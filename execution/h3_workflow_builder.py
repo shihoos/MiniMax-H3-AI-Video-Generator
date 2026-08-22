@@ -3,584 +3,433 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-
-from planner.config import (
-    H3_AUDIO_VAE,
-    H3_FPS,
-    H3_REF2VA_MODEL,
-    H3_REF_IMAGE_SIZE,
-    H3_TEXT_ENCODER,
-    H3_VIDEO_VAE,
-)
+from typing import Any
 
 
 class H3WorkflowBuilder:
+    """
+    Workflow-driven MiniMax-H3 builder.
 
-    MAX_IMAGES = 9
-    MAX_VIDEOS = 3
-    MAX_AUDIO = 3
-    MAX_TOTAL_FILES = 12
+    IMPORTANT:
+    This class does NOT construct H3 graphs.
+
+    The canonical ComfyUI workflow remains the source of truth.
+    This class only:
+      1. loads a workflow
+      2. converts UI workflow -> API workflow when necessary
+      3. patches known H3 inputs
+      4. returns the API prompt graph
+    """
+
+    WORKFLOW_ROOT = (
+        "workflows"
+        / Path("MiniMax-H3")
+    )
 
     def __init__(
         self,
         project_root: Path,
+        comfy_client=None,
     ):
+        self.project_root = Path(project_root)
+        self.client = comfy_client
 
-        self.project_root = Path(
-            project_root
-        )
-
-        self.workflow_path = (
+        self.workflow_root = (
             self.project_root
             / "workflows"
             / "MiniMax-H3"
-            / "base"
-            / "H3_Ref2VA_Memory_API.json"
         )
 
-    def _load_template(self):
+    # ---------------------------------------------------------
+    # Workflow selection
+    # ---------------------------------------------------------
 
-        if not self.workflow_path.is_file():
+    def workflow_path(
+        self,
+        mode: str,
+    ) -> Path:
+
+        mapping = {
+            "multishot": (
+                "canonical"
+                / "H3_Multishot_AIO.json"
+            ),
+            "memory": (
+                "canonical"
+                / "H3_Multishot_MEMORY.json"
+            ),
+            "keyframes": (
+                "canonical"
+                / "H3_Keyframes.json"
+            ),
+            "hard_mode": (
+                "canonical"
+                / "H3_HardMode_Chained.json"
+            ),
+        }
+
+        if mode not in mapping:
+            raise ValueError(
+                f"Unknown H3 workflow mode: {mode}"
+            )
+
+        path = self.workflow_root / mapping[mode]
+
+        if not path.is_file():
             raise FileNotFoundError(
-                f"H3 API workflow missing: "
-                f"{self.workflow_path}"
+                f"Canonical H3 workflow missing: {path}"
             )
 
-        return json.loads(
-            self.workflow_path.read_text(
-                encoding="utf-8"
-            )
+        return path
+
+    # ---------------------------------------------------------
+    # Loading
+    # ---------------------------------------------------------
+
+    def load(
+        self,
+        mode: str,
+    ) -> dict[str, Any]:
+
+        path = self.workflow_path(mode)
+
+        with path.open(
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            return json.load(handle)
+
+    # ---------------------------------------------------------
+    # Generic node helpers
+    # ---------------------------------------------------------
+
+    @staticmethod
+    def is_api_workflow(
+        workflow: dict,
+    ) -> bool:
+
+        if not workflow:
+            return False
+
+        return all(
+            isinstance(value, dict)
+            and "class_type" in value
+            and "inputs" in value
+            for value in workflow.values()
         )
 
     @staticmethod
-    def _find(
-        workflow,
-        class_type,
+    def api_nodes(
+        workflow: dict,
     ):
-
-        for node_id, node in workflow.items():
-
-            if (
-                isinstance(node, dict)
-                and node.get(
-                    "class_type"
-                ) == class_type
-            ):
-                return (
-                    str(node_id),
-                    node,
-                )
-
-        raise RuntimeError(
-            f"Required node missing: "
-            f"{class_type}"
-        )
+        return workflow.items()
 
     @staticmethod
-    def _find_all(
-        workflow,
-        class_type,
+    def find_nodes(
+        workflow: dict,
+        class_type: str,
     ):
-
         return [
             (
                 str(node_id),
                 node,
             )
-            for node_id, node
-            in workflow.items()
+            for node_id, node in workflow.items()
             if (
                 isinstance(node, dict)
-                and node.get(
-                    "class_type"
-                ) == class_type
+                and node.get("class_type")
+                == class_type
             )
         ]
 
     @staticmethod
-    def _next_id(workflow):
-
-        numeric = []
-
-        for node_id in workflow:
-
-            try:
-                numeric.append(
-                    int(node_id)
-                )
-            except Exception:
-                pass
-
-        return str(
-            max(numeric or [0])
-            + 1
+    def first_node(
+        workflow: dict,
+        class_type: str,
+    ):
+        nodes = H3WorkflowBuilder.find_nodes(
+            workflow,
+            class_type,
         )
 
-    @classmethod
-    def _add_node(
-        cls,
-        workflow,
-        class_type,
-        inputs,
-        title,
-    ):
+        if not nodes:
+            return None
 
-        node_id = cls._next_id(
+        return nodes[0]
+
+    @staticmethod
+    def set_input(
+        node: dict,
+        key: str,
+        value: Any,
+    ):
+        node.setdefault(
+            "inputs",
+            {},
+        )[key] = value
+
+    # ---------------------------------------------------------
+    # Conversion
+    # ---------------------------------------------------------
+
+    def to_api(
+        self,
+        workflow: dict,
+    ) -> dict:
+
+        if self.is_api_workflow(workflow):
+            return copy.deepcopy(workflow)
+
+        if self.client is None:
+            raise RuntimeError(
+                "ComfyClient is required to convert "
+                "a UI workflow to API format."
+            )
+
+        return self.client.convert_workflow(
             workflow
         )
 
-        workflow[node_id] = {
-            "class_type": class_type,
-            "inputs": inputs,
-            "_meta": {
-                "title": title
-            },
-        }
+    # ---------------------------------------------------------
+    # H3 generic controls
+    # ---------------------------------------------------------
 
-        return node_id
-
-    @classmethod
-    def _add_image(
-        cls,
-        workflow,
-        filename,
+    def patch_common(
+        self,
+        workflow: dict,
+        *,
+        width: int,
+        height: int,
+        frames_per_shot: int,
+        steps: int,
+        seed: int,
     ):
 
-        return cls._add_node(
-            workflow,
-            "LoadImage",
-            {
-                "image": filename,
-            },
-            "H3 reference image",
+        samplers = (
+            self.find_nodes(
+                workflow,
+                "H3MultishotMemorySampler",
+            )
+            + self.find_nodes(
+                workflow,
+                "H3MultishotSampler",
+            )
         )
 
-    @classmethod
-    def _add_video(
-        cls,
-        workflow,
-        filename,
-    ):
+        for _, node in samplers:
 
-        return cls._add_node(
-            workflow,
-            "VHS_LoadVideo",
-            {
-                "video": filename,
-
-                "force_rate": 24,
-
-                "force_size": "Disabled",
-
-                "custom_width": 0,
-                "custom_height": 0,
-
-                "frame_load_cap": 0,
-
-                "skip_first_frames": 0,
-
-                "select_every_nth": 1,
-            },
-            "H3 reference video",
-        )
-
-    @classmethod
-    def _add_audio(
-        cls,
-        workflow,
-        filename,
-    ):
-
-        return cls._add_node(
-            workflow,
-            "LoadAudio",
-            {
-                "audio_file": filename,
-            },
-            "H3 reference audio",
-        )
-
-    @classmethod
-    def _set_input(
-        cls,
-        node,
-        key,
-        value,
-    ):
-
-        node.setdefault(
-            "inputs",
-            {}
-        )[key] = value
-
-    @classmethod
-    def _patch_model_nodes(
-        cls,
-        workflow,
-    ):
-
-        for _, node in cls._find_all(
-            workflow,
-            "H3ModelLoaderAny",
-        ):
-
-            cls._set_input(
+            self.set_input(
                 node,
-                "model_name",
-                H3_REF2VA_MODEL,
+                "width",
+                int(width),
             )
 
-        for _, node in cls._find_all(
-            workflow,
-            "H3ClipLoaderAny",
-        ):
-
-            cls._set_input(
+            self.set_input(
                 node,
-                "model_name",
-                H3_TEXT_ENCODER,
+                "height",
+                int(height),
             )
 
-            cls._set_input(
+            self.set_input(
                 node,
-                "clip_name",
-                H3_TEXT_ENCODER,
+                "frames_per_shot",
+                int(frames_per_shot),
             )
 
-            cls._set_input(
-                node,
-                "type",
-                "minimax",
-            )
-
-        for _, node in cls._find_all(
-            workflow,
-            "VAELoader",
-        ):
-
-            title = str(
-                node.get(
-                    "_meta",
-                    {}
-                ).get(
-                    "title",
-                    ""
-                )
-            ).lower()
-
-            if "audio" in title:
-                cls._set_input(
-                    node,
-                    "vae_name",
-                    H3_AUDIO_VAE,
-                )
-
-            elif "video" in title:
-                cls._set_input(
-                    node,
-                    "vae_name",
-                    H3_VIDEO_VAE,
-                )
-
-    @classmethod
-    def _patch_sampling(
-        cls,
-        workflow,
-        steps,
-        seed,
-    ):
-
-        for _, node in cls._find_all(
-            workflow,
-            "BasicScheduler",
-        ):
-
-            cls._set_input(
+            self.set_input(
                 node,
                 "steps",
                 int(steps),
             )
 
-            cls._set_input(
+            self.set_input(
                 node,
-                "denoise",
-                1.0,
-            )
-
-        for _, node in cls._find_all(
-            workflow,
-            "RandomNoise",
-        ):
-
-            cls._set_input(
-                node,
-                "noise_seed",
+                "seed",
                 int(seed),
             )
 
-    @classmethod
-    def _patch_video(
-        cls,
-        workflow,
-        width,
-        height,
-        frames,
-        prompt,
-    ):
+    # ---------------------------------------------------------
+    # Multishot script
+    # ---------------------------------------------------------
 
-        _, ref = cls._find(
-            workflow,
-            "MiniMaxH3ReferenceToVideo",
-        )
-
-        cls._set_input(
-            ref,
-            "width",
-            int(width),
-        )
-
-        cls._set_input(
-            ref,
-            "height",
-            int(height),
-        )
-
-        cls._set_input(
-            ref,
-            "length",
-            int(frames),
-        )
-
-        cls._set_input(
-            ref,
-            "prompt",
-            prompt,
-        )
-
-        cls._set_input(
-            ref,
-            "ref_image_size",
-            H3_REF_IMAGE_SIZE,
-        )
-
-        for _, node in cls._find_all(
-            workflow,
-            "CreateVideo",
-        ):
-
-            cls._set_input(
-                node,
-                "frame_rate",
-                H3_FPS,
-            )
-
-    @classmethod
-    def _patch_references(
-        cls,
-        workflow,
-        image_files,
-        video_files,
-        audio_files,
-        video_audio_files=None,
-    ):
-
-        video_audio_files = (
-            video_audio_files or []
-        )
-
-        total = (
-            len(image_files)
-            + len(video_files)
-            + len(video_audio_files)
-            + len(audio_files)
-        )
-
-        if total > cls.MAX_TOTAL_FILES:
-            raise ValueError(
-                "H3 Ref2VA allows at most "
-                f"{cls.MAX_TOTAL_FILES} "
-                "reference files total."
-            )
-
-        if len(image_files) > cls.MAX_IMAGES:
-            raise ValueError(
-                "Too many reference images."
-            )
-
-        if len(video_files) > cls.MAX_VIDEOS:
-            raise ValueError(
-                "Too many reference videos."
-            )
-
-        if len(audio_files) > cls.MAX_AUDIO:
-            raise ValueError(
-                "Too many standalone audio files."
-            )
-
-        _, ref = cls._find(
-            workflow,
-            "MiniMaxH3ReferenceToVideo",
-        )
-
-        # Remove old dynamic refs.
-        inputs = ref.setdefault(
-            "inputs",
-            {}
-        )
-
-        for key in list(
-            inputs.keys()
-        ):
-
-            if (
-                key.startswith(
-                    "ref_images."
-                )
-                or key.startswith(
-                    "ref_videos."
-                )
-                or key.startswith(
-                    "ref_video_audios."
-                )
-                or key.startswith(
-                    "ref_audios."
-                )
-            ):
-                del inputs[key]
-
-        # ----------------------------------------------------
-        # Images
-        # ----------------------------------------------------
-
-        for index, filename in enumerate(
-            image_files
-        ):
-
-            node_id = cls._add_image(
-                workflow,
-                filename,
-            )
-
-            inputs[
-                f"ref_images.ref_image_{index}"
-            ] = [
-                node_id,
-                0,
-            ]
-
-        # ----------------------------------------------------
-        # Videos
-        # ----------------------------------------------------
-
-        for index, filename in enumerate(
-            video_files
-        ):
-
-            node_id = cls._add_video(
-                workflow,
-                filename,
-            )
-
-            inputs[
-                f"ref_videos.ref_video_{index}"
-            ] = [
-                node_id,
-                0,
-            ]
-
-            if index < len(
-                video_audio_files
-            ):
-
-                audio_node = cls._add_audio(
-                    workflow,
-                    video_audio_files[index],
-                )
-
-                inputs[
-                    "ref_video_audios."
-                    f"ref_video_audio_{index}"
-                ] = [
-                    audio_node,
-                    0,
-                ]
-
-        # ----------------------------------------------------
-        # Standalone audio
-        # ----------------------------------------------------
-
-        for index, filename in enumerate(
-            audio_files
-        ):
-
-            audio_node = cls._add_audio(
-                workflow,
-                filename,
-            )
-
-            inputs[
-                f"ref_audios.ref_audio_{index}"
-            ] = [
-                audio_node,
-                0,
-            ]
-
-    def build_ref2va(
+    def patch_script(
         self,
-        prompt,
-        image_files,
-        video_files,
-        audio_files,
-        video_audio_files=None,
-        width=1344,
-        height=768,
-        frames=124,
-        steps=14,
-        seed=0,
-        output_prefix="h3/ref2va",
+        workflow: dict,
+        script: str,
+        shot_count: int,
     ):
 
-        workflow = copy.deepcopy(
-            self._load_template()
+        samplers = (
+            self.find_nodes(
+                workflow,
+                "H3MultishotMemorySampler",
+            )
+            + self.find_nodes(
+                workflow,
+                "H3MultishotSampler",
+            )
         )
 
-        self._patch_model_nodes(
+        if not samplers:
+            raise RuntimeError(
+                "Selected workflow does not contain "
+                "an H3 multishot sampler."
+            )
+
+        for _, node in samplers:
+
+            self.set_input(
+                node,
+                "script",
+                script,
+            )
+
+            self.set_input(
+                node,
+                "shot_count",
+                int(shot_count),
+            )
+
+    # ---------------------------------------------------------
+    # Reference files
+    # ---------------------------------------------------------
+
+    def patch_load_images(
+        self,
+        workflow: dict,
+        filenames: list[str],
+    ):
+
+        nodes = self.find_nodes(
+            workflow,
+            "LoadImage",
+        )
+
+        for index, filename in enumerate(
+            filenames
+        ):
+
+            if index >= len(nodes):
+                break
+
+            _, node = nodes[index]
+
+            self.set_input(
+                node,
+                "image",
+                filename,
+            )
+
+    def patch_load_audio(
+        self,
+        workflow: dict,
+        filenames: list[str],
+    ):
+
+        nodes = self.find_nodes(
+            workflow,
+            "LoadAudio",
+        )
+
+        for index, filename in enumerate(
+            filenames
+        ):
+
+            if index >= len(nodes):
+                break
+
+            _, node = nodes[index]
+
+            self.set_input(
+                node,
+                "audio",
+                filename,
+            )
+
+    # ---------------------------------------------------------
+    # Output
+    # ---------------------------------------------------------
+
+    def patch_output_prefix(
+        self,
+        workflow: dict,
+        prefix: str,
+    ):
+
+        for class_type in (
+            "SaveVideo",
+            "VHS_VideoCombine",
+        ):
+
+            for _, node in self.find_nodes(
+                workflow,
+                class_type,
+            ):
+
+                if (
+                    "filename_prefix"
+                    in node.get("inputs", {})
+                ):
+                    self.set_input(
+                        node,
+                        "filename_prefix",
+                        prefix,
+                    )
+
+    # ---------------------------------------------------------
+    # Public build
+    # ---------------------------------------------------------
+
+    def build(
+        self,
+        *,
+        mode: str,
+        script: str,
+        shot_count: int,
+        width: int,
+        height: int,
+        frames_per_shot: int,
+        steps: int,
+        seed: int,
+        image_files: list[str] | None = None,
+        audio_files: list[str] | None = None,
+        output_prefix: str = "h3/output",
+    ) -> dict:
+
+        workflow = self.load(mode)
+
+        workflow = self.to_api(
             workflow
         )
 
-        self._patch_sampling(
+        self.patch_common(
             workflow,
+            width=width,
+            height=height,
+            frames_per_shot=frames_per_shot,
             steps=steps,
             seed=seed,
         )
 
-        self._patch_video(
+        self.patch_script(
             workflow,
-            width=width,
-            height=height,
-            frames=frames,
-            prompt=prompt,
+            script=script,
+            shot_count=shot_count,
         )
 
-        self._patch_references(
+        self.patch_load_images(
             workflow,
-            image_files=image_files,
-            video_files=video_files,
-            audio_files=audio_files,
-            video_audio_files=(
-                video_audio_files
-            ),
+            image_files or [],
         )
 
-        for _, node in self._find_all(
+        self.patch_load_audio(
             workflow,
-            "SaveVideo",
-        ):
+            audio_files or [],
+        )
 
-            self._set_input(
-                node,
-                "filename_prefix",
-                output_prefix,
-            )
+        self.patch_output_prefix(
+            workflow,
+            output_prefix,
+        )
 
         return workflow
