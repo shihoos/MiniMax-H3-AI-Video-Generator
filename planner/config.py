@@ -23,8 +23,7 @@ QWEN_MODEL_ID = os.getenv(
 QWEN_KAGGLE_PATH = Path(
     os.getenv(
         "QWEN_KAGGLE_PATH",
-        "/kaggle/input/datasets/"
-        "shihoos/qwen3-4b-instruct-2507",
+        "/kaggle/input/qwen3-4b-instruct-2507",
     )
 )
 
@@ -134,7 +133,7 @@ SHOT_PLAN_PROMPT_PATH = (
 
 
 # ============================================================
-# DIRECTORIES
+# DATA
 # ============================================================
 
 DATA_DIR = PROJECT_ROOT / "data"
@@ -150,18 +149,8 @@ PRODUCTION_DIR = DATA_DIR / "production"
 
 
 # ============================================================
-# H3
+# H3 BASE PROFILE
 # ============================================================
-
-H3_DATASET_NAME = os.getenv(
-    "H3_DATASET_NAME",
-    "MiniMax H3 Ref2VA Q4",
-)
-
-H3_DATASET_SLUG = os.getenv(
-    "H3_DATASET_SLUG",
-    "minimax-h3-ref2va-q4",
-)
 
 H3_FPS = int(
     os.getenv(
@@ -170,8 +159,8 @@ H3_FPS = int(
     )
 )
 
-# Official H3-Base target:
-# 16:9 with 768px short edge.
+# 768-short-edge 16:9 target.
+# T4 fallback is controlled separately.
 H3_WIDTH = int(
     os.getenv(
         "H3_WIDTH",
@@ -186,7 +175,6 @@ H3_HEIGHT = int(
     )
 )
 
-# Safer fallback for very limited VRAM.
 H3_SAFE_WIDTH = int(
     os.getenv(
         "H3_SAFE_WIDTH",
@@ -201,10 +189,12 @@ H3_SAFE_HEIGHT = int(
     )
 )
 
+# H3's trained frame grid.
+# 243 = approximately 10.1 seconds at 24 FPS.
 H3_FRAMES_PER_SHOT = int(
     os.getenv(
         "H3_FRAMES_PER_SHOT",
-        "124",
+        "243",
     )
 )
 
@@ -220,23 +210,19 @@ H3_REF_IMAGE_SIZE = os.getenv(
     "match",
 )
 
-# Use max only when explicitly enabled.
-H3_IDENTITY_MAX_REFERENCES = (
-    os.getenv(
-        "H3_IDENTITY_MAX_REFERENCES",
-        "0",
-    )
-    == "1"
-)
-
 
 # ============================================================
-# H3 MODEL FILES
+# BASE Q4 MODEL FILES
 # ============================================================
 
 H3_REF2VA_MODEL = os.getenv(
     "H3_REF2VA_MODEL",
     "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
+)
+
+H3_FL2VA_MODEL = os.getenv(
+    "H3_FL2VA_MODEL",
+    "minimax_h3_fl2va_pruned-Q4_K_M.gguf",
 )
 
 H3_TEXT_ENCODER = os.getenv(
@@ -256,45 +242,59 @@ H3_AUDIO_VAE = os.getenv(
 
 
 # ============================================================
-# LORA POLICY
+# TURBO PROFILE
 # ============================================================
 
-# IMPORTANT:
-# There is currently no verified official H3 identity-lock
-# LoRA for Ref2VA that we can safely put into this pipeline.
-#
-# Therefore identity_lora is OFF.
-#
-# Do not put a random LoRA here.
-H3_IDENTITY_LORA_ENABLED = False
-H3_IDENTITY_LORA_PATH = ""
-
-
-# Optional H3 Turbo LoRA.
-# This is acceleration, NOT identity preservation.
-H3_TURBO_LORA_ENABLED = (
+TURBO_ENABLED = (
     os.getenv(
-        "H3_TURBO_LORA_ENABLED",
+        "H3_ENABLE_TURBO",
         "0",
     )
     == "1"
 )
 
-H3_TURBO_LORA_NAME = os.getenv(
-    "H3_TURBO_LORA_NAME",
-    "",
+TURBO_REF2VA_MODEL = os.getenv(
+    "H3_TURBO_REF2VA_MODEL",
+    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
 )
 
-H3_TURBO_LORA_STRENGTH = float(
+TURBO_FL2VA_MODEL = os.getenv(
+    "H3_TURBO_FL2VA_MODEL",
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+)
+
+TURBO_TEXT_ENCODER = os.getenv(
+    "H3_TURBO_TEXT_ENCODER",
+    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+)
+
+TURBO_REF2V_LORA = os.getenv(
+    "H3_TURBO_REF2V_LORA",
+    "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+)
+
+TURBO_FL2V_LORA = os.getenv(
+    "H3_TURBO_FL2V_LORA",
+    "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+)
+
+TURBO_REF2V_STEPS = int(
     os.getenv(
-        "H3_TURBO_LORA_STRENGTH",
-        "0.7",
+        "H3_TURBO_REF2V_STEPS",
+        "4",
+    )
+)
+
+TURBO_FL2V_STEPS = int(
+    os.getenv(
+        "H3_TURBO_FL2V_STEPS",
+        "8",
     )
 )
 
 
 # ============================================================
-# OFFICIAL H3 REGENERATION
+# OFFICIAL 2K API
 # ============================================================
 
 H3_REGENERATE_2K_ENABLED = (
@@ -317,10 +317,19 @@ H3_API_KEY = os.getenv(
 
 H3_REGENERATE_ENDPOINT = os.getenv(
     "H3_REGENERATE_ENDPOINT",
-    "/video-generation/v2/video_generation",
+    "/v2/video_regeneration",
 )
 
-# Final delivery.
+H3_QUERY_ENDPOINT = os.getenv(
+    "H3_QUERY_ENDPOINT",
+    "/v2/query/video_generation",
+)
+
+
+# ============================================================
+# FINAL DELIVERY
+# ============================================================
+
 FINAL_WIDTH = int(
     os.getenv(
         "FINAL_WIDTH",
@@ -334,6 +343,40 @@ FINAL_HEIGHT = int(
         "720",
     )
 )
+
+
+# ============================================================
+# WORKFLOW MODES
+# ============================================================
+
+WORKFLOW_AUTO = "auto"
+
+WORKFLOW_HARD_R2V = "hard_r2v"
+WORKFLOW_HARD_CHAINED = "hard_chained"
+
+WORKFLOW_SEAMLESS_V2 = "seamless_v2"
+WORKFLOW_SEAMLESS_CORE = "seamless_core"
+
+WORKFLOW_KEYFRAMES = "keyframes"
+WORKFLOW_EXTEND_TAKE = "extend_take"
+
+WORKFLOW_TURBO_I2V = "turbo_i2v"
+WORKFLOW_TURBO_REF2V = "turbo_ref2v"
+WORKFLOW_TURBO_T2V = "turbo_t2v"
+
+
+ALL_WORKFLOW_MODES = {
+    WORKFLOW_AUTO,
+    WORKFLOW_HARD_R2V,
+    WORKFLOW_HARD_CHAINED,
+    WORKFLOW_SEAMLESS_V2,
+    WORKFLOW_SEAMLESS_CORE,
+    WORKFLOW_KEYFRAMES,
+    WORKFLOW_EXTEND_TAKE,
+    WORKFLOW_TURBO_I2V,
+    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_TURBO_T2V,
+}
 
 
 # ============================================================
@@ -358,6 +401,7 @@ VALID_STORY_MODES = {
 
 
 def ensure_directories():
+
     for directory in (
         STORIES_DIR,
         CHARACTERS_DIR,
