@@ -2,36 +2,68 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 
 class H3WorkflowBuilder:
-    """
-    Workflow-driven MiniMax-H3 builder.
 
-    IMPORTANT:
-    This class does NOT construct H3 graphs.
+    BASE_WORKFLOWS = {
+        "hard_r2v": (
+            "base",
+            "H3_HardMode_R2V.json",
+        ),
+        "hard_chained": (
+            "base",
+            "H3_HardMode_Chained.json",
+        ),
+        "seamless_v2": (
+            "base",
+            "H3_Seamless_Chain_v2.json",
+        ),
+        "seamless_core": (
+            "base",
+            "H3_Seamless_Chain_CORE.json",
+        ),
+        "keyframes": (
+            "base",
+            "H3_Keyframes.json",
+        ),
+        "extend_take": (
+            "base",
+            "H3_Extend_Take.json",
+        ),
+    }
 
-    The canonical ComfyUI workflow remains the source of truth.
-    This class only:
-      1. loads a workflow
-      2. converts UI workflow -> API workflow when necessary
-      3. patches known H3 inputs
-      4. returns the API prompt graph
-    """
+    TURBO_WORKFLOWS = {
+        "turbo_i2v": (
+            "turbo",
+            "H3_Turbo_I2V.json",
+        ),
+        "turbo_ref2v": (
+            "turbo",
+            "H3_Turbo_Ref2V.json",
+        ),
+        "turbo_t2v": (
+            "turbo",
+            "H3_Turbo_T2V.json",
+        ),
+    }
 
-    WORKFLOW_ROOT = (
-        "workflows"
-        / Path("MiniMax-H3")
+    MANUAL_WORKFLOW = (
+        "H3_Ref2VA_Memory_API.json"
     )
 
     def __init__(
         self,
         project_root: Path,
-        comfy_client=None,
+        comfy_client,
     ):
-        self.project_root = Path(project_root)
+        self.project_root = Path(
+            project_root
+        )
+
         self.client = comfy_client
 
         self.workflow_root = (
@@ -40,396 +72,1346 @@ class H3WorkflowBuilder:
             / "MiniMax-H3"
         )
 
-    # ---------------------------------------------------------
-    # Workflow selection
-    # ---------------------------------------------------------
+    # =========================================================
+    # WORKFLOW REGISTRY
+    # =========================================================
 
-    def workflow_path(
+    @classmethod
+    def all_modes(cls):
+        return set(
+            cls.BASE_WORKFLOWS
+        ) | set(
+            cls.TURBO_WORKFLOWS
+        )
+
+    @classmethod
+    def is_turbo_mode(
+        cls,
+        mode: str,
+    ):
+        return mode in cls.TURBO_WORKFLOWS
+
+    def path_for_mode(
         self,
         mode: str,
     ) -> Path:
 
-        mapping = {
-            "multishot": (
-                "canonical"
-                / "H3_Multishot_AIO.json"
-            ),
-            "memory": (
-                "canonical"
-                / "H3_Multishot_MEMORY.json"
-            ),
-            "keyframes": (
-                "canonical"
-                / "H3_Keyframes.json"
-            ),
-            "hard_mode": (
-                "canonical"
-                / "H3_HardMode_Chained.json"
-            ),
-        }
+        registry = (
+            self.TURBO_WORKFLOWS
+            if self.is_turbo_mode(mode)
+            else self.BASE_WORKFLOWS
+        )
 
-        if mode not in mapping:
+        try:
+            directory, filename = (
+                registry[mode]
+            )
+        except KeyError as error:
             raise ValueError(
                 f"Unknown H3 workflow mode: {mode}"
-            )
+            ) from error
 
-        path = self.workflow_root / mapping[mode]
+        path = (
+            self.workflow_root
+            / directory
+            / filename
+        )
 
         if not path.is_file():
             raise FileNotFoundError(
-                f"Canonical H3 workflow missing: {path}"
+                f"Workflow missing for "
+                f"{mode}: {path}"
             )
 
         return path
 
-    # ---------------------------------------------------------
-    # Loading
-    # ---------------------------------------------------------
+    # =========================================================
+    # LOAD
+    # =========================================================
 
-    def load(
+    def load_ui(
         self,
         mode: str,
-    ) -> dict[str, Any]:
+    ) -> dict:
 
-        path = self.workflow_path(mode)
+        path = self.path_for_mode(
+            mode
+        )
 
         with path.open(
             "r",
             encoding="utf-8",
         ) as handle:
-            return json.load(handle)
+            workflow = json.load(
+                handle
+            )
 
-    # ---------------------------------------------------------
-    # Generic node helpers
-    # ---------------------------------------------------------
+        if not isinstance(
+            workflow,
+            dict,
+        ):
+            raise ValueError(
+                f"Invalid workflow JSON: {path}"
+            )
+
+        return workflow
+
+    # =========================================================
+    # WIDGET HELPERS
+    # =========================================================
 
     @staticmethod
-    def is_api_workflow(
-        workflow: dict,
-    ) -> bool:
+    def _widgets(
+        node: dict,
+    ) -> list:
 
-        if not workflow:
-            return False
+        values = node.get(
+            "widgets_values"
+        )
 
-        return all(
-            isinstance(value, dict)
-            and "class_type" in value
-            and "inputs" in value
-            for value in workflow.values()
+        if not isinstance(
+            values,
+            list,
+        ):
+            values = []
+
+        node[
+            "widgets_values"
+        ] = values
+
+        return values
+
+    @classmethod
+    def _set_widget(
+        cls,
+        node: dict,
+        index: int,
+        value,
+    ):
+
+        values = cls._widgets(
+            node
+        )
+
+        while len(values) <= index:
+            values.append(
+                None
+            )
+
+        values[index] = value
+
+    @staticmethod
+    def _title(
+        node: dict,
+    ) -> str:
+
+        return str(
+            node.get(
+                "title",
+                "",
+            )
+        ).lower()
+
+    @staticmethod
+    def _type(
+        node: dict,
+    ) -> str:
+
+        return str(
+            node.get(
+                "type",
+                "",
+            )
         )
 
     @staticmethod
-    def api_nodes(
-        workflow: dict,
-    ):
-        return workflow.items()
+    def _number_in_title(
+        node: dict,
+    ) -> int:
 
-    @staticmethod
-    def find_nodes(
+        match = re.search(
+            r"(?:image|picture|video|audio|"
+            r"keyframe)\s*([0-9]+)",
+            H3WorkflowBuilder._title(
+                node
+            ),
+            flags=re.IGNORECASE,
+        )
+
+        if not match:
+            return 9999
+
+        return int(
+            match.group(1)
+        )
+
+    # =========================================================
+    # UI MODEL PATCHING
+    # =========================================================
+
+    def _patch_models_ui(
+        self,
         workflow: dict,
-        class_type: str,
+        mode: str,
     ):
-        return [
-            (
-                str(node_id),
-                node,
+
+        turbo = (
+            self.is_turbo_mode(mode)
+        )
+
+        h3_model_nodes = [
+            node
+            for node in workflow.get(
+                "nodes",
+                []
             )
-            for node_id, node in workflow.items()
-            if (
-                isinstance(node, dict)
-                and node.get("class_type")
-                == class_type
-            )
+            if node.get("type")
+            == "H3ModelLoaderAny"
         ]
 
-    @staticmethod
-    def first_node(
-        workflow: dict,
-        class_type: str,
-    ):
-        nodes = H3WorkflowBuilder.find_nodes(
-            workflow,
-            class_type,
-        )
+        for index, node in enumerate(
+            h3_model_nodes
+        ):
 
-        if not nodes:
-            return None
+            widgets = self._widgets(
+                node
+            )
 
-        return nodes[0]
+            current = str(
+                widgets[0]
+                if widgets
+                else ""
+            ).lower()
 
-    @staticmethod
-    def set_input(
-        node: dict,
-        key: str,
-        value: Any,
-    ):
-        node.setdefault(
-            "inputs",
-            {},
-        )[key] = value
+            if turbo:
 
-    # ---------------------------------------------------------
-    # Conversion
-    # ---------------------------------------------------------
+                if mode == "turbo_ref2v":
+                    model_name = (
+                        "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+                    )
+                else:
+                    model_name = (
+                        "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+                    )
 
-    def to_api(
+            elif mode == "hard_r2v":
+
+                model_name = (
+                    "minimax_h3_ref2va_pruned-Q4_K_M.gguf"
+                )
+
+            elif mode == "hard_chained":
+
+                if (
+                    "ref2va"
+                    in current
+                ):
+                    model_name = (
+                        "minimax_h3_ref2va_pruned-Q4_K_M.gguf"
+                    )
+
+                elif (
+                    "fl2va"
+                    in current
+                ):
+                    model_name = (
+                        "minimax_h3_fl2va_pruned-Q4_K_M.gguf"
+                    )
+
+                elif index == 0:
+
+                    model_name = (
+                        "minimax_h3_ref2va_pruned-Q4_K_M.gguf"
+                    )
+
+                else:
+
+                    model_name = (
+                        "minimax_h3_fl2va_pruned-Q4_K_M.gguf"
+                    )
+
+            else:
+
+                model_name = (
+                    "minimax_h3_fl2va_pruned-Q4_K_M.gguf"
+                )
+
+            self._set_widget(
+                node,
+                0,
+                model_name,
+            )
+
+        # Turbo workflow JSONs normally use UNETLoader.
+        for node in workflow.get(
+            "nodes",
+            []
+        ):
+
+            if node.get(
+                "type"
+            ) not in {
+                "UNETLoader",
+                "CheckpointLoaderSimple",
+            }:
+                continue
+
+            if not turbo:
+                continue
+
+            if mode == "turbo_ref2v":
+                model_name = (
+                    "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+                )
+            else:
+                model_name = (
+                    "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+                )
+
+            self._set_widget(
+                node,
+                0,
+                model_name,
+            )
+
+    def _patch_text_encoders_ui(
         self,
         workflow: dict,
-    ) -> dict:
-
-        if self.is_api_workflow(workflow):
-            return copy.deepcopy(workflow)
-
-        if self.client is None:
-            raise RuntimeError(
-                "ComfyClient is required to convert "
-                "a UI workflow to API format."
-            )
-
-        return self.client.convert_workflow(
-            workflow
-        )
-
-    # ---------------------------------------------------------
-    # H3 generic controls
-    # ---------------------------------------------------------
-
-    def patch_common(
-        self,
-        workflow: dict,
-        *,
-        width: int,
-        height: int,
-        frames_per_shot: int,
-        steps: int,
-        seed: int,
+        mode: str,
     ):
 
-        samplers = (
-            self.find_nodes(
-                workflow,
-                "H3MultishotMemorySampler",
-            )
-            + self.find_nodes(
-                workflow,
-                "H3MultishotSampler",
-            )
+        turbo = (
+            self.is_turbo_mode(mode)
         )
 
-        for _, node in samplers:
+        for node in workflow.get(
+            "nodes",
+            []
+        ):
 
-            self.set_input(
-                node,
-                "width",
-                int(width),
+            node_type = (
+                node.get(
+                    "type"
+                )
             )
 
-            self.set_input(
-                node,
-                "height",
-                int(height),
-            )
+            if node_type == "H3ClipLoaderAny":
 
-            self.set_input(
-                node,
-                "frames_per_shot",
-                int(frames_per_shot),
-            )
+                encoder = (
+                    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+                    if turbo
+                    else
+                    "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"
+                )
 
-            self.set_input(
-                node,
-                "steps",
-                int(steps),
-            )
+                self._set_widget(
+                    node,
+                    0,
+                    encoder,
+                )
 
-            self.set_input(
-                node,
-                "seed",
-                int(seed),
-            )
+                widgets = self._widgets(
+                    node
+                )
 
-    # ---------------------------------------------------------
-    # Multishot script
-    # ---------------------------------------------------------
+                if len(widgets) > 1:
+                    self._set_widget(
+                        node,
+                        1,
+                        "minimax",
+                    )
 
-    def patch_script(
+            elif node_type in {
+                "DualCLIPLoader",
+                "CLIPLoader",
+            }:
+
+                values = self._widgets(
+                    node
+                )
+
+                text = " ".join(
+                    str(value)
+                    for value in values
+                ).lower()
+
+                if "qwen" not in text:
+                    continue
+
+                encoder = (
+                    "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+                    if turbo
+                    else
+                    "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"
+                )
+
+                self._set_widget(
+                    node,
+                    0,
+                    encoder,
+                )
+
+    def _patch_vaes_ui(
         self,
         workflow: dict,
-        script: str,
-        shot_count: int,
     ):
 
-        samplers = (
-            self.find_nodes(
-                workflow,
-                "H3MultishotMemorySampler",
+        for node in workflow.get(
+            "nodes",
+            []
+        ):
+
+            if node.get(
+                "type"
+            ) != "VAELoader":
+                continue
+
+            title = self._title(
+                node
             )
-            + self.find_nodes(
-                workflow,
-                "H3MultishotSampler",
-            )
+
+            if "audio" in title:
+
+                self._set_widget(
+                    node,
+                    0,
+                    "minimax_h3_audio_vae_fp32.safetensors",
+                )
+
+            elif "video" in title:
+
+                self._set_widget(
+                    node,
+                    0,
+                    "minimax_h3_video_vae_fp16.safetensors",
+                )
+
+    # =========================================================
+    # SAMPLING / RESOLUTION
+    # =========================================================
+
+    def _patch_controls_ui(
+        self,
+        workflow,
+        mode,
+        width,
+        height,
+        frames_per_shot,
+        steps,
+        seed,
+        duration_seconds,
+    ):
+
+        turbo = (
+            self.is_turbo_mode(mode)
         )
 
-        if not samplers:
-            raise RuntimeError(
-                "Selected workflow does not contain "
-                "an H3 multishot sampler."
+        if turbo:
+            if mode == "turbo_ref2v":
+                steps_to_use = 4
+            else:
+                steps_to_use = 8
+        else:
+            steps_to_use = int(
+                steps
             )
 
-        for _, node in samplers:
+        megapixels = (
+            (width * height)
+            / 1_000_000
+        )
 
-            self.set_input(
-                node,
-                "script",
+        for node in workflow.get(
+            "nodes",
+            []
+        ):
+
+            node_type = node.get(
+                "type"
+            )
+
+            if node_type == "ResolutionSelector":
+
+                self._set_widget(
+                    node,
+                    0,
+                    "16:9 (Widescreen)",
+                )
+
+                self._set_widget(
+                    node,
+                    1,
+                    float(
+                        megapixels
+                    ),
+                )
+
+                self._set_widget(
+                    node,
+                    2,
+                    32,
+                )
+
+            elif node_type == "BasicScheduler":
+
+                self._set_widget(
+                    node,
+                    1,
+                    steps_to_use,
+                )
+
+            elif node_type == "KSamplerSelect":
+
+                if turbo:
+                    self._set_widget(
+                        node,
+                        0,
+                        "euler",
+                    )
+                else:
+                    self._set_widget(
+                        node,
+                        0,
+                        "res_multistep",
+                    )
+
+            elif node_type == "RandomNoise":
+
+                self._set_widget(
+                    node,
+                    0,
+                    int(seed),
+                )
+
+            elif (
+                node_type
+                == "PrimitiveFloat"
+                and "duration" in self._title(node)
+            ):
+
+                self._set_widget(
+                    node,
+                    0,
+                    float(
+                        duration_seconds
+                    ),
+                )
+
+    # =========================================================
+    # PROMPT
+    # =========================================================
+
+    def _patch_prompt_ui(
+        self,
+        workflow,
+        script,
+    ):
+
+        candidates = []
+
+        for node in workflow.get(
+            "nodes",
+            []
+        ):
+
+            node_type = node.get(
+                "type"
+            )
+
+            if node_type not in {
+                "PrimitiveStringMultiline",
+                "PrimitiveString",
+            }:
+                continue
+
+            title = self._title(
+                node
+            )
+
+            score = 0
+
+            if (
+                "input text"
+                in title
+            ):
+                score += 100
+
+            if "prompt" in title:
+                score += 70
+
+            if "script" in title:
+                score += 60
+
+            if (
+                "script + bindings"
+                in title
+            ):
+                score += 110
+
+            if score:
+                candidates.append(
+                    (
+                        score,
+                        node,
+                    )
+                )
+
+        candidates.sort(
+            key=lambda item:
+                item[0],
+            reverse=True,
+        )
+
+        if candidates:
+
+            self._set_widget(
+                candidates[0][1],
+                0,
                 script,
             )
 
-            self.set_input(
-                node,
-                "shot_count",
-                int(shot_count),
-            )
+    # =========================================================
+    # REFERENCES
+    # =========================================================
 
-    # ---------------------------------------------------------
-    # Reference files
-    # ---------------------------------------------------------
-
-    def patch_load_images(
-        self,
-        workflow: dict,
-        filenames: list[str],
+    @staticmethod
+    def _matching_nodes(
+        workflow,
+        *,
+        kind,
     ):
 
-        nodes = self.find_nodes(
-            workflow,
-            "LoadImage",
-        )
+        result = []
 
-        for index, filename in enumerate(
-            filenames
+        for node in workflow.get(
+            "nodes",
+            []
         ):
 
-            if index >= len(nodes):
-                break
+            node_type = str(
+                node.get(
+                    "type",
+                    ""
+                )
+            ).lower()
 
-            _, node = nodes[index]
+            title = str(
+                node.get(
+                    "title",
+                    ""
+                )
+            ).lower()
 
-            self.set_input(
-                node,
-                "image",
-                filename,
-            )
+            score = 0
 
-    def patch_load_audio(
-        self,
-        workflow: dict,
-        filenames: list[str],
-    ):
-
-        nodes = self.find_nodes(
-            workflow,
-            "LoadAudio",
-        )
-
-        for index, filename in enumerate(
-            filenames
-        ):
-
-            if index >= len(nodes):
-                break
-
-            _, node = nodes[index]
-
-            self.set_input(
-                node,
-                "audio",
-                filename,
-            )
-
-    # ---------------------------------------------------------
-    # Output
-    # ---------------------------------------------------------
-
-    def patch_output_prefix(
-        self,
-        workflow: dict,
-        prefix: str,
-    ):
-
-        for class_type in (
-            "SaveVideo",
-            "VHS_VideoCombine",
-        ):
-
-            for _, node in self.find_nodes(
-                workflow,
-                class_type,
-            ):
+            if kind == "image":
 
                 if (
-                    "filename_prefix"
-                    in node.get("inputs", {})
+                    node_type == "loadimage"
                 ):
-                    self.set_input(
-                        node,
-                        "filename_prefix",
-                        prefix,
-                    )
+                    score += 10
 
-    # ---------------------------------------------------------
-    # Public build
-    # ---------------------------------------------------------
+                if (
+                    "<picture"
+                    in title
+                ):
+                    score += 100
+
+                if (
+                    "reference image"
+                    in title
+                ):
+                    score += 90
+
+            elif kind == "video":
+
+                if (
+                    "loadvideo"
+                    in node_type
+                ):
+                    score += 10
+
+                if (
+                    "<video"
+                    in title
+                ):
+                    score += 100
+
+                if (
+                    "reference video"
+                    in title
+                ):
+                    score += 90
+
+            elif kind == "audio":
+
+                if (
+                    node_type == "loadaudio"
+                ):
+                    score += 10
+
+                if (
+                    "<audio"
+                    in title
+                ):
+                    score += 100
+
+                if (
+                    "reference audio"
+                    in title
+                ):
+                    score += 90
+
+                if (
+                    "voice reference"
+                    in title
+                ):
+                    score += 95
+
+            elif kind == "keyframe":
+
+                if (
+                    node_type == "loadimage"
+                ):
+                    score += 10
+
+                if "keyframe" in title:
+                    score += 100
+
+            if score:
+                result.append(
+                    (
+                        score,
+                        H3WorkflowBuilder._number_in_title(node),
+                        node,
+                    )
+                )
+
+        result.sort(
+            key=lambda item:
+                (
+                    -item[0],
+                    item[1],
+                )
+        )
+
+        return [
+            item[2]
+            for item in result
+        ]
+
+    def _patch_reference_loaders_ui(
+        self,
+        workflow,
+        image_files,
+        video_files,
+        audio_files,
+        keyframe_files,
+        mode,
+    ):
+
+        if image_files:
+
+            nodes = self._matching_nodes(
+                workflow,
+                kind="image",
+            )
+
+            if len(nodes) < len(
+                image_files
+            ):
+
+                raise RuntimeError(
+                    f"{mode}: workflow exposes "
+                    f"{len(nodes)} image reference "
+                    f"slots but {len(image_files)} "
+                    "images were requested."
+                )
+
+            for node, filename in zip(
+                nodes,
+                image_files,
+            ):
+
+                self._set_widget(
+                    node,
+                    0,
+                    filename,
+                )
+
+        if video_files:
+
+            nodes = self._matching_nodes(
+                workflow,
+                kind="video",
+            )
+
+            if len(nodes) < len(
+                video_files
+            ):
+
+                raise RuntimeError(
+                    f"{mode}: workflow exposes "
+                    f"{len(nodes)} video reference "
+                    f"slots but {len(video_files)} "
+                    "videos were requested."
+                )
+
+            for node, filename in zip(
+                nodes,
+                video_files,
+            ):
+
+                self._set_widget(
+                    node,
+                    0,
+                    filename,
+                )
+
+        if audio_files:
+
+            nodes = self._matching_nodes(
+                workflow,
+                kind="audio",
+            )
+
+            if len(nodes) < len(
+                audio_files
+            ):
+
+                raise RuntimeError(
+                    f"{mode}: workflow exposes "
+                    f"{len(nodes)} audio slots but "
+                    f"{len(audio_files)} standalone "
+                    "audio references were requested."
+                )
+
+            for node, filename in zip(
+                nodes,
+                audio_files,
+            ):
+
+                self._set_widget(
+                    node,
+                    0,
+                    filename,
+                )
+
+        if keyframe_files:
+
+            nodes = self._matching_nodes(
+                workflow,
+                kind="keyframe",
+            )
+
+            if len(nodes) < len(
+                keyframe_files
+            ):
+
+                raise RuntimeError(
+                    f"{mode}: workflow exposes "
+                    f"{len(nodes)} keyframe slots but "
+                    f"{len(keyframe_files)} were requested."
+                )
+
+            for node, filename in zip(
+                nodes,
+                keyframe_files,
+            ):
+
+                self._set_widget(
+                    node,
+                    0,
+                    filename,
+                )
+
+    # =========================================================
+    # API PATCHES AFTER CONVERSION
+    # =========================================================
+
+    @staticmethod
+    def _set_api(
+        node,
+        key,
+        value,
+    ):
+
+        inputs = node.setdefault(
+            "inputs",
+            {}
+        )
+
+        if (
+            key in inputs
+            or key in {
+                "script",
+                "shot_count",
+                "width",
+                "height",
+                "length",
+                "frames_per_shot",
+                "steps",
+                "seed",
+                "seed_per_shot",
+                "prompt",
+                "sampler_name",
+                "filename_prefix",
+                "scheduler",
+            }
+        ):
+
+            inputs[key] = value
+
+    def _patch_api(
+        self,
+        workflow,
+        *,
+        mode,
+        script,
+        shot_count,
+        width,
+        height,
+        frames_per_shot,
+        steps,
+        seed,
+        output_prefix,
+        refs_root,
+    ):
+
+        turbo = self.is_turbo_mode(
+            mode
+        )
+
+        sampler_steps = (
+            4
+            if mode == "turbo_ref2v"
+            else 8
+            if turbo
+            else steps
+        )
+
+        for _, node in workflow.items():
+
+            if not isinstance(
+                node,
+                dict,
+            ):
+                continue
+
+            class_type = node.get(
+                "class_type"
+            )
+
+            if class_type in {
+                "H3MultishotMemorySampler",
+                "H3MultishotSampler",
+            }:
+
+                self._set_api(
+                    node,
+                    "script",
+                    script,
+                )
+
+                self._set_api(
+                    node,
+                    "shot_count",
+                    shot_count,
+                )
+
+                self._set_api(
+                    node,
+                    "width",
+                    width,
+                )
+
+                self._set_api(
+                    node,
+                    "height",
+                    height,
+                )
+
+                self._set_api(
+                    node,
+                    "frames_per_shot",
+                    frames_per_shot,
+                )
+
+                self._set_api(
+                    node,
+                    "steps",
+                    sampler_steps,
+                )
+
+                self._set_api(
+                    node,
+                    "seed",
+                    seed,
+                )
+
+                self._set_api(
+                    node,
+                    "seed_per_shot",
+                    True,
+                )
+
+            elif class_type == (
+                "MiniMaxH3ReferenceToVideo"
+            ):
+
+                self._set_api(
+                    node,
+                    "prompt",
+                    script,
+                )
+
+                self._set_api(
+                    node,
+                    "width",
+                    width,
+                )
+
+                self._set_api(
+                    node,
+                    "height",
+                    height,
+                )
+
+                self._set_api(
+                    node,
+                    "length",
+                    frames_per_shot,
+                )
+
+                self._set_api(
+                    node,
+                    "ref_image_size",
+                    "match",
+                )
+
+            elif class_type == (
+                "BasicScheduler"
+            ):
+
+                self._set_api(
+                    node,
+                    "steps",
+                    sampler_steps,
+                )
+
+            elif class_type == (
+                "KSamplerSelect"
+            ):
+
+                self._set_api(
+                    node,
+                    "sampler_name",
+                    (
+                        "euler"
+                        if turbo
+                        else "res_multistep"
+                    ),
+                )
+
+            elif class_type == (
+                "RandomNoise"
+            ):
+
+                self._set_api(
+                    node,
+                    "noise_seed",
+                    seed,
+                )
+
+            elif class_type == (
+                "H3AutoRefs"
+            ):
+
+                self._set_api(
+                    node,
+                    "refs_root",
+                    refs_root,
+                )
+
+                self._set_api(
+                    node,
+                    "max_per_character",
+                    3,
+                )
+
+                self._set_api(
+                    node,
+                    "script",
+                    script,
+                )
+
+            elif class_type == (
+                "H3EpisodeSplit"
+            ):
+
+                self._set_api(
+                    node,
+                    "script",
+                    script,
+                )
+
+                self._set_api(
+                    node,
+                    "shot_count",
+                    shot_count,
+                )
+
+            elif class_type in {
+                "SaveVideo",
+                "VHS_VideoCombine",
+            }:
+
+                self._set_api(
+                    node,
+                    "filename_prefix",
+                    output_prefix,
+                )
+
+    # =========================================================
+    # VALIDATION
+    # =========================================================
+
+    @staticmethod
+    def _is_api(
+        workflow,
+    ):
+
+        return (
+            isinstance(
+                workflow,
+                dict,
+            )
+            and bool(workflow)
+            and all(
+                isinstance(node, dict)
+                and "class_type" in node
+                and "inputs" in node
+                for node in workflow.values()
+            )
+        )
+
+    def _validate_api(
+        self,
+        workflow,
+        mode,
+    ):
+
+        if not self._is_api(
+            workflow
+        ):
+            raise RuntimeError(
+                f"{mode}: converted workflow "
+                "is not valid ComfyUI API format."
+            )
+
+        classes = {
+            node.get(
+                "class_type"
+            )
+            for node in workflow.values()
+            if isinstance(
+                node,
+                dict,
+            )
+        }
+
+        if mode == "hard_r2v":
+            required = {
+                "H3ModelLoaderAny",
+                "H3ClipLoaderAny",
+                "MiniMaxH3ReferenceToVideo",
+                "H3FreeTextEncoder",
+                "VAEDecode",
+                "VAEDecodeAudio",
+                "CreateVideo",
+                "SaveVideo",
+            }
+
+        elif mode in {
+            "hard_chained",
+            "seamless_v2",
+            "seamless_core",
+        }:
+            required = {
+                "H3ModelLoaderAny",
+                "H3ClipLoaderAny",
+            }
+
+            if not (
+                {
+                    "H3MultishotSampler",
+                    "H3MultishotMemorySampler",
+                }
+                & classes
+            ):
+                raise RuntimeError(
+                    f"{mode}: no H3 multishot sampler "
+                    "exists in the selected workflow."
+                )
+
+        elif mode == "keyframes":
+            required = {
+                "H3ModelLoaderAny",
+                "H3ClipLoaderAny",
+            }
+
+        elif mode == "extend_take":
+            required = {
+                "H3ModelLoaderAny",
+                "H3ClipLoaderAny",
+            }
+
+        elif mode.startswith(
+            "turbo_"
+        ):
+            required = set()
+
+        else:
+            raise ValueError(
+                f"Unsupported workflow: {mode}"
+            )
+
+        missing = sorted(
+            required
+            - classes
+        )
+
+        if missing:
+            raise RuntimeError(
+                f"{mode}: missing required nodes: "
+                + ", ".join(missing)
+            )
+
+    # =========================================================
+    # PUBLIC
+    # =========================================================
 
     def build(
         self,
         *,
-        mode: str,
-        script: str,
-        shot_count: int,
-        width: int,
-        height: int,
-        frames_per_shot: int,
-        steps: int,
-        seed: int,
-        image_files: list[str] | None = None,
-        audio_files: list[str] | None = None,
-        output_prefix: str = "h3/output",
-    ) -> dict:
+        mode,
+        profile,
+        script,
+        shot_count,
+        width,
+        height,
+        frames_per_shot,
+        steps,
+        seed,
+        image_files=None,
+        video_files=None,
+        audio_files=None,
+        keyframe_files=None,
+        output_prefix="h3/output",
+        refs_root="",
+    ):
 
-        workflow = self.load(mode)
+        if mode not in self.all_modes():
+            raise ValueError(
+                f"Unknown workflow mode: {mode}"
+            )
 
-        workflow = self.to_api(
+        if (
+            mode.startswith(
+                "turbo_"
+            )
+            and profile != "turbo"
+        ):
+            raise ValueError(
+                f"{mode} requires profile='turbo'."
+            )
+
+        if (
+            profile == "turbo"
+            and not self.is_turbo_mode(mode)
+        ):
+            raise ValueError(
+                "Turbo profile requires one of the "
+                "H3_Turbo_* workflows."
+            )
+
+        workflow = self.load_ui(
+            mode
+        )
+
+        workflow = copy.deepcopy(
             workflow
         )
 
-        self.patch_common(
+        self._patch_models_ui(
             workflow,
+            mode,
+        )
+
+        self._patch_text_encoders_ui(
+            workflow,
+            mode,
+        )
+
+        self._patch_vaes_ui(
+            workflow
+        )
+
+        self._patch_controls_ui(
+            workflow,
+            mode,
+            width,
+            height,
+            frames_per_shot,
+            steps,
+            seed,
+            duration_seconds=(
+                frames_per_shot
+                / 24.0
+            ),
+        )
+
+        self._patch_prompt_ui(
+            workflow,
+            script,
+        )
+
+        self._patch_reference_loaders_ui(
+            workflow,
+            image_files or [],
+            video_files or [],
+            audio_files or [],
+            keyframe_files or [],
+            mode,
+        )
+
+        api_workflow = (
+            self.client.convert_workflow(
+                workflow
+            )
+        )
+
+        api_workflow = copy.deepcopy(
+            api_workflow
+        )
+
+        self._patch_api(
+            api_workflow,
+            mode=mode,
+            script=script,
+            shot_count=shot_count,
             width=width,
             height=height,
             frames_per_shot=frames_per_shot,
             steps=steps,
             seed=seed,
+            output_prefix=output_prefix,
+            refs_root=refs_root,
         )
 
-        self.patch_script(
-            workflow,
-            script=script,
-            shot_count=shot_count,
+        self._validate_api(
+            api_workflow,
+            mode,
         )
 
-        self.patch_load_images(
-            workflow,
-            image_files or [],
-        )
-
-        self.patch_load_audio(
-            workflow,
-            audio_files or [],
-        )
-
-        self.patch_output_prefix(
-            workflow,
-            output_prefix,
-        )
-
-        return workflow
+        return api_workflow
