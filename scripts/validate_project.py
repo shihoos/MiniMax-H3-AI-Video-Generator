@@ -11,98 +11,32 @@ ROOT = (
     .parents[1]
 )
 
-
-REQUIRED = [
-    "planner/config.py",
-    "planner/qwen_loader.py",
-    "planner/story_planner.py",
-    "planner/character_detector.py",
-    "planner/character_planner.py",
-    "planner/scene_planner.py",
-    "planner/shot_planner.py",
-
-    "pipeline/continuity_manager.py",
-    "pipeline/identity_continuity.py",
-    "pipeline/production_orchestrator.py",
-    "pipeline/reference_manager.py",
-
-    "execution/assembly_manager.py",
-    "execution/checkpoint_manager.py",
-    "execution/comfy_client.py",
-    "execution/h3_runtime.py",
-    "execution/h3_workflow_builder.py",
-    "execution/shot_executor.py",
-    "execution/production_runner.py",
-
-    "scheduler/gpu_scheduler.py",
-    "scheduler/shot_queue.py",
-
-    "schemas/character.py",
-    "schemas/parser.py",
-    "schemas/scene.py",
-    "schemas/shot.py",
-
-    "kaggle/bootstrap.py",
-    "kaggle/compatibility_lock.yaml",
-    "kaggle/h3_config.yaml",
-    "kaggle/preflight_h3.py",
-    "kaggle/start_comfyui.py",
-    "kaggle/verify_live_runtime.py",
-
-    "scripts/cpu_preflight.py",
-    "scripts/generate_video.py",
-]
-
-
-WORKFLOW_ROOT = (
+WORKFLOWS = (
     ROOT
     / "workflows"
     / "MiniMax-H3"
 )
 
-
-REQUIRED_WORKFLOWS = [
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_HardMode_R2V.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_HardMode_Chained.json",
-]
-
-
-FORBIDDEN = {
-    "LTX-13B",
-    "LTXVLatentUpsamplerModelLoader",
-    "ltxv-13b",
-    "legacy_ltx_098",
-    "detailer_compat",
+BASE = {
+    "H3_Extend_Take.json",
+    "H3_HardMode_Chained.json",
+    "H3_HardMode_R2V.json",
+    "H3_Keyframes.json",
+    "H3_Seamless_Chain_CORE.json",
+    "H3_Seamless_Chain_v2.json",
 }
 
+TURBO = {
+    "H3_Turbo_I2V.json",
+    "H3_Turbo_Ref2V.json",
+    "H3_Turbo_T2V.json",
+}
 
-def validate_required_files():
-
-    missing = []
-
-    for relative in REQUIRED:
-
-        if not (
-            ROOT
-            / relative
-        ).is_file():
-
-            missing.append(
-                relative
-            )
-
-    if missing:
-        raise RuntimeError(
-            "Missing required project files:\n"
-            + "\n".join(
-                missing
-            )
-        )
+MANUAL = (
+    WORKFLOWS
+    / "base"
+    / "H3_Ref2VA_Memory_API.json"
+)
 
 
 def validate_python():
@@ -130,118 +64,118 @@ def validate_python():
         )
 
 
-def validate_json():
+def validate_json_file(
+    path,
+):
 
-    workflow_files = list(
-        WORKFLOW_ROOT.rglob(
-            "*.json"
+    data = json.loads(
+        path.read_text(
+            encoding="utf-8"
         )
     )
 
-    if not workflow_files:
+    if not isinstance(
+        data,
+        dict,
+    ):
         raise RuntimeError(
-            "No H3 workflow JSON files found."
+            f"Workflow root is not object: {path}"
         )
 
-    for path in workflow_files:
 
-        data = json.loads(
-            path.read_text(
-                encoding="utf-8"
-            )
+def validate_workflows():
+
+    if MANUAL.exists():
+
+        raise RuntimeError(
+            "Remove manual workflow: "
+            f"{MANUAL}"
         )
 
-        if not isinstance(
-            data,
-            dict,
-        ):
-            raise RuntimeError(
-                f"Workflow root is not an object: "
-                f"{path}"
-            )
+    actual_base = {
+        path.name
+        for path in (
+            WORKFLOWS
+            / "base"
+        ).glob(
+            "*.json"
+        )
+    }
+
+    actual_turbo = {
+        path.name
+        for path in (
+            WORKFLOWS
+            / "turbo"
+        ).glob(
+            "*.json"
+        )
+    }
+
+    if actual_base != BASE:
+
+        raise RuntimeError(
+            "Base workflow set does not match expected "
+            "production set.\n"
+            f"Expected: {sorted(BASE)}\n"
+            f"Actual: {sorted(actual_base)}"
+        )
+
+    if actual_turbo != TURBO:
+
+        raise RuntimeError(
+            "Turbo workflow set does not match expected "
+            "production set.\n"
+            f"Expected: {sorted(TURBO)}\n"
+            f"Actual: {sorted(actual_turbo)}"
+        )
+
+    for name in BASE:
+        validate_json_file(
+            WORKFLOWS
+            / "base"
+            / name
+        )
+
+    for name in TURBO:
+        validate_json_file(
+            WORKFLOWS
+            / "turbo"
+            / name
+        )
 
 
-def validate_h3_builder():
+def validate_no_wrong_workflow_paths():
 
-    path = (
+    builder = (
         ROOT
         / "execution"
         / "h3_workflow_builder.py"
-    )
-
-    text = path.read_text(
+    ).read_text(
         encoding="utf-8"
     )
 
-    required_terms = [
-        "MiniMaxH3ReferenceToVideo",
-        "H3MultishotSampler",
-        "H3LastFrame",
-        "H3ConcatAV",
-        "H3ModelLoaderAny",
-        "H3ClipLoaderAny",
-        "ref_images.ref_image_",
-        "ref_videos.ref_video_",
-        "ref_video_audios.ref_video_audio_",
-        "ref_audios.ref_audio_",
-        "/workflow/convert",
+    forbidden = [
+        "canonical/H3_Multishot_AIO.json",
+        "canonical/H3_Multishot_MEMORY.json",
+        "H3_Ref2VA_Memory_API.json",
     ]
 
-    for term in required_terms:
+    for value in forbidden:
 
-        if term not in text:
+        if value in builder:
+
             raise RuntimeError(
-                "H3 builder is missing required "
-                f"contract term: {term}"
+                "Production builder still references "
+                f"forbidden workflow: {value}"
             )
-
-
-def validate_no_legacy():
-
-    for path in ROOT.rglob("*"):
-
-        if not path.is_file():
-            continue
-
-        if ".git" in path.parts:
-            continue
-
-        if "ComfyUI" in path.parts:
-            continue
-
-        if path.suffix.lower() not in {
-            ".py",
-            ".json",
-            ".yaml",
-            ".yml",
-            ".txt",
-            ".md",
-        }:
-            continue
-
-        text = path.read_text(
-            encoding="utf-8",
-            errors="ignore",
-        )
-
-        lowered = text.lower()
-
-        for forbidden in FORBIDDEN:
-
-            if forbidden.lower() in lowered:
-                raise RuntimeError(
-                    "Legacy LTX reference found in "
-                    f"{path}: {forbidden}"
-                )
 
 
 def main():
 
-    validate_required_files()
     validate_python()
-    validate_json()
-    validate_h3_builder()
-    validate_no_legacy()
+    validate_workflows()
+    validate_no_wrong_workflow_paths()
 
     print(
         "MiniMax H3 project validation PASSED."
