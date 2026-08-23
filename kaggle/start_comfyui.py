@@ -15,21 +15,57 @@ ROOT = (
 )
 
 COMFY = ROOT / "ComfyUI"
-LOGS = ROOT / "data" / "comfy_logs"
+
+LOG_DIR = (
+    ROOT
+    / "data"
+    / "comfy_logs"
+)
 
 
-def start(
-    gpu_id: int,
-    port: int,
+def gpu_ids():
+
+    configured = os.getenv(
+        "H3_GPU_IDS"
+    )
+
+    if configured:
+        return [
+            int(value.strip())
+            for value in configured.split(",")
+            if value.strip()
+        ]
+
+    try:
+
+        import torch
+
+        count = torch.cuda.device_count()
+
+        if count >= 2:
+            return [0, 1]
+
+        if count == 1:
+            return [0]
+
+    except Exception:
+        pass
+
+    return [0]
+
+
+def start_worker(
+    gpu_id,
+    port,
 ):
 
-    LOGS.mkdir(
+    LOG_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
 
     logfile = (
-        LOGS
+        LOG_DIR
         / f"gpu_{gpu_id}.log"
     )
 
@@ -68,59 +104,62 @@ def start(
         text=True,
     )
 
-    return process, handle
+    return (
+        process,
+        handle,
+    )
 
 
 def main():
 
-    workers = [
-        (0, 8188),
-        (1, 8189),
-    ]
+    ids = gpu_ids()
 
-    processes = [
-        start(
-            gpu_id,
-            port,
-        )
-        for gpu_id, port
-        in workers
-    ]
+    processes = []
 
-    print(
-        "MiniMax H3 workers started:"
-    )
-
-    for index, (
-        process,
-        _handle,
-    ) in enumerate(
-        processes
+    for index, gpu_id in enumerate(
+        ids
     ):
 
+        port = (
+            8188 + index
+        )
+
+        process, handle = (
+            start_worker(
+                gpu_id,
+                port,
+            )
+        )
+
+        processes.append(
+            (
+                process,
+                handle,
+                gpu_id,
+                port,
+            )
+        )
+
         print(
-            f"GPU {index}: "
-            f"PID={process.pid} "
-            f"PORT={8188 + index}"
+            f"GPU {gpu_id}: "
+            f"http://127.0.0.1:{port} "
+            f"PID={process.pid}"
         )
 
     try:
 
-        while True:
-
-            if not any(
-                process.poll()
-                is None
-                for process, _handle
-                in processes
-            ):
-                break
-
+        while any(
+            process.poll() is None
+            for process, _, _, _
+            in processes
+        ):
             time.sleep(2)
 
     except KeyboardInterrupt:
 
-        for process, handle in processes:
+        for process, handle, _, _ in (
+            processes
+        ):
 
             if process.poll() is None:
                 process.send_signal(
