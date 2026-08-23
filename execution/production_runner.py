@@ -18,6 +18,16 @@ from postprocess.h3_regenerate_2k import (
 
 from planner.config import (
     H3_REGENERATE_2K_ENABLED,
+    WORKFLOW_AUTO,
+    WORKFLOW_HARD_R2V,
+    WORKFLOW_HARD_CHAINED,
+    WORKFLOW_SEAMLESS_V2,
+    WORKFLOW_SEAMLESS_CORE,
+    WORKFLOW_KEYFRAMES,
+    WORKFLOW_EXTEND_TAKE,
+    WORKFLOW_TURBO_I2V,
+    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_TURBO_T2V,
 )
 
 from scheduler.gpu_scheduler import (
@@ -59,6 +69,101 @@ class ProductionRunner:
             exist_ok=True,
         )
 
+    @staticmethod
+    def select_auto_workflow(
+        shots,
+        profile,
+    ):
+
+        if profile == "turbo":
+
+            has_reference = any(
+                (
+                    shot.get(
+                        "reference_images"
+                    )
+                    or shot.get(
+                        "reference_videos"
+                    )
+                    or shot.get(
+                        "reference_audio_paths"
+                    )
+                )
+                for shot in shots
+            )
+
+            if has_reference:
+                return WORKFLOW_TURBO_REF2V
+
+            if any(
+                shot.get(
+                    "reference_images"
+                )
+                for shot in shots
+            ):
+                return WORKFLOW_TURBO_I2V
+
+            return WORKFLOW_TURBO_T2V
+
+        # Special modes explicitly requested by the planner.
+        for shot in shots:
+
+            if shot.get(
+                "keyframe_images"
+            ):
+                return WORKFLOW_KEYFRAMES
+
+            if shot.get(
+                "extend_take_source_video"
+            ):
+                return WORKFLOW_EXTEND_TAKE
+
+        if len(shots) == 1:
+            return WORKFLOW_HARD_R2V
+
+        # Hard Mode Chained is used for shorter continuous
+        # scenes; Seamless Chain v2 is the long-form path.
+        if len(shots) <= 8:
+            return WORKFLOW_HARD_CHAINED
+
+        return WORKFLOW_SEAMLESS_V2
+
+    @staticmethod
+    def character_reference_map(
+        production_plan,
+    ):
+
+        result = {}
+
+        for character in (
+            production_plan.get(
+                "characters",
+                [],
+            )
+        ):
+
+            name = str(
+                character.get(
+                    "name",
+                    "",
+                )
+            ).strip()
+
+            if not name:
+                continue
+
+            paths = list(
+                character.get(
+                    "reference_paths",
+                    [],
+                )
+            )
+
+            if paths:
+                result[name] = paths[:3]
+
+        return result
+
     def _executor(
         self,
         gpu_id,
@@ -89,12 +194,11 @@ class ProductionRunner:
         gpu_id,
         scene_id,
         shots,
+        workflow_mode,
+        profile,
+        character_reference_map,
+        production_plan,
     ):
-
-        executor = self._executor(
-            gpu_id,
-            scene_id,
-        )
 
         shots = sorted(
             shots,
@@ -104,7 +208,43 @@ class ProductionRunner:
                         "order",
                         0,
                     )
-                ),
+                )
+        )
+
+        if workflow_mode == WORKFLOW_AUTO:
+
+            workflow_mode = (
+                self.select_auto_workflow(
+                    shots,
+                    profile,
+                )
+            )
+
+        if (
+            workflow_mode
+            in {
+                WORKFLOW_HARD_R2V,
+                WORKFLOW_KEYFRAMES,
+                WORKFLOW_EXTEND_TAKE,
+            }
+            and len(shots) != 1
+        ):
+            if workflow_mode == WORKFLOW_HARD_R2V:
+                raise RuntimeError(
+                    "hard_r2v is a single-shot workflow. "
+                    "Use hard_chained or seamless_v2 for "
+                    "a multi-shot scene."
+                )
+
+            if workflow_mode == WORKFLOW_KEYFRAMES:
+                raise RuntimeError(
+                    "keyframes is a single-generation workflow. "
+                    "Use it for one scene-generation pass."
+                )
+
+        executor = self._executor(
+            gpu_id,
+            scene_id,
         )
 
         output_dir = (
@@ -118,28 +258,56 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        # At the moment we use Ref2VA directly
-        # for each shot.
-        #
-        # This guarantees correct reference routing
-        # before adding a custom multishot node.
-        shot_outputs = []
-
-        for shot in shots:
-
-            result = (
-                executor
-                .execute_native_ref2va(
-                    shot,
-                    output_dir,
-                )
+        width = int(
+            production_plan.get(
+                "width",
+                1344,
             )
+        )
 
-            shot_outputs.append(
-                result
+        height = int(
+            production_plan.get(
+                "height",
+                768,
             )
+        )
 
-        return shot_outputs
+        frames = int(
+            production_plan.get(
+                "frames_per_shot",
+                243,
+            )
+        )
+
+        steps = int(
+            production_plan.get(
+                "steps",
+                14,
+            )
+        )
+
+        result = (
+            executor.execute_scene(
+                scene_id=scene_id,
+                shots=shots,
+                workflow_mode=workflow_mode,
+                profile=profile,
+                character_reference_map=(
+                    character_reference_map
+                ),
+                output_dir=output_dir,
+                width=width,
+                height=height,
+                frames_per_shot=frames,
+                steps=steps,
+            )
+        )
+
+        return (
+            scene_id,
+            workflow_mode,
+            result,
+        )
 
     @staticmethod
     def concat(
@@ -153,6 +321,10 @@ class ProductionRunner:
             raise ValueError(
                 "No videos supplied."
             )
+
+        destination = Path(
+            destination
+        )
 
         destination.parent.mkdir(
             parents=True,
@@ -237,6 +409,20 @@ class ProductionRunner:
                 "Production plan contains no shots."
             )
 
+        profile = str(
+            production_plan.get(
+                "profile",
+                "base",
+            )
+        )
+
+        workflow_mode = str(
+            production_plan.get(
+                "workflow_mode",
+                WORKFLOW_AUTO,
+            )
+        )
+
         scenes = {}
 
         for shot in shots:
@@ -248,11 +434,6 @@ class ProductionRunner:
                 )
             )
 
-            if not scene_id:
-                raise RuntimeError(
-                    "Shot missing scene_id."
-                )
-
             scenes.setdefault(
                 scene_id,
                 [],
@@ -260,18 +441,20 @@ class ProductionRunner:
                 shot
             )
 
-        scene_jobs = []
-
-        for scene_id, scene_shots in (
-            scenes.items()
-        ):
-
-            scene_jobs.append(
-                SimpleNamespace(
-                    scene_id=scene_id,
-                    shots=scene_shots,
-                )
+        character_reference_map = (
+            self.character_reference_map(
+                production_plan
             )
+        )
+
+        jobs = [
+            SimpleNamespace(
+                scene_id=scene_id,
+                shots=scene_shots,
+            )
+            for scene_id, scene_shots
+            in scenes.items()
+        ]
 
         scheduler = GPUScheduler(
             gpu_ids=sorted(
@@ -288,17 +471,23 @@ class ProductionRunner:
                 gpu_id=gpu_id,
                 scene_id=job.scene_id,
                 shots=job.shots,
+                workflow_mode=workflow_mode,
+                profile=profile,
+                character_reference_map=(
+                    character_reference_map
+                ),
+                production_plan=production_plan,
             )
 
         results = scheduler.run(
-            scene_jobs,
+            jobs,
             worker,
         )
 
-        # Restore narrative scene order.
+        # Narrative order.
         results.sort(
             key=lambda item:
-                next(
+                min(
                     int(
                         shot.get(
                             "order",
@@ -306,17 +495,20 @@ class ProductionRunner:
                         )
                     )
                     for shot in scenes[
-                        item[1]
+                        item[0]
                     ]
                 )
         )
 
         scene_videos = []
 
-        for _, scene_id, paths in results:
-
-            scene_videos.extend(
-                paths
+        for (
+            _scene_id,
+            _workflow_mode,
+            path,
+        ) in results:
+            scene_videos.append(
+                Path(path)
             )
 
         native_master = (
@@ -329,11 +521,8 @@ class ProductionRunner:
             native_master,
         )
 
-        master_for_export = (
-            native_master
-        )
+        master = native_master
 
-        # Official H3 regeneration.
         if H3_REGENERATE_2K_ENABLED:
 
             regenerated = (
@@ -341,14 +530,10 @@ class ProductionRunner:
                 / "master_h3_2k.mp4"
             )
 
-            regenerater = (
-                H3Regenerate2K()
-            )
-
-            master_for_export = (
-                regenerater.regenerate(
-                    native_master,
-                    regenerated,
+            master = (
+                H3Regenerate2K().regenerate(
+                    source_video=native_master,
+                    destination=regenerated,
                     prompt=production_plan.get(
                         "story",
                         "",
@@ -364,6 +549,6 @@ class ProductionRunner:
         )
 
         return FinalExporter.export_720p(
-            master_for_export,
-            final,
+            source=master,
+            destination=final,
         )
