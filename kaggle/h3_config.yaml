@@ -1,61 +1,125 @@
-dataset_name: minimax-h3-ref2va-q4
+backend:
+  runtime: comfyui
+  profile: q4
+  workflow_source: repository
 
-backend: minimax-h3
-mode: ref2va
+dataset:
+  name: "MiniMax H3 Ref2VA Q4"
 
 models:
-  diffusion_model: minimax_h3_ref2va_pruned-Q4_K_M.gguf
-  text_encoder: qwen3vl_32b_minimax_h3-Q4_K_M.gguf
-  mmproj: Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf
-  video_vae: minimax_h3_video_vae_fp16.safetensors
-  audio_vae: minimax_h3_audio_vae_fp32.safetensors
+  base:
+    ref2va:
+      file: "minimax_h3_ref2va_pruned-Q4_K_M.gguf"
+      directory: "diffusion_models"
+
+    fl2va:
+      file: "minimax_h3_fl2va_pruned-Q4_K_M.gguf"
+      directory: "diffusion_models"
+
+    text_encoder:
+      file: "qwen3vl_32b_minimax_h3-Q4_K_M.gguf"
+      directory: "text_encoders"
+
+    video_vae:
+      file: "minimax_h3_video_vae_fp16.safetensors"
+      directory: "vae"
+
+    audio_vae:
+      file: "minimax_h3_audio_vae_fp32.safetensors"
+      directory: "vae"
+
+  turbo:
+    enabled: false
+
+    ref2va:
+      file: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+      directory: "diffusion_models"
+
+    fl2va:
+      file: "minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+      directory: "diffusion_models"
+
+    text_encoder:
+      file: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors"
+      directory: "text_encoders"
+
+    ref2v_lora:
+      file: "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
+      directory: "loras"
+
+    fl2v_lora:
+      file: "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+      directory: "loras"
+
+workflows:
+  base:
+    - "H3_Extend_Take.json"
+    - "H3_HardMode_Chained.json"
+    - "H3_HardMode_R2V.json"
+    - "H3_Keyframes.json"
+    - "H3_Seamless_Chain_CORE.json"
+    - "H3_Seamless_Chain_v2.json"
+
+  turbo:
+    - "H3_Turbo_I2V.json"
+    - "H3_Turbo_Ref2V.json"
+    - "H3_Turbo_T2V.json"
+
+  excluded:
+    - "H3_Ref2VA_Memory_API.json"
 
 generation:
+  width: 1344
+  height: 768
+  fallback_width: 960
+  fallback_height: 544
   fps: 24
-  width: 960
-  height: 544
-  frames_per_shot: 124
+  frames_per_shot: 243
   steps: 14
-  sampler: res_multistep
-  scheduler: beta
-  ref_image_size: match
+  reference_image_size: "match"
 
 references:
   images: 9
   videos: 3
-  video_audio: 3
   standalone_audio: 3
-  total_max: 12
+  total_files: 12
 
 identity:
-  face: true
-  hair: true
-  body: true
-  skin_tone: true
-  clothing: true
-  accessories: true
-  distinctive_features: true
-  character_state: true
-  continuity_rules: true
+  reference_controls:
+    - face
+    - facial_geometry
+    - hair
+    - hairline
+    - body_structure
+    - body_proportions
+    - skin_tone
+    - stable_identity_marks
+
+  qwen_controls:
+    - clothing
+    - accessories
+    - makeup
+    - temporary_scars
+    - injuries
+    - physical_state
+    - environment
+    - lighting
+    - props
 
 continuity:
-  first_shot: ref2va
-  later_shots: last_frame_chain
-  long_form_memory: true
+  short_scene_workflow: "H3_HardMode_Chained.json"
+  long_scene_workflow: "H3_Seamless_Chain_v2.json"
+  fallback_workflow: "H3_Seamless_Chain_CORE.json"
 
-offload:
-  qwen_unload_before_h3: true
-  h3_text_encoder_eviction: true
-  cpu_vae: true
-  lowvram: true
+gpu:
+  workers:
+    - 0
+    - 1
 
-multi_gpu:
-  enabled: true
-  strategy: scene_parallel
-  worker_0_port: 8188
-  worker_1_port: 8189
+  ports:
+    - 8188
+    - 8189
 
 delivery:
   width: 1280
   height: 720
-  fps: 24
