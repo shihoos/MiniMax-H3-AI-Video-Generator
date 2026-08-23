@@ -9,24 +9,11 @@ from urllib.error import (
     HTTPError,
     URLError,
 )
-from urllib.parse import (
-    urlencode,
-)
+from urllib.parse import urlencode
 from urllib.request import (
     Request,
     urlopen,
 )
-
-
-TRANSIENT_HTTP_STATUS_CODES = {
-    408,
-    425,
-    429,
-    500,
-    502,
-    503,
-    504,
-}
 
 
 class ComfyClient:
@@ -37,6 +24,7 @@ class ComfyClient:
         timeout: int = 60,
         request_retries: int = 3,
     ):
+
         self.base_url = (
             base_url.rstrip("/")
         )
@@ -53,12 +41,13 @@ class ComfyClient:
 
     def _request(
         self,
-        method: str,
-        path: str,
+        method,
+        path,
         payload=None,
-        retry: bool = False,
-        timeout: int | None = None,
+        retry=False,
+        timeout=None,
     ):
+
         url = (
             self.base_url
             + path
@@ -68,6 +57,7 @@ class ComfyClient:
         headers = {}
 
         if payload is not None:
+
             data = json.dumps(
                 payload,
                 ensure_ascii=False,
@@ -88,14 +78,16 @@ class ComfyClient:
         request_timeout = (
             self.timeout
             if timeout is None
-            else max(1, int(timeout))
+            else max(
+                1,
+                int(timeout),
+            )
         )
-
-        last_error = None
 
         for attempt in range(
             attempts
         ):
+
             request = Request(
                 url=url,
                 method=method,
@@ -104,6 +96,7 @@ class ComfyClient:
             )
 
             try:
+
                 with urlopen(
                     request,
                     timeout=request_timeout,
@@ -122,12 +115,14 @@ class ComfyClient:
                     ).lower()
 
                     if (
-                        "json" in content_type
-                        or body[:1] in (
+                        "json"
+                        in content_type
+                        or body[:1] in {
                             b"{",
                             b"[",
-                        )
+                        }
                     ):
+
                         try:
                             return json.loads(
                                 body.decode(
@@ -140,7 +135,6 @@ class ComfyClient:
                     return body
 
             except HTTPError as error:
-                last_error = error
 
                 body = (
                     error.read()
@@ -153,12 +147,25 @@ class ComfyClient:
                 if (
                     retry
                     and error.code
-                    in TRANSIENT_HTTP_STATUS_CODES
-                    and attempt < attempts - 1
+                    in {
+                        408,
+                        429,
+                        500,
+                        502,
+                        503,
+                        504,
+                    }
+                    and attempt
+                    < attempts - 1
                 ):
-                    self._sleep_before_retry(
-                        attempt
+
+                    time.sleep(
+                        min(
+                            2 ** attempt,
+                            10,
+                        )
                     )
+
                     continue
 
                 raise RuntimeError(
@@ -170,53 +177,51 @@ class ComfyClient:
                 URLError,
                 TimeoutError,
             ) as error:
-                last_error = error
 
                 if (
                     retry
-                    and attempt < attempts - 1
+                    and attempt
+                    < attempts - 1
                 ):
-                    self._sleep_before_retry(
-                        attempt
+
+                    time.sleep(
+                        min(
+                            2 ** attempt,
+                            10,
+                        )
                     )
+
                     continue
 
                 raise RuntimeError(
-                    "Cannot connect to ComfyUI "
-                    f"at {self.base_url}: {error}"
+                    f"Cannot connect to ComfyUI "
+                    f"{self.base_url}: {error}"
                 ) from error
 
         raise RuntimeError(
-            f"ComfyUI request failed: {last_error}"
-        )
-
-    @staticmethod
-    def _sleep_before_retry(
-        attempt: int,
-    ) -> None:
-        time.sleep(
-            min(
-                1.0 * (2 ** attempt),
-                10.0,
-            )
+            "ComfyUI request failed."
         )
 
     def health_check(
         self,
-    ) -> bool:
+    ):
+
         try:
             self._request(
                 "GET",
                 "/system_stats",
                 retry=True,
             )
+
             return True
+
         except Exception:
             return False
 
     def get_object_info(
         self,
-    ) -> dict:
+    ):
+
         result = self._request(
             "GET",
             "/object_info",
@@ -227,61 +232,42 @@ class ComfyClient:
             result,
             dict,
         ):
+
             raise RuntimeError(
                 "Invalid /object_info response."
             )
 
         return result
-        
-    def supports_workflow_conversion(self) -> bool:
-         try:
-             info = self.get_object_info()
-         except Exception:
-             return False
 
-         return (
-              "WorkflowToApi"
-               in info
-               or "WorkflowToAPI"
-               in info
-    )
-    
-    
     def convert_workflow(
         self,
-        workflow: dict,
-    ) -> dict:
-        """
-        Convert a full ComfyUI UI/save-format workflow
-        into ComfyUI API format using the server-side converter.
-
-        This deliberately does NOT attempt to recreate ComfyUI's
-        frontend conversion logic locally.
-        """
+        workflow,
+    ):
 
         result = self._request(
             "POST",
             "/workflow/convert",
             payload=workflow,
             retry=False,
-            timeout=120,
+            timeout=180,
         )
 
         if not isinstance(
             result,
             dict,
         ):
+
             raise RuntimeError(
-                "ComfyUI workflow converter returned "
-                "an invalid response."
+                "Workflow converter returned "
+                "invalid data."
             )
 
-        if (
-            "success" in result
-            and result.get("success") is False
-        ):
+        if result.get(
+            "success"
+        ) is False:
+
             raise RuntimeError(
-                "ComfyUI workflow conversion failed: "
+                "Workflow conversion failed: "
                 + str(
                     result.get(
                         "error",
@@ -290,58 +276,62 @@ class ComfyClient:
                 )
             )
 
-        # The converter returns the API workflow itself.
         if all(
-            isinstance(value, dict)
+            isinstance(
+                value,
+                dict,
+            )
             for value in result.values()
         ):
+
             return result
 
-        # Some converter versions may wrap it.
         for key in (
             "workflow",
-            "data",
             "prompt",
+            "data",
         ):
+
             candidate = result.get(
                 key
             )
 
             if (
-                isinstance(candidate, dict)
+                isinstance(
+                    candidate,
+                    dict,
+                )
                 and all(
-                    isinstance(value, dict)
-                    for value in candidate.values()
+                    isinstance(
+                        value,
+                        dict,
+                    )
+                    for value
+                    in candidate.values()
                 )
             ):
+
                 return candidate
 
         raise RuntimeError(
-            "Could not locate API workflow in "
-            "converter response."
+            "Could not find converted API "
+            "workflow in converter response."
         )
 
     def queue_prompt(
         self,
-        workflow: dict,
-        client_id: str | None = None,
+        workflow,
     ) -> str:
 
-        if client_id is None:
-            client_id = str(
-                uuid.uuid4()
-            )
-
-        payload = {
-            "prompt": workflow,
-            "client_id": client_id,
-        }
-
-        # NEVER retry /prompt automatically.
         result = self._request(
             "POST",
             "/prompt",
-            payload,
+            payload={
+                "prompt": workflow,
+                "client_id": str(
+                    uuid.uuid4()
+                ),
+            },
             retry=False,
         )
 
@@ -349,6 +339,7 @@ class ComfyClient:
             result,
             dict,
         ):
+
             raise RuntimeError(
                 "Invalid /prompt response."
             )
@@ -356,6 +347,7 @@ class ComfyClient:
         if result.get(
             "error"
         ):
+
             raise RuntimeError(
                 "ComfyUI rejected prompt: "
                 + str(
@@ -368,6 +360,7 @@ class ComfyClient:
         )
 
         if not prompt_id:
+
             raise RuntimeError(
                 "ComfyUI did not return prompt_id: "
                 + str(result)
@@ -379,8 +372,9 @@ class ComfyClient:
 
     def get_history(
         self,
-        prompt_id: str,
-    ) -> dict:
+        prompt_id,
+    ):
+
         result = self._request(
             "GET",
             f"/history/{prompt_id}",
@@ -391,6 +385,7 @@ class ComfyClient:
             result,
             dict,
         ):
+
             raise RuntimeError(
                 "Invalid history response."
             )
@@ -399,34 +394,37 @@ class ComfyClient:
 
     def wait_for_prompt(
         self,
-        prompt_id: str,
-        poll_interval: float = 2.0,
-        timeout: float = 7200.0,
-    ) -> dict:
+        prompt_id,
+        poll_interval=2.0,
+        timeout=14400.0,
+    ):
 
         started = time.monotonic()
-        current_interval = max(
-            0.5,
-            float(poll_interval),
+        delay = float(
+            poll_interval
         )
 
         while True:
-            elapsed = (
+
+            if (
                 time.monotonic()
                 - started
-            )
+                > timeout
+            ):
 
-            if elapsed > timeout:
                 raise TimeoutError(
                     f"ComfyUI prompt {prompt_id} "
                     "timed out."
                 )
 
-            history = self.get_history(
-                prompt_id
+            history = (
+                self.get_history(
+                    prompt_id
+                )
             )
 
             if prompt_id in history:
+
                 result = history[
                     prompt_id
                 ]
@@ -436,40 +434,48 @@ class ComfyClient:
                     {},
                 )
 
-                if status.get(
-                    "status_str"
-                ) == "error":
+                if (
+                    status.get(
+                        "status_str"
+                    )
+                    == "error"
+                ):
+
                     raise RuntimeError(
-                        "ComfyUI generation failed "
-                        f"for {prompt_id}: "
+                        f"ComfyUI failed {prompt_id}: "
                         f"{status}"
                     )
 
-                if status.get(
-                    "status_str"
-                ) == "success":
+                if (
+                    status.get(
+                        "status_str"
+                    )
+                    == "success"
+                ):
+
                     return result
 
                 if result.get(
                     "outputs"
                 ):
+
                     return result
 
             time.sleep(
-                current_interval
+                delay
             )
 
-            current_interval = min(
-                current_interval * 1.5,
+            delay = min(
+                delay * 1.5,
                 10.0,
             )
 
     def download_file(
         self,
-        filename: str,
-        subfolder: str = "",
-        file_type: str = "output",
-        destination: Path | None = None,
+        filename,
+        subfolder="",
+        file_type="output",
+        destination=None,
     ) -> Path:
 
         query = urlencode(
@@ -490,6 +496,7 @@ class ComfyClient:
             data,
             bytes,
         ):
+
             raise RuntimeError(
                 "ComfyUI /view did not return "
                 "binary data."
@@ -517,46 +524,33 @@ class ComfyClient:
             not destination.is_file()
             or destination.stat().st_size <= 0
         ):
+
             raise RuntimeError(
-                "Downloaded output is missing "
-                "or empty: "
-                f"{destination}"
+                "Downloaded file is missing "
+                "or empty."
             )
 
         return destination
 
     @staticmethod
-    def _is_video_filename(
-        filename: str,
-    ) -> bool:
+    def _is_video(
+        filename,
+    ):
+
         return Path(
             filename
         ).suffix.lower() in {
             ".mp4",
             ".mov",
-            ".webm",
             ".mkv",
-            ".gif",
-        }
-
-    @staticmethod
-    def _is_image_filename(
-        filename: str,
-    ) -> bool:
-        return Path(
-            filename
-        ).suffix.lower() in {
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".webp",
+            ".webm",
         }
 
     @classmethod
     def find_video_outputs(
         cls,
-        history: dict,
-    ) -> list[dict]:
+        history,
+    ):
 
         results = []
 
@@ -579,86 +573,15 @@ class ComfyClient:
             ):
                 continue
 
-            for value in node_output.values():
+            for items in node_output.values():
 
                 if not isinstance(
-                    value,
+                    items,
                     list,
                 ):
                     continue
 
-                for item in value:
-
-                    if not isinstance(
-                        item,
-                        dict,
-                    ):
-                        continue
-
-                    filename = item.get(
-                        "filename"
-                    )
-
-                    if not filename:
-                        continue
-
-                    if not cls._is_video_filename(
-                        filename
-                    ):
-                        continue
-
-                    results.append(
-                        {
-                            "filename": filename,
-                            "subfolder": item.get(
-                                "subfolder",
-                                "",
-                            ),
-                            "type": item.get(
-                                "type",
-                                "output",
-                            ),
-                        }
-                    )
-
-        return results
-
-    @classmethod
-    def find_image_outputs(
-        cls,
-        history: dict,
-    ) -> list[dict]:
-
-        results = []
-
-        outputs = history.get(
-            "outputs",
-            {},
-        )
-
-        if not isinstance(
-            outputs,
-            dict,
-        ):
-            return results
-
-        for node_output in outputs.values():
-
-            if not isinstance(
-                node_output,
-                dict,
-            ):
-                continue
-
-            for value in node_output.values():
-
-                if not isinstance(
-                    value,
-                    list,
-                ):
-                    continue
-
-                for item in value:
+                for item in items:
 
                     if not isinstance(
                         item,
@@ -671,25 +594,24 @@ class ComfyClient:
                     )
 
                     if (
-                        not filename
-                        or not cls._is_image_filename(
+                        filename
+                        and cls._is_video(
                             filename
                         )
                     ):
-                        continue
 
-                    results.append(
-                        {
-                            "filename": filename,
-                            "subfolder": item.get(
-                                "subfolder",
-                                "",
-                            ),
-                            "type": item.get(
-                                "type",
-                                "output",
-                            ),
-                        }
-                    )
+                        results.append(
+                            {
+                                "filename": filename,
+                                "subfolder": item.get(
+                                    "subfolder",
+                                    "",
+                                ),
+                                "type": item.get(
+                                    "type",
+                                    "output",
+                                ),
+                            }
+                        )
 
         return results
