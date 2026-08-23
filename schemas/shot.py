@@ -76,10 +76,23 @@ class Shot:
         default_factory=list
     )
 
+    # Production workflow controls.
+    workflow_mode: str = "auto"
+
+    keyframe_images: list = field(
+        default_factory=list
+    )
+
+    keyframe_positions: list = field(
+        default_factory=list
+    )
+
+    extend_take_source_video: Optional[str] = None
+
     width: int = 1344
     height: int = 768
     fps: int = 24
-    frames_per_shot: int = 124
+    frames_per_shot: int = 243
     steps: int = 14
 
     previous_shot: Optional[str] = None
@@ -134,6 +147,9 @@ class Shot:
             "subject_definitions:\n"
             f"{subjects}\n\n"
 
+            "reference_bindings:\n"
+            f"{references}\n\n"
+
             "summary:\n"
             f"{self.action.strip()}\n\n"
 
@@ -141,7 +157,6 @@ class Shot:
             f"{self.retention_analysis.strip()}\n\n"
 
             "detailed_description:\n"
-            f"{references}\n"
             f"{description}\n"
             f"Location: {self.location}\n"
             f"Camera: {self.camera_shot}; "
@@ -241,6 +256,22 @@ class Shot:
 
             "identity_locks": (
                 self.identity_locks
+            ),
+
+            "workflow_mode": (
+                self.workflow_mode
+            ),
+
+            "keyframe_images": (
+                self.keyframe_images
+            ),
+
+            "keyframe_positions": (
+                self.keyframe_positions
+            ),
+
+            "extend_take_source_video": (
+                self.extend_take_source_video
             ),
 
             "width": self.width,
