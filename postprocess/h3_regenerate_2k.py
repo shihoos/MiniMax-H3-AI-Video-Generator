@@ -4,7 +4,10 @@ import base64
 import json
 import time
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import (
+    HTTPError,
+    URLError,
+)
 from urllib.request import (
     Request,
     urlopen,
@@ -13,6 +16,7 @@ from urllib.request import (
 from planner.config import (
     H3_API_BASE,
     H3_API_KEY,
+    H3_QUERY_ENDPOINT,
     H3_REGENERATE_ENDPOINT,
 )
 
@@ -21,9 +25,10 @@ class H3Regenerate2K:
 
     def __init__(
         self,
-        api_key: str | None = None,
-        api_base: str = H3_API_BASE,
-        endpoint: str = H3_REGENERATE_ENDPOINT,
+        api_key=None,
+        api_base=H3_API_BASE,
+        endpoint=H3_REGENERATE_ENDPOINT,
+        query_endpoint=H3_QUERY_ENDPOINT,
     ):
 
         self.api_key = (
@@ -36,8 +41,11 @@ class H3Regenerate2K:
         )
 
         self.endpoint = endpoint
+        self.query_endpoint = (
+            query_endpoint.rstrip("/")
+        )
 
-    def _request(
+    def _post(
         self,
         payload,
     ):
@@ -47,36 +55,32 @@ class H3Regenerate2K:
                 "MINIMAX_API_KEY is not configured."
             )
 
-        data = json.dumps(
-            payload
-        ).encode(
-            "utf-8"
-        )
-
         request = Request(
             self.api_base
             + self.endpoint,
-            data=data,
             method="POST",
+            data=json.dumps(
+                payload
+            ).encode(
+                "utf-8"
+            ),
             headers={
                 "Content-Type":
                     "application/json",
-
                 "Authorization":
                     f"Bearer {self.api_key}",
             },
         )
 
         try:
+
             with urlopen(
                 request,
                 timeout=300,
             ) as response:
 
-                body = response.read()
-
                 return json.loads(
-                    body.decode(
+                    response.read().decode(
                         "utf-8"
                     )
                 )
@@ -92,33 +96,67 @@ class H3Regenerate2K:
             )
 
             raise RuntimeError(
-                "H3 Regenerate-2K API failed: "
-                f"HTTP {error.code}: {body}"
+                f"H3 Regenerate-2K HTTP "
+                f"{error.code}: {body}"
             ) from error
+
+        except URLError as error:
+
+            raise RuntimeError(
+                f"H3 Regenerate-2K connection "
+                f"failed: {error}"
+            ) from error
+
+    def _get_task(
+        self,
+        task_id,
+    ):
+
+        request = Request(
+            (
+                f"{self.api_base}"
+                f"{self.query_endpoint}"
+                f"/{task_id}"
+            ),
+            method="GET",
+            headers={
+                "Authorization":
+                    f"Bearer {self.api_key}",
+            },
+        )
+
+        with urlopen(
+            request,
+            timeout=120,
+        ) as response:
+
+            return json.loads(
+                response.read().decode(
+                    "utf-8"
+                )
+            )
 
     @staticmethod
     def _data_url(
-        path: Path,
+        video_path,
     ):
 
-        mime = "video/mp4"
-
         encoded = base64.b64encode(
-            path.read_bytes()
+            Path(video_path).read_bytes()
         ).decode(
             "ascii"
         )
 
         return (
-            f"data:{mime};base64,"
-            f"{encoded}"
+            "data:video/mp4;base64,"
+            + encoded
         )
 
     def regenerate(
         self,
         source_video: Path,
         destination: Path,
-        prompt: str | None = None,
+        prompt: str = "",
     ) -> Path:
 
         source_video = Path(
@@ -134,83 +172,180 @@ class H3Regenerate2K:
                 source_video
             )
 
-        payload = {
-            "base_video": self._data_url(
-                source_video
-            ),
-        }
+        content = [
+            {
+                "type": "video_url",
+                "video_url": {
+                    "url": self._data_url(
+                        source_video
+                    ),
+                },
+                "role": "base_video",
+            }
+        ]
 
-        if prompt:
-            payload[
-                "prompt"
-            ] = prompt
+        if prompt.strip():
 
-        result = self._request(
-            payload
-        )
-
-        # API response schemas can change.
-        # Keep extraction deliberately defensive.
-        video_url = (
-            result.get("video_url")
-            or result.get("url")
-            or result.get("output_url")
-        )
-
-        if not video_url:
-
-            data = result.get(
-                "data"
+            content.insert(
+                0,
+                {
+                    "type": "text",
+                    "text": prompt.strip(),
+                },
             )
 
-            if isinstance(
-                data,
-                dict,
-            ):
-                video_url = (
-                    data.get(
-                        "video_url"
-                    )
-                    or data.get(
-                        "url"
-                    )
-                )
+        result = self._post(
+            {
+                "model": "MiniMax-H3",
+                "content": content,
+                "resolution": "2K",
+            }
+        )
 
-        if not video_url:
+        task_id = (
+            result.get(
+                "task_id"
+            )
+        )
+
+        if not task_id:
+
+            task_id = (
+                result.get(
+                    "data",
+                    {}
+                ).get(
+                    "task_id"
+                )
+                if isinstance(
+                    result.get(
+                        "data"
+                    ),
+                    dict,
+                )
+                else None
+            )
+
+        if not task_id:
+
             raise RuntimeError(
-                "H3 Regenerate-2K did not "
-                "return a video URL:\n"
+                "H3 regeneration did not return "
+                "a task_id:\n"
                 + json.dumps(
                     result,
                     indent=2,
                 )
             )
 
-        destination.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        deadline = time.monotonic() + 3600
 
-        request = Request(
-            video_url,
-            method="GET",
-        )
+        while time.monotonic() < deadline:
 
-        with urlopen(
-            request,
-            timeout=600,
-        ) as response:
-
-            destination.write_bytes(
-                response.read()
+            status = self._get_task(
+                task_id
             )
 
-        if (
-            not destination.is_file()
-            or destination.stat().st_size <= 0
-        ):
-            raise RuntimeError(
-                "H3 2K result is empty."
+            task = status.get(
+                "task",
+                status,
             )
 
-        return destination
+            task_status = (
+                str(
+                    task.get(
+                        "status",
+                        ""
+                    )
+                ).lower()
+            )
+
+            if task_status in {
+                "success",
+                "succeeded",
+                "completed",
+            }:
+
+                content = (
+                    task.get(
+                        "content"
+                    )
+                )
+
+                if isinstance(
+                    content,
+                    dict,
+                ):
+
+                    url = (
+                        content.get(
+                            "url"
+                        )
+                    )
+
+                else:
+                    url = None
+
+                if not url:
+
+                    raise RuntimeError(
+                        "H3 regeneration completed "
+                        "without an output URL:\n"
+                        + json.dumps(
+                            status,
+                            indent=2,
+                        )
+                    )
+
+                destination.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                request = Request(
+                    url,
+                    method="GET",
+                )
+
+                with urlopen(
+                    request,
+                    timeout=600,
+                ) as response:
+
+                    destination.write_bytes(
+                        response.read()
+                    )
+
+                if (
+                    not destination.is_file()
+                    or destination.stat().st_size <= 0
+                ):
+
+                    raise RuntimeError(
+                        "Downloaded H3 2K result "
+                        "is empty."
+                    )
+
+                return destination
+
+            if task_status in {
+                "failed",
+                "error",
+                "cancelled",
+            }:
+
+                raise RuntimeError(
+                    "H3 2K regeneration failed:\n"
+                    + json.dumps(
+                        status,
+                        indent=2,
+                    )
+                )
+
+            time.sleep(
+                5
+            )
+
+        raise TimeoutError(
+            f"H3 2K regeneration task "
+            f"{task_id} timed out."
+        )
