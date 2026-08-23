@@ -7,28 +7,37 @@ from pathlib import Path
 from pipeline.continuity_manager import (
     ContinuityManager,
 )
+
 from pipeline.reference_manager import (
     ReferenceManager,
 )
+
 from planner.character_detector import (
     CharacterDetector,
 )
+
 from planner.character_planner import (
     CharacterPlanner,
 )
+
 from planner.config import (
     PRODUCTION_DIR,
+    WORKFLOW_AUTO,
     ensure_directories,
 )
+
 from planner.qwen_loader import (
     QwenStoryModel,
 )
+
 from planner.scene_planner import (
     ScenePlanner,
 )
+
 from planner.shot_planner import (
     ShotPlanner,
 )
+
 from planner.story_planner import (
     StoryPlanner,
 )
@@ -37,6 +46,7 @@ from planner.story_planner import (
 class ProductionOrchestrator:
 
     def __init__(self):
+
         ensure_directories()
 
         self.project_root = (
@@ -93,11 +103,9 @@ class ProductionOrchestrator:
         self,
         mode: str,
         user_input: str,
+        workflow_mode: str = WORKFLOW_AUTO,
+        profile: str = "base",
     ) -> dict:
-
-        # ----------------------------------------------------
-        # 1. STORY
-        # ----------------------------------------------------
 
         story = (
             self.story_planner.plan(
@@ -106,20 +114,12 @@ class ProductionOrchestrator:
             )
         )
 
-        # ----------------------------------------------------
-        # 2. CHARACTER DETECTION
-        # ----------------------------------------------------
-
         names = (
             self.character_detector.detect(
                 story=story,
                 original_request=user_input,
             )
         )
-
-        # ----------------------------------------------------
-        # 3. CHARACTER PLANNING
-        # ----------------------------------------------------
 
         characters = (
             self.character_planner
@@ -129,26 +129,14 @@ class ProductionOrchestrator:
             )
         )
 
-        # ----------------------------------------------------
-        # 4. RESOLVE CHARACTER REFERENCES
-        # ----------------------------------------------------
-
         self.references.resolve_characters(
             characters
         )
-
-        # ----------------------------------------------------
-        # 5. CHARACTER REFERENCE VALIDATION
-        # ----------------------------------------------------
 
         self.references.validate(
             characters,
             require_images=True,
         )
-
-        # ----------------------------------------------------
-        # 6. SCENE PLANNING
-        # ----------------------------------------------------
 
         scenes = (
             self.scene_planner
@@ -158,14 +146,9 @@ class ProductionOrchestrator:
             )
         )
 
-        # ----------------------------------------------------
-        # 7. SHOT PLANNING
-        # ----------------------------------------------------
-
         all_shots = []
 
         previous_shot = None
-
         shot_index = 1
 
         for scene in scenes:
@@ -186,9 +169,7 @@ class ProductionOrchestrator:
                     continuity_context=(
                         continuity_context
                     ),
-                    shot_start_index=(
-                        shot_index
-                    ),
+                    shot_start_index=shot_index,
                 )
             )
 
@@ -220,180 +201,137 @@ class ProductionOrchestrator:
                 scene_shots
             )
 
-        # ----------------------------------------------------
-        # 8. FINAL H3 SHOT VALIDATION
-        #
-        # H3 Ref2VA limits:
-        #
-        # Images          <= 9
-        # Videos          <= 3
-        # Standalone audio <= 3
-        # Total references <= 12
-        #
-        # These limits are checked here before the
-        # production plan is written.
-        # ----------------------------------------------------
-
         for shot in all_shots:
 
-            image_count = len(
+            images = len(
                 shot.reference_images
             )
 
-            video_count = len(
+            videos = len(
                 shot.reference_videos
             )
 
-            audio_count = len(
+            audio = len(
                 shot.reference_audio_paths
             )
 
-            total_reference_files = (
-                image_count
-                + video_count
-                + audio_count
+            total = (
+                images
+                + videos
+                + audio
             )
-
-            # ------------------------------------------------
-            # Character shots must have an identity reference.
-            # ------------------------------------------------
 
             if (
                 shot.characters
-                and not shot.reference_images
+                and not images
             ):
                 raise RuntimeError(
                     f"{shot.shot_id}: "
                     "character shot has no "
-                    "reference images"
+                    "reference images."
                 )
 
-            # ------------------------------------------------
-            # Maximum H3 image references.
-            # ------------------------------------------------
-
-            if image_count > 9:
+            if images > 9:
                 raise RuntimeError(
                     f"{shot.shot_id}: "
-                    f"{image_count} reference images; "
-                    "H3 Ref2VA allows at most 9"
+                    "more than 9 image references."
                 )
 
-            # ------------------------------------------------
-            # Maximum H3 video references.
-            # ------------------------------------------------
-
-            if video_count > 3:
+            if videos > 3:
                 raise RuntimeError(
                     f"{shot.shot_id}: "
-                    f"{video_count} reference videos; "
-                    "H3 Ref2VA allows at most 3"
+                    "more than 3 video references."
                 )
 
-            # ------------------------------------------------
-            # Maximum standalone audio references.
-            # ------------------------------------------------
-
-            if audio_count > 3:
+            if audio > 3:
                 raise RuntimeError(
                     f"{shot.shot_id}: "
-                    f"{audio_count} reference audio files; "
-                    "H3 Ref2VA allows at most 3"
+                    "more than 3 standalone audio references."
                 )
 
-            # ------------------------------------------------
-            # Maximum total H3 reference files.
-            # ------------------------------------------------
-
-            if total_reference_files > 12:
+            if total > 12:
                 raise RuntimeError(
                     f"{shot.shot_id}: "
-                    f"{total_reference_files} total "
-                    "reference files; "
-                    "H3 Ref2VA allows at most 12"
+                    "more than 12 H3 reference files."
                 )
-
-            # ------------------------------------------------
-            # Audio cannot be the only reference type.
-            #
-            # H3 Ref2VA needs visual/video reference context
-            # when using reference audio.
-            # ------------------------------------------------
-
-            if (
-                audio_count > 0
-                and image_count == 0
-                and video_count == 0
-            ):
-                raise RuntimeError(
-                    f"{shot.shot_id}: "
-                    "reference audio exists without "
-                    "a reference image or reference video"
-                )
-
-            # ------------------------------------------------
-            # Reference binding validation.
-            #
-            # Every reference image used by the shot should
-            # correspond to an actual character/reference
-            # binding when character identity is involved.
-            # ------------------------------------------------
 
             if shot.characters:
 
-                if (
-                    not shot.identity_locks
-                ):
+                if not shot.identity_locks:
                     raise RuntimeError(
                         f"{shot.shot_id}: "
-                        "character shot has no "
-                        "identity locks"
+                        "missing identity locks."
                     )
 
-                if (
-                    not shot.reference_bindings
-                ):
+                if not shot.reference_bindings:
                     raise RuntimeError(
                         f"{shot.shot_id}: "
-                        "character shot has no "
-                        "reference bindings"
+                        "missing reference bindings."
                     )
-
-        # ----------------------------------------------------
-        # 9. PRODUCTION PLAN
-        # ----------------------------------------------------
 
         production_plan = {
             "created_at": (
                 datetime.now()
                 .isoformat()
             ),
+
             "backend": (
-                "minimax-h3-ref2va-q4"
+                "minimax-h3-q4"
             ),
+
+            "profile": profile,
+
+            "workflow_mode": workflow_mode,
+
             "identity_strategy": (
-                "structured_identity_profile"
-                "+independent_h3_references"
+                "reference_face_hair_body"
+                "+qwen_story_state"
+                "+h3_reference_conditioning"
             ),
+
             "story": story,
+
             "character_names": names,
+
             "characters": [
                 character.to_dict()
                 for character in characters
             ],
+
             "scenes": [
                 scene.to_dict()
                 for scene in scenes
             ],
+
             "shots": [
                 shot.to_dict()
                 for shot in all_shots
             ],
-        }
 
-        # ----------------------------------------------------
-        # 10. SAVE PRODUCTION PLAN
-        # ----------------------------------------------------
+            "width": (
+                all_shots[0].width
+                if all_shots
+                else 1344
+            ),
+
+            "height": (
+                all_shots[0].height
+                if all_shots
+                else 768
+            ),
+
+            "frames_per_shot": (
+                all_shots[0].frames_per_shot
+                if all_shots
+                else 243
+            ),
+
+            "steps": (
+                all_shots[0].steps
+                if all_shots
+                else 14
+            ),
+        }
 
         output_path = (
             PRODUCTION_DIR
@@ -418,6 +356,7 @@ class ProductionOrchestrator:
         return production_plan
 
     def unload_models(self):
+
         try:
             self.model.unload()
         except Exception:
