@@ -1,64 +1,26 @@
-      - name: Validate H3 compatibility lock
+name: Validate MiniMax H3 Project
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate project
         run: |
-          python - <<'PY'
-          from pathlib import Path
-          import yaml
-
-          path = Path("kaggle/compatibility_lock.yaml")
-
-          if not path.is_file():
-              raise SystemExit(
-                  "kaggle/compatibility_lock.yaml missing"
-              )
-
-          data = yaml.safe_load(
-              path.read_text(encoding="utf-8")
-          )
-
-          if data.get("backend") not in {
-              "minimax-h3-ref2va",
-              "minimax-h3"
-          }:
-              raise SystemExit(
-                  "Expected MiniMax H3 backend"
-              )
-
-          model = data.get("model", {})
-
-          required = {
-              "diffusion_checkpoint",
-              "text_encoder",
-              "mmproj",
-              "video_vae",
-              "audio_vae",
-          }
-
-          missing = (
-              required
-              - set(model)
-          )
-
-          if missing:
-              raise SystemExit(
-                  "Missing H3 model entries: "
-                  + ", ".join(
-                      sorted(missing)
-                  )
-              )
-
-          references = data.get(
-              "references",
-              {},
-          )
-
-          if references.get(
-              "max_images_per_generation"
-          ) != 9:
-              raise SystemExit(
-                  "H3 image reference limit must be 9"
-              )
-
-          print(
-              "H3 compatibility lock: OK"
-          )
-          PY
+          python scripts/validate_project.py
