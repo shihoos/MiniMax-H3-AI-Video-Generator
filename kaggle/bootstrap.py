@@ -13,36 +13,36 @@ ROOT = (
     .parents[1]
 )
 
-COMFY = (
-    ROOT
-    / "ComfyUI"
-)
-
-CUSTOM = (
-    COMFY
-    / "custom_nodes"
-)
+COMFY = ROOT / "ComfyUI"
+CUSTOM = COMFY / "custom_nodes"
 
 
 def run(
-    *args: str,
-) -> None:
+    *args,
+):
 
     print(
         "+",
-        " ".join(args),
+        " ".join(
+            str(arg)
+            for arg in args
+        ),
     )
 
     subprocess.run(
-        args,
+        [str(arg) for arg in args],
         check=True,
     )
 
 
 def clone(
-    url: str,
-    destination: Path,
-) -> None:
+    url,
+    destination,
+):
+
+    destination = Path(
+        destination
+    )
 
     if destination.exists():
         print(
@@ -57,99 +57,133 @@ def clone(
         "--depth",
         "1",
         url,
-        str(destination),
+        destination,
     )
 
 
-def find_dataset() -> Path:
+def locate(
+    root,
+    filename,
+):
 
-    required_names = [
-        (
-            "models",
-            "diffusion_models",
-            "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
-        ),
-        (
-            "models",
-            "text_encoders",
-            "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-        ),
-        (
-            "models",
-            "text_encoders",
-            "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf",
-        ),
-        (
-            "models",
-            "vae",
-            "minimax_h3_video_vae_fp16.safetensors",
-        ),
-        (
-            "models",
-            "vae",
-            "minimax_h3_audio_vae_fp32.safetensors",
-        ),
+    matches = [
+        path
+        for path in Path(root).rglob(
+            filename
+        )
+        if path.is_file()
     ]
 
-    kaggle_root = Path(
+    if not matches:
+        return None
+
+    return matches[0]
+
+
+def locate_case_insensitive(
+    root,
+    filename,
+):
+
+    target = filename.lower()
+
+    for path in Path(root).rglob("*"):
+
+        if (
+            path.is_file()
+            and path.name.lower()
+            == target
+        ):
+            return path
+
+    return None
+
+
+def locate_dataset():
+
+    root = Path(
         "/kaggle/input"
     )
 
-    if not kaggle_root.is_dir():
+    if not root.is_dir():
         raise FileNotFoundError(
             "/kaggle/input does not exist."
         )
 
-    candidates = []
+    diffusion = locate_case_insensitive(
+        root,
+        "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
+    )
 
-    for model in kaggle_root.rglob(
-        "minimax_h3_ref2va_pruned-Q4_K_M.gguf"
-    ):
-        candidates.append(
-            model.parent.parent.parent
+    if diffusion is None:
+        raise FileNotFoundError(
+            "Q4 Ref2VA diffusion model not found."
         )
 
-    for root in candidates:
-
-        ok = True
-
-        for parts in required_names:
-            path = root.joinpath(
-                *parts
-            )
-
-            if not path.is_file():
-                ok = False
-                break
-
-        if ok:
-            return root
-
-    raise FileNotFoundError(
-        "Complete MiniMax H3 Ref2VA Q4 dataset "
-        "was not found under /kaggle/input.\n\n"
-        "Expected:\n"
-        "models/diffusion_models/"
-        "minimax_h3_ref2va_pruned-Q4_K_M.gguf\n"
-        "models/text_encoders/"
-        "qwen3vl_32b_minimax_h3-Q4_K_M.gguf\n"
-        "models/text_encoders/"
-        "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf\n"
-        "models/vae/"
-        "minimax_h3_video_vae_fp16.safetensors\n"
-        "models/vae/"
-        "minimax_h3_audio_vae_fp32.safetensors"
+    dataset_root = (
+        diffusion
+        .parents[2]
     )
+
+    required = {
+        "qwen":
+            locate_case_insensitive(
+                dataset_root,
+                "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+            ),
+
+        "mmproj":
+            locate_case_insensitive(
+                dataset_root,
+                "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf",
+            ),
+
+        "video_vae":
+            locate_case_insensitive(
+                dataset_root,
+                "minimax_h3_video_vae_fp16.safetensors",
+            ),
+
+        "audio_vae":
+            locate_case_insensitive(
+                dataset_root,
+                "minimax_h3_audio_vae_fp32.safetensors",
+            ),
+    }
+
+    missing = [
+        name
+        for name, path
+        in required.items()
+        if path is None
+    ]
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing H3 Q4 dataset files: "
+            + ", ".join(missing)
+        )
+
+    return {
+        "root": dataset_root,
+        "diffusion": diffusion,
+        **required,
+    }
 
 
 def link(
-    source: Path,
-    destination: Path,
-) -> None:
+    source,
+    destination,
+):
+
+    source = Path(source)
+    destination = Path(
+        destination
+    )
 
     if not source.is_file():
         raise FileNotFoundError(
-            f"Missing source model: {source}"
+            source
         )
 
     destination.parent.mkdir(
@@ -164,24 +198,42 @@ def link(
         destination.unlink()
 
     try:
+
         destination.symlink_to(
             source
         )
-        mode = "symlink"
+
     except OSError:
+
         shutil.copy2(
             source,
             destination,
         )
-        mode = "copy"
 
-    print(
-        f"MODEL {mode}:",
-        destination,
+
+def install_comfy():
+
+    if not (
+        COMFY / "main.py"
+    ).is_file():
+
+        clone(
+            "https://github.com/comfyanonymous/ComfyUI.git",
+            COMFY,
+        )
+
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "-r",
+        COMFY / "requirements.txt",
     )
 
 
-def install_custom_nodes():
+def install_nodes():
 
     CUSTOM.mkdir(
         parents=True,
@@ -209,186 +261,80 @@ def install_custom_nodes():
         / "comfyui-workflow-to-api-converter-endpoint",
     )
 
-
-def install_comfy():
-
-    COMFY.mkdir(
-        parents=True,
-        exist_ok=True,
+    patcher = (
+        CUSTOM
+        / "ComfyUI-H3-Multishot"
+        / "apply_gguf_arch_patch.py"
     )
 
-    if not (
-        COMFY
-        / "main.py"
-    ).is_file():
+    if patcher.is_file():
 
-        clone(
-            "https://github.com/comfyanonymous/ComfyUI.git",
-            COMFY,
+        run(
+            sys.executable,
+            patcher,
         )
 
-    run(
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "-r",
-        str(
-            COMFY
-            / "requirements.txt"
-        ),
-    )
 
+def install_base_models():
 
-def install_models():
-
-    dataset = find_dataset()
+    dataset = locate_dataset()
 
     models = (
-        dataset
-        / "models"
-    )
-
-    comfy_models = (
         COMFY
         / "models"
     )
 
     link(
+        dataset["diffusion"],
         models
-        / "diffusion_models"
-        / "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
-        comfy_models
         / "diffusion_models"
         / "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
     )
 
     link(
+        dataset["qwen"],
         models
-        / "text_encoders"
-        / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-        comfy_models
         / "text_encoders"
         / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
     )
 
     link(
+        dataset["mmproj"],
         models
-        / "text_encoders"
-        / "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf",
-        comfy_models
         / "text_encoders"
         / "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf",
     )
 
     link(
+        dataset["video_vae"],
         models
-        / "vae"
-        / "minimax_h3_video_vae_fp16.safetensors",
-        comfy_models
         / "vae"
         / "minimax_h3_video_vae_fp16.safetensors",
     )
 
     link(
+        dataset["audio_vae"],
         models
         / "vae"
         / "minimax_h3_audio_vae_fp32.safetensors",
-        comfy_models
-        / "vae"
-        / "minimax_h3_audio_vae_fp32.safetensors",
     )
-
-    # --------------------------------------------------------------
-    # IMPORTANT:
-    #
-    # ComfyUI-GGUF's automatic mmproj matcher searches for the
-    # encoder's base name inside the mmproj filename.
-    #
-    # Your dataset filename is:
-    #
-    # Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf
-    #
-    # while the encoder is:
-    #
-    # qwen3vl_32b_minimax_h3-Q4_K_M.gguf
-    #
-    # Create a compatibility alias without modifying the dataset.
-    # --------------------------------------------------------------
-
-    original_mmproj = (
-        comfy_models
-        / "text_encoders"
-        / "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf"
-    )
-
-    mmproj_alias = (
-        comfy_models
-        / "text_encoders"
-        / "qwen3vl_32b_minimax_h3-mmproj-BF16.gguf"
-    )
-
-    if (
-        original_mmproj.is_file()
-        and not mmproj_alias.exists()
-    ):
-        try:
-            mmproj_alias.symlink_to(
-                original_mmproj
-            )
-            print(
-                "Created mmproj compatibility alias:",
-                mmproj_alias,
-            )
-        except OSError:
-            shutil.copy2(
-                original_mmproj,
-                mmproj_alias,
-            )
-            print(
-                "Created mmproj compatibility copy:",
-                mmproj_alias,
-            )
 
 
 def main():
 
     install_comfy()
-
-    install_custom_nodes()
-
-    install_models()
+    install_nodes()
+    install_base_models()
 
     print()
     print(
         "=" * 72
     )
     print(
-        "MiniMax H3 Ref2VA Q4 bootstrap complete."
+        "MiniMax H3 Q4 base bootstrap complete."
     )
     print(
         "=" * 72
-    )
-    print(
-        "Diffusion:",
-        "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
-    )
-    print(
-        "Text encoder:",
-        "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-    )
-    print(
-        "Video VAE:",
-        "minimax_h3_video_vae_fp16.safetensors",
-    )
-    print(
-        "Audio VAE:",
-        "minimax_h3_audio_vae_fp32.safetensors",
-    )
-    print(
-        "Workflow converter:",
-        "installed",
     )
 
 
