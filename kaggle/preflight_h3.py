@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -11,244 +12,201 @@ ROOT = (
     .parents[1]
 )
 
-COMFY = (
-    ROOT
-    / "ComfyUI"
-)
+COMFY = ROOT / "ComfyUI"
 
-REQUIRED_FILES = [
-    COMFY
-    / "main.py",
-
-    COMFY
-    / "custom_nodes"
-    / "ComfyUI-GGUF",
-
-    COMFY
-    / "custom_nodes"
-    / "ComfyUI-H3-Multishot",
-
-    COMFY
-    / "custom_nodes"
-    / "ComfyUI-VideoHelperSuite",
-
-    COMFY
-    / "custom_nodes"
-    / "comfyui-workflow-to-api-converter-endpoint",
-
-    COMFY
-    / "models"
-    / "diffusion_models"
-    / "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
-
-    COMFY
-    / "models"
-    / "text_encoders"
-    / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-
-    COMFY
-    / "models"
-    / "text_encoders"
-    / "Qwen3-VL-32B-Instruct-MiniMax-H3-L0-49-mmproj-BF16.gguf",
-
-    COMFY
-    / "models"
-    / "text_encoders"
-    / "qwen3vl_32b_minimax_h3-mmproj-BF16.gguf",
-
-    COMFY
-    / "models"
-    / "vae"
-    / "minimax_h3_video_vae_fp16.safetensors",
-
-    COMFY
-    / "models"
-    / "vae"
-    / "minimax_h3_audio_vae_fp32.safetensors",
-]
-
-WORKFLOWS = [
+WORKFLOW_ROOT = (
     ROOT
     / "workflows"
     / "MiniMax-H3"
+)
+
+
+BASE_WORKFLOWS = [
+    WORKFLOW_ROOT
+    / "base"
+    / "H3_Extend_Take.json",
+
+    WORKFLOW_ROOT
+    / "base"
+    / "H3_HardMode_Chained.json",
+
+    WORKFLOW_ROOT
     / "base"
     / "H3_HardMode_R2V.json",
 
-    ROOT
-    / "workflows"
-    / "MiniMax-H3"
+    WORKFLOW_ROOT
     / "base"
-    / "H3_HardMode_Chained.json",
+    / "H3_Keyframes.json",
+
+    WORKFLOW_ROOT
+    / "base"
+    / "H3_Seamless_Chain_CORE.json",
+
+    WORKFLOW_ROOT
+    / "base"
+    / "H3_Seamless_Chain_v2.json",
 ]
 
 
-def check_files() -> bool:
+TURBO_WORKFLOWS = [
+    WORKFLOW_ROOT
+    / "turbo"
+    / "H3_Turbo_I2V.json",
 
-    failed = False
+    WORKFLOW_ROOT
+    / "turbo"
+    / "H3_Turbo_Ref2V.json",
 
-    print(
-        "\nFILES"
-    )
-    print(
-        "-" * 72
-    )
+    WORKFLOW_ROOT
+    / "turbo"
+    / "H3_Turbo_T2V.json",
+]
 
-    for path in REQUIRED_FILES:
 
-        exists = (
-            path.exists()
-            or path.is_symlink()
+def require_file(
+    path,
+):
+
+    if not (
+        path.is_file()
+        or path.is_symlink()
+    ):
+
+        raise RuntimeError(
+            f"Missing required file: {path}"
         )
 
-        print(
-            "[OK]   "
-            if exists
-            else "[FAIL] ",
-            path,
+
+def check_models():
+
+    for path in (
+        COMFY
+        / "models"
+        / "diffusion_models"
+        / "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
+
+        COMFY
+        / "models"
+        / "diffusion_models"
+        / "minimax_h3_fl2va_pruned-Q4_K_M.gguf",
+
+        COMFY
+        / "models"
+        / "text_encoders"
+        / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
+
+        COMFY
+        / "models"
+        / "vae"
+        / "minimax_h3_video_vae_fp16.safetensors",
+
+        COMFY
+        / "models"
+        / "vae"
+        / "minimax_h3_audio_vae_fp32.safetensors",
+    ):
+        require_file(path)
+
+
+def check_workflows():
+
+    manual = (
+        WORKFLOW_ROOT
+        / "base"
+        / "H3_Ref2VA_Memory_API.json"
+    )
+
+    if manual.exists():
+        raise RuntimeError(
+            "Manual H3_Ref2VA_Memory_API.json still exists. "
+            "Delete it; it is not a production workflow."
         )
 
-        if not exists:
-            failed = True
+    for path in BASE_WORKFLOWS:
+        require_file(path)
 
-    return not failed
-
-
-def check_workflows() -> bool:
-
-    failed = False
-
-    print(
-        "\nWORKFLOWS"
-    )
-    print(
-        "-" * 72
-    )
-
-    for path in WORKFLOWS:
-
-        if not path.is_file():
-            print(
-                "[FAIL] ",
-                path,
+        json.loads(
+            path.read_text(
+                encoding="utf-8"
             )
-            failed = True
-            continue
+        )
 
-        try:
-            data = json.loads(
+    if (
+        os.getenv(
+            "H3_ENABLE_TURBO",
+            "0",
+        )
+        == "1"
+    ):
+
+        for path in TURBO_WORKFLOWS:
+            require_file(path)
+
+            json.loads(
                 path.read_text(
                     encoding="utf-8"
                 )
             )
-        except Exception as error:
-            print(
-                "[FAIL] ",
-                path,
-                error,
-            )
-            failed = True
-            continue
-
-        if not isinstance(
-            data,
-            dict,
-        ):
-            print(
-                "[FAIL] workflow root is not object:",
-                path,
-            )
-            failed = True
-            continue
-
-        print(
-            "[OK]   ",
-            path,
-        )
-
-    return not failed
 
 
-def check_imports() -> bool:
+def check_nodes():
 
     sys.path.insert(
         0,
         str(COMFY),
     )
 
-    print(
-        "\nIMPORTS"
-    )
-    print(
-        "-" * 72
-    )
+    import nodes  # noqa: F401
 
-    try:
-        import nodes  # noqa: F401
+    import comfy_extras.nodes_minimax_h3  # noqa: F401
 
-        print(
-            "[OK]   ComfyUI nodes"
-        )
-
-    except Exception as error:
-        print(
-            "[FAIL] ComfyUI nodes:",
-            error,
-        )
-        return False
-
-    try:
-        import comfy_extras.nodes_minimax_h3  # noqa: F401
-
-        print(
-            "[OK]   native MiniMax H3"
-        )
-
-    except Exception as error:
-        print(
-            "[FAIL] native MiniMax H3:",
-            error,
-        )
-        return False
-
-    return True
-
-
-def main() -> int:
-
-    print(
-        "=" * 72
-    )
-    print(
-        "MINIMAX H3 REF2VA Q4 PREFLIGHT"
-    )
-    print(
-        "=" * 72
+    from execution.comfy_client import (
+        ComfyClient,
     )
 
-    ok = True
+    client = ComfyClient(
+        "http://127.0.0.1:8188"
+    )
 
-    ok &= check_files()
-    ok &= check_workflows()
-    ok &= check_imports()
-
-    print()
-
-    if ok:
-        print(
-            "PREFLIGHT PASSED."
+    if not client.health_check():
+        raise RuntimeError(
+            "ComfyUI worker on 8188 is not running."
         )
-        print(
-            "Next: start ComfyUI and run verify_live_runtime.py."
+
+    info = client.get_object_info()
+
+    required = {
+        "H3ModelLoaderAny",
+        "H3ClipLoaderAny",
+        "MiniMaxH3ReferenceToVideo",
+        "H3FreeTextEncoder",
+        "H3MultishotSampler",
+        "H3MultishotMemorySampler",
+        "H3LastFrame",
+        "H3ConcatAV",
+    }
+
+    missing = sorted(
+        required
+        - set(info)
+    )
+
+    if missing:
+        raise RuntimeError(
+            "Missing H3 nodes: "
+            + ", ".join(missing)
         )
-        return 0
+
+
+def main():
+
+    check_models()
+    check_workflows()
 
     print(
-        "PREFLIGHT FAILED."
+        "Static H3 preflight passed."
     )
-    return 2
 
 
 if __name__ == "__main__":
-    raise SystemExit(
-        main()
-    )
+    main()
