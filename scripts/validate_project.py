@@ -5,60 +5,12 @@ import json
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-LEGACY_TOKENS = {
-    "Q4_K_M",
-    "qwen3-4b",
-    "minimax_h3_fl2va",
-    "minimax_h3_ref2va_pruned-Q4",
-    "H3_Ref2VA_Memory_API",
-    "H3_HardMode_Chained",
-    "H3_Seamless_Chain_CORE",
-    "H3_Seamless_Chain_v2",
-}
+ROOT = Path(
+    __file__
+).resolve().parents[1]
 
 
-REQUIRED_FILES = [
-    ROOT
-    / "configs"
-    / "model_inventory.yaml",
-
-    ROOT
-    / "configs"
-    / "custom_nodes.yaml",
-
-    ROOT
-    / "kaggle"
-    / "bootstrap.py",
-
-    ROOT
-    / "kaggle"
-    / "preflight_h3.py",
-
-    ROOT
-    / "execution"
-    / "h3_workflow_builder.py",
-
-    ROOT
-    / "execution"
-    / "shot_executor.py",
-
-    ROOT
-    / "execution"
-    / "production_runner.py",
-
-    ROOT
-    / "pipeline"
-    / "h3_scene_continuity.py",
-
-    ROOT
-    / "pipeline"
-    / "continuity_manager.py",
-]
-
-
-WORKFLOW_FILES = [
+PRODUCTION_WORKFLOWS = [
     ROOT
     / "workflows"
     / "MiniMax-H3"
@@ -75,15 +27,36 @@ WORKFLOW_FILES = [
     / "workflows"
     / "MiniMax-H3"
     / "postprocess"
-    / "MMH3_Ultimate_Upscale.json",
+    / "H3_Ref2V_UltimateUpscale_Production.json",
 ]
 
 
-def validate_python():
+REQUIRED_FILES = [
+    ROOT / "configs" / "model_inventory.yaml",
+    ROOT / "configs" / "custom_nodes.yaml",
+    ROOT / "kaggle" / "bootstrap.py",
+    ROOT / "kaggle" / "preflight_h3.py",
+    ROOT / "execution" / "h3_workflow_builder.py",
+    ROOT / "execution" / "shot_executor.py",
+    ROOT / "execution" / "production_runner.py",
+    ROOT / "pipeline" / "h3_scene_continuity.py",
+    ROOT / "pipeline" / "continuity_manager.py",
+]
 
-    for path in ROOT.rglob(
-        "*.py"
-    ):
+
+FORBIDDEN_EXECUTABLE_MODEL_TOKENS = {
+    "minimax_h3_fl2va",
+    "minimax_h3_fl2v",
+    "qwen3-4b",
+    "qwen3vl_32b_minimax_h3-Q4",
+    "Q4_K_M",
+    "minimax_h3_video_vae_int8_convrot",
+    "minimax_h3_ref2va_pruned_int8_convrot",
+}
+
+
+def validate_python():
+    for path in ROOT.rglob("*.py"):
 
         if ".git" in path.parts:
             continue
@@ -105,91 +78,178 @@ def validate_python():
 def validate_required_files():
 
     for path in REQUIRED_FILES:
+
         if not path.is_file():
             raise RuntimeError(
-                f"Missing required project file: "
-                f"{path}"
+                f"Missing required project file: {path}"
             )
+
+
+def load_workflow(path: Path) -> dict:
+
+    if not path.is_file():
+        raise RuntimeError(
+            f"Missing production workflow: {path}"
+        )
+
+    data = json.loads(
+        path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+        raise RuntimeError(
+            f"Workflow is not a JSON object: {path}"
+        )
+
+    if not data.get("nodes"):
+        raise RuntimeError(
+            f"Workflow contains no nodes: {path}"
+        )
+
+    return data
+
+
+def executable_model_values(
+    workflow: dict,
+) -> list[str]:
+
+    values = []
+
+    executable_types = {
+        "UNETLoader",
+        "CLIPLoader",
+        "CLIPLoaderGGUF",
+        "VAELoader",
+        "LoraLoaderModelOnly",
+        "MMH3LatentUpscaleWithModelParams",
+    }
+
+    for node in workflow.get(
+        "nodes",
+        []
+    ):
+
+        if node.get("type") not in executable_types:
+            continue
+
+        for value in node.get(
+            "widgets_values",
+            []
+        ):
+
+            if isinstance(
+                value,
+                str,
+            ):
+                values.append(
+                    value.lower()
+                )
+
+    return values
 
 
 def validate_workflows():
 
-    for path in WORKFLOW_FILES:
+    workflows = [
+        load_workflow(path)
+        for path in PRODUCTION_WORKFLOWS
+    ]
 
-        if not path.is_file():
+    # Ref2V
+    ref2v = workflows[0]
+
+    ref2v_types = {
+        node.get("type")
+        for node in ref2v["nodes"]
+    }
+
+    for required in {
+        "UNETLoader",
+        "CLIPLoader",
+        "MiniMaxH3ReferenceToVideo",
+        "SamplerCustomAdvanced",
+        "VAEDecode",
+        "VAEDecodeAudio",
+        "CreateVideo",
+        "SaveVideo",
+    }:
+
+        if required not in ref2v_types:
             raise RuntimeError(
-                f"Missing required workflow: "
-                f"{path}"
+                f"Ref2V production workflow missing node: "
+                f"{required}"
             )
 
-        data = json.loads(
-            path.read_text(
-                encoding="utf-8"
-            )
+    # Turbo
+    turbo = workflows[1]
+
+    turbo_types = {
+        node.get("type")
+        for node in turbo["nodes"]
+    }
+
+    if "MiniMaxH3TurboLoRA" not in turbo_types:
+        raise RuntimeError(
+            "Turbo production workflow is missing "
+            "MiniMaxH3TurboLoRA."
         )
 
-        if not isinstance(
-            data,
-            dict,
+    if "MiniMaxH3TurboSampler" not in turbo_types:
+        raise RuntimeError(
+            "Turbo production workflow is missing "
+            "MiniMaxH3TurboSampler."
+        )
+
+    # Upscale
+    upscale = workflows[2]
+
+    upscale_types = {
+        node.get("type")
+        for node in upscale["nodes"]
+    }
+
+    if "MMH3UltimateUpscale" not in upscale_types:
+        raise RuntimeError(
+            "Ultimate Upscale production workflow missing "
+            "MMH3UltimateUpscale."
+        )
+
+    if (
+        "MMH3LatentUpscaleWithModelParams"
+        not in upscale_types
+    ):
+        raise RuntimeError(
+            "Ultimate Upscale production workflow missing "
+            "H3 3D parameter node."
+        )
+
+    # No legacy executable assets.
+    for index, workflow in enumerate(
+        workflows
+    ):
+
+        values = executable_model_values(
+            workflow
+        )
+
+        for token in (
+            FORBIDDEN_EXECUTABLE_MODEL_TOKENS
         ):
-            raise RuntimeError(
-                f"Workflow is not an object: "
-                f"{path}"
-            )
 
-        if not data.get(
-            "nodes"
-        ):
-            raise RuntimeError(
-                f"Workflow contains no nodes: "
-                f"{path}"
-            )
-
-
-def validate_no_legacy_text():
-
-    for directory in [
-        ROOT
-        / "planner",
-
-        ROOT
-        / "pipeline",
-
-        ROOT
-        / "execution",
-
-        ROOT
-        / "scheduler",
-
-        ROOT
-        / "kaggle",
-
-        ROOT
-        / "workflows",
-    ]:
-
-        if not directory.exists():
-            continue
-
-        for path in directory.rglob("*"):
-
-            if not path.is_file():
-                continue
-
-            try:
-                text = path.read_text(
-                    encoding="utf-8"
+            if any(
+                token.lower() in value
+                for value in values
+            ):
+                raise RuntimeError(
+                    f"Legacy executable model "
+                    f"reference '{token}' found in "
+                    f"production workflow #{index + 1}"
                 )
-            except UnicodeDecodeError:
-                continue
-
-            for token in LEGACY_TOKENS:
-
-                if token in text:
-                    raise RuntimeError(
-                        f"Legacy token '{token}' "
-                        f"found in {path}"
-                    )
 
 
 def main():
@@ -197,7 +257,6 @@ def main():
     validate_python()
     validate_required_files()
     validate_workflows()
-    validate_no_legacy_text()
 
     print(
         "MiniMax H3 project validation PASSED."
