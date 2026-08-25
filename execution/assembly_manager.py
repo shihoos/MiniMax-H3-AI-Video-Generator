@@ -1,5 +1,6 @@
-import subprocess
+from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 
@@ -9,9 +10,8 @@ class AssemblyManager:
         self,
         output_dir: Path,
     ):
-
-        self.output_dir = (
-            Path(output_dir)
+        self.output_dir = Path(
+            output_dir
         )
 
         self.output_dir.mkdir(
@@ -19,43 +19,54 @@ class AssemblyManager:
             exist_ok=True,
         )
 
-    def check_ffmpeg(self):
+    @staticmethod
+    def check_ffmpeg():
 
         result = subprocess.run(
-            [
-                "ffmpeg",
-                "-version",
-            ],
+            ["ffmpeg", "-version"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
         )
 
         if result.returncode != 0:
-
             raise RuntimeError(
                 "FFmpeg is not installed."
             )
 
-    def create_concat_file(
+    def assemble(
         self,
-        shot_paths: list,
-        path: Path,
-    ):
+        videos: list[Path],
+        final_name: str = "final_video.mp4",
+    ) -> Path:
+
+        self.check_ffmpeg()
+
+        if not videos:
+            raise ValueError(
+                "No videos supplied."
+            )
+
+        concat_file = (
+            self.output_dir
+            / "concat.txt"
+        )
 
         lines = []
 
-        for shot_path in shot_paths:
+        for video in videos:
 
-            absolute = (
-                Path(
-                    shot_path
+            video = Path(
+                video
+            ).resolve()
+
+            if not video.is_file():
+                raise FileNotFoundError(
+                    video
                 )
-                .resolve()
-            )
 
             escaped = str(
-                absolute
+                video
             ).replace(
                 "'",
                 "'\\''",
@@ -65,49 +76,20 @@ class AssemblyManager:
                 f"file '{escaped}'"
             )
 
-        path.write_text(
+        concat_file.write_text(
             "\n".join(lines)
             + "\n",
             encoding="utf-8",
         )
 
-    def assemble(
-        self,
-        shot_paths: list,
-        final_name: str = (
-            "final_video.mp4"
-        ),
-    ) -> Path:
-
-        self.check_ffmpeg()
-
-        if not shot_paths:
-
-            raise ValueError(
-                "No completed shots "
-                "were supplied."
-            )
-
-        output_path = (
+        destination = (
             self.output_dir
             / final_name
         )
 
-        concat_path = (
+        temp = (
             self.output_dir
-            / "concat.txt"
-        )
-
-        self.create_concat_file(
-            shot_paths,
-            concat_path,
-        )
-
-        temp_path = (
-            self.output_dir
-            / (
-                ".final_video_tmp.mp4"
-            )
+            / ".final.tmp.mp4"
         )
 
         command = [
@@ -118,52 +100,58 @@ class AssemblyManager:
             "-safe",
             "0",
             "-i",
-            str(concat_path),
+            str(concat_file),
 
-            # Normalize to 24 FPS.
             "-vf",
             (
                 "fps=24,"
                 "scale=1280:720:"
-                "force_original_aspect_ratio=increase,"
-                "crop=1280:720"
+                "force_original_aspect_ratio=decrease,"
+                "pad=1280:720:"
+                "(ow-iw)/2:"
+                "(oh-ih)/2"
             ),
 
             "-c:v",
             "libx264",
-
             "-preset",
             "medium",
-
             "-crf",
             "17",
-
             "-pix_fmt",
             "yuv420p",
+
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
 
             "-movflags",
             "+faststart",
 
-            "-an",
-
-            str(temp_path),
+            str(temp),
         ]
 
-        subprocess.run(
+        result = subprocess.run(
             command,
-            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
         )
 
-        temp_path.replace(
-            output_path
+        concat_file.unlink(
+            missing_ok=True
         )
 
-        try:
+        if result.returncode != 0:
+            raise RuntimeError(
+                "FFmpeg assembly failed:\n"
+                + result.stderr[-5000:]
+            )
 
-            concat_path.unlink()
+        temp.replace(
+            destination
+        )
 
-        except FileNotFoundError:
-
-            pass
-
-        return output_path
+        return destination
