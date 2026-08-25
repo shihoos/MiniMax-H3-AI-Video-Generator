@@ -21,9 +21,11 @@ class AssemblyManager:
 
     @staticmethod
     def check_ffmpeg():
-
         result = subprocess.run(
-            ["ffmpeg", "-version"],
+            [
+                "ffmpeg",
+                "-version",
+            ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -38,6 +40,9 @@ class AssemblyManager:
         self,
         videos: list[Path],
         final_name: str = "final_video.mp4",
+        width: int = 1280,
+        height: int = 720,
+        fps: int = 24,
     ) -> Path:
 
         self.check_ffmpeg()
@@ -45,6 +50,15 @@ class AssemblyManager:
         if not videos:
             raise ValueError(
                 "No videos supplied."
+            )
+
+        if (
+            width <= 0
+            or height <= 0
+            or fps <= 0
+        ):
+            raise ValueError(
+                "Invalid final delivery parameters."
             )
 
         concat_file = (
@@ -56,17 +70,17 @@ class AssemblyManager:
 
         for video in videos:
 
-            video = Path(
+            path = Path(
                 video
             ).resolve()
 
-            if not video.is_file():
+            if not path.is_file():
                 raise FileNotFoundError(
-                    video
+                    path
                 )
 
             escaped = str(
-                video
+                path
             ).replace(
                 "'",
                 "'\\''",
@@ -101,17 +115,15 @@ class AssemblyManager:
             "0",
             "-i",
             str(concat_file),
-
             "-vf",
             (
-                "fps=24,"
-                "scale=1280:720:"
+                f"fps={fps},"
+                f"scale={width}:{height}:"
                 "force_original_aspect_ratio=decrease,"
-                "pad=1280:720:"
-                "(ow-iw)/2:"
-                "(oh-ih)/2"
+                f"pad={width}:{height}:"
+                f"({width}-iw)/2:"
+                f"({height}-ih)/2"
             ),
-
             "-c:v",
             "libx264",
             "-preset",
@@ -120,15 +132,12 @@ class AssemblyManager:
             "17",
             "-pix_fmt",
             "yuv420p",
-
             "-c:a",
             "aac",
             "-b:a",
             "192k",
-
             "-movflags",
             "+faststart",
-
             str(temp),
         ]
 
