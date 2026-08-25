@@ -14,7 +14,7 @@ class ShotExecutor:
     ):
 
         from execution.h3_workflow_builder import (
-            H3WorkflowBuilder
+            H3WorkflowBuilder,
         )
 
         self.client = comfy_client
@@ -32,11 +32,9 @@ class ShotExecutor:
             exist_ok=True,
         )
 
-        self.builder = (
-            H3WorkflowBuilder(
-                self.project_root,
-                self.client,
-            )
+        self.builder = H3WorkflowBuilder(
+            project_root=self.project_root,
+            comfy_client=self.client,
         )
 
     @staticmethod
@@ -62,7 +60,7 @@ class ShotExecutor:
 
         if not source.is_file():
             raise FileNotFoundError(
-                source
+                f"Reference input does not exist:\n{source}"
             )
 
         destination = (
@@ -79,6 +77,85 @@ class ShotExecutor:
         )
 
         return destination.name
+
+    def _prepare_reference_images(
+        self,
+        shot,
+    ) -> list[str]:
+
+        raw = shot.get(
+            "reference_images",
+            [],
+        )
+
+        if raw is None:
+            return []
+
+        if not isinstance(raw, list):
+            raise RuntimeError(
+                f"{shot.get('shot_id')}: "
+                "reference_images must be a list."
+            )
+
+        prepared: list[str] = []
+
+        for index, value in enumerate(
+            raw[:9]
+        ):
+
+            if value is None:
+                continue
+
+            source = Path(
+                str(value)
+            )
+
+            if not source.is_file():
+                raise FileNotFoundError(
+                    f"{shot.get('shot_id')}: "
+                    f"reference image does not exist:\n"
+                    f"{source}"
+                )
+
+            filename = self.copy_input(
+                source,
+                prefix=(
+                    f"{shot.get('shot_id', 'shot')}"
+                    f"_ref{index + 1}"
+                ),
+            )
+
+            prepared.append(
+                filename
+            )
+
+        return prepared
+
+    @staticmethod
+    def _float_or_none(
+        value,
+    ):
+
+        if value is None:
+            return None
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _int_or_none(
+        value,
+    ):
+
+        if value is None:
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def execute_shot(
         self,
@@ -121,25 +198,47 @@ class ShotExecutor:
             )
         )
 
-        workflow = (
-            self.builder.build(
-                mode=workflow_mode,
-                prompt=prompt,
-                seed=seed,
+        width = self._int_or_none(
+            shot.get("width")
+        )
+
+        height = self._int_or_none(
+            shot.get("height")
+        )
+
+        duration = self._float_or_none(
+            shot.get("duration_seconds")
+        )
+
+        if duration is None:
+            duration = self._float_or_none(
+                shot.get("duration")
+            )
+
+        reference_images = (
+            self._prepare_reference_images(
+                shot
             )
         )
 
-        prompt_id = (
-            self.client.queue_prompt(
-                workflow
-            )
+        workflow = self.builder.build(
+            mode=workflow_mode,
+            prompt=prompt,
+            seed=seed,
+            turbo_steps=8,
+            reference_images=reference_images,
+            width=width,
+            height=height,
+            duration_seconds=duration,
         )
 
-        history = (
-            self.client.wait_for_prompt(
-                prompt_id,
-                timeout=14400,
-            )
+        prompt_id = self.client.queue_prompt(
+            workflow
+        )
+
+        history = self.client.wait_for_prompt(
+            prompt_id,
+            timeout=14400,
         )
 
         outputs = (
