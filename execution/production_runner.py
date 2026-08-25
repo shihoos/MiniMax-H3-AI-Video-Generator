@@ -1,33 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from execution.shot_executor import (
     ShotExecutor,
 )
 
-from postprocess.final_export import (
-    FinalExporter,
-)
-
-from postprocess.h3_regenerate_2k import (
-    H3Regenerate2K,
-)
-
-from planner.config import (
-    H3_REGENERATE_2K_ENABLED,
-    WORKFLOW_AUTO,
-    WORKFLOW_HARD_R2V,
-    WORKFLOW_HARD_CHAINED,
-    WORKFLOW_SEAMLESS_V2,
-    WORKFLOW_SEAMLESS_CORE,
-    WORKFLOW_KEYFRAMES,
-    WORKFLOW_EXTEND_TAKE,
-    WORKFLOW_TURBO_I2V,
-    WORKFLOW_TURBO_REF2V,
-    WORKFLOW_TURBO_T2V,
+from pipeline.h3_scene_continuity import (
+    H3SceneContinuity,
 )
 
 from scheduler.gpu_scheduler import (
@@ -51,6 +32,11 @@ class ProductionRunner:
             comfy_clients
         )
 
+        if not self.clients:
+            raise ValueError(
+                "At least one ComfyUI client is required."
+            )
+
         self.input_root = (
             self.project_root
             / "ComfyUI"
@@ -69,182 +55,78 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-    @staticmethod
-    def select_auto_workflow(
-        shots,
-        profile,
-    ):
-
-        if profile == "turbo":
-
-            has_reference = any(
-                (
-                    shot.get(
-                        "reference_images"
-                    )
-                    or shot.get(
-                        "reference_videos"
-                    )
-                    or shot.get(
-                        "reference_audio_paths"
-                    )
-                )
-                for shot in shots
+        self.continuity = (
+            H3SceneContinuity(
+                self.project_root
             )
-
-            if has_reference:
-                return WORKFLOW_TURBO_REF2V
-
-            if any(
-                shot.get(
-                    "reference_images"
-                )
-                for shot in shots
-            ):
-                return WORKFLOW_TURBO_I2V
-
-            return WORKFLOW_TURBO_T2V
-
-        # Special modes explicitly requested by the planner.
-        for shot in shots:
-
-            if shot.get(
-                "keyframe_images"
-            ):
-                return WORKFLOW_KEYFRAMES
-
-            if shot.get(
-                "extend_take_source_video"
-            ):
-                return WORKFLOW_EXTEND_TAKE
-
-        if len(shots) == 1:
-            return WORKFLOW_HARD_R2V
-
-        # Hard Mode Chained is used for shorter continuous
-        # scenes; Seamless Chain v2 is the long-form path.
-        if len(shots) <= 8:
-            return WORKFLOW_HARD_CHAINED
-
-        return WORKFLOW_SEAMLESS_V2
-
-    @staticmethod
-    def character_reference_map(
-        production_plan,
-    ):
-
-        result = {}
-
-        for character in (
-            production_plan.get(
-                "characters",
-                [],
-            )
-        ):
-
-            name = str(
-                character.get(
-                    "name",
-                    "",
-                )
-            ).strip()
-
-            if not name:
-                continue
-
-            paths = list(
-                character.get(
-                    "reference_paths",
-                    [],
-                )
-            )
-
-            if paths:
-                result[name] = paths[:3]
-
-        return result
+        )
 
     def _executor(
         self,
-        gpu_id,
-        scene_id,
-    ):
+        gpu_id: int,
+        scene_id: str,
+    ) -> ShotExecutor:
 
         input_dir = (
             self.input_root
             / f"gpu_{gpu_id}"
-            / str(scene_id)
-        )
-
-        input_dir.mkdir(
-            parents=True,
-            exist_ok=True,
+            / scene_id
         )
 
         return ShotExecutor(
-            comfy_client=self.clients[
-                gpu_id
-            ],
+            comfy_client=self.clients[gpu_id],
             project_root=self.project_root,
             comfy_input_dir=input_dir,
         )
 
-    def run_scene(
-        self,
-        gpu_id,
-        scene_id,
-        shots,
-        workflow_mode,
-        profile,
-        character_reference_map,
-        production_plan,
-    ):
+    @staticmethod
+    def _workflow_for_shot(
+        shot: dict,
+        profile: str,
+    ) -> str:
 
-        shots = sorted(
-            shots,
-            key=lambda item:
-                int(
-                    item.get(
-                        "order",
-                        0,
-                    )
+        explicit = (
+            str(
+                shot.get(
+                    "workflow_mode",
+                    ""
                 )
+            ).strip()
         )
 
-        if workflow_mode == WORKFLOW_AUTO:
+        if explicit in {
+            "ref2v",
+            "turbo_ref2v",
+        }:
+            return explicit
 
-            workflow_mode = (
-                self.select_auto_workflow(
-                    shots,
-                    profile,
-                )
-            )
+        if profile == "turbo":
+            return "turbo_ref2v"
 
-        if (
-            workflow_mode
-            in {
-                WORKFLOW_HARD_R2V,
-                WORKFLOW_KEYFRAMES,
-                WORKFLOW_EXTEND_TAKE,
-            }
-            and len(shots) != 1
-        ):
-            if workflow_mode == WORKFLOW_HARD_R2V:
-                raise RuntimeError(
-                    "hard_r2v is a single-shot workflow. "
-                    "Use hard_chained or seamless_v2 for "
-                    "a multi-shot scene."
-                )
+        return "ref2v"
 
-            if workflow_mode == WORKFLOW_KEYFRAMES:
-                raise RuntimeError(
-                    "keyframes is a single-generation workflow. "
-                    "Use it for one scene-generation pass."
-                )
+    def _run_scene(
+        self,
+        gpu_id: int,
+        scene_id: str,
+        shots: list[dict],
+        profile: str,
+    ):
 
         executor = self._executor(
             gpu_id,
             scene_id,
+        )
+
+        ordered = sorted(
+            shots,
+            key=lambda shot:
+            int(
+                shot.get(
+                    "order",
+                    0,
+                )
+            ),
         )
 
         output_dir = (
@@ -258,150 +140,76 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        width = int(
-            production_plan.get(
-                "width",
-                1344,
-            )
-        )
+        results = []
 
-        height = int(
-            production_plan.get(
-                "height",
-                768,
-            )
-        )
+        previous_video = None
+        previous_shot = None
 
-        frames = int(
-            production_plan.get(
-                "frames_per_shot",
-                243,
-            )
-        )
+        for shot in ordered:
 
-        steps = int(
-            production_plan.get(
-                "steps",
-                14,
+            shot = dict(
+                shot
             )
-        )
 
-        result = (
-            executor.execute_scene(
-                scene_id=scene_id,
-                shots=shots,
+            if previous_video is not None:
+
+                last_frame = (
+                    self.continuity.prepare_next_shot(
+                        previous_video,
+                        scene_id,
+                        str(
+                            previous_shot[
+                                "shot_id"
+                            ]
+                        ),
+                    )
+                )
+
+                shot[
+                    "reference_images"
+                ] = [
+                    str(last_frame),
+                    *shot.get(
+                        "reference_images",
+                        [],
+                    ),
+                ][:9]
+
+            workflow_mode = (
+                self._workflow_for_shot(
+                    shot,
+                    profile,
+                )
+            )
+
+            result = executor.execute_shot(
+                shot=shot,
                 workflow_mode=workflow_mode,
-                profile=profile,
-                character_reference_map=(
-                    character_reference_map
-                ),
                 output_dir=output_dir,
-                width=width,
-                height=height,
-                frames_per_shot=frames,
-                steps=steps,
-            )
-        )
-
-        return (
-            scene_id,
-            workflow_mode,
-            result,
-        )
-
-    @staticmethod
-    def concat(
-        videos,
-        destination,
-    ):
-
-        import subprocess
-
-        if not videos:
-            raise ValueError(
-                "No videos supplied."
             )
 
-        destination = Path(
-            destination
-        )
-
-        destination.parent.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        manifest = (
-            destination.with_suffix(
-                ".txt"
-            )
-        )
-
-        lines = []
-
-        for video in videos:
-
-            path = (
-                Path(video)
-                .resolve()
+            results.append(
+                result
             )
 
-            escaped = str(
-                path
-            ).replace(
-                "'",
-                "'\\''",
+            previous_video = Path(
+                result
             )
 
-            lines.append(
-                f"file '{escaped}'"
-            )
+            previous_shot = shot
 
-        manifest.write_text(
-            "\n".join(lines)
-            + "\n",
-            encoding="utf-8",
-        )
-
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(manifest),
-                "-c",
-                "copy",
-                str(destination),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-
-        manifest.unlink(
-            missing_ok=True
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                "FFmpeg concat failed:\n"
-                + result.stderr[-5000:]
-            )
-
-        return destination
+        return results
 
     def run(
         self,
         production_plan: dict[str, Any],
     ):
 
-        shots = production_plan.get(
-            "shots",
-            [],
+        shots = list(
+            production_plan.get(
+                "shots",
+                [],
+            )
         )
 
         if not shots:
@@ -416,13 +224,6 @@ class ProductionRunner:
             )
         )
 
-        workflow_mode = str(
-            production_plan.get(
-                "workflow_mode",
-                WORKFLOW_AUTO,
-            )
-        )
-
         scenes = {}
 
         for shot in shots:
@@ -434,6 +235,11 @@ class ProductionRunner:
                 )
             )
 
+            if not scene_id:
+                raise RuntimeError(
+                    "Shot is missing scene_id."
+                )
+
             scenes.setdefault(
                 scene_id,
                 [],
@@ -441,114 +247,58 @@ class ProductionRunner:
                 shot
             )
 
-        character_reference_map = (
-            self.character_reference_map(
-                production_plan
-            )
+        scene_ids = list(
+            scenes
         )
-
-        jobs = [
-            SimpleNamespace(
-                scene_id=scene_id,
-                shots=scene_shots,
-            )
-            for scene_id, scene_shots
-            in scenes.items()
-        ]
 
         scheduler = GPUScheduler(
             gpu_ids=sorted(
-                self.clients.keys()
+                self.clients
             )
         )
 
-        def worker(
-            gpu_id,
-            job,
-        ):
+        # Independent scenes may run in parallel.
+        scene_jobs = [
+            (
+                scene_id,
+                scenes[scene_id]
+            )
+            for scene_id in scene_ids
+        ]
 
-            return self.run_scene(
-                gpu_id=gpu_id,
-                scene_id=job.scene_id,
-                shots=job.shots,
-                workflow_mode=workflow_mode,
-                profile=profile,
-                character_reference_map=(
-                    character_reference_map
+        results = scheduler.run_independent(
+            scene_jobs,
+            lambda gpu_id, job:
+                (
+                    job[0],
+                    self._run_scene(
+                        gpu_id,
+                        job[0],
+                        job[1],
+                        profile,
+                    ),
                 ),
-                production_plan=production_plan,
-            )
-
-        results = scheduler.run(
-            jobs,
-            worker,
         )
 
-        # Narrative order.
         results.sort(
             key=lambda item:
-                min(
-                    int(
-                        shot.get(
-                            "order",
-                            0,
-                        )
+            min(
+                int(
+                    shot.get(
+                        "order",
+                        0,
                     )
-                    for shot in scenes[
-                        item[0]
-                    ]
                 )
-        )
-
-        scene_videos = []
-
-        for (
-            _scene_id,
-            _workflow_mode,
-            path,
-        ) in results:
-            scene_videos.append(
-                Path(path)
+                for shot in scenes[
+                    item[0]
+                ]
             )
-
-        native_master = (
-            self.output_root
-            / "master_native.mp4"
         )
 
-        self.concat(
-            scene_videos,
-            native_master,
-        )
-
-        master = native_master
-
-        if H3_REGENERATE_2K_ENABLED:
-
-            regenerated = (
-                self.output_root
-                / "master_h3_2k.mp4"
-            )
-
-            master = (
-                H3Regenerate2K().regenerate(
-                    source_video=native_master,
-                    destination=regenerated,
-                    prompt=production_plan.get(
-                        "story",
-                        "",
-                    ),
-                )
-            )
-
-        final = (
-            self.project_root
-            / "data"
-            / "production"
-            / "final_h3_720p.mp4"
-        )
-
-        return FinalExporter.export_720p(
-            source=master,
-            destination=final,
-        )
+        return [
+            video
+            for _scene, videos
+            in results
+            for video
+            in videos
+        ]
