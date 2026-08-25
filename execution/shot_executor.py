@@ -6,23 +6,24 @@ from pathlib import Path
 
 class ShotExecutor:
 
+    MAX_IMAGES = 9
+    MAX_VIDEOS = 3
+    MAX_AUDIO = 3
+
     def __init__(
         self,
         comfy_client,
         project_root,
         comfy_input_dir,
     ):
-
         from execution.h3_workflow_builder import (
             H3WorkflowBuilder,
         )
 
         self.client = comfy_client
-
         self.project_root = Path(
             project_root
         )
-
         self.comfy_input_dir = Path(
             comfy_input_dir
         )
@@ -38,8 +39,9 @@ class ShotExecutor:
         )
 
     @staticmethod
-    def _safe_name(value) -> str:
-
+    def _safe_name(
+        value,
+    ) -> str:
         return "".join(
             char
             if (
@@ -55,12 +57,13 @@ class ShotExecutor:
         source,
         prefix: str,
     ) -> str:
-
-        source = Path(source)
+        source = Path(
+            source
+        )
 
         if not source.is_file():
             raise FileNotFoundError(
-                f"Reference input does not exist:\n{source}"
+                f"Media input does not exist:\n{source}"
             )
 
         destination = (
@@ -78,84 +81,117 @@ class ShotExecutor:
 
         return destination.name
 
-    def _prepare_reference_images(
+    def _prepare_media(
         self,
         shot,
-    ) -> list[str]:
-
-        raw = shot.get(
-            "reference_images",
-            [],
+    ):
+        raw_images = (
+            list(
+                shot.get(
+                    "reference_images",
+                    [],
+                )
+                or []
+            )
         )
 
-        if raw is None:
-            return []
+        raw_videos = (
+            list(
+                shot.get(
+                    "reference_videos",
+                    [],
+                )
+                or []
+            )
+        )
 
-        if not isinstance(raw, list):
+        raw_audio = (
+            list(
+                shot.get(
+                    "reference_audio_paths",
+                    [],
+                )
+                or []
+            )
+        )
+
+        if len(raw_images) > self.MAX_IMAGES:
             raise RuntimeError(
                 f"{shot.get('shot_id')}: "
-                "reference_images must be a list."
+                "maximum 9 reference images."
             )
 
-        prepared: list[str] = []
+        if len(raw_videos) > self.MAX_VIDEOS:
+            raise RuntimeError(
+                f"{shot.get('shot_id')}: "
+                "maximum 3 reference videos."
+            )
 
-        for index, value in enumerate(
-            raw[:9]
+        if len(raw_audio) > self.MAX_AUDIO:
+            raise RuntimeError(
+                f"{shot.get('shot_id')}: "
+                "maximum 3 reference audio clips."
+            )
+
+        if (
+            len(raw_images)
+            + len(raw_videos)
+            + len(raw_audio)
+            > 12
         ):
-
-            if value is None:
-                continue
-
-            source = Path(
-                str(value)
+            raise RuntimeError(
+                f"{shot.get('shot_id')}: "
+                "maximum 12 reference files."
             )
 
-            if not source.is_file():
-                raise FileNotFoundError(
-                    f"{shot.get('shot_id')}: "
-                    f"reference image does not exist:\n"
-                    f"{source}"
-                )
-
-            filename = self.copy_input(
-                source,
-                prefix=(
-                    f"{shot.get('shot_id', 'shot')}"
-                    f"_ref{index + 1}"
-                ),
+        images = [
+            self.copy_input(
+                value,
+                f"{shot['shot_id']}_image_{i + 1}",
             )
-
-            prepared.append(
-                filename
+            for i, value in enumerate(
+                raw_images
             )
+        ]
 
-        return prepared
+        videos = [
+            self.copy_input(
+                value,
+                f"{shot['shot_id']}_video_{i + 1}",
+            )
+            for i, value in enumerate(
+                raw_videos
+            )
+        ]
+
+        audio = [
+            self.copy_input(
+                value,
+                f"{shot['shot_id']}_audio_{i + 1}",
+            )
+            for i, value in enumerate(
+                raw_audio
+            )
+        ]
+
+        return images, videos, audio
 
     @staticmethod
-    def _float_or_none(
+    def _number(
         value,
+        default,
+        cast,
     ):
-
         if value is None:
-            return None
+            return default
 
         try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _int_or_none(
-        value,
-    ):
-
-        if value is None:
-            return None
-
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+            return cast(value)
+        except (
+            TypeError,
+            ValueError,
+        ):
+            return default
 
     def execute_shot(
         self,
@@ -164,7 +200,6 @@ class ShotExecutor:
         workflow_mode,
         output_dir,
     ):
-
         output_dir = Path(
             output_dir
         )
@@ -191,32 +226,32 @@ class ShotExecutor:
                 "empty H3 prompt."
             )
 
-        seed = int(
-            shot.get(
-                "seed",
-                135791113,
-            )
+        seed = self._number(
+            shot.get("seed"),
+            135791113,
+            int,
         )
 
-        width = self._int_or_none(
-            shot.get("width")
+        width = self._number(
+            shot.get("width"),
+            1344,
+            int,
         )
 
-        height = self._int_or_none(
-            shot.get("height")
+        height = self._number(
+            shot.get("height"),
+            768,
+            int,
         )
 
-        duration = self._float_or_none(
-            shot.get("duration_seconds")
+        duration = self._number(
+            shot.get("duration_seconds"),
+            5.2,
+            float,
         )
 
-        if duration is None:
-            duration = self._float_or_none(
-                shot.get("duration")
-            )
-
-        reference_images = (
-            self._prepare_reference_images(
+        images, videos, audio = (
+            self._prepare_media(
                 shot
             )
         )
@@ -226,7 +261,9 @@ class ShotExecutor:
             prompt=prompt,
             seed=seed,
             turbo_steps=8,
-            reference_images=reference_images,
+            reference_images=images,
+            reference_videos=videos,
+            reference_audio=audio,
             width=width,
             height=height,
             duration_seconds=duration,
