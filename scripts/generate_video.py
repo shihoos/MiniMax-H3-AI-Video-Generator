@@ -21,31 +21,21 @@ if str(ROOT) not in sys.path:
 
 WORKFLOW_CHOICES = [
     "auto",
-    "hard_r2v",
-    "hard_chained",
-    "seamless_v2",
-    "seamless_core",
-    "keyframes",
-    "extend_take",
-    "turbo_i2v",
     "turbo_ref2v",
-    "turbo_t2v",
+    "ref2v",
 ]
 
 
 def load_clients(
-    urls,
+    urls: list[str],
 ):
-
     from execution.comfy_client import (
         ComfyClient,
     )
 
     clients = {}
 
-    for index, url in enumerate(
-        urls
-    ):
+    for index, url in enumerate(urls):
 
         client = ComfyClient(
             base_url=url,
@@ -55,7 +45,8 @@ def load_clients(
 
         if not client.health_check():
             raise RuntimeError(
-                f"ComfyUI worker unavailable: {url}"
+                "ComfyUI worker unavailable:\n"
+                f"{url}"
             )
 
         clients[index] = client
@@ -67,13 +58,14 @@ def main():
 
     parser = argparse.ArgumentParser(
         description=(
-            "MiniMax H3 production pipeline"
+            "MiniMax H3 production video generator"
         )
     )
 
     parser.add_argument(
         "--story",
         required=True,
+        help="Story text or path to story input.",
     )
 
     parser.add_argument(
@@ -105,11 +97,15 @@ def main():
         "--worker",
         action="append",
         dest="workers",
+        help=(
+            "ComfyUI worker URL. Repeat for multiple GPUs."
+        ),
     )
 
     parser.add_argument(
         "--plan-only",
         action="store_true",
+        help="Create the production plan but do not execute.",
     )
 
     args = parser.parse_args()
@@ -126,24 +122,18 @@ def main():
         ProductionOrchestrator,
     )
 
-    orchestrator = (
-        ProductionOrchestrator()
-    )
+    orchestrator = ProductionOrchestrator()
 
     try:
-
         plan = (
-            orchestrator
-            .create_production_plan(
+            orchestrator.create_production_plan(
                 mode=args.mode,
                 user_input=args.story,
                 workflow_mode=args.workflow,
                 profile=args.profile,
             )
         )
-
     finally:
-
         orchestrator.unload_models()
 
     print(
@@ -162,41 +152,48 @@ def main():
                 ),
             },
             indent=2,
+            ensure_ascii=False,
         )
     )
 
     if args.plan_only:
-        return
-
-    from execution.production_runner import (
-        ProductionRunner,
-    )
+        return 0
 
     clients = load_clients(
         workers
     )
 
-    result = (
-        ProductionRunner(
-            project_root=ROOT,
-            comfy_clients=clients,
-        ).run(
-            plan
-        )
+    from execution.production_runner import (
+        ProductionRunner,
+    )
+
+    result = ProductionRunner(
+        project_root=ROOT,
+        comfy_clients=clients,
+    ).run(
+        plan
     )
 
     print(
         json.dumps(
             {
                 "status": "completed",
-                "video": str(result),
+                "shot_outputs": [
+                    str(path)
+                    for path in result
+                ],
                 "profile": args.profile,
                 "workflow": args.workflow,
             },
             indent=2,
+            ensure_ascii=False,
         )
     )
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        main()
+    )
