@@ -2,10 +2,7 @@ from __future__ import annotations
 
 import json
 from urllib.error import HTTPError, URLError
-from urllib.request import (
-    Request,
-    urlopen,
-)
+from urllib.request import Request, urlopen
 
 from planner.config import (
     PLANNER_API_KEY,
@@ -24,12 +21,8 @@ class QwenStoryModel:
         model_id: str | None = None,
     ):
         self.model_id = (
-            model_id
-            or PLANNER_MODEL
+            model_id or PLANNER_MODEL
         )
-
-    def load(self) -> None:
-        self._validate()
 
     def _validate(self) -> None:
 
@@ -43,9 +36,12 @@ class QwenStoryModel:
                 "PLANNER_MODEL is not configured."
             )
 
+    def load(self) -> None:
+        self._validate()
+
     def generate(
         self,
-        messages: list,
+        messages: list[dict],
         max_new_tokens: int = PLANNER_MAX_NEW_TOKENS,
         temperature: float = PLANNER_TEMPERATURE,
         top_p: float = PLANNER_TOP_P,
@@ -56,30 +52,32 @@ class QwenStoryModel:
         payload = {
             "model": self.model_id,
             "messages": messages,
-            "max_tokens": int(max_new_tokens),
-            "temperature": float(temperature),
+            "max_tokens": int(
+                max_new_tokens
+            ),
+            "temperature": float(
+                temperature
+            ),
             "top_p": float(top_p),
         }
 
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        if PLANNER_API_KEY:
+            headers["Authorization"] = (
+                f"Bearer {PLANNER_API_KEY}"
+            )
+
         request = Request(
-            PLANNER_BASE_URL
-            + "/chat/completions",
+            f"{PLANNER_BASE_URL}/chat/completions",
             method="POST",
+            headers=headers,
             data=json.dumps(
                 payload,
                 ensure_ascii=False,
             ).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                **(
-                    {
-                        "Authorization":
-                        f"Bearer {PLANNER_API_KEY}"
-                    }
-                    if PLANNER_API_KEY
-                    else {}
-                ),
-            },
         )
 
         try:
@@ -98,15 +96,13 @@ class QwenStoryModel:
             )
 
             raise RuntimeError(
-                f"Planner API HTTP {error.code}: "
-                f"{body}"
+                f"Planner HTTP {error.code}: {body}"
             ) from error
 
         except URLError as error:
 
             raise RuntimeError(
-                f"Planner API connection failed: "
-                f"{error}"
+                f"Planner connection failed: {error}"
             ) from error
 
         try:
@@ -115,11 +111,11 @@ class QwenStoryModel:
             )
         except json.JSONDecodeError as error:
             raise RuntimeError(
-                "Planner API returned invalid JSON."
+                "Planner returned invalid JSON."
             ) from error
 
         try:
-            text = (
+            content = (
                 result["choices"][0]
                 ["message"]["content"]
             )
@@ -129,18 +125,20 @@ class QwenStoryModel:
             TypeError,
         ) as error:
             raise RuntimeError(
-                "Planner API response is missing "
+                "Planner response is missing "
                 "choices[0].message.content."
             ) from error
 
-        text = str(text).strip()
+        content = str(
+            content
+        ).strip()
 
-        if not text:
+        if not content:
             raise RuntimeError(
                 "Planner returned empty content."
             )
 
-        return text
+        return content
 
     def unload(self) -> None:
         return None
