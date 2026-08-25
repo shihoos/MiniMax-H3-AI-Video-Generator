@@ -17,6 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -24,7 +25,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install validation dependencies
         run: |
@@ -40,12 +40,50 @@ jobs:
             scheduler \
             schemas \
             scripts \
-            kaggle \
-            compatibility
+            kaggle
 
-      - name: H3 project validation
+      - name: Project validator
         run: |
           python scripts/validate_project.py
+
+      - name: Planner smoke test
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from planner.production_planner import (
+              ProductionPlanner,
+          )
+
+          root = Path(".").resolve()
+
+          planner = ProductionPlanner(
+              root
+          )
+
+          plan = planner.build(
+              mode="preserve_user_story",
+              user_input=(
+                  "A young explorer walks through "
+                  "a city street at sunset."
+              ),
+              workflow_mode="ref2v",
+              profile="base",
+          )
+
+          assert plan["shots"]
+          assert plan["scenes"]
+          assert plan["characters"]
+
+          for shot in plan["shots"]:
+              assert shot["width"] % 32 == 0
+              assert shot["height"] % 32 == 0
+              assert shot["fps"] == 24
+
+          print(
+              "Planner smoke test PASSED."
+          )
+          PY
 
       - name: Workflow inventory
         run: |
@@ -53,45 +91,67 @@ jobs:
           import json
           from pathlib import Path
 
-          root = Path("workflows")
-
           production = [
-              root / "generation" / "H3_Ref2V_Production.json",
-              root / "generation" / "H3_Turbo_Ref2V_Production.json",
-              root / "postprocess" / "H3_Ref2V_UltimateUpscale_Production.json",
+              Path(
+                  "workflows/generation/"
+                  "H3_Ref2V_Production.json"
+              ),
+              Path(
+                  "workflows/generation/"
+                  "H3_Turbo_Ref2V_Production.json"
+              ),
+              Path(
+                  "workflows/postprocess/"
+                  "H3_Ref2V_UltimateUpscale_Production.json"
+              ),
           ]
 
           sources = [
-              root / "sources" / "H3_Turbo_Reference_Source.json",
-              root / "sources" / "H3_LatentUpscaler_Source.json",
+              Path(
+                  "workflows/sources/"
+                  "H3_Turbo_Reference_Source.json"
+              ),
+              Path(
+                  "workflows/sources/"
+                  "H3_LatentUpscaler_Source.json"
+              ),
           ]
 
           for path in production + sources:
               assert path.is_file(), path
-              data = json.loads(path.read_text())
-              assert isinstance(data, dict)
+
+              data = json.loads(
+                  path.read_text(
+                      encoding="utf-8"
+                  )
+              )
+
               assert data.get("nodes")
+              assert isinstance(
+                  data.get("links", []),
+                  list,
+              )
+
               print(
-                  f"PASS {path} "
-                  f"nodes={len(data['nodes'])} "
-                  f"links={len(data.get('links', []))}"
+                  "PASS",
+                  path,
+                  "nodes=",
+                  len(data["nodes"]),
+                  "links=",
+                  len(data.get("links", [])),
               )
           PY
 
-      - name: Repository cleanliness
-        run: |
-          test ! -e workflows/generation/aa
-          test ! -e workflows/sources/a
-          ! find workflows -type f -name '*_TEST.json' | grep -q .
-
-      - name: Runtime manifest check
+      - name: Runtime manifest
         run: |
           python - <<'PY'
           from pathlib import Path
 
           text = Path(
               "configs/custom_nodes.yaml"
-          ).read_text()
+          ).read_text(
+              encoding="utf-8"
+          )
 
           required = [
               "Comfyui_Minimax_h3_latent_Upscaler",
@@ -103,8 +163,24 @@ jobs:
 
           for name in required:
               assert name in text, name
-              print("PASS", name)
+              print(
+                  "PASS",
+                  name,
+              )
           PY
+
+      - name: Repository cleanup
+        run: |
+          test ! -e workflows/generation/aa
+          test ! -e workflows/sources/a
+          ! find . -type f -name '*_TEST.json' | grep -q .
+
+      - name: No external Qwen API
+        run: |
+          ! grep -RniE \
+            'chat/completions|PLANNER_BASE_URL|PLANNER_API_KEY|openai|vllm' \
+            planner execution pipeline scripts \
+            --exclude-dir='__pycache__'
 
       - name: Complete
         run: |
