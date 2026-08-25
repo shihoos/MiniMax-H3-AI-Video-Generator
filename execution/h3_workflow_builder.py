@@ -343,53 +343,70 @@ class H3WorkflowBuilder:
         width: int | None,
         height: int | None,
     ) -> None:
-
-        if width is None and height is None:
+    
+        if width is None or height is None:
             return
-
-        reference_nodes = self._find(
+    
+        width = int(width)
+        height = int(height)
+    
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                "Workflow dimensions must be positive."
+            )
+    
+        selector = self._find(
             workflow,
-            "MiniMaxH3ReferenceToVideo",
+            "ResolutionSelector",
         )
-
-        if len(reference_nodes) != 1:
+    
+        if len(selector) != 1:
             raise RuntimeError(
-                "Expected exactly one "
-                "MiniMaxH3ReferenceToVideo node."
+                "Expected exactly one ResolutionSelector."
             )
-
-        node = reference_nodes[0]
+    
+        node = selector[0]
         widgets = self._widgets(node)
-
-        # Current H3 ReferenceToVideo layout:
-        # [prompt, width, height, length, ref_image_size]
-        if width is not None:
-            self._set_widget(
-                node,
-                1,
-                int(width),
+    
+        if len(widgets) < 3:
+            raise RuntimeError(
+                "ResolutionSelector widgets are malformed."
             )
-
-        if height is not None:
-            self._set_widget(
-                node,
-                2,
-                int(height),
+    
+        # This production project uses the 16:9 H3 workflow.
+        # The selector calculates dimensions from megapixels
+        # and rounds to the configured multiple.
+        ratio = width / height
+    
+        target_ratio = 16 / 9
+    
+        if abs(ratio - target_ratio) > 0.03:
+            raise ValueError(
+                "The current production H3 workflow is locked "
+                "to approximately 16:9. Requested dimensions: "
+                f"{width}x{height}"
             )
-
-        # Keep widgets_values_named coherent when present.
-        named = node.get("widgets_values_named")
-
+    
+        widgets[0] = "16:9 (Widescreen)"
+    
+        # Area in megapixels.
+        widgets[1] = (
+            (width * height)
+            / 1_000_000
+        )
+    
+        widgets[2] = 32
+    
+        named = node.get(
+            "widgets_values_named"
+        )
+    
         if isinstance(named, dict):
-            if width is not None:
-                named["width"] = int(width)
-            if height is not None:
-                named["height"] = int(height)
-
-        # ResolutionSelector is upstream of the reference node.
-        # The API conversion uses the actual graph links, so the safest
-        # runtime override is the reference-node widget itself.
-        _ = widgets
+            named["aspect_ratio"] = (
+                "16:9 (Widescreen)"
+            )
+            named["megapixels"] = widgets[1]
+            named["multiple"] = 32
 
     def _set_duration(
         self,
