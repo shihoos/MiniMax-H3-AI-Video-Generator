@@ -1,30 +1,41 @@
 runtime:
-  comfyui: true
-  gguf_loader: ComfyUI-GGUF
-  h3_nodes: ComfyUI-H3-Multishot
-  video_nodes: VideoHelperSuite
-  workflow_converter: required
+  comfyui: required
+  custom_nodes_manifest: configs/custom_nodes.yaml
+  model_manifest: configs/model_inventory.yaml
 
-project_workflow_policy:
-  manual_ref2va_api: forbidden
-  canonical_production_files: true
-  turbo_profile_separate: true
+workflow_policy:
+  only_ref2va_generation: true
+  only_locked_models: true
+  no_q4_models: true
+  no_fl2va_model: true
+  no_manual_memory_api: true
 
-base_workflows:
-  H3_Extend_Take.json: fl2va
-  H3_HardMode_Chained.json: ref2va_plus_fl2va
-  H3_HardMode_R2V.json: ref2va
-  H3_Keyframes.json: fl2va
-  H3_Seamless_Chain_CORE.json: fl2va
-  H3_Seamless_Chain_v2.json: fl2va_memory
+generation_workflows:
+  - ref2v
+  - ref2v_chain
+  - turbo_ref2v
 
-turbo_workflows:
-  H3_Turbo_I2V.json: fl2va_turbo
-  H3_Turbo_Ref2V.json: ref2va_turbo
-  H3_Turbo_T2V.json: fl2va_turbo
+postprocess_workflows:
+  - mmh3_ultimate_upscale
 
 reference_limits:
   max_images: 9
   max_videos: 3
   max_standalone_audio: 3
   max_total_files: 12
+
+resolution:
+  generation_width: 960
+  generation_height: 544
+  final_width: 1280
+  final_height: 720
+
+continuity:
+  last_frame_reference: true
+  sequential_dependency: true
+  parallelize_dependent_shots: false
+
+policy:
+  pin_custom_node_revisions: true
+  vendor_third_party_source: false
+  locked_model_inventory: true
