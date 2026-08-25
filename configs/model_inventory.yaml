@@ -1,0 +1,43 @@
+models:
+  diffusion_model:
+    filename: "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors"
+    directory: "diffusion_models"
+    required: true
+    purpose: "Primary MiniMax H3 Ref2VA generation"
+
+  text_encoder:
+    filename: "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"
+    directory: "text_encoders"
+    required: true
+    purpose: "MiniMax H3 Qwen3-VL-32B encoder"
+
+  turbo_lora:
+    filename: "minimax_h3_turbo_v4_step600_ema.safetensors"
+    directory: "loras"
+    required: true
+    purpose: "H3 Turbo Step600 LoRA"
+
+  video_vae:
+    filename: "minimax_h3_video_vae_fp16.safetensors"
+    directory: "vae"
+    required: true
+    purpose: "MiniMax H3 video VAE"
+
+  audio_vae:
+    filename: "minimax_h3_audio_vae_fp32.safetensors"
+    directory: "vae"
+    required: true
+    purpose: "MiniMax H3 audio VAE"
+
+  latent_upscaler:
+    filename: "minimax_h3_latent_upscaler_3d_fp16.safetensors"
+    directory: "latent_upscale_models"
+    required: true
+    purpose: "MiniMax H3 3D latent upscaler"
+
+policy:
+  exact_inventory: true
+  allow_extra_production_models: false
+  allow_q4_models: false
+  allow_secondary_qwen_models: false
+  allow_separate_upscaler_dataset: false
