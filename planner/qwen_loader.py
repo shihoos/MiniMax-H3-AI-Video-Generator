@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import (
+    Request,
+    urlopen,
+)
 
 from planner.config import (
-    PLANNER_API_BASE_URL,
     PLANNER_API_KEY,
+    PLANNER_BASE_URL,
     PLANNER_MAX_NEW_TOKENS,
     PLANNER_MODEL,
     PLANNER_TEMPERATURE,
@@ -15,18 +18,6 @@ from planner.config import (
 
 
 class QwenStoryModel:
-    """
-    Compatibility wrapper retained for existing planner modules.
-
-    IMPORTANT:
-    The locked Qwen3-VL-32B H3 .safetensors file is an H3 encoder,
-    not a standalone causal text-generation checkpoint.
-
-    Therefore story/scene/shot planning is delegated to an
-    OpenAI-compatible text-generation endpoint.
-
-    This keeps the six-model production dataset unchanged.
-    """
 
     def __init__(
         self,
@@ -37,16 +28,14 @@ class QwenStoryModel:
             or PLANNER_MODEL
         )
 
-    def load(self):
-        self._validate_configuration()
+    def load(self) -> None:
+        self._validate()
 
-    def _validate_configuration(self):
-        if not PLANNER_API_BASE_URL:
+    def _validate(self) -> None:
+
+        if not PLANNER_BASE_URL:
             raise RuntimeError(
-                "PLANNER_API_BASE_URL is not configured. "
-                "The locked MiniMax H3 Qwen3-VL-32B file is an "
-                "H3 text encoder, not a standalone story-generation "
-                "model. Configure an OpenAI-compatible planner endpoint."
+                "PLANNER_BASE_URL is not configured."
             )
 
         if not self.model_id:
@@ -62,44 +51,35 @@ class QwenStoryModel:
         top_p: float = PLANNER_TOP_P,
     ) -> str:
 
-        self._validate_configuration()
+        self._validate()
 
         payload = {
             "model": self.model_id,
             "messages": messages,
-            "max_tokens": int(
-                max_new_tokens
-            ),
-            "temperature": float(
-                temperature
-            ),
-            "top_p": float(
-                top_p
-            ),
+            "max_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
+            "top_p": float(top_p),
         }
-
-        data = json.dumps(
-            payload,
-            ensure_ascii=False,
-        ).encode("utf-8")
-
-        headers = {
-            "Content-Type": "application/json",
-        }
-
-        if PLANNER_API_KEY:
-            headers["Authorization"] = (
-                f"Bearer {PLANNER_API_KEY}"
-            )
 
         request = Request(
-            (
-                PLANNER_API_BASE_URL
-                + "/chat/completions"
-            ),
+            PLANNER_BASE_URL
+            + "/chat/completions",
             method="POST",
-            data=data,
-            headers=headers,
+            data=json.dumps(
+                payload,
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                **(
+                    {
+                        "Authorization":
+                        f"Bearer {PLANNER_API_KEY}"
+                    }
+                    if PLANNER_API_KEY
+                    else {}
+                ),
+            },
         )
 
         try:
@@ -108,22 +88,22 @@ class QwenStoryModel:
                 timeout=600,
             ) as response:
 
-                body = response.read()
+                raw = response.read()
 
         except HTTPError as error:
-            message = (
-                error.read()
-                .decode(
-                    "utf-8",
-                    errors="replace",
-                )
+
+            body = error.read().decode(
+                "utf-8",
+                errors="replace",
             )
+
             raise RuntimeError(
                 f"Planner API HTTP {error.code}: "
-                f"{message}"
+                f"{body}"
             ) from error
 
         except URLError as error:
+
             raise RuntimeError(
                 f"Planner API connection failed: "
                 f"{error}"
@@ -131,7 +111,7 @@ class QwenStoryModel:
 
         try:
             result = json.loads(
-                body.decode("utf-8")
+                raw.decode("utf-8")
             )
         except json.JSONDecodeError as error:
             raise RuntimeError(
@@ -139,7 +119,7 @@ class QwenStoryModel:
             ) from error
 
         try:
-            content = (
+            text = (
                 result["choices"][0]
                 ["message"]["content"]
             )
@@ -149,24 +129,18 @@ class QwenStoryModel:
             TypeError,
         ) as error:
             raise RuntimeError(
-                "Planner API response does not contain "
+                "Planner API response is missing "
                 "choices[0].message.content."
             ) from error
 
-        content = str(
-            content
-        ).strip()
+        text = str(text).strip()
 
-        if not content:
+        if not text:
             raise RuntimeError(
-                "Planner returned empty output."
+                "Planner returned empty content."
             )
 
-        return content
+        return text
 
-    def unload(self):
-        """
-        Kept for compatibility with the existing orchestration layer.
-        Remote planner clients have no local model to unload.
-        """
+    def unload(self) -> None:
         return None
