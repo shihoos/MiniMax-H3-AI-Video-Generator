@@ -4,52 +4,19 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = (
-    Path(__file__).resolve().parents[1]
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+DATA_DIR = PROJECT_ROOT / "data"
 
-# ============================================================
-# LOCAL PROJECT PATHS
-# ============================================================
-
-PROMPTS_DIR = (
-    PROJECT_ROOT
-    / "prompts"
-    / "qwen"
-)
-
-DATA_DIR = (
-    PROJECT_ROOT / "data"
-)
-
-STORIES_DIR = (
-    DATA_DIR / "stories"
-)
-
-CHARACTERS_DIR = (
-    DATA_DIR / "characters"
-)
-
-GENERATED_CHARACTERS_DIR = (
-    CHARACTERS_DIR / "generated"
-)
-
-SCENES_DIR = (
-    DATA_DIR / "scenes"
-)
-
-SHOTS_DIR = (
-    DATA_DIR / "shots"
-)
-
-PRODUCTION_DIR = (
-    DATA_DIR / "production"
-)
+STORIES_DIR = DATA_DIR / "stories"
+CHARACTERS_DIR = DATA_DIR / "characters"
+GENERATED_CHARACTERS_DIR = CHARACTERS_DIR / "generated"
+SCENES_DIR = DATA_DIR / "scenes"
+SHOTS_DIR = DATA_DIR / "shots"
+PRODUCTION_DIR = DATA_DIR / "production"
 
 
 def ensure_directories() -> None:
-
     for directory in (
         STORIES_DIR,
         CHARACTERS_DIR,
@@ -97,12 +64,7 @@ H3_LATENT_UPSCALER_3D = (
 # H3 GENERATION
 # ============================================================
 
-H3_FPS = int(
-    os.getenv(
-        "H3_FPS",
-        "24",
-    )
-)
+H3_FPS = 24
 
 H3_WIDTH = int(
     os.getenv(
@@ -132,10 +94,17 @@ H3_REF_IMAGE_SIZE = os.getenv(
 
 
 # ============================================================
+# H3 REFERENCE LIMITS
+# ============================================================
+
+H3_MAX_REFERENCE_IMAGES = 9
+H3_MAX_REFERENCE_VIDEOS = 3
+H3_MAX_REFERENCE_AUDIO = 3
+H3_MAX_REFERENCE_FILES = 12
+
+
+# ============================================================
 # TURBO
-#
-# The production Turbo workflow is LOCKED to 8 steps.
-# Do not allow environment variables to silently change this.
 # ============================================================
 
 TURBO_STEPS = 8
@@ -145,25 +114,17 @@ TURBO_STEPS = 8
 # UPSCALE
 # ============================================================
 
-UPSCALE_ENABLED = (
-    os.getenv(
-        "H3_ENABLE_UPSCALE",
-        "1",
-    )
-    == "1"
-)
-
 UPSCALE_WIDTH = int(
     os.getenv(
         "H3_UPSCALE_WIDTH",
-        "1280",
+        "2560",
     )
 )
 
 UPSCALE_HEIGHT = int(
     os.getenv(
         "H3_UPSCALE_HEIGHT",
-        "720",
+        "1440",
     )
 )
 
@@ -186,18 +147,27 @@ ALL_WORKFLOW_MODES = {
 
 
 # ============================================================
+# PROFILES
+# ============================================================
+
+PROFILE_BASE = "base"
+PROFILE_TURBO = "turbo"
+PROFILE_UPSCALE = "upscale"
+
+ALL_PROFILES = {
+    PROFILE_BASE,
+    PROFILE_TURBO,
+    PROFILE_UPSCALE,
+}
+
+
+# ============================================================
 # STORY MODES
 # ============================================================
 
 AI_STORY_MODE = "ai_story"
-
-PRESERVE_USER_STORY_MODE = (
-    "preserve_user_story"
-)
-
-EXPAND_USER_STORY_MODE = (
-    "expand_user_story"
-)
+PRESERVE_USER_STORY_MODE = "preserve_user_story"
+EXPAND_USER_STORY_MODE = "expand_user_story"
 
 VALID_STORY_MODES = {
     AI_STORY_MODE,
@@ -207,32 +177,9 @@ VALID_STORY_MODES = {
 
 
 # ============================================================
-# PLANNER
-#
-# IMPORTANT:
-# There is intentionally NO external Qwen/LLM dependency.
-#
-# The only model in the locked inventory is the H3 Qwen3-VL
-# conditioning encoder. It remains exclusively part of the
-# ComfyUI/H3 generation path.
+# SINGLE LOCAL QWEN INVENTORY
 # ============================================================
 
-PLANNER_BACKEND = "deterministic"
-
+# This is the H3 conditioning encoder.
+# No external Qwen API and no second Qwen model are used.
 PLANNER_MODEL = H3_TEXT_ENCODER
-
-PLANNER_MAX_NEW_TOKENS = 0
-
-PLANNER_TEMPERATURE = 0.0
-
-PLANNER_TOP_P = 1.0
-
-
-# Stage constants retained for compatibility with planner
-# modules. They are no longer LLM sampling temperatures.
-
-QWEN_STORY_TEMPERATURE = 0.0
-QWEN_CHARACTER_DETECTION_TEMPERATURE = 0.0
-QWEN_CHARACTER_PLAN_TEMPERATURE = 0.0
-QWEN_SCENE_PLAN_TEMPERATURE = 0.0
-QWEN_SHOT_PLAN_TEMPERATURE = 0.0
