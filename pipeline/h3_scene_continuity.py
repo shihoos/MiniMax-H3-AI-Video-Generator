@@ -33,6 +33,15 @@ class H3SceneContinuity:
         shot_id: str,
     ) -> Path:
 
+        video_path = Path(
+            video_path
+        )
+
+        if not video_path.is_file():
+            raise FileNotFoundError(
+                video_path
+            )
+
         destination = (
             self.root
             / str(scene_id)
@@ -63,18 +72,19 @@ class H3SceneContinuity:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            check=False,
         )
 
         if result.returncode != 0:
             raise RuntimeError(
-                "Could not extract H3 last frame:\n"
-                + result.stderr[-4000:]
+                "Unable to extract H3 last frame:\n"
+                + result.stderr[-5000:]
             )
 
         if not destination.is_file():
             raise RuntimeError(
-                "FFmpeg completed but did not create "
-                f"the last frame: {destination}"
+                f"Last frame was not created: "
+                f"{destination}"
             )
 
         return destination
