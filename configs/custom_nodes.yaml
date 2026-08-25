@@ -22,6 +22,11 @@ custom_nodes:
       purpose: "MiniMax H3 Turbo LoRA and audio-video Turbo sampler"
       depends_on: []
       required: true
+    - name: "ComfyUI-Workflow-To-API-Converter"
+      repository: "https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint.git"
+      revision: "bc8538278f82053b3ca10a44d62d02596f8e1a37"
+      purpose: "Convert ComfyUI graph-format workflows to API prompt format"
+      required: true
 
   supporting:
     - name: "ComfyUI-VideoHelperSuite"
