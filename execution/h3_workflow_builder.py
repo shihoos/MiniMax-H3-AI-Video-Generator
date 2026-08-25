@@ -7,12 +7,9 @@ from typing import Any
 
 from planner.config import (
     H3_AUDIO_VAE,
-    H3_HEIGHT,
     H3_REF2VA_MODEL,
-    H3_STEPS,
     H3_TEXT_ENCODER,
     H3_VIDEO_VAE,
-    H3_WIDTH,
     H3_TURBO_LORA,
     TURBO_STEPS,
 )
@@ -20,29 +17,19 @@ from planner.config import (
 
 class H3WorkflowBuilder:
 
-    WORKFLOWS = {
+    MODES = {
         "ref2v": (
-            "base",
-            "H3_HardMode_R2V.json",
-        ),
-        "ref2v_chain": (
-            "base",
-            "H3_HardMode_R2V.json",
+            "generation",
+            "H3_Ref2V_Production.json",
         ),
         "turbo_ref2v": (
-            "turbo",
-            "H3_Turbo_Ref2V.json",
+            "generation",
+            "H3_Turbo_Ref2V_Production.json",
         ),
-    }
-
-    REQUIRED_NODE_TYPES = {
-        "H3ModelLoaderAny",
-        "H3ClipLoaderAny",
-        "MiniMaxH3ReferenceToVideo",
-        "VAELoader",
-        "VAEDecode",
-        "VAEDecodeAudio",
-        "CreateVideo",
+        "upscale": (
+            "postprocess",
+            "MMH3_Ultimate_Upscale.json",
+        ),
     }
 
     def __init__(
@@ -69,11 +56,11 @@ class H3WorkflowBuilder:
 
         try:
             directory, filename = (
-                self.WORKFLOWS[mode]
+                self.MODES[mode]
             )
         except KeyError as error:
             raise ValueError(
-                f"Unsupported H3 workflow mode: {mode}"
+                f"Unknown H3 workflow mode: {mode}"
             ) from error
 
         path = (
@@ -84,243 +71,225 @@ class H3WorkflowBuilder:
 
         if not path.is_file():
             raise FileNotFoundError(
-                path
+                f"Workflow missing: {path}"
             )
 
         return path
 
-    @staticmethod
-    def _set_widget(
-        node: dict[str, Any],
-        index: int,
-        value: Any,
-    ) -> None:
-
-        values = node.setdefault(
-            "widgets_values",
-            [],
-        )
-
-        while len(values) <= index:
-            values.append(None)
-
-        values[index] = value
-
-    @staticmethod
-    def _nodes(
-        workflow: dict[str, Any],
-        node_type: str,
-    ):
-
-        return [
-            node
-            for node in workflow.get(
-                "nodes",
-                [],
-            )
-            if node.get("type") == node_type
-        ]
-
-    def _load(
+    def load(
         self,
         mode: str,
-    ) -> dict:
+    ) -> dict[str, Any]:
 
         path = self.path_for_mode(
             mode
         )
 
-        with path.open(
-            "r",
-            encoding="utf-8",
-        ) as handle:
-            workflow = json.load(handle)
+        data = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
+        )
 
         if not isinstance(
-            workflow,
+            data,
             dict,
         ):
-            raise ValueError(
+            raise RuntimeError(
                 f"Invalid workflow: {path}"
             )
 
-        return workflow
+        return copy.deepcopy(data)
 
-    def _validate_node_types(
-        self,
+    @staticmethod
+    def _nodes(
         workflow: dict,
+    ):
+        return workflow.get(
+            "nodes",
+            []
+        )
+
+    @staticmethod
+    def _widgets(
+        node: dict,
+    ) -> list:
+
+        widgets = node.setdefault(
+            "widgets_values",
+            []
+        )
+
+        if not isinstance(
+            widgets,
+            list,
+        ):
+            raise RuntimeError(
+                f"Invalid widgets_values in "
+                f"node {node.get('id')}"
+            )
+
+        return widgets
+
+    @staticmethod
+    def _set_widget(
+        node: dict,
+        index: int,
+        value: Any,
     ) -> None:
 
-        actual = {
-            str(node.get("type"))
-            for node in workflow.get(
-                "nodes",
-                [],
-            )
-        }
-
-        missing = (
-            self.REQUIRED_NODE_TYPES
-            - actual
+        widgets = H3WorkflowBuilder._widgets(
+            node
         )
 
-        if missing:
-            raise RuntimeError(
-                "Workflow is missing required H3 nodes: "
-                + ", ".join(sorted(missing))
-            )
+        while len(widgets) <= index:
+            widgets.append(None)
 
-    def _patch_models(
+        widgets[index] = value
+
+    @staticmethod
+    def _type(
+        node: dict,
+    ) -> str:
+        return str(
+            node.get(
+                "type",
+                ""
+            )
+        )
+
+    @staticmethod
+    def _title(
+        node: dict,
+    ) -> str:
+        return str(
+            node.get(
+                "title",
+                ""
+            )
+        ).lower()
+
+    def _find(
         self,
         workflow: dict,
-        turbo: bool,
-    ) -> None:
+        *,
+        types: set[str] | None = None,
+        title_contains: str | None = None,
+    ) -> list[dict]:
 
-        model_nodes = (
-            self._nodes(
-                workflow,
-                "H3ModelLoaderAny",
-            )
-        )
-
-        if not model_nodes:
-            raise RuntimeError(
-                "No H3ModelLoaderAny node found."
-            )
-
-        for node in model_nodes:
-            self._set_widget(
-                node,
-                0,
-                H3_REF2VA_MODEL,
-            )
-
-        clip_nodes = (
-            self._nodes(
-                workflow,
-                "H3ClipLoaderAny",
-            )
-        )
-
-        if not clip_nodes:
-            raise RuntimeError(
-                "No H3ClipLoaderAny node found."
-            )
-
-        for node in clip_nodes:
-            self._set_widget(
-                node,
-                0,
-                H3_TEXT_ENCODER,
-            )
+        result = []
 
         for node in self._nodes(
-            workflow,
-            "VAELoader",
+            workflow
         ):
-
-            title = str(
-                node.get(
-                    "title",
-                    "",
-                )
-            ).lower()
-
-            if "audio" in title:
-                self._set_widget(
-                    node,
-                    0,
-                    H3_AUDIO_VAE,
-                )
-
-            elif "video" in title:
-                self._set_widget(
-                    node,
-                    0,
-                    H3_VIDEO_VAE,
-                )
-
-        if turbo:
-            self._patch_turbo(
-                workflow
-            )
-
-    def _patch_turbo(
-        self,
-        workflow: dict,
-    ) -> None:
-
-        candidates = []
-
-        for node in workflow.get(
-            "nodes",
-            [],
-        ):
-            node_type = str(
-                node.get(
-                    "type",
-                    "",
-                )
-            )
 
             if (
-                "LoraLoader"
-                in node_type
+                types
+                and self._type(node)
+                not in types
             ):
-                candidates.append(node)
+                continue
 
-        if not candidates:
-            raise RuntimeError(
-                "Turbo workflow does not expose a "
-                "LoRA loader node. Do not silently "
-                "pretend Step600 Turbo is active."
-            )
+            if (
+                title_contains
+                and title_contains.lower()
+                not in self._title(node)
+            ):
+                continue
 
-        for node in candidates:
+            result.append(node)
 
-            widgets = node.setdefault(
-                "widgets_values",
-                [],
-            )
+        return result
 
-            if not widgets:
-                widgets.append(None)
-
-            widgets[0] = H3_TURBO_LORA
-
-            if len(widgets) > 1:
-                widgets[1] = 1.0
-
-            if len(widgets) > 2:
-                widgets[2] = 1.0
-
-    def _patch_resolution(
+    def _patch_common_models(
         self,
         workflow: dict,
-        width: int,
-        height: int,
-        steps: int,
     ) -> None:
 
-        for node in self._nodes(
-            workflow,
-            "ResolutionSelector",
-        ):
-            self._set_widget(
-                node,
-                1,
-                (width * height)
-                / 1_000_000,
-            )
+        found_diffusion = False
+        found_text = False
 
         for node in self._nodes(
-            workflow,
-            "BasicScheduler",
+            workflow
         ):
-            self._set_widget(
-                node,
-                1,
-                steps,
+
+            node_type = self._type(
+                node
+            )
+
+            widgets = (
+                self._widgets(node)
+            )
+
+            text = " ".join(
+                str(value).lower()
+                for value in widgets
+            )
+
+            if node_type in {
+                "UNETLoader",
+                "H3ModelLoaderAny",
+            }:
+                if widgets:
+                    self._set_widget(
+                        node,
+                        0,
+                        H3_REF2VA_MODEL,
+                    )
+                    found_diffusion = True
+
+            elif node_type in {
+                "CLIPLoader",
+                "H3ClipLoaderAny",
+            }:
+                if widgets:
+                    self._set_widget(
+                        node,
+                        0,
+                        H3_TEXT_ENCODER,
+                    )
+                    found_text = True
+
+            elif node_type == "VAELoader":
+
+                if "audio" in text:
+                    self._set_widget(
+                        node,
+                        0,
+                        H3_AUDIO_VAE,
+                    )
+
+                elif "video" in text:
+                    self._set_widget(
+                        node,
+                        0,
+                        H3_VIDEO_VAE,
+                    )
+
+                elif "minimax_h3" in text:
+                    # Only change if the filename itself identifies VAE type.
+                    if "audio" in text:
+                        self._set_widget(
+                            node,
+                            0,
+                            H3_AUDIO_VAE,
+                        )
+                    else:
+                        self._set_widget(
+                            node,
+                            0,
+                            H3_VIDEO_VAE,
+                        )
+
+        if not found_diffusion:
+            raise RuntimeError(
+                "No diffusion model loader found "
+                "in H3 workflow."
+            )
+
+        if not found_text:
+            raise RuntimeError(
+                "No H3 text encoder loader found."
             )
 
     def _patch_prompt(
@@ -329,37 +298,37 @@ class H3WorkflowBuilder:
         prompt: str,
     ) -> None:
 
-        candidates = [
-            node
-            for node in workflow.get(
-                "nodes",
-                [],
+        candidates = []
+
+        for node in self._nodes(
+            workflow
+        ):
+
+            node_type = self._type(
+                node
             )
-            if node.get("type")
-            in {
+
+            if node_type not in {
                 "PrimitiveStringMultiline",
                 "PrimitiveString",
-            }
-            and (
+            }:
+                continue
+
+            if (
                 "prompt"
-                in str(
-                    node.get(
-                        "title",
-                        "",
-                    )
-                ).lower()
-            )
-        ]
+                in self._title(node)
+            ):
+                candidates.append(
+                    node
+                )
 
         if not candidates:
             raise RuntimeError(
-                "H3 prompt input node not found."
+                "No prompt widget found."
             )
 
-        node = candidates[0]
-
         self._set_widget(
-            node,
+            candidates[0],
             0,
             prompt,
         )
@@ -370,9 +339,9 @@ class H3WorkflowBuilder:
         seed: int,
     ) -> None:
 
-        for node in self._nodes(
+        for node in self._find(
             workflow,
-            "RandomNoise",
+            types={"RandomNoise"},
         ):
             self._set_widget(
                 node,
@@ -380,55 +349,92 @@ class H3WorkflowBuilder:
                 int(seed),
             )
 
+    def _patch_steps(
+        self,
+        workflow: dict,
+        turbo: bool,
+    ) -> None:
+
+        steps = (
+            TURBO_STEPS
+            if turbo
+            else 14
+        )
+
+        for node in self._find(
+            workflow,
+            types={"BasicScheduler"},
+        ):
+            widgets = self._widgets(
+                node
+            )
+
+            if len(widgets) > 1:
+                self._set_widget(
+                    node,
+                    1,
+                    steps,
+                )
+
+    def _validate_turbo(
+        self,
+        workflow: dict,
+    ) -> None:
+
+        turbo_nodes = [
+            node
+            for node in self._nodes(
+                workflow
+            )
+            if "Turbo" in self._type(node)
+        ]
+
+        if not turbo_nodes:
+            raise RuntimeError(
+                "Turbo workflow contains no MiniMax-H3 "
+                "Turbo node. It cannot be called Turbo."
+            )
+
     def build(
         self,
         *,
         mode: str,
         prompt: str,
-        width: int = H3_WIDTH,
-        height: int = H3_HEIGHT,
-        steps: int = H3_STEPS,
         seed: int = 0,
     ) -> dict:
 
-        workflow = copy.deepcopy(
-            self._load(mode)
+        workflow = self.load(
+            mode
         )
 
-        self._validate_node_types(
+        self._patch_common_models(
             workflow
-        )
-
-        self._patch_models(
-            workflow,
-            turbo=(
-                mode == "turbo_ref2v"
-            ),
-        )
-
-        self._patch_resolution(
-            workflow,
-            width,
-            height,
-            (
-                TURBO_STEPS
-                if mode == "turbo_ref2v"
-                else steps
-            ),
         )
 
         self._patch_prompt(
             workflow,
-            prompt,
+            prompt
         )
 
         self._patch_seed(
             workflow,
-            seed,
+            seed
         )
 
-        return (
-            self.client.convert_workflow(
+        turbo = (
+            mode == "turbo_ref2v"
+        )
+
+        self._patch_steps(
+            workflow,
+            turbo
+        )
+
+        if turbo:
+            self._validate_turbo(
                 workflow
             )
+
+        return self.client.convert_workflow(
+            workflow
         )
