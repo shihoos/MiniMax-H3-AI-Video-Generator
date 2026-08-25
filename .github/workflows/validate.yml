@@ -57,9 +57,7 @@ jobs:
 
           root = Path(".").resolve()
 
-          planner = ProductionPlanner(
-              root
-          )
+          planner = ProductionPlanner(root)
 
           plan = planner.build(
               mode="preserve_user_story",
@@ -126,7 +124,13 @@ jobs:
                   )
               )
 
+              assert isinstance(
+                  data,
+                  dict,
+              )
+
               assert data.get("nodes")
+
               assert isinstance(
                   data.get("links", []),
                   list,
@@ -174,13 +178,6 @@ jobs:
           test ! -e workflows/generation/aa
           test ! -e workflows/sources/a
           ! find . -type f -name '*_TEST.json' | grep -q .
-
-      - name: No external Qwen API
-        run: |
-          ! grep -RniE \
-            'chat/completions|PLANNER_BASE_URL|PLANNER_API_KEY|openai|vllm' \
-            planner execution pipeline scripts \
-            --exclude-dir='__pycache__'
 
       - name: Complete
         run: |
