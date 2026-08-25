@@ -15,6 +15,17 @@ from planner.config import (
 
 
 class QwenStoryModel:
+    """
+    Planning-model client.
+
+    IMPORTANT:
+    The locked MiniMax H3 qwen3vl text encoder is NOT used here
+    as a chat-completion model. It is used by the H3 ComfyUI
+    generation workflow.
+
+    This client expects a separate OpenAI-compatible planning
+    service.
+    """
 
     def __init__(
         self,
@@ -52,12 +63,8 @@ class QwenStoryModel:
         payload = {
             "model": self.model_id,
             "messages": messages,
-            "max_tokens": int(
-                max_new_tokens
-            ),
-            "temperature": float(
-                temperature
-            ),
+            "max_tokens": int(max_new_tokens),
+            "temperature": float(temperature),
             "top_p": float(top_p),
         }
 
@@ -85,7 +92,6 @@ class QwenStoryModel:
                 request,
                 timeout=600,
             ) as response:
-
                 raw = response.read()
 
         except HTTPError as error:
@@ -124,6 +130,7 @@ class QwenStoryModel:
             IndexError,
             TypeError,
         ) as error:
+
             raise RuntimeError(
                 "Planner response is missing "
                 "choices[0].message.content."
@@ -141,4 +148,7 @@ class QwenStoryModel:
         return content
 
     def unload(self) -> None:
+        """
+        External planner has no local model object to unload.
+        """
         return None
