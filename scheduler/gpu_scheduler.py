@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from collections import deque
 
 
 class GPUScheduler:
@@ -9,13 +10,13 @@ class GPUScheduler:
         self,
         gpu_ids=None,
     ):
-
-        if gpu_ids is None:
-            gpu_ids = [0, 1]
-
         self.gpu_ids = [
             int(gpu)
-            for gpu in gpu_ids
+            for gpu in (
+                gpu_ids
+                if gpu_ids is not None
+                else [0, 1]
+            )
         ]
 
         if not self.gpu_ids:
@@ -23,17 +24,17 @@ class GPUScheduler:
                 "At least one GPU is required."
             )
 
-    def run(
+    def run_independent(
         self,
         jobs,
         worker_function,
     ):
+        """
+        Parallel execution is allowed only for jobs
+        explicitly marked independent.
+        """
 
-        if not jobs:
-            return []
-
-        queue = list(jobs)
-
+        queue = deque(jobs)
         queue_lock = threading.Lock()
         result_lock = threading.Lock()
 
@@ -49,28 +50,9 @@ class GPUScheduler:
                     if not queue:
                         return
 
-                    job = queue.pop(0)
-
-                job_id = (
-                    getattr(
-                        job,
-                        "scene_id",
-                        None,
-                    )
-                    or
-                    getattr(
-                        job,
-                        "shot_id",
-                        "<unknown>",
-                    )
-                )
+                    job = queue.popleft()
 
                 try:
-
-                    print(
-                        f"[GPU {gpu_id}] "
-                        f"START {job_id}"
-                    )
 
                     result = worker_function(
                         gpu_id,
@@ -79,70 +61,72 @@ class GPUScheduler:
 
                     with result_lock:
                         results.append(
-                            (
-                                gpu_id,
-                                str(job_id),
-                                result,
-                            )
+                            result
                         )
 
-                    print(
-                        f"[GPU {gpu_id}] "
-                        f"DONE {job_id}"
-                    )
-
                 except Exception as error:
-
-                    message = (
-                        f"{type(error).__name__}: "
-                        f"{error}"
-                    )
 
                     with result_lock:
                         failures.append(
                             (
                                 gpu_id,
-                                str(job_id),
-                                message,
+                                job,
+                                error,
                             )
                         )
 
-                    print(
-                        f"[GPU {gpu_id}] "
-                        f"FAILED {job_id}: "
-                        f"{message}"
-                    )
-
-        threads = []
-
-        for gpu_id in self.gpu_ids:
-
-            thread = threading.Thread(
+        threads = [
+            threading.Thread(
                 target=worker,
                 args=(gpu_id,),
                 name=f"h3-gpu-{gpu_id}",
-                daemon=False,
             )
+            for gpu_id in self.gpu_ids
+        ]
 
+        for thread in threads:
             thread.start()
-            threads.append(
-                thread
-            )
 
         for thread in threads:
             thread.join()
 
         if failures:
 
-            details = "\n".join(
-                f"GPU {gpu}: {job}: {error}"
-                for gpu, job, error
+            messages = "\n".join(
+                f"GPU {gpu}: {error}"
+                for gpu, _job, error
                 in failures
             )
 
             raise RuntimeError(
-                "One or more GPU jobs failed:\n"
-                + details
+                "GPU jobs failed:\n"
+                + messages
+            )
+
+        return results
+
+    def run_sequential(
+        self,
+        jobs,
+        worker_function,
+        gpu_id=None,
+    ):
+        """
+        Continuity-dependent shots/scenes must use this path.
+        """
+
+        if gpu_id is None:
+            gpu_id = self.gpu_ids[0]
+
+        results = []
+
+        for job in jobs:
+
+            results.append(
+                worker_function(
+                    gpu_id,
+                    job,
+                )
             )
 
         return results
