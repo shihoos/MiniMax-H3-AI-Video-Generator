@@ -84,6 +84,33 @@ SHOT_PLAN_PROMPT_PATH = (
     QWEN_PROMPTS_DIR / "shot_plan.txt"
 )
 
+QWEN_CHARACTER_DETECTION_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_CHARACTER_DETECTION_TEMPERATURE",
+        "0.1",
+    )
+)
+
+QWEN_CHARACTER_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_CHARACTER_PLAN_TEMPERATURE",
+        "0.2",
+    )
+)
+
+QWEN_SCENE_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_SCENE_PLAN_TEMPERATURE",
+        "0.2",
+    )
+)
+
+QWEN_SHOT_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_SHOT_PLAN_TEMPERATURE",
+        "0.2",
+    )
+)
 
 # ============================================================
 # DATA
