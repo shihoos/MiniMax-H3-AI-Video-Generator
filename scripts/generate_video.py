@@ -19,15 +19,29 @@ if str(ROOT) not in sys.path:
     )
 
 
-WORKFLOW_CHOICES = [
-    "auto",
-    "turbo_ref2v",
-    "ref2v",
-]
+def discover_gpu_ids():
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "NVIDIA CUDA GPU is required "
+            "for production H3 generation."
+        )
+
+    count = torch.cuda.device_count()
+
+    if count <= 0:
+        raise RuntimeError(
+            "No CUDA GPUs detected."
+        )
+
+    return list(
+        range(count)
+    )
 
 
 def load_clients(
-    urls: list[str],
+    urls,
 ):
     from execution.comfy_client import (
         ComfyClient,
@@ -35,8 +49,9 @@ def load_clients(
 
     clients = {}
 
-    for index, url in enumerate(urls):
-
+    for index, url in enumerate(
+        urls
+    ):
         client = ComfyClient(
             base_url=url,
             timeout=60,
@@ -45,8 +60,7 @@ def load_clients(
 
         if not client.health_check():
             raise RuntimeError(
-                "ComfyUI worker unavailable:\n"
-                f"{url}"
+                f"ComfyUI worker unavailable: {url}"
             )
 
         clients[index] = client
@@ -65,12 +79,11 @@ def main():
     parser.add_argument(
         "--story",
         required=True,
-        help="Story text or path to story input.",
     )
 
     parser.add_argument(
         "--mode",
-        default="ai_story",
+        default="preserve_user_story",
         choices=[
             "ai_story",
             "preserve_user_story",
@@ -84,13 +97,8 @@ def main():
         choices=[
             "base",
             "turbo",
+            "upscale",
         ],
-    )
-
-    parser.add_argument(
-        "--workflow",
-        default="auto",
-        choices=WORKFLOW_CHOICES,
     )
 
     parser.add_argument(
@@ -98,43 +106,34 @@ def main():
         action="append",
         dest="workers",
         help=(
-            "ComfyUI worker URL. Repeat for multiple GPUs."
+            "Existing ComfyUI worker URL. "
+            "Repeat for multiple GPUs."
         ),
     )
 
     parser.add_argument(
         "--plan-only",
         action="store_true",
-        help="Create the production plan but do not execute.",
     )
 
     args = parser.parse_args()
-
-    workers = (
-        args.workers
-        if args.workers
-        else [
-            "http://127.0.0.1:8188"
-        ]
-    )
 
     from pipeline.production_orchestrator import (
         ProductionOrchestrator,
     )
 
-    orchestrator = ProductionOrchestrator()
+    orchestrator = (
+        ProductionOrchestrator()
+    )
 
-    try:
-        plan = (
-            orchestrator.create_production_plan(
-                mode=args.mode,
-                user_input=args.story,
-                workflow_mode=args.workflow,
-                profile=args.profile,
-            )
+    plan = (
+        orchestrator
+        .create_production_plan(
+            mode=args.mode,
+            user_input=args.story,
+            profile=args.profile,
         )
-    finally:
-        orchestrator.unload_models()
+    )
 
     print(
         json.dumps(
@@ -142,7 +141,6 @@ def main():
                 "plan": plan.get(
                     "production_plan_path"
                 ),
-                "workflow": args.workflow,
                 "profile": args.profile,
                 "shots": len(
                     plan.get(
@@ -159,36 +157,84 @@ def main():
     if args.plan_only:
         return 0
 
-    clients = load_clients(
-        workers
-    )
+    runtime_workers = None
 
-    from execution.production_runner import (
-        ProductionRunner,
-    )
-
-    result = ProductionRunner(
-        project_root=ROOT,
-        comfy_clients=clients,
-    ).run(
-        plan
-    )
-
-    print(
-        json.dumps(
-            {
-                "status": "completed",
-                "shot_outputs": [
-                    str(path)
-                    for path in result
-                ],
-                "profile": args.profile,
-                "workflow": args.workflow,
-            },
-            indent=2,
-            ensure_ascii=False,
+    if args.workers:
+        workers = args.workers
+    else:
+        from execution.h3_runtime import (
+            H3Runtime,
         )
-    )
+
+        gpu_ids = discover_gpu_ids()
+
+        runtime_workers = (
+            H3Runtime.launch_workers(
+                ROOT,
+                gpu_ids,
+            )
+        )
+
+        workers = [
+            item["url"]
+            for item in (
+                runtime_workers
+                .values()
+            )
+        ]
+
+    try:
+
+        clients = load_clients(
+            workers
+        )
+
+        from execution.production_runner import (
+            ProductionRunner,
+        )
+
+        result = (
+            ProductionRunner(
+                project_root=ROOT,
+                comfy_clients=clients,
+            )
+            .run(
+                plan
+            )
+        )
+
+        print(
+            json.dumps(
+                {
+                    "status": "completed",
+                    "profile": args.profile,
+                    "shot_outputs": [
+                        str(path)
+                        for path in result[
+                            "shot_outputs"
+                        ]
+                    ],
+                    "final_video": str(
+                        result[
+                            "final_video"
+                        ]
+                    ),
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+    finally:
+
+        if runtime_workers is not None:
+            from execution.h3_runtime import (
+                H3Runtime,
+            )
+
+            H3Runtime.stop_workers(
+                runtime_workers
+            )
 
     return 0
 
