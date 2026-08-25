@@ -1,18 +1,27 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
+import yaml
 
-ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[1]
-)
+
+ROOT = Path(__file__).resolve().parents[1]
 
 COMFY = ROOT / "ComfyUI"
+
+MODEL_MANIFEST = (
+    ROOT
+    / "configs"
+    / "model_inventory.yaml"
+)
+
+NODE_MANIFEST = (
+    ROOT
+    / "configs"
+    / "custom_nodes.yaml"
+)
 
 WORKFLOW_ROOT = (
     ROOT
@@ -21,57 +30,16 @@ WORKFLOW_ROOT = (
 )
 
 
-BASE_WORKFLOWS = [
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_Extend_Take.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_HardMode_Chained.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_HardMode_R2V.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_Keyframes.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_Seamless_Chain_CORE.json",
-
-    WORKFLOW_ROOT
-    / "base"
-    / "H3_Seamless_Chain_v2.json",
-]
+def load_yaml(path: Path):
+    return yaml.safe_load(
+        path.read_text(
+            encoding="utf-8"
+        )
+    )
 
 
-TURBO_WORKFLOWS = [
-    WORKFLOW_ROOT
-    / "turbo"
-    / "H3_Turbo_I2V.json",
-
-    WORKFLOW_ROOT
-    / "turbo"
-    / "H3_Turbo_Ref2V.json",
-
-    WORKFLOW_ROOT
-    / "turbo"
-    / "H3_Turbo_T2V.json",
-]
-
-
-def require_file(
-    path,
-):
-
-    if not (
-        path.is_file()
-        or path.is_symlink()
-    ):
-
+def require_file(path: Path):
+    if not path.is_file():
         raise RuntimeError(
             f"Missing required file: {path}"
         )
@@ -79,50 +47,42 @@ def require_file(
 
 def check_models():
 
-    for path in (
-        COMFY
-        / "models"
-        / "diffusion_models"
-        / "minimax_h3_ref2va_pruned-Q4_K_M.gguf",
+    manifest = load_yaml(
+        MODEL_MANIFEST
+    )
 
-        COMFY
-        / "models"
-        / "diffusion_models"
-        / "minimax_h3_fl2va_pruned-Q4_K_M.gguf",
-
-        COMFY
-        / "models"
-        / "text_encoders"
-        / "qwen3vl_32b_minimax_h3-Q4_K_M.gguf",
-
-        COMFY
-        / "models"
-        / "vae"
-        / "minimax_h3_video_vae_fp16.safetensors",
-
-        COMFY
-        / "models"
-        / "vae"
-        / "minimax_h3_audio_vae_fp32.safetensors",
+    for model in (
+        manifest["models"].values()
     ):
+
+        path = (
+            COMFY
+            / "models"
+            / model["directory"]
+            / model["filename"]
+        )
+
         require_file(path)
 
 
 def check_workflows():
 
-    manual = (
+    required = [
         WORKFLOW_ROOT
-        / "base"
-        / "H3_Ref2VA_Memory_API.json"
-    )
+        / "generation"
+        / "H3_Ref2V_Production.json",
 
-    if manual.exists():
-        raise RuntimeError(
-            "Manual H3_Ref2VA_Memory_API.json still exists. "
-            "Delete it; it is not a production workflow."
-        )
+        WORKFLOW_ROOT
+        / "generation"
+        / "H3_Turbo_Ref2V_Production.json",
 
-    for path in BASE_WORKFLOWS:
+        WORKFLOW_ROOT
+        / "postprocess"
+        / "MMH3_Ultimate_Upscale.json",
+    ]
+
+    for path in required:
+
         require_file(path)
 
         json.loads(
@@ -131,70 +91,69 @@ def check_workflows():
             )
         )
 
-    if (
-        os.getenv(
-            "H3_ENABLE_TURBO",
-            "0",
-        )
-        == "1"
-    ):
 
-        for path in TURBO_WORKFLOWS:
-            require_file(path)
+def check_no_legacy_models():
 
-            json.loads(
-                path.read_text(
+    forbidden = [
+        "Q4_K_M",
+        "_fl2va_",
+        "qwen3-4b",
+        "qwen3vl_32b_minimax_h3-Q4",
+    ]
+
+    for directory in [
+        COMFY / "models",
+        ROOT / "planner",
+        ROOT / "execution",
+        ROOT / "kaggle",
+        ROOT / "workflows",
+    ]:
+
+        if not directory.exists():
+            continue
+
+        for path in directory.rglob("*"):
+
+            if not path.is_file():
+                continue
+
+            try:
+                text = path.read_text(
                     encoding="utf-8"
                 )
-            )
+            except UnicodeDecodeError:
+                continue
+
+            for value in forbidden:
+
+                if value in text:
+                    raise RuntimeError(
+                        f"Legacy model reference "
+                        f"'{value}' found in {path}"
+                    )
 
 
-def check_nodes():
+def check_custom_nodes():
 
-    sys.path.insert(
-        0,
-        str(COMFY),
+    manifest = load_yaml(
+        NODE_MANIFEST
     )
 
-    import nodes  # noqa: F401
-
-    import comfy_extras.nodes_minimax_h3  # noqa: F401
-
-    from execution.comfy_client import (
-        ComfyClient,
+    custom_nodes = (
+        manifest["custom_nodes"]["required"]
+        + manifest["custom_nodes"]["supporting"]
     )
 
-    client = ComfyClient(
-        "http://127.0.0.1:8188"
-    )
+    for node in custom_nodes:
 
-    if not client.health_check():
-        raise RuntimeError(
-            "ComfyUI worker on 8188 is not running."
+        path = (
+            COMFY
+            / "custom_nodes"
+            / node["name"]
         )
 
-    info = client.get_object_info()
-
-    required = {
-        "H3ModelLoaderAny",
-        "H3ClipLoaderAny",
-        "MiniMaxH3ReferenceToVideo",
-        "H3FreeTextEncoder",
-        "H3MultishotSampler",
-        "H3MultishotMemorySampler",
-        "H3LastFrame",
-        "H3ConcatAV",
-    }
-
-    missing = sorted(
-        required
-        - set(info)
-    )
-
-    if missing:
-        raise RuntimeError(
-            "Missing H3 nodes: "
-            + ", ".join(missing)
+        require_file(
+            path / "__init__.py"
         )
 
 
@@ -202,9 +161,11 @@ def main():
 
     check_models()
     check_workflows()
+    check_custom_nodes()
+    check_no_legacy_models()
 
     print(
-        "Static H3 preflight passed."
+        "MiniMax H3 preflight PASSED."
     )
 
 
