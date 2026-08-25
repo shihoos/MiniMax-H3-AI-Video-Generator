@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = (
+    Path(__file__).resolve().parents[1]
+)
 
 
 # ============================================================
-# PLANNER
+# PLANNER API
 # ============================================================
 
 PLANNER_BASE_URL = os.getenv(
@@ -44,6 +46,43 @@ PLANNER_TOP_P = float(
     os.getenv(
         "PLANNER_TOP_P",
         "0.8",
+    )
+)
+
+
+# Stage-specific planner temperatures.
+QWEN_STORY_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_STORY_TEMPERATURE",
+        "0.35",
+    )
+)
+
+QWEN_CHARACTER_DETECTION_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_CHARACTER_DETECTION_TEMPERATURE",
+        "0.10",
+    )
+)
+
+QWEN_CHARACTER_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_CHARACTER_PLAN_TEMPERATURE",
+        "0.20",
+    )
+)
+
+QWEN_SCENE_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_SCENE_PLAN_TEMPERATURE",
+        "0.20",
+    )
+)
+
+QWEN_SHOT_PLAN_TEMPERATURE = float(
+    os.getenv(
+        "QWEN_SHOT_PLAN_TEMPERATURE",
+        "0.20",
     )
 )
 
@@ -84,33 +123,6 @@ SHOT_PLAN_PROMPT_PATH = (
     QWEN_PROMPTS_DIR / "shot_plan.txt"
 )
 
-QWEN_CHARACTER_DETECTION_TEMPERATURE = float(
-    os.getenv(
-        "QWEN_CHARACTER_DETECTION_TEMPERATURE",
-        "0.1",
-    )
-)
-
-QWEN_CHARACTER_PLAN_TEMPERATURE = float(
-    os.getenv(
-        "QWEN_CHARACTER_PLAN_TEMPERATURE",
-        "0.2",
-    )
-)
-
-QWEN_SCENE_PLAN_TEMPERATURE = float(
-    os.getenv(
-        "QWEN_SCENE_PLAN_TEMPERATURE",
-        "0.2",
-    )
-)
-
-QWEN_SHOT_PLAN_TEMPERATURE = float(
-    os.getenv(
-        "QWEN_SHOT_PLAN_TEMPERATURE",
-        "0.2",
-    )
-)
 
 # ============================================================
 # DATA
@@ -118,16 +130,33 @@ QWEN_SHOT_PLAN_TEMPERATURE = float(
 
 DATA_DIR = PROJECT_ROOT / "data"
 
-STORIES_DIR = DATA_DIR / "stories"
-CHARACTERS_DIR = DATA_DIR / "characters"
-GENERATED_CHARACTERS_DIR = CHARACTERS_DIR / "generated"
-SCENES_DIR = DATA_DIR / "scenes"
-SHOTS_DIR = DATA_DIR / "shots"
-PRODUCTION_DIR = DATA_DIR / "production"
+STORIES_DIR = (
+    DATA_DIR / "stories"
+)
+
+CHARACTERS_DIR = (
+    DATA_DIR / "characters"
+)
+
+GENERATED_CHARACTERS_DIR = (
+    CHARACTERS_DIR / "generated"
+)
+
+SCENES_DIR = (
+    DATA_DIR / "scenes"
+)
+
+SHOTS_DIR = (
+    DATA_DIR / "shots"
+)
+
+PRODUCTION_DIR = (
+    DATA_DIR / "production"
+)
 
 
 # ============================================================
-# LOCKED H3 MODELS
+# LOCKED H3 MODEL INVENTORY
 # ============================================================
 
 H3_REF2VA_MODEL = (
@@ -160,23 +189,38 @@ H3_LATENT_UPSCALER_3D = (
 # ============================================================
 
 H3_FPS = int(
-    os.getenv("H3_FPS", "24")
+    os.getenv(
+        "H3_FPS",
+        "24",
+    )
 )
 
 H3_WIDTH = int(
-    os.getenv("H3_WIDTH", "960")
+    os.getenv(
+        "H3_WIDTH",
+        "960",
+    )
 )
 
 H3_HEIGHT = int(
-    os.getenv("H3_HEIGHT", "544")
+    os.getenv(
+        "H3_HEIGHT",
+        "544",
+    )
 )
 
 H3_FRAMES_PER_SHOT = int(
-    os.getenv("H3_FRAMES_PER_SHOT", "125")
+    os.getenv(
+        "H3_FRAMES_PER_SHOT",
+        "125",
+    )
 )
 
 H3_STEPS = int(
-    os.getenv("H3_STEPS", "14")
+    os.getenv(
+        "H3_STEPS",
+        "14",
+    )
 )
 
 H3_REF_IMAGE_SIZE = os.getenv(
@@ -246,26 +290,13 @@ UPSCALE_ENABLE_TEMPORAL_CHUNKING = (
 
 WORKFLOW_AUTO = "auto"
 WORKFLOW_REF2V = "ref2v"
-WORKFLOW_CHAIN = "ref2v_chain"
 WORKFLOW_TURBO_REF2V = "turbo_ref2v"
 WORKFLOW_UPSCALE = "upscale"
-
-
-# Compatibility aliases used by existing planner code.
-WORKFLOW_HARD_R2V = WORKFLOW_REF2V
-WORKFLOW_HARD_CHAINED = WORKFLOW_CHAIN
-WORKFLOW_TURBO_I2V = WORKFLOW_REF2V
-WORKFLOW_TURBO_T2V = WORKFLOW_REF2V
-WORKFLOW_KEYFRAMES = WORKFLOW_REF2V
-WORKFLOW_EXTEND_TAKE = WORKFLOW_CHAIN
-WORKFLOW_SEAMLESS_V2 = WORKFLOW_CHAIN
-WORKFLOW_SEAMLESS_CORE = WORKFLOW_CHAIN
 
 
 ALL_WORKFLOW_MODES = {
     WORKFLOW_AUTO,
     WORKFLOW_REF2V,
-    WORKFLOW_CHAIN,
     WORKFLOW_TURBO_REF2V,
     WORKFLOW_UPSCALE,
 }
