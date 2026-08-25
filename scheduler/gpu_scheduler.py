@@ -15,7 +15,7 @@ class GPUScheduler:
             for gpu in (
                 gpu_ids
                 if gpu_ids is not None
-                else [0, 1]
+                else [0]
             )
         ]
 
@@ -30,8 +30,10 @@ class GPUScheduler:
         worker_function,
     ):
         """
-        Parallel execution is allowed only for jobs
-        explicitly marked independent.
+        One worker thread per physical GPU.
+
+        Each GPU owns at most one active scene at a time.
+        Shots inside a scene remain sequential in ProductionRunner.
         """
 
         queue = deque(jobs)
@@ -41,19 +43,18 @@ class GPUScheduler:
         results = []
         failures = []
 
-        def worker(gpu_id):
-
+        def worker(
+            gpu_id,
+        ):
             while True:
 
                 with queue_lock:
-
                     if not queue:
                         return
 
                     job = queue.popleft()
 
                 try:
-
                     result = worker_function(
                         gpu_id,
                         job,
@@ -80,6 +81,7 @@ class GPUScheduler:
                 target=worker,
                 args=(gpu_id,),
                 name=f"h3-gpu-{gpu_id}",
+                daemon=True,
             )
             for gpu_id in self.gpu_ids
         ]
@@ -91,7 +93,6 @@ class GPUScheduler:
             thread.join()
 
         if failures:
-
             messages = "\n".join(
                 f"GPU {gpu}: {error}"
                 for gpu, _job, error
@@ -101,32 +102,6 @@ class GPUScheduler:
             raise RuntimeError(
                 "GPU jobs failed:\n"
                 + messages
-            )
-
-        return results
-
-    def run_sequential(
-        self,
-        jobs,
-        worker_function,
-        gpu_id=None,
-    ):
-        """
-        Continuity-dependent shots/scenes must use this path.
-        """
-
-        if gpu_id is None:
-            gpu_id = self.gpu_ids[0]
-
-        results = []
-
-        for job in jobs:
-
-            results.append(
-                worker_function(
-                    gpu_id,
-                    job,
-                )
             )
 
         return results
