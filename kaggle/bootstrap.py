@@ -5,99 +5,43 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
 
-ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[1]
-)
+
+ROOT = Path(__file__).resolve().parents[1]
 
 COMFY = ROOT / "ComfyUI"
 CUSTOM = COMFY / "custom_nodes"
 MODELS = COMFY / "models"
 
-KAGGLE_INPUT = Path(
-    "/kaggle/input"
+KAGGLE_INPUT = Path("/kaggle/input")
+
+MODEL_MANIFEST = (
+    ROOT / "configs" / "model_inventory.yaml"
+)
+
+NODE_MANIFEST = (
+    ROOT / "configs" / "custom_nodes.yaml"
 )
 
 
-NODE_REPOSITORIES = {
-    "Comfyui_Minimax_h3_latent_Upscaler": {
-        "url": (
-            "https://github.com/"
-            "LBH-123-AI/"
-            "Comfyui_Minimax_h3_latent_Upscaler.git"
-        ),
-        "revision": (
-            "6a4b191e8af583b7c097f564690325f91d18c2e2"
-        ),
-    },
-    "Comfyui-MMH3-UltimateUpscale": {
-        "url": (
-            "https://github.com/"
-            "bbaudio-2025/"
-            "Comfyui-MMH3-UltimateUpscale.git"
-        ),
-        "revision": (
-            "2553ad1b66ee0956df02e9146dd78b93395f9f69"
-        ),
-    },
-    "ComfyUI-VideoHelperSuite": {
-        "url": (
-            "https://github.com/"
-            "Kosinkadink/"
-            "ComfyUI-VideoHelperSuite.git"
-        ),
-        "revision": (
-            "4ee72c065db22c9d96c2427954dc69e7b908444b"
-        ),
-    },
-}
-
-
-MODEL_FILES = {
-    "diffusion_model": (
-        "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
-        MODELS / "diffusion_models",
-    ),
-    "text_encoder": (
-        "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",
-        MODELS / "text_encoders",
-    ),
-    "turbo_lora": (
-        "minimax_h3_turbo_v4_step600_ema.safetensors",
-        MODELS / "loras",
-    ),
-    "video_vae": (
-        "minimax_h3_video_vae_fp16.safetensors",
-        MODELS / "vae",
-    ),
-    "audio_vae": (
-        "minimax_h3_audio_vae_fp32.safetensors",
-        MODELS / "vae",
-    ),
-    "latent_upscaler": (
-        "minimax_h3_latent_upscaler_3d_fp16.safetensors",
-        MODELS / "latent_upscale_models",
-    ),
-}
-
-
-def run(
-    *args: str | Path,
-) -> None:
-
+def run(*args: str | Path) -> None:
     print(
         "+",
-        " ".join(
-            str(value)
-            for value in args
-        ),
+        " ".join(str(value) for value in args),
     )
 
     subprocess.run(
         [str(value) for value in args],
         check=True,
+    )
+
+
+def load_yaml(path: Path) -> dict:
+    return yaml.safe_load(
+        path.read_text(
+            encoding="utf-8"
+        )
     )
 
 
@@ -108,7 +52,6 @@ def git_checkout(
 ) -> None:
 
     if not destination.exists():
-
         run(
             "git",
             "clone",
@@ -136,14 +79,9 @@ def git_checkout(
     )
 
 
-def find_file(
+def find_model(
     filename: str,
 ) -> Path:
-
-    if not KAGGLE_INPUT.is_dir():
-        raise RuntimeError(
-            "/kaggle/input does not exist."
-        )
 
     matches = []
 
@@ -155,15 +93,14 @@ def find_file(
         ):
             matches.append(path)
 
-    if len(matches) == 0:
+    if not matches:
         raise FileNotFoundError(
             f"Locked model not found: {filename}"
         )
 
     if len(matches) > 1:
         raise RuntimeError(
-            f"Multiple copies of locked model found: "
-            f"{filename}\n"
+            f"Multiple copies of model found: {filename}\n"
             + "\n".join(
                 str(path)
                 for path in matches
@@ -196,67 +133,64 @@ def link_model(
     except OSError:
         shutil.copy2(
             source,
-            destination,
+            destination
         )
-
-
-def install_comfy() -> None:
-
-    if not (
-        COMFY / "main.py"
-    ).is_file():
-
-        raise RuntimeError(
-            "ComfyUI is not installed. "
-            "Install/pin the required ComfyUI revision first."
-        )
-
-    run(
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "-r",
-        COMFY / "requirements.txt",
-    )
 
 
 def install_nodes() -> None:
+
+    manifest = load_yaml(
+        NODE_MANIFEST
+    )
 
     CUSTOM.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    for name, config in (
-        NODE_REPOSITORIES.items()
-    ):
+    groups = (
+        manifest["custom_nodes"]["required"],
+        manifest["custom_nodes"]["supporting"],
+    )
 
-        destination = (
-            CUSTOM / name
-        )
+    for group in groups:
+        for node in group:
 
-        git_checkout(
-            url=config["url"],
-            destination=destination,
-            revision=config["revision"],
-        )
+            destination = (
+                CUSTOM / node["name"]
+            )
+
+            git_checkout(
+                node["repository"],
+                destination,
+                node["revision"],
+            )
+
+            print(
+                f"[NODE] {node['name']} "
+                f"@ {node['revision']}"
+            )
 
 
 def install_models() -> None:
 
-    for name, (
-        filename,
-        destination_dir,
-    ) in MODEL_FILES.items():
+    manifest = load_yaml(
+        MODEL_MANIFEST
+    )
 
-        source = find_file(
+    models = manifest["models"]
+
+    for model in models.values():
+
+        filename = model["filename"]
+
+        source = find_model(
             filename
         )
 
         destination = (
-            destination_dir
+            MODELS
+            / model["directory"]
             / filename
         )
 
@@ -266,27 +200,36 @@ def install_models() -> None:
         )
 
         print(
-            f"[MODEL] {name}: {destination}"
+            f"[MODEL] {filename}"
         )
 
 
-def verify_locked_inventory() -> None:
+def verify_inventory() -> None:
+
+    manifest = load_yaml(
+        MODEL_MANIFEST
+    )
 
     expected = {
-        filename.lower()
-        for filename, _directory
-        in MODEL_FILES.values()
+        model["filename"].lower()
+        for model in manifest["models"].values()
     }
 
-    found = set()
+    actual = set()
 
-    for directory in (
-        MODELS / "diffusion_models",
-        MODELS / "text_encoders",
-        MODELS / "loras",
-        MODELS / "vae",
-        MODELS / "latent_upscale_models",
-    ):
+    model_dirs = {
+        "diffusion_models",
+        "text_encoders",
+        "loras",
+        "vae",
+        "latent_upscale_models",
+    }
+
+    for directory_name in model_dirs:
+
+        directory = (
+            MODELS / directory_name
+        )
 
         if not directory.is_dir():
             continue
@@ -294,33 +237,46 @@ def verify_locked_inventory() -> None:
         for path in directory.iterdir():
 
             if path.is_file():
-                found.add(
+                actual.add(
                     path.name.lower()
                 )
 
-    unexpected = sorted(
-        found - expected
+    missing = sorted(
+        expected - actual
     )
+
+    unexpected = sorted(
+        actual - expected
+    )
+
+    if missing:
+        raise RuntimeError(
+            "Missing locked production models:\n"
+            + "\n".join(missing)
+        )
 
     if unexpected:
         raise RuntimeError(
-            "Unexpected production model files "
-            "found in ComfyUI/models:\n"
-            + "\n".join(
-                unexpected
-            )
+            "Unexpected production models:\n"
+            + "\n".join(unexpected)
         )
 
 
 def main() -> None:
 
-    install_comfy()
+    if not (
+        COMFY / "main.py"
+    ).is_file():
+        raise RuntimeError(
+            "ComfyUI is missing."
+        )
+
     install_nodes()
     install_models()
-    verify_locked_inventory()
+    verify_inventory()
 
     print(
-        "MiniMax H3 production bootstrap PASSED."
+        "MiniMax H3 Kaggle bootstrap PASSED."
     )
 
 
