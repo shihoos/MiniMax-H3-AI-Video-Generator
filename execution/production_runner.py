@@ -3,12 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from execution.assembly_manager import (
+    AssemblyManager,
+)
+
 from execution.shot_executor import (
     ShotExecutor,
 )
 
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
+)
+
+from planner.config import (
+    PROFILE_BASE,
+    PROFILE_TURBO,
+    PROFILE_UPSCALE,
+    WORKFLOW_REF2V,
+    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_UPSCALE,
 )
 
 from scheduler.gpu_scheduler import (
@@ -23,7 +36,6 @@ class ProductionRunner:
         project_root: Path,
         comfy_clients: dict[int, object],
     ):
-
         self.project_root = Path(
             project_root
         )
@@ -55,16 +67,17 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        self.continuity = H3SceneContinuity(
-            self.project_root
+        self.continuity = (
+            H3SceneContinuity(
+                self.project_root
+            )
         )
 
     def _executor(
         self,
         gpu_id: int,
         scene_id: str,
-    ) -> ShotExecutor:
-
+    ):
         input_dir = (
             self.input_root
             / f"gpu_{gpu_id}"
@@ -90,24 +103,25 @@ class ProductionRunner:
             )
         ).strip()
 
-        allowed = {
-            "ref2v",
-            "turbo_ref2v",
-        }
-
-        if explicit in allowed:
+        if explicit in {
+            WORKFLOW_REF2V,
+            WORKFLOW_TURBO_REF2V,
+            WORKFLOW_UPSCALE,
+        }:
             return explicit
 
-        if profile == "turbo":
-            return "turbo_ref2v"
+        if profile == PROFILE_TURBO:
+            return WORKFLOW_TURBO_REF2V
 
-        return "ref2v"
+        if profile == PROFILE_UPSCALE:
+            return WORKFLOW_UPSCALE
+
+        return WORKFLOW_REF2V
 
     @staticmethod
     def _sort_shots(
-        shots: list[dict],
-    ) -> list[dict]:
-
+        shots,
+    ):
         return sorted(
             shots,
             key=lambda shot: int(
@@ -120,19 +134,14 @@ class ProductionRunner:
 
     def _run_scene(
         self,
-        gpu_id: int,
-        scene_id: str,
-        shots: list[dict],
-        profile: str,
+        gpu_id,
+        scene_id,
+        shots,
+        profile,
     ):
-
         executor = self._executor(
             gpu_id,
             scene_id,
-        )
-
-        ordered = self._sort_shots(
-            shots
         )
 
         output_dir = (
@@ -147,32 +156,30 @@ class ProductionRunner:
         )
 
         results = []
-
         previous_video = None
         previous_shot = None
 
-        for original_shot in ordered:
-
+        for original in self._sort_shots(
+            shots
+        ):
             shot = dict(
-                original_shot
+                original
             )
 
-            # Sequential continuity inside a scene.
             if previous_video is not None:
 
                 last_frame = (
-                    self.continuity.prepare_next_shot(
+                    self.continuity
+                    .prepare_next_shot(
                         previous_video,
                         scene_id,
-                        str(
-                            previous_shot[
-                                "shot_id"
-                            ]
-                        ),
+                        previous_shot[
+                            "shot_id"
+                        ],
                     )
                 )
 
-                existing_refs = list(
+                refs = list(
                     shot.get(
                         "reference_images",
                         [],
@@ -180,9 +187,11 @@ class ProductionRunner:
                     or []
                 )
 
-                shot["reference_images"] = [
+                shot[
+                    "reference_images"
+                ] = [
                     str(last_frame),
-                    *existing_refs,
+                    *refs,
                 ][:9]
 
             workflow_mode = (
@@ -192,14 +201,16 @@ class ProductionRunner:
                 )
             )
 
-            result = executor.execute_shot(
-                shot=shot,
-                workflow_mode=workflow_mode,
-                output_dir=output_dir,
+            result = (
+                executor.execute_shot(
+                    shot=shot,
+                    workflow_mode=workflow_mode,
+                    output_dir=output_dir,
+                )
             )
 
             results.append(
-                result
+                Path(result)
             )
 
             previous_video = Path(
@@ -230,22 +241,22 @@ class ProductionRunner:
         profile = str(
             production_plan.get(
                 "profile",
-                "base",
+                PROFILE_BASE,
             )
         ).strip().lower()
 
         if profile not in {
-            "base",
-            "turbo",
+            PROFILE_BASE,
+            PROFILE_TURBO,
+            PROFILE_UPSCALE,
         }:
             raise RuntimeError(
-                f"Unsupported production profile: {profile}"
+                f"Unsupported profile: {profile}"
             )
 
-        scenes: dict[str, list[dict]] = {}
+        scenes = {}
 
         for shot in shots:
-
             scene_id = str(
                 shot.get(
                     "scene_id",
@@ -265,13 +276,9 @@ class ProductionRunner:
                 shot
             )
 
-        scene_jobs = [
-            (
-                scene_id,
-                scenes[scene_id],
-            )
-            for scene_id in scenes
-        ]
+        scene_jobs = list(
+            scenes.items()
+        )
 
         scheduler = GPUScheduler(
             gpu_ids=sorted(
@@ -279,23 +286,22 @@ class ProductionRunner:
             )
         )
 
-        # Scenes are independent. Shots INSIDE a scene remain
-        # sequential because last-frame continuity depends on
-        # the previous shot.
-        results = scheduler.run_independent(
-            scene_jobs,
-            lambda gpu_id, job: (
-                job[0],
-                self._run_scene(
-                    gpu_id,
+        scene_results = (
+            scheduler.run_independent(
+                scene_jobs,
+                lambda gpu_id, job: (
                     job[0],
-                    job[1],
-                    profile,
+                    self._run_scene(
+                        gpu_id,
+                        job[0],
+                        job[1],
+                        profile,
+                    ),
                 ),
-            ),
+            )
         )
 
-        results.sort(
+        scene_results.sort(
             key=lambda item: min(
                 int(
                     shot.get(
@@ -309,11 +315,52 @@ class ProductionRunner:
             )
         )
 
-        flattened = []
+        videos = []
 
-        for _scene_id, videos in results:
-            flattened.extend(
-                videos
+        for _scene_id, scene_videos in (
+            scene_results
+        ):
+            videos.extend(
+                scene_videos
             )
 
-        return flattened
+        assembly_dir = (
+            self.project_root
+            / "data"
+            / "production"
+            / "final"
+        )
+
+        assembler = AssemblyManager(
+            assembly_dir
+        )
+
+        final_video = assembler.assemble(
+            videos,
+            final_name=(
+                f"h3_{profile}_final.mp4"
+            ),
+            width=(
+                int(
+                    production_plan.get(
+                        "delivery_width",
+                        1280,
+                    )
+                )
+            ),
+            height=(
+                int(
+                    production_plan.get(
+                        "delivery_height",
+                        720,
+                    )
+                )
+            ),
+            fps=24,
+        )
+
+        return {
+            "shot_outputs": videos,
+            "final_video": final_video,
+            "profile": profile,
+        }
