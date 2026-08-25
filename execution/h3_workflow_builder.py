@@ -2,20 +2,31 @@ from __future__ import annotations
 
 import copy
 import json
-import math
 from pathlib import Path
 from typing import Any
 
+from planner.config import (
+    H3_AUDIO_VAE,
+    H3_FPS,
+    H3_HEIGHT,
+    H3_MAX_REFERENCE_AUDIO,
+    H3_MAX_REFERENCE_FILES,
+    H3_MAX_REFERENCE_IMAGES,
+    H3_MAX_REFERENCE_VIDEOS,
+    H3_REF2VA_MODEL,
+    H3_REF_IMAGE_SIZE,
+    H3_TEXT_ENCODER,
+    H3_TURBO_LORA,
+    H3_VIDEO_VAE,
+    H3_LATENT_UPSCALER_3D,
+    H3_WIDTH,
+    TURBO_STEPS,
+    UPSCALE_HEIGHT,
+    UPSCALE_WIDTH,
+)
+
 
 class H3WorkflowBuilder:
-    """
-    Runtime builder for the canonical MiniMax H3 production workflows.
-
-    IMPORTANT:
-    - Production JSON files are never modified on disk.
-    - workflows/sources is reference-only.
-    - Runtime inputs are applied to an in-memory deep copy.
-    """
 
     MODES = {
         "ref2v": (
@@ -32,30 +43,6 @@ class H3WorkflowBuilder:
         ),
     }
 
-    LOCKED_DIFFUSION_MODEL = (
-        "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors"
-    )
-
-    LOCKED_TEXT_ENCODER = (
-        "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"
-    )
-
-    LOCKED_VIDEO_VAE = (
-        "minimax_h3_video_vae_fp16.safetensors"
-    )
-
-    LOCKED_AUDIO_VAE = (
-        "minimax_h3_audio_vae_fp32.safetensors"
-    )
-
-    LOCKED_TURBO_LORA = (
-        "minimax_h3_turbo_v4_step600_ema.safetensors"
-    )
-
-    LOCKED_UPSCALER = (
-        "minimax_h3_latent_upscaler_3d_fp16.safetensors"
-    )
-
     def __init__(
         self,
         project_root: Path,
@@ -63,171 +50,78 @@ class H3WorkflowBuilder:
     ):
         self.project_root = Path(project_root)
         self.client = comfy_client
-
         self.workflow_root = (
-            self.project_root
-            / "workflows"
+            self.project_root / "workflows"
         )
 
-        if not self.workflow_root.is_dir():
-            raise FileNotFoundError(
-                "Workflow directory missing:\n"
-                f"{self.workflow_root}"
-            )
-
-    # ------------------------------------------------------------------
-    # File loading
-    # ------------------------------------------------------------------
-
-    def path_for_mode(
-        self,
-        mode: str,
-    ) -> Path:
-
-        try:
-            relative_dir, filename = self.MODES[mode]
-        except KeyError as error:
-            raise ValueError(
-                f"Unknown H3 workflow mode: {mode}"
-            ) from error
-
-        path = (
-            self.workflow_root
-            / relative_dir
-            / filename
-        )
-
-        if not path.is_file():
-            raise FileNotFoundError(
-                "Canonical H3 workflow missing:\n"
-                f"{path}"
-            )
-
-        return path
-
-    def load(
-        self,
-        mode: str,
-    ) -> dict[str, Any]:
-
-        path = self.path_for_mode(mode)
-
-        try:
-            data = json.loads(
-                path.read_text(
-                    encoding="utf-8"
-                )
-            )
-        except json.JSONDecodeError as error:
-            raise RuntimeError(
-                f"Invalid workflow JSON: {path}\n"
-                f"{error}"
-            ) from error
-
-        if not isinstance(data, dict):
-            raise RuntimeError(
-                f"Workflow root must be an object: {path}"
-            )
-
-        nodes = data.get("nodes")
-
-        if not isinstance(nodes, list) or not nodes:
-            raise RuntimeError(
-                f"Workflow contains no nodes: {path}"
-            )
-
-        return copy.deepcopy(data)
-
-    # ------------------------------------------------------------------
-    # Generic graph helpers
-    # ------------------------------------------------------------------
+    # ============================================================
+    # BASIC GRAPH HELPERS
+    # ============================================================
 
     @staticmethod
     def _nodes(
-        workflow: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-
-        nodes = workflow.get("nodes", [])
-
-        if not isinstance(nodes, list):
-            raise RuntimeError(
-                "Workflow nodes must be a list."
-            )
-
-        return [
-            node
-            for node in nodes
-            if isinstance(node, dict)
-        ]
-
-    @staticmethod
-    def _node_type(
-        node: dict[str, Any],
-    ) -> str:
-
-        return str(
-            node.get("type", "")
+        workflow: dict,
+    ):
+        return workflow.get(
+            "nodes",
+            [],
         )
 
     @classmethod
     def _find(
         cls,
-        workflow: dict[str, Any],
+        workflow: dict,
         node_type: str,
-    ) -> list[dict[str, Any]]:
-
+    ):
         return [
             node
             for node in cls._nodes(workflow)
-            if cls._node_type(node) == node_type
+            if node.get("type") == node_type
         ]
 
     @classmethod
-    def _find_one(
+    def _one(
         cls,
-        workflow: dict[str, Any],
+        workflow: dict,
         node_type: str,
-    ) -> dict[str, Any]:
-
-        nodes = cls._find(
+    ):
+        found = cls._find(
             workflow,
             node_type,
         )
 
-        if len(nodes) != 1:
+        if len(found) != 1:
             raise RuntimeError(
-                f"Expected exactly one {node_type}; "
-                f"found {len(nodes)}."
+                f"Expected exactly one "
+                f"{node_type}; found {len(found)}."
             )
 
-        return nodes[0]
+        return found[0]
 
     @staticmethod
     def _widgets(
-        node: dict[str, Any],
-    ) -> list[Any]:
-
-        widgets = node.setdefault(
+        node: dict,
+    ):
+        values = node.setdefault(
             "widgets_values",
-            []
+            [],
         )
 
-        if not isinstance(widgets, list):
+        if not isinstance(values, list):
             raise RuntimeError(
-                "widgets_values must be a list for node "
-                f"{node.get('id')}"
+                f"Unsupported widgets_values format "
+                f"for node {node.get('id')}."
             )
 
-        return widgets
+        return values
 
     @classmethod
     def _set_widget(
         cls,
-        node: dict[str, Any],
+        node: dict,
         index: int,
-        value: Any,
-    ) -> None:
-
+        value,
+    ):
         widgets = cls._widgets(node)
 
         while len(widgets) <= index:
@@ -236,372 +130,917 @@ class H3WorkflowBuilder:
         widgets[index] = value
 
     @staticmethod
-    def _node_id(node: dict[str, Any]) -> int | None:
+    def _node_id(
+        node: dict,
+    ) -> int:
+        return int(node["id"])
 
-        value = node.get("id")
+    # ============================================================
+    # LOAD
+    # ============================================================
 
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+    def load(
+        self,
+        mode: str,
+    ) -> dict:
 
-    # ------------------------------------------------------------------
-    # Input setters
-    # ------------------------------------------------------------------
+        if mode not in self.MODES:
+            raise ValueError(
+                f"Unknown H3 workflow mode: {mode}"
+            )
+
+        directory, filename = self.MODES[
+            mode
+        ]
+
+        path = (
+            self.workflow_root
+            / directory
+            / filename
+        )
+
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"Missing H3 production workflow:\n{path}"
+            )
+
+        data = json.loads(
+            path.read_text(
+                encoding="utf-8",
+            )
+        )
+
+        return copy.deepcopy(data)
+
+    # ============================================================
+    # H3 FRAME GRID
+    # ============================================================
+
+    @staticmethod
+    def _legal_frames(
+        duration_seconds: float,
+    ) -> int:
+
+        seconds = float(
+            duration_seconds
+        )
+
+        if seconds < 4.0:
+            seconds = 4.0
+
+        if seconds > 15.0:
+            seconds = 15.0
+
+        requested = round(
+            seconds * H3_FPS
+        )
+
+        # H3 VAE frame grid = 17*n + 5.
+        n = max(
+            0,
+            (requested - 5 + 16) // 17,
+        )
+
+        frames = 17 * n + 5
+
+        frames = max(
+            124,
+            frames,
+        )
+
+        frames = min(
+            362,
+            frames,
+        )
+
+        return frames
+
+    # ============================================================
+    # PROMPT / SEED
+    # ============================================================
 
     def _set_prompt(
         self,
-        workflow: dict[str, Any],
+        workflow: dict,
         prompt: str,
-    ) -> None:
+    ):
+        nodes = self._find(
+            workflow,
+            "PrimitiveStringMultiline",
+        )
 
-        prompt_nodes = [
-            node
-            for node in self._nodes(workflow)
-            if self._node_type(node)
-            == "PrimitiveStringMultiline"
-        ]
-
-        if not prompt_nodes:
+        if not nodes:
             raise RuntimeError(
-                "No PrimitiveStringMultiline prompt node "
-                "exists in the H3 workflow."
+                "H3 workflow has no prompt node."
             )
 
         labelled = [
             node
-            for node in prompt_nodes
-            if "prompt"
-            in str(node.get("title", "")).lower()
-            or "prompt"
-            in str(
-                node.get("properties", {})
-                .get("Node name for S&R", "")
-            ).lower()
+            for node in nodes
+            if (
+                "prompt"
+                in str(
+                    node.get(
+                        "title",
+                        "",
+                    )
+                ).lower()
+            )
         ]
 
-        target = labelled[0] if labelled else prompt_nodes[0]
+        target = (
+            labelled[0]
+            if labelled
+            else nodes[0]
+        )
 
         self._set_widget(
             target,
             0,
-            str(prompt),
+            prompt,
         )
 
     def _set_seed(
         self,
-        workflow: dict[str, Any],
+        workflow: dict,
         seed: int,
-    ) -> None:
-
-        noise_nodes = self._find(
+    ):
+        nodes = self._find(
             workflow,
             "RandomNoise",
         )
 
-        if not noise_nodes:
+        if not nodes:
             raise RuntimeError(
-                "H3 workflow contains no RandomNoise node."
+                "H3 workflow has no RandomNoise node."
             )
 
-        for node in noise_nodes:
+        for node in nodes:
             self._set_widget(
                 node,
                 0,
                 int(seed),
             )
 
-    @staticmethod
-    def _duration_to_frames(
-        duration_seconds: float,
-    ) -> int:
+    # ============================================================
+    # 16:9
+    # ============================================================
 
-        duration = max(
-            0.25,
-            float(duration_seconds),
-        )
-
-        raw = max(
-            5,
-            round(duration * 24),
-        )
-
-        # Match the workflow's frame alignment rule.
-        aligned = (
-            raw
-            + (
-                5
-                - (raw % 17)
-            ) % 17
-        )
-
-        return max(5, aligned)
-
-    def _set_dimensions(
+    def _set_resolution(
         self,
-        workflow: dict[str, Any],
-        width: int | None,
-        height: int | None,
-    ) -> None:
-    
-        if width is None or height is None:
-            return
-    
-        width = int(width)
-        height = int(height)
-    
-        if width <= 0 or height <= 0:
+        workflow: dict,
+        width: int,
+        height: int,
+    ):
+        ratio = (
+            float(width)
+            / float(height)
+        )
+
+        if abs(
+            ratio - (16.0 / 9.0)
+        ) > 0.03:
             raise ValueError(
-                "Workflow dimensions must be positive."
+                "MiniMax H3 production is locked "
+                "to 16:9 in this repository."
             )
-    
-        selector = self._find(
+
+        selectors = self._find(
             workflow,
             "ResolutionSelector",
         )
-    
-        if len(selector) != 1:
+
+        if len(selectors) != 1:
             raise RuntimeError(
-                "Expected exactly one ResolutionSelector."
+                "Expected one ResolutionSelector."
             )
-    
-        node = selector[0]
-        widgets = self._widgets(node)
-    
-        if len(widgets) < 3:
-            raise RuntimeError(
-                "ResolutionSelector widgets are malformed."
-            )
-    
-        # This production project uses the 16:9 H3 workflow.
-        # The selector calculates dimensions from megapixels
-        # and rounds to the configured multiple.
-        ratio = width / height
-    
-        target_ratio = 16 / 9
-    
-        if abs(ratio - target_ratio) > 0.03:
-            raise ValueError(
-                "The current production H3 workflow is locked "
-                "to approximately 16:9. Requested dimensions: "
-                f"{width}x{height}"
-            )
-    
+
+        selector = selectors[0]
+
+        widgets = self._widgets(
+            selector
+        )
+
+        while len(widgets) < 3:
+            widgets.append(None)
+
         widgets[0] = "16:9 (Widescreen)"
-    
-        # Area in megapixels.
         widgets[1] = (
             (width * height)
             / 1_000_000
         )
-    
         widgets[2] = 32
-    
-        named = node.get(
-            "widgets_values_named"
+
+        named = selector.get(
+            "widgets_values_named",
         )
-    
-        if isinstance(named, dict):
-            named["aspect_ratio"] = (
-                "16:9 (Widescreen)"
+
+        if isinstance(
+            named,
+            dict,
+        ):
+            named[
+                "aspect_ratio"
+            ] = "16:9 (Widescreen)"
+            named[
+                "megapixels"
+            ] = widgets[1]
+            named[
+                "multiple"
+            ] = 32
+
+    # ============================================================
+    # LINKED DURATION
+    # ============================================================
+
+    def _set_linked_expression_value(
+        self,
+        workflow: dict,
+        target_node_id: int,
+        target_slot: int,
+        value: int,
+    ):
+        links = workflow.get(
+            "links",
+            [],
+        )
+
+        for link in links:
+
+            if not isinstance(
+                link,
+                list,
+            ) or len(link) < 5:
+                continue
+
+            try:
+                source_id = int(
+                    link[1]
+                )
+                destination_id = int(
+                    link[3]
+                )
+                destination_slot = int(
+                    link[4]
+                )
+            except (
+                TypeError,
+                ValueError,
+            ):
+                continue
+
+            if (
+                destination_id != target_node_id
+                or destination_slot != target_slot
+            ):
+                continue
+
+            source = next(
+                (
+                    node
+                    for node in self._nodes(
+                        workflow
+                    )
+                    if self._node_id(node)
+                    == source_id
+                ),
+                None,
             )
-            named["megapixels"] = widgets[1]
-            named["multiple"] = 32
+
+            if source is None:
+                continue
+
+            if source.get(
+                "type"
+            ) == "ComfyMathExpression":
+
+                widgets = self._widgets(
+                    source
+                )
+
+                if widgets:
+                    widgets[0] = str(
+                        int(value)
+                    )
+
+                    return True
+
+        return False
 
     def _set_duration(
         self,
-        workflow: dict[str, Any],
-        duration_seconds: float | None,
-    ) -> None:
-
-        if duration_seconds is None:
-            return
-
-        frames = self._duration_to_frames(
+        workflow: dict,
+        duration_seconds: float,
+    ):
+        frames = self._legal_frames(
             duration_seconds
         )
 
-        reference_nodes = self._find(
+        ref_node = self._one(
             workflow,
             "MiniMaxH3ReferenceToVideo",
         )
 
-        if len(reference_nodes) != 1:
-            raise RuntimeError(
-                "Expected exactly one "
-                "MiniMaxH3ReferenceToVideo node."
-            )
+        ref_id = self._node_id(
+            ref_node
+        )
 
-        node = reference_nodes[0]
-
-        # Current H3 ReferenceToVideo layout:
-        # [prompt, width, height, length, ref_image_size]
-        self._set_widget(
-            node,
-            3,
+        # Current H3 production workflow:
+        # length is target input 12.
+        if not self._set_linked_expression_value(
+            workflow,
+            ref_id,
+            12,
             frames,
-        )
+        ):
+            # Keep the widget fallback coherent.
+            self._set_widget(
+                ref_node,
+                3,
+                frames,
+            )
 
-        named = node.get("widgets_values_named")
+    # ============================================================
+    # ULTIMATE UPSCALE TARGET
+    # ============================================================
 
-        if isinstance(named, dict):
-            named["length"] = frames
-
-    # ------------------------------------------------------------------
-    # Reference image injection
-    # ------------------------------------------------------------------
-
-    def _reference_loaders(
+    def _set_upscale_target(
         self,
-        workflow: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-
-        reference_nodes = self._find(
+        workflow: dict,
+        width: int,
+        height: int,
+    ):
+        params = self._find(
             workflow,
-            "MiniMaxH3ReferenceToVideo",
+            "MMH3LatentUpscaleWithModelParams",
         )
 
-        if len(reference_nodes) != 1:
+        if len(params) != 1:
             raise RuntimeError(
-                "Expected exactly one "
-                "MiniMaxH3ReferenceToVideo node."
+                "Expected one "
+                "MMH3LatentUpscaleWithModelParams."
             )
 
-        ref_node = reference_nodes[0]
-        ref_id = self._node_id(ref_node)
+        param = params[0]
 
-        if ref_id is None:
-            raise RuntimeError(
-                "MiniMaxH3ReferenceToVideo node has no valid id."
+        input_links = {
+            item.get("name"): item.get("link")
+            for item in param.get(
+                "inputs",
+                [],
+            )
+        }
+
+        for name, value in (
+            ("width", width),
+            ("height", height),
+        ):
+            link_id = input_links.get(
+                name
             )
 
-        links = workflow.get("links", [])
+            if link_id is None:
+                continue
 
-        if not isinstance(links, list):
-            raise RuntimeError(
-                "Workflow links must be a list."
+            link = next(
+                (
+                    row
+                    for row in workflow.get(
+                        "links",
+                        [],
+                    )
+                    if (
+                        isinstance(row, list)
+                        and row
+                        and row[0] == link_id
+                    )
+                ),
+                None,
             )
 
-        source_ids: set[int] = set()
-
-        # ComfyUI link format:
-        # [link_id, source_node_id, source_slot,
-        #  target_node_id, target_slot, type]
-        for link in links:
-            if not isinstance(link, list) or len(link) < 5:
+            if link is None:
                 continue
 
-            source_id = link[1]
-            target_id = link[3]
-            target_slot = link[4]
-
-            try:
-                source_id = int(source_id)
-                target_id = int(target_id)
-                target_slot = int(target_slot)
-            except (TypeError, ValueError):
-                continue
-
-            if target_id != ref_id:
-                continue
-
-            # In MiniMaxH3ReferenceToVideo, ref_image_0 starts at
-            # target slot 3, followed by ref_image_1, etc.
-            if target_slot < 3:
-                continue
-
-            if target_slot > 11:
-                continue
-
-            source_ids.add(source_id)
-
-        loaders = [
-            node
-            for node in self._find(
-                workflow,
-                "LoadImage",
+            source_id = int(
+                link[1]
             )
-            if self._node_id(node) in source_ids
-        ]
 
-        loaders.sort(
-            key=lambda node: self._node_id(node) or 0
+            source = next(
+                (
+                    node
+                    for node in self._nodes(
+                        workflow
+                    )
+                    if self._node_id(node)
+                    == source_id
+                ),
+                None,
+            )
+
+            if (
+                source is not None
+                and source.get("type")
+                == "ComfyMathExpression"
+            ):
+                widgets = self._widgets(
+                    source
+                )
+
+                if widgets:
+                    widgets[0] = str(
+                        int(value)
+                    )
+
+        # Keep widget fallback coherent.
+        widgets = self._widgets(
+            param
         )
 
-        return loaders
+        if len(widgets) >= 3:
+            widgets[1] = int(width)
+            widgets[2] = int(height)
 
-    def _set_reference_images(
+    # ============================================================
+    # MEDIA GRAPH HELPERS
+    # ============================================================
+
+    def _next_id(
         self,
-        workflow: dict[str, Any],
-        reference_images: list[str],
-    ) -> None:
-
-        references = [
-            str(path)
-            for path in (
-                reference_images or []
+        workflow: dict,
+    ) -> int:
+        value = int(
+            workflow.get(
+                "last_node_id",
+                0,
             )
-            if str(path).strip()
-        ][:9]
+        ) + 1
 
-        if not references:
-            return
+        workflow[
+            "last_node_id"
+        ] = value
 
-        loaders = self._reference_loaders(
+        return value
+
+    def _next_link_id(
+        self,
+        workflow: dict,
+    ) -> int:
+        value = int(
+            workflow.get(
+                "last_link_id",
+                0,
+            )
+        ) + 1
+
+        workflow[
+            "last_link_id"
+        ] = value
+
+        return value
+
+    def _append_input(
+        self,
+        node: dict,
+        name: str,
+        type_name: str,
+    ) -> int:
+
+        inputs = node.setdefault(
+            "inputs",
+            [],
+        )
+
+        for index, item in enumerate(
+            inputs
+        ):
+            if item.get(
+                "name"
+            ) == name:
+                return index
+
+        inputs.append(
+            {
+                "name": name,
+                "type": type_name,
+                "link": None,
+            }
+        )
+
+        return len(inputs) - 1
+
+    def _add_load_image(
+        self,
+        workflow: dict,
+        filename: str,
+    ) -> tuple[int, int]:
+
+        node_id = self._next_id(
             workflow
         )
 
-        if len(loaders) < len(references):
-            raise RuntimeError(
-                "Workflow does not expose enough reference-image "
-                "LoadImage nodes.\n"
-                f"Needed: {len(references)}\n"
-                f"Available: {len(loaders)}"
+        node = {
+            "id": node_id,
+            "type": "LoadImage",
+            "pos": [
+                -2200,
+                6500 + node_id * 20,
+            ],
+            "size": [
+                360,
+                320,
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "IMAGE",
+                    "type": "IMAGE",
+                    "links": [],
+                },
+                {
+                    "name": "MASK",
+                    "type": "MASK",
+                    "links": None,
+                },
+            ],
+            "properties": {
+                "cnr_id": "comfy-core",
+                "ver": "0.33.0",
+            },
+            "widgets_values": [
+                filename,
+                "image",
+            ],
+        }
+
+        workflow[
+            "nodes"
+        ].append(node)
+
+        return (
+            node_id,
+            0,
+        )
+
+    def _add_load_video(
+        self,
+        workflow: dict,
+        filename: str,
+    ) -> tuple[int, int, int]:
+
+        node_id = self._next_id(
+            workflow
+        )
+
+        node = {
+            "id": node_id,
+            "type": "VHS_LoadVideoPath",
+            "pos": [
+                -2200,
+                6500 + node_id * 20,
+            ],
+            "size": [
+                400,
+                500,
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "IMAGE",
+                    "type": "IMAGE",
+                    "links": [],
+                },
+                {
+                    "name": "frame_count",
+                    "type": "INT",
+                    "links": None,
+                },
+                {
+                    "name": "audio",
+                    "type": "AUDIO",
+                    "links": [],
+                },
+                {
+                    "name": "video_info",
+                    "type": "VHS_VIDEOINFO",
+                    "links": None,
+                },
+            ],
+            "properties": {
+                "Node name for S&R":
+                    "VHS_LoadVideoPath",
+            },
+            "widgets_values": {
+                "video": filename,
+                "force_rate": 24,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+            },
+        }
+
+        workflow[
+            "nodes"
+        ].append(node)
+
+        return (
+            node_id,
+            0,
+            2,
+        )
+
+    def _add_load_audio(
+        self,
+        workflow: dict,
+        filename: str,
+    ) -> tuple[int, int]:
+
+        node_id = self._next_id(
+            workflow
+        )
+
+        node = {
+            "id": node_id,
+            "type": "VHS_LoadAudio",
+            "pos": [
+                -2200,
+                6500 + node_id * 20,
+            ],
+            "size": [
+                400,
+                300,
+            ],
+            "flags": {},
+            "order": 0,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [
+                {
+                    "name": "audio",
+                    "type": "AUDIO",
+                    "links": [],
+                }
+            ],
+            "properties": {
+                "Node name for S&R":
+                    "VHS_LoadAudio",
+            },
+            "widgets_values": {
+                "audio_file": filename,
+                "seek_seconds": 0,
+            },
+        }
+
+        workflow[
+            "nodes"
+        ].append(node)
+
+        return (
+            node_id,
+            0,
+        )
+
+    def _connect(
+        self,
+        workflow: dict,
+        source_id: int,
+        source_slot: int,
+        target_id: int,
+        target_slot: int,
+        type_name: str,
+    ):
+        link_id = self._next_link_id(
+            workflow
+        )
+
+        workflow.setdefault(
+            "links",
+            [],
+        ).append(
+            [
+                link_id,
+                source_id,
+                source_slot,
+                target_id,
+                target_slot,
+                type_name,
+            ]
+        )
+
+        source = next(
+            node
+            for node in self._nodes(
+                workflow
+            )
+            if self._node_id(node)
+            == source_id
+        )
+
+        outputs = source.get(
+            "outputs",
+            [],
+        )
+
+        if (
+            0 <= source_slot
+            < len(outputs)
+        ):
+            links = outputs[
+                source_slot
+            ].setdefault(
+                "links",
+                [],
             )
 
-        for index, source in enumerate(
-            references
-        ):
-
-            node = loaders[index]
-            widgets = self._widgets(node)
-
-            if not widgets:
-                raise RuntimeError(
-                    f"LoadImage node {node.get('id')} "
-                    "has no filename widget."
+            if links is not None:
+                links.append(
+                    link_id
                 )
 
-            self._set_widget(
-                node,
-                0,
-                source,
-            )
+        return link_id
 
-            self._set_widget(
-                node,
-                1,
-                "image",
-            )
-
-            named = node.get(
-                "widgets_values_named"
-            )
-
-            if isinstance(named, dict):
-                named["image"] = source
-                named["upload"] = "image"
-
-    # ------------------------------------------------------------------
-    # Model validation
-    # ------------------------------------------------------------------
-
-    def _validate_locked_models(
+    def _connect_media(
         self,
-        workflow: dict[str, Any],
-        mode: str,
-    ) -> None:
+        workflow: dict,
+        reference_images: list[str],
+        reference_videos: list[str],
+        reference_audio: list[str],
+    ):
+        if (
+            len(reference_images)
+            + len(reference_videos)
+            + len(reference_audio)
+            > H3_MAX_REFERENCE_FILES
+        ):
+            raise ValueError(
+                "H3 allows at most 12 total references."
+            )
 
+        if len(reference_images) > H3_MAX_REFERENCE_IMAGES:
+            raise ValueError(
+                "H3 allows at most 9 image references."
+            )
+
+        if len(reference_videos) > H3_MAX_REFERENCE_VIDEOS:
+            raise ValueError(
+                "H3 allows at most 3 video references."
+            )
+
+        if len(reference_audio) > H3_MAX_REFERENCE_AUDIO:
+            raise ValueError(
+                "H3 allows at most 3 audio references."
+            )
+
+        ref_node = self._one(
+            workflow,
+            "MiniMaxH3ReferenceToVideo",
+        )
+
+        ref_id = self._node_id(
+            ref_node
+        )
+
+        # Images
+        for index, filename in enumerate(
+            reference_images
+        ):
+            node_id, output_slot = (
+                self._add_load_image(
+                    workflow,
+                    filename,
+                )
+            )
+
+            target_slot = self._append_input(
+                ref_node,
+                f"ref_images.ref_image_{index}",
+                "IMAGE",
+            )
+
+            link_id = self._connect(
+                workflow,
+                node_id,
+                output_slot,
+                ref_id,
+                target_slot,
+                "IMAGE",
+            )
+
+            ref_node[
+                "inputs"
+            ][target_slot][
+                "link"
+            ] = link_id
+
+        # Videos + paired audio.
+        for index, filename in enumerate(
+            reference_videos
+        ):
+            (
+                node_id,
+                image_slot,
+                audio_slot,
+            ) = self._add_load_video(
+                workflow,
+                filename,
+            )
+
+            video_slot = self._append_input(
+                ref_node,
+                f"ref_videos.ref_video_{index}",
+                "IMAGE",
+            )
+
+            video_link = self._connect(
+                workflow,
+                node_id,
+                image_slot,
+                ref_id,
+                video_slot,
+                "IMAGE",
+            )
+
+            ref_node[
+                "inputs"
+            ][video_slot][
+                "link"
+            ] = video_link
+
+            audio_input = self._append_input(
+                ref_node,
+                f"ref_video_audios.ref_video_audio_{index}",
+                "AUDIO",
+            )
+
+            audio_link = self._connect(
+                workflow,
+                node_id,
+                audio_slot,
+                ref_id,
+                audio_input,
+                "AUDIO",
+            )
+
+            ref_node[
+                "inputs"
+            ][audio_input][
+                "link"
+            ] = audio_link
+
+        # Standalone audio.
+        for index, filename in enumerate(
+            reference_audio
+        ):
+            node_id, output_slot = (
+                self._add_load_audio(
+                    workflow,
+                    filename,
+                )
+            )
+
+            audio_slot = self._append_input(
+                ref_node,
+                f"ref_audios.ref_audio_{index}",
+                "AUDIO",
+            )
+
+            audio_link = self._connect(
+                workflow,
+                node_id,
+                output_slot,
+                ref_id,
+                audio_slot,
+                "AUDIO",
+            )
+
+            ref_node[
+                "inputs"
+            ][audio_slot][
+                "link"
+            ] = audio_link
+
+        return (
+            len(reference_images),
+            len(reference_videos),
+            len(reference_audio),
+        )
+
+    # ============================================================
+    # VALIDATION
+    # ============================================================
+
+    def _validate_models(
+        self,
+        workflow: dict,
+        mode: str,
+    ):
         unets = self._find(
             workflow,
             "UNETLoader",
@@ -609,22 +1048,20 @@ class H3WorkflowBuilder:
 
         if len(unets) != 1:
             raise RuntimeError(
-                f"{mode}: expected exactly one UNETLoader."
+                f"{mode}: invalid UNETLoader count."
             )
 
-        diffusion = self._widgets(
+        unet_widgets = self._widgets(
             unets[0]
         )
 
-        if not diffusion:
+        if (
+            not unet_widgets
+            or unet_widgets[0]
+            != H3_REF2VA_MODEL
+        ):
             raise RuntimeError(
-                f"{mode}: UNETLoader has no model value."
-            )
-
-        if diffusion[0] != self.LOCKED_DIFFUSION_MODEL:
-            raise RuntimeError(
-                f"{mode}: unexpected diffusion model:\n"
-                f"{diffusion[0]}"
+                f"{mode}: wrong Ref2VA model."
             )
 
         clips = self._find(
@@ -634,285 +1071,210 @@ class H3WorkflowBuilder:
 
         if len(clips) != 1:
             raise RuntimeError(
-                f"{mode}: expected exactly one CLIPLoader."
+                f"{mode}: invalid CLIPLoader count."
             )
 
-        clip = self._widgets(
+        clip_widgets = self._widgets(
             clips[0]
         )
 
-        if not clip:
+        if (
+            not clip_widgets
+            or clip_widgets[0]
+            != H3_TEXT_ENCODER
+        ):
             raise RuntimeError(
-                f"{mode}: CLIPLoader has no model value."
+                f"{mode}: wrong Qwen3-VL encoder."
             )
 
-        if clip[0] != self.LOCKED_TEXT_ENCODER:
-            raise RuntimeError(
-                f"{mode}: unexpected text encoder:\n"
-                f"{clip[0]}"
-            )
-
-        vaes = self._find(
-            workflow,
-            "VAELoader",
-        )
-
-        values = [
+        vae_values = [
             self._widgets(node)[0]
-            for node in vaes
+            for node in self._find(
+                workflow,
+                "VAELoader",
+            )
             if self._widgets(node)
         ]
 
-        if self.LOCKED_VIDEO_VAE not in values:
+        if H3_VIDEO_VAE not in vae_values:
             raise RuntimeError(
-                f"{mode}: missing locked video VAE."
+                f"{mode}: video VAE missing."
             )
 
-        if self.LOCKED_AUDIO_VAE not in values:
+        if H3_AUDIO_VAE not in vae_values:
             raise RuntimeError(
-                f"{mode}: missing locked audio VAE."
+                f"{mode}: audio VAE missing."
             )
 
-    def _validate_ref2v(
+    def _validate_mode(
         self,
-        workflow: dict[str, Any],
-    ) -> None:
+        workflow: dict,
+        mode: str,
+    ):
+        self._validate_models(
+            workflow,
+            mode,
+        )
 
-        required = [
-            "UNETLoader",
-            "CLIPLoader",
-            "MiniMaxH3ReferenceToVideo",
-            "BasicGuider",
-            "BasicScheduler",
-            "SamplerCustomAdvanced",
-            "VAEDecode",
-            "VAEDecodeAudio",
-            "CreateVideo",
-            "SaveVideo",
-        ]
-
-        for node_type in required:
-            if not self._find(
+        if mode == "turbo_ref2v":
+            lora = self._one(
                 workflow,
-                node_type,
+                "MiniMaxH3TurboLoRA",
+            )
+
+            widgets = self._widgets(
+                lora
+            )
+
+            if (
+                not widgets
+                or widgets[0]
+                != H3_TURBO_LORA
             ):
                 raise RuntimeError(
-                    f"Ref2V workflow missing node: "
-                    f"{node_type}"
+                    "Turbo is not using the "
+                    "locked Step600 LoRA."
                 )
 
-        self._validate_locked_models(
-            workflow,
-            "ref2v",
-        )
-
-    def _validate_turbo(
-        self,
-        workflow: dict[str, Any],
-    ) -> None:
-
-        self._validate_ref2v(
-            workflow
-        )
-
-        lora_nodes = self._find(
-            workflow,
-            "MiniMaxH3TurboLoRA",
-        )
-
-        sampler_nodes = self._find(
-            workflow,
-            "MiniMaxH3TurboSampler",
-        )
-
-        if len(lora_nodes) != 1:
-            raise RuntimeError(
-                "Turbo workflow must contain exactly one "
-                "MiniMaxH3TurboLoRA."
-            )
-
-        if len(sampler_nodes) != 1:
-            raise RuntimeError(
-                "Turbo workflow must contain exactly one "
-                "MiniMaxH3TurboSampler."
-            )
-
-        lora_widgets = self._widgets(
-            lora_nodes[0]
-        )
-
-        if not lora_widgets:
-            raise RuntimeError(
-                "Turbo LoRA node has no widgets."
-            )
-
-        if (
-            lora_widgets[0]
-            != self.LOCKED_TURBO_LORA
-        ):
-            raise RuntimeError(
-                "Turbo workflow is not using the locked "
-                f"Step600 LoRA:\n{lora_widgets[0]}"
-            )
-
-        scheduler = self._find_one(
-            workflow,
-            "BasicScheduler",
-        )
-
-        scheduler_widgets = self._widgets(
-            scheduler
-        )
-
-        if len(scheduler_widgets) < 3:
-            raise RuntimeError(
-                "Turbo scheduler is malformed."
-            )
-
-        scheduler_widgets[1] = 8
-        scheduler_widgets[2] = 1
-
-    def _validate_upscale(
-        self,
-        workflow: dict[str, Any],
-    ) -> None:
-
-        required = [
-            "MMH3LatentUpscaleWithModelParams",
-            "MMH3TemporalSplitParams",
-            "MMH3SpatialSplitParams",
-            "MMH3UltimateUpscale",
-        ]
-
-        for node_type in required:
-            if not self._find(
+        elif mode == "upscale":
+            node = self._one(
                 workflow,
-                node_type,
+                "MMH3LatentUpscaleWithModelParams",
+            )
+
+            widgets = self._widgets(
+                node
+            )
+
+            if (
+                not widgets
+                or widgets[0]
+                != H3_LATENT_UPSCALER_3D
             ):
                 raise RuntimeError(
-                    "Upscale workflow missing node: "
-                    f"{node_type}"
+                    "Upscale workflow is not using "
+                    "the locked H3 3D upscaler."
                 )
 
-        param = self._find_one(
-            workflow,
-            "MMH3LatentUpscaleWithModelParams",
-        )
-
-        widgets = self._widgets(
-            param
-        )
-
-        if (
-            not widgets
-            or widgets[0]
-            != self.LOCKED_UPSCALER
-        ):
-            raise RuntimeError(
-                "Upscale workflow does not use the locked "
-                "3D H3 upscaler."
-            )
-
-    # ------------------------------------------------------------------
-    # Public build API
-    # ------------------------------------------------------------------
+    # ============================================================
+    # PUBLIC BUILD
+    # ============================================================
 
     def build(
         self,
         *,
         mode: str,
-        prompt: str = "",
-        seed: int = 0,
-        turbo_steps: int = 8,
+        prompt: str,
+        seed: int,
+        turbo_steps: int = TURBO_STEPS,
         reference_images: list[str] | None = None,
-        width: int | None = None,
-        height: int | None = None,
-        duration_seconds: float | None = None,
-    ) -> dict[str, Any]:
+        reference_videos: list[str] | None = None,
+        reference_audio: list[str] | None = None,
+        width: int = H3_WIDTH,
+        height: int = H3_HEIGHT,
+        duration_seconds: float = 5.2,
+    ):
+        workflow = self.load(
+            mode
+        )
 
-        workflow = self.load(mode)
+        reference_images = list(
+            reference_images or []
+        )
 
-        if mode == "ref2v":
+        reference_videos = list(
+            reference_videos or []
+        )
 
-            self._validate_ref2v(
-                workflow
-            )
+        reference_audio = list(
+            reference_audio or []
+        )
 
-            if prompt:
-                self._set_prompt(
-                    workflow,
-                    prompt,
-                )
+        self._validate_mode(
+            workflow,
+            mode,
+        )
 
-            self._set_seed(
-                workflow,
-                seed,
-            )
-
-            self._set_reference_images(
-                workflow,
-                reference_images or [],
-            )
-
-            self._set_dimensions(
-                workflow,
-                width,
-                height,
-            )
-
-            self._set_duration(
-                workflow,
-                duration_seconds,
-            )
-
-        elif mode == "turbo_ref2v":
-
+        if mode == "turbo_ref2v":
             if int(turbo_steps) != 8:
                 raise ValueError(
-                    "This production Turbo workflow is locked "
-                    "to exactly 8 steps."
+                    "Production Turbo is locked to 8 steps."
                 )
 
-            self._validate_turbo(
-                workflow
-            )
+        self._set_prompt(
+            workflow,
+            prompt,
+        )
 
-            if prompt:
-                self._set_prompt(
-                    workflow,
-                    prompt,
-                )
+        self._set_seed(
+            workflow,
+            seed,
+        )
 
-            self._set_seed(
+        self._set_resolution(
+            workflow,
+            width,
+            height,
+        )
+
+        self._set_duration(
+            workflow,
+            duration_seconds,
+        )
+
+        if mode == "upscale":
+            self._set_upscale_target(
                 workflow,
-                seed,
+                UPSCALE_WIDTH,
+                UPSCALE_HEIGHT,
             )
 
-            self._set_reference_images(
+        image_count, video_count, audio_count = (
+            self._connect_media(
                 workflow,
-                reference_images or [],
+                reference_images,
+                reference_videos,
+                reference_audio,
+            )
+        )
+
+        # Tell H3 which reference categories it must associate
+        # with the prompt. H3's Ref2VA path is multimodal and
+        # uses ordered reference tags.
+        tags = []
+
+        for index in range(
+            image_count
+        ):
+            tags.append(
+                f"<Picture {index + 1}>"
             )
 
-            self._set_dimensions(
+        for index in range(
+            video_count
+        ):
+            tags.append(
+                f"<Video {index + 1}>"
+            )
+
+        for index in range(
+            audio_count
+        ):
+            tags.append(
+                f"<Audio {index + 1}>"
+            )
+
+        if tags:
+            prompt_prefix = (
+                "REFERENCE INPUTS: "
+                + ", ".join(tags)
+                + ". Use each reference only for "
+                "the role described in the prompt.\\n\\n"
+            )
+
+            self._set_prompt(
                 workflow,
-                width,
-                height,
-            )
-
-            self._set_duration(
-                workflow,
-                duration_seconds,
-            )
-
-        elif mode == "upscale":
-
-            self._validate_upscale(
-                workflow
-            )
-
-        else:
-            raise ValueError(
-                f"Unsupported H3 workflow mode: {mode}"
+                prompt_prefix + prompt,
             )
 
         return self.client.convert_workflow(
