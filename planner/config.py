@@ -173,7 +173,7 @@ TURBO_ENABLED = (
 TURBO_STEPS = int(
     os.getenv(
         "H3_TURBO_STEPS",
-        "4",
+        "8",
     )
 )
 
