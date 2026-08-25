@@ -16,6 +16,13 @@ custom_nodes:
         - "Comfyui_Minimax_h3_latent_Upscaler"
       required: true
 
+    - name: "ComfyUI-MiniMax-H3-Turbo"
+      repository: "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git"
+      revision: "4274783a23afcfdbea3b4876cb79effd6c510785"
+      purpose: "MiniMax H3 Turbo LoRA and audio-video Turbo sampler"
+      depends_on: []
+      required: true
+
   supporting:
     - name: "ComfyUI-VideoHelperSuite"
       repository: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git"
