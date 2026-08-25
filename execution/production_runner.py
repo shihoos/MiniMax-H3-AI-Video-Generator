@@ -55,10 +55,8 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        self.continuity = (
-            H3SceneContinuity(
-                self.project_root
-            )
+        self.continuity = H3SceneContinuity(
+            self.project_root
         )
 
     def _executor(
@@ -85,25 +83,40 @@ class ProductionRunner:
         profile: str,
     ) -> str:
 
-        explicit = (
-            str(
-                shot.get(
-                    "workflow_mode",
-                    ""
-                )
-            ).strip()
-        )
+        explicit = str(
+            shot.get(
+                "workflow_mode",
+                "",
+            )
+        ).strip()
 
-        if explicit in {
+        allowed = {
             "ref2v",
             "turbo_ref2v",
-        }:
+        }
+
+        if explicit in allowed:
             return explicit
 
         if profile == "turbo":
             return "turbo_ref2v"
 
         return "ref2v"
+
+    @staticmethod
+    def _sort_shots(
+        shots: list[dict],
+    ) -> list[dict]:
+
+        return sorted(
+            shots,
+            key=lambda shot: int(
+                shot.get(
+                    "order",
+                    0,
+                )
+            ),
+        )
 
     def _run_scene(
         self,
@@ -118,15 +131,8 @@ class ProductionRunner:
             scene_id,
         )
 
-        ordered = sorted(
-            shots,
-            key=lambda shot:
-            int(
-                shot.get(
-                    "order",
-                    0,
-                )
-            ),
+        ordered = self._sort_shots(
+            shots
         )
 
         output_dir = (
@@ -145,12 +151,13 @@ class ProductionRunner:
         previous_video = None
         previous_shot = None
 
-        for shot in ordered:
+        for original_shot in ordered:
 
             shot = dict(
-                shot
+                original_shot
             )
 
+            # Sequential continuity inside a scene.
             if previous_video is not None:
 
                 last_frame = (
@@ -165,14 +172,17 @@ class ProductionRunner:
                     )
                 )
 
-                shot[
-                    "reference_images"
-                ] = [
-                    str(last_frame),
-                    *shot.get(
+                existing_refs = list(
+                    shot.get(
                         "reference_images",
                         [],
-                    ),
+                    )
+                    or []
+                )
+
+                shot["reference_images"] = [
+                    str(last_frame),
+                    *existing_refs,
                 ][:9]
 
             workflow_mode = (
@@ -222,9 +232,17 @@ class ProductionRunner:
                 "profile",
                 "base",
             )
-        )
+        ).strip().lower()
 
-        scenes = {}
+        if profile not in {
+            "base",
+            "turbo",
+        }:
+            raise RuntimeError(
+                f"Unsupported production profile: {profile}"
+            )
+
+        scenes: dict[str, list[dict]] = {}
 
         for shot in shots:
 
@@ -233,7 +251,7 @@ class ProductionRunner:
                     "scene_id",
                     "",
                 )
-            )
+            ).strip()
 
             if not scene_id:
                 raise RuntimeError(
@@ -247,9 +265,13 @@ class ProductionRunner:
                 shot
             )
 
-        scene_ids = list(
-            scenes
-        )
+        scene_jobs = [
+            (
+                scene_id,
+                scenes[scene_id],
+            )
+            for scene_id in scenes
+        ]
 
         scheduler = GPUScheduler(
             gpu_ids=sorted(
@@ -257,32 +279,24 @@ class ProductionRunner:
             )
         )
 
-        # Independent scenes may run in parallel.
-        scene_jobs = [
-            (
-                scene_id,
-                scenes[scene_id]
-            )
-            for scene_id in scene_ids
-        ]
-
+        # Scenes are independent. Shots INSIDE a scene remain
+        # sequential because last-frame continuity depends on
+        # the previous shot.
         results = scheduler.run_independent(
             scene_jobs,
-            lambda gpu_id, job:
-                (
+            lambda gpu_id, job: (
+                job[0],
+                self._run_scene(
+                    gpu_id,
                     job[0],
-                    self._run_scene(
-                        gpu_id,
-                        job[0],
-                        job[1],
-                        profile,
-                    ),
+                    job[1],
+                    profile,
                 ),
+            ),
         )
 
         results.sort(
-            key=lambda item:
-            min(
+            key=lambda item: min(
                 int(
                     shot.get(
                         "order",
@@ -295,10 +309,11 @@ class ProductionRunner:
             )
         )
 
-        return [
-            video
-            for _scene, videos
-            in results
-            for video
-            in videos
-        ]
+        flattened = []
+
+        for _scene_id, videos in results:
+            flattened.extend(
+                videos
+            )
+
+        return flattened
