@@ -1,224 +1,172 @@
 from __future__ import annotations
 
-import gc
-
-import torch
-
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-)
+import json
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from planner.config import (
-    QWEN_KAGGLE_PATH,
-    QWEN_LOCAL_PATH,
-    QWEN_MODEL_ID,
-    QWEN_MAX_NEW_TOKENS,
-    QWEN_STORY_TEMPERATURE,
-    QWEN_TOP_P,
+    PLANNER_API_BASE_URL,
+    PLANNER_API_KEY,
+    PLANNER_MAX_NEW_TOKENS,
+    PLANNER_MODEL,
+    PLANNER_TEMPERATURE,
+    PLANNER_TOP_P,
 )
 
 
 class QwenStoryModel:
+    """
+    Compatibility wrapper retained for existing planner modules.
+
+    IMPORTANT:
+    The locked Qwen3-VL-32B H3 .safetensors file is an H3 encoder,
+    not a standalone causal text-generation checkpoint.
+
+    Therefore story/scene/shot planning is delegated to an
+    OpenAI-compatible text-generation endpoint.
+
+    This keeps the six-model production dataset unchanged.
+    """
 
     def __init__(
         self,
-        model_id: str = QWEN_MODEL_ID,
+        model_id: str | None = None,
     ):
-        self.model_id = model_id
-        self.model = None
-        self.tokenizer = None
-
-        self.model_path = (
-            self._resolve_model_path()
-        )
-
-    def _resolve_model_path(self):
-        required = (
-            "config.json",
-            "model.safetensors.index.json",
-        )
-
-        roots = (
-            QWEN_KAGGLE_PATH,
-            QWEN_LOCAL_PATH,
-        )
-
-        for root in roots:
-            if not root.is_dir():
-                continue
-
-            if all(
-                (
-                    root / filename
-                ).is_file()
-                for filename in required
-            ):
-                return root
-
-            for config in root.rglob(
-                "config.json"
-            ):
-                candidate = config.parent
-
-                if (
-                    candidate
-                    / "model.safetensors.index.json"
-                ).is_file():
-                    return candidate
-
-        raise FileNotFoundError(
-            "Qwen planner model was not found."
+        self.model_id = (
+            model_id
+            or PLANNER_MODEL
         )
 
     def load(self):
-        if self.model is not None:
-            return
+        self._validate_configuration()
 
-        self.tokenizer = (
-            AutoTokenizer.from_pretrained(
-                self.model_path,
-                local_files_only=True,
-            )
-        )
-
-        self.model = (
-            AutoModelForCausalLM
-            .from_pretrained(
-                self.model_path,
-                torch_dtype="auto",
-                device_map="auto",
-                local_files_only=True,
-            )
-        )
-
-        self.model.eval()
-
-    def _input_device(self):
-        # Avoid assuming the first parameter device when
-        # Accelerate has sharded/offloaded the model.
-        try:
-            embeddings = (
-                self.model.get_input_embeddings()
+    def _validate_configuration(self):
+        if not PLANNER_API_BASE_URL:
+            raise RuntimeError(
+                "PLANNER_API_BASE_URL is not configured. "
+                "The locked MiniMax H3 Qwen3-VL-32B file is an "
+                "H3 text encoder, not a standalone story-generation "
+                "model. Configure an OpenAI-compatible planner endpoint."
             )
 
-            if embeddings is not None:
-                return (
-                    embeddings.weight.device
-                )
-        except Exception:
-            pass
-
-        return next(
-            self.model.parameters()
-        ).device
+        if not self.model_id:
+            raise RuntimeError(
+                "PLANNER_MODEL is not configured."
+            )
 
     def generate(
         self,
         messages: list,
-        max_new_tokens: int = (
-            QWEN_MAX_NEW_TOKENS
-        ),
-        temperature: float = (
-            QWEN_STORY_TEMPERATURE
-        ),
-        top_p: float = QWEN_TOP_P,
+        max_new_tokens: int = PLANNER_MAX_NEW_TOKENS,
+        temperature: float = PLANNER_TEMPERATURE,
+        top_p: float = PLANNER_TOP_P,
     ) -> str:
 
-        if self.model is None:
-            self.load()
+        self._validate_configuration()
 
-        prompt = (
-            self.tokenizer
-            .apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        )
-
-        inputs = self.tokenizer(
-            [prompt],
-            return_tensors="pt",
-        )
-
-        device = self._input_device()
-
-        inputs = {
-            key: value.to(device)
-            for key, value
-            in inputs.items()
-        }
-
-        kwargs = {
-            **inputs,
-            "max_new_tokens": int(
+        payload = {
+            "model": self.model_id,
+            "messages": messages,
+            "max_tokens": int(
                 max_new_tokens
+            ),
+            "temperature": float(
+                temperature
+            ),
+            "top_p": float(
+                top_p
             ),
         }
 
-        if temperature <= 0:
-            kwargs["do_sample"] = False
-        else:
-            kwargs.update(
-                {
-                    "do_sample": True,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                }
+        data = json.dumps(
+            payload,
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        if PLANNER_API_KEY:
+            headers["Authorization"] = (
+                f"Bearer {PLANNER_API_KEY}"
             )
 
-        with torch.inference_mode():
-            output = (
-                self.model.generate(
-                    **kwargs
-                )
-            )
-
-        generated = output[
-            :,
-            inputs[
-                "input_ids"
-            ].shape[1]:,
-        ]
-
-        result = (
-            self.tokenizer
-            .batch_decode(
-                generated,
-                skip_special_tokens=True,
-            )[0]
-            .strip()
+        request = Request(
+            (
+                PLANNER_API_BASE_URL
+                + "/chat/completions"
+            ),
+            method="POST",
+            data=data,
+            headers=headers,
         )
 
-        if not result:
+        try:
+            with urlopen(
+                request,
+                timeout=600,
+            ) as response:
+
+                body = response.read()
+
+        except HTTPError as error:
+            message = (
+                error.read()
+                .decode(
+                    "utf-8",
+                    errors="replace",
+                )
+            )
             raise RuntimeError(
-                "Qwen returned empty output."
+                f"Planner API HTTP {error.code}: "
+                f"{message}"
+            ) from error
+
+        except URLError as error:
+            raise RuntimeError(
+                f"Planner API connection failed: "
+                f"{error}"
+            ) from error
+
+        try:
+            result = json.loads(
+                body.decode("utf-8")
+            )
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                "Planner API returned invalid JSON."
+            ) from error
+
+        try:
+            content = (
+                result["choices"][0]
+                ["message"]["content"]
+            )
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+        ) as error:
+            raise RuntimeError(
+                "Planner API response does not contain "
+                "choices[0].message.content."
+            ) from error
+
+        content = str(
+            content
+        ).strip()
+
+        if not content:
+            raise RuntimeError(
+                "Planner returned empty output."
             )
 
-        return result
+        return content
 
     def unload(self):
-        if self.model is not None:
-            del self.model
-            self.model = None
-
-        if self.tokenizer is not None:
-            del self.tokenizer
-            self.tokenizer = None
-
-        gc.collect()
-
-        if torch.cuda.is_available():
-            for device_id in range(
-                torch.cuda.device_count()
-            ):
-                with torch.cuda.device(
-                    device_id
-                ):
-                    torch.cuda.empty_cache()
-
-                    try:
-                        torch.cuda.ipc_collect()
-                    except Exception:
-                        pass
+        """
+        Kept for compatibility with the existing orchestration layer.
+        Remote planner clients have no local model to unload.
+        """
+        return None
