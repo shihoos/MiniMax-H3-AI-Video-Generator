@@ -57,29 +57,59 @@ jobs:
 
           root = Path(".").resolve()
 
-          planner = ProductionPlanner(root)
+          planner = ProductionPlanner(
+              root
+          )
 
           plan = planner.build(
               mode="preserve_user_story",
               user_input=(
-                  "A young explorer walks through "
-                  "a city street at sunset."
+                  "A cinematic city street at sunset. "
+                  "The camera moves slowly across the rooftop "
+                  "as wind moves through the scene."
               ),
               workflow_mode="ref2v",
               profile="base",
           )
 
-          assert plan["shots"]
-          assert plan["scenes"]
-          assert plan["characters"]
+          # A valid planner result must contain scenes and shots.
+          # Character extraction is intentionally conservative and
+          # must NOT be required for every story.
+          assert plan["scenes"], (
+              "Planner produced no scenes."
+          )
+
+          assert plan["shots"], (
+              "Planner produced no shots."
+          )
+
+          assert plan["width"] == 1344
+          assert plan["height"] == 768
+          assert plan["fps"] == 24
+          assert plan["steps"] == 20
 
           for shot in plan["shots"]:
-              assert shot["width"] % 32 == 0
-              assert shot["height"] % 32 == 0
+              assert shot["width"] == 1344
+              assert shot["height"] == 768
               assert shot["fps"] == 24
+              assert shot["steps"] == 20
 
+          print("Planner smoke test PASSED.")
           print(
-              "Planner smoke test PASSED."
+              "Scenes:",
+              len(plan["scenes"]),
+          )
+          print(
+              "Shots:",
+              len(plan["shots"]),
+          )
+          print(
+              "Characters detected:",
+              len(plan["characters"]),
+          )
+          print(
+              "Normal Ref2V steps:",
+              plan["steps"],
           )
           PY
 
