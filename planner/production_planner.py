@@ -28,6 +28,7 @@ from planner.config import (
     WORKFLOW_AUTO,
     WORKFLOW_REF2V,
     WORKFLOW_TURBO_REF2V,
+    director_enabled,
 )
 from schemas.character import Character
 from schemas.scene import Scene
@@ -45,16 +46,30 @@ class ProductionPlanner:
     Dependency-free production planner.
 
     Important architectural rule:
-    the repository uses one locked Qwen3-VL model inside the
-    MiniMax H3 ComfyUI workflow. This planner does not call an
-    external LLM, API, OpenAI service, second Qwen model, or
-    remote planner.
+
+    When the local Qwen director is enabled, Qwen is the
+    creative authority for:
+      - story development
+      - character creation
+      - scene design
+      - cinematic shot planning
+
+    This deterministic planner then acts only as the production
+    safety/reference/H3 binding layer.
+
+    When the Qwen director is disabled, this planner remains
+    available as a deterministic fallback for CI and offline
+    operation.
 
     Character creation therefore means:
-      story -> deterministic canonical character profile
-      -> identity locks -> H3 prompt
+
+        story
+          -> deterministic canonical character profile
+          -> identity locks
+          -> H3 prompt
 
     When reference media exists, it is attached.
+
     When it does not exist, the generated character profile
     becomes the canonical identity source for the production.
     """
@@ -369,31 +384,31 @@ class ProductionPlanner:
         mode: str,
         user_input: str,
     ) -> str:
-    
+
         story = self._clean_text(
             user_input
         )
-    
+
         if not story:
             raise ValueError(
                 "Story cannot be empty."
             )
-    
+
         if mode not in VALID_STORY_MODES:
             raise ValueError(
                 f"Unsupported story mode: {mode}"
             )
-    
+
         # IMPORTANT:
-        # The story itself is never rewritten here.
+        # Never inject instructions into the user's story.
         #
-        # Qwen is the story/director model and is responsible for:
+        # Qwen is responsible for:
         #   - developing AI stories
         #   - expanding supplied stories
         #   - cinematic interpretation
         #
-        # The deterministic planner must never inject words such
-        # as "Treat", "Develop", "Clarify", etc. into the story.
+        # The deterministic planner must not introduce words
+        # such as "Treat", "Develop", "Clarify", etc.
         return story
 
     # ============================================================
@@ -449,18 +464,21 @@ class ProductionPlanner:
             )
 
         return result
+
     def detect_character_descriptors(
         self,
         story: str,
     ) -> list[str]:
-    
+
         candidates = []
-    
-        # Deterministic fallback detection is intentionally limited
-        # to concrete role descriptors. Qwen is responsible for
-        # creative character creation and naming.
+
+        # Deterministic fallback detection is intentionally
+        # limited to concrete role descriptors.
+        #
+        # Qwen is responsible for creative character creation
+        # and naming during production.
         for pattern, label in self.ROLE_PATTERNS:
-    
+
             count = len(
                 re.findall(
                     pattern,
@@ -468,13 +486,13 @@ class ProductionPlanner:
                     flags=re.IGNORECASE,
                 )
             )
-    
+
             if count:
                 candidates.append(
                     label
                 )
-    
-        # Explicitly named characters can still be detected when
+
+        # Explicitly named characters are allowed only when
         # the user actually says "named X" or "called X".
         explicit_names = re.findall(
             r"\b(?:named|called)\s+"
@@ -482,44 +500,43 @@ class ProductionPlanner:
             r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
             story,
         )
-    
+
         for name in explicit_names:
-    
+
             name = name.strip()
-    
+
             if not name:
                 continue
-    
+
             if name in (
                 self.COMMON_PROPER_WORDS
             ):
                 continue
-    
+
             candidates.append(
                 name
             )
-    
+
         result = []
         seen = set()
-    
+
         for value in candidates:
-    
+
             key = value.lower()
-    
+
             if key in seen:
                 continue
-    
+
             seen.add(
                 key
             )
-    
+
             result.append(
                 value
             )
-    
+
         return result
 
-    
     @staticmethod
     def _appearance_from_story(
         name: str,
@@ -1389,6 +1406,44 @@ class ProductionPlanner:
             user_input,
         )
 
+        # When Qwen is enabled, this planner supplies only a
+        # production-safe skeleton. Qwen owns the creative plan.
+        #
+        # The deterministic implementation below remains intact
+        # as the CI/offline fallback when the director is disabled.
+        if director_enabled():
+            return {
+                "story": story,
+                "story_mode": mode,
+                "profile": profile,
+                "workflow_mode": workflow_mode,
+                "preview_ready": False,
+                "director_pending": True,
+
+                "character_count": 0,
+                "scene_count": 0,
+                "shot_count": 0,
+
+                "characters": [],
+                "scenes": [],
+                "shots": [],
+
+                "width": H3_WIDTH,
+                "height": H3_HEIGHT,
+                "fps": H3_FPS,
+                "frames_per_shot": (
+                    H3_FRAMES_PER_SHOT
+                ),
+                "normal_steps": H3_STEPS,
+                "turbo_steps": TURBO_STEPS,
+
+                "audio_policy": (
+                    "Use supplied reference audio when present; "
+                    "otherwise request native H3 audio generation "
+                    "from the shot soundscape/dialogue prompt."
+                ),
+            }
+
         characters = self.create_characters(
             story
         )
@@ -1451,6 +1506,7 @@ class ProductionPlanner:
             "profile": profile,
             "workflow_mode": workflow_mode,
             "preview_ready": True,
+            "director_pending": False,
 
             "character_count": len(
                 character_dicts
