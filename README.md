@@ -1,1 +1,1 @@
-# LTX-13B-AI-Video-Model
+# MiniMax H3 Ref2VA
