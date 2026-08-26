@@ -5,7 +5,6 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-import gradio as gr
 
 
 ROOT = (
@@ -95,10 +94,19 @@ def build_interface(
     approval_event: threading.Event,
 ):
 
+    try:
+        import gradio as gr
+    except ImportError as exc:
+        raise RuntimeError(
+            "Gradio is not installed. "
+            "Run kaggle/bootstrap.py before starting "
+            "the Gradio storyboard UI."
+        ) from exc
+
     plan = load_plan(
         plan_path
     )
-
+    
     with gr.Blocks(
         title="MiniMax H3 Storyboard",
     ) as demo:
