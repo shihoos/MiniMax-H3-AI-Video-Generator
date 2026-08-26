@@ -99,6 +99,11 @@ def save_plan(
     plan: dict,
 ) -> None:
 
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     path.write_text(
         json.dumps(
             plan,
@@ -116,18 +121,21 @@ def require_approval(
     approval = plan.get(
         "approval",
         {},
-    )
+    ) or {}
 
     if (
         approval.get(
             "status"
         )
-        != "approved"
+        not in {
+            "approved",
+            "completed",
+        }
     ):
         raise RuntimeError(
             "Storyboard has not been approved.\n"
-            "Run with --storyboard, approve it in the "
-            "browser, then continue to generation."
+            "Use --storyboard to open the Gradio UI, "
+            "or provide an approved plan with --plan."
         )
 
 
@@ -189,9 +197,8 @@ def main():
         "--storyboard",
         action="store_true",
         help=(
-            "Create the plan, launch the interactive "
-            "visual storyboard, wait for approval, "
-            "then continue to generation."
+            "Launch the canonical Gradio storyboard UI. "
+            "Approval and H3 generation are handled by the UI."
         ),
     )
 
@@ -199,6 +206,7 @@ def main():
         "--storyboard-port",
         type=int,
         default=8765,
+        help=argparse.SUPPRESS,
     )
 
     parser.add_argument(
@@ -223,9 +231,28 @@ def main():
 
     args = parser.parse_args()
 
-    from pipeline.production_orchestrator import (
-        ProductionOrchestrator,
-    )
+    # --------------------------------------------------------
+    # CANONICAL INTERACTIVE FLOW
+    # --------------------------------------------------------
+
+    if args.storyboard:
+
+        if args.plan:
+            raise RuntimeError(
+                "--storyboard is an interactive UI flow "
+                "and cannot be combined with --plan."
+            )
+
+        from ui.storyboard_gradio import (
+            serve_storyboard_gradio,
+        )
+
+        serve_storyboard_gradio(
+            initial_story=args.story,
+            initial_mode=args.mode,
+        )
+
+        return 0
 
     # --------------------------------------------------------
     # LOAD OR CREATE PLAN
@@ -237,7 +264,7 @@ def main():
 
         plan_path = Path(
             args.plan
-        )
+        ).resolve()
 
         plan = load_plan(
             plan_path
@@ -251,6 +278,10 @@ def main():
                 "--story is required unless "
                 "--plan is supplied."
             )
+
+        from pipeline.production_orchestrator import (
+            ProductionOrchestrator,
+        )
 
         orchestrator = (
             ProductionOrchestrator()
@@ -270,7 +301,7 @@ def main():
             plan[
                 "production_plan_path"
             ]
-        )
+        ).resolve()
 
         created_new_plan = True
 
@@ -301,7 +332,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # PREVIEW SUMMARY
+    # PREVIEW
     # --------------------------------------------------------
 
     preview = {
@@ -311,6 +342,9 @@ def main():
         ),
         "profile": plan.get(
             "profile"
+        ),
+        "production_id": plan.get(
+            "production_id"
         ),
         "characters": len(
             plan.get(
@@ -349,33 +383,11 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # STORYBOARD
-    # --------------------------------------------------------
-
-    if args.storyboard:
-
-        from ui.storyboard_gradio import (
-            serve_storyboard_gradio,
-        )
-
-        approved_path = (
-            serve_storyboard_gradio(
-                plan_path,
-                wait_for_approval=True,
-            )
-        )
-
-        plan = load_plan(
-            approved_path
-        )
-
-    elif args.preview:
-
+    if args.preview:
         return 0
 
     # --------------------------------------------------------
-    # GENERATION REQUIRES APPROVAL
+    # APPROVAL
     # --------------------------------------------------------
 
     require_approval(
@@ -423,6 +435,24 @@ def main():
             workers
         )
 
+        # ----------------------------------------------------
+        # Live worker validation
+        # ----------------------------------------------------
+
+        if runtime_workers is not None:
+
+            from kaggle.verify_live_runtime import (
+                check_worker,
+            )
+
+            for worker in (
+                runtime_workers.values()
+            ):
+
+                check_worker(
+                    worker["port"]
+                )
+
         from execution.production_runner import (
             ProductionRunner,
         )
@@ -442,6 +472,10 @@ def main():
                 {
                     "status":
                         "completed",
+                    "production_id":
+                        result[
+                            "production_id"
+                        ],
                     "profile":
                         plan.get(
                             "profile",
