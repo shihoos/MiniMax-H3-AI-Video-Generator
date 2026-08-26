@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import ast
-import json
 import importlib
+import json
+import sys
 from pathlib import Path
 
 
@@ -11,6 +12,22 @@ ROOT = (
     .resolve()
     .parents[1]
 )
+
+# IMPORTANT:
+# This file is executed as:
+#
+#     python scripts/validate_project.py
+#
+# In that invocation Python starts with scripts/
+# on sys.path. Add the repository root so sibling
+# packages such as planner/, execution/, pipeline/,
+# schemas/, etc. can be imported.
+if str(ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(ROOT),
+    )
+
 
 PRODUCTION_WORKFLOWS = {
     "ref2v":
@@ -126,7 +143,6 @@ def load_json(
 def node_types(
     graph: dict,
 ):
-
     return {
         str(
             node.get(
@@ -342,7 +358,9 @@ def validate_turbo():
     loras = [
         node
         for node
-        in graph["nodes"]
+        in graph[
+            "nodes"
+        ]
         if node.get(
             "type"
         )
@@ -354,11 +372,9 @@ def validate_turbo():
             "Turbo must contain exactly one Turbo LoRA node."
         )
 
-    values = (
-        loras[0].get(
-            "widgets_values",
-            [],
-        )
+    values = loras[0].get(
+        "widgets_values",
+        [],
     )
 
     if (
@@ -373,7 +389,9 @@ def validate_turbo():
     schedulers = [
         node
         for node
-        in graph["nodes"]
+        in graph[
+            "nodes"
+        ]
         if node.get(
             "type"
         )
@@ -507,10 +525,10 @@ def validate_config():
         H3_HEIGHT,
         H3_STEPS,
         H3_WIDTH,
+        H3_REF_IMAGE_SIZE,
+        TURBO_STEPS,
         UPSCALE_HEIGHT,
         UPSCALE_WIDTH,
-        TURBO_STEPS,
-        H3_REF_IMAGE_SIZE,
     )
 
     assert (
