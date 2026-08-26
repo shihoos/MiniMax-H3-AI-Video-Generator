@@ -356,26 +356,20 @@ def main():
 
     if args.storyboard:
 
-        from ui.storyboard_server import (
-            serve_storyboard,
+    from ui.storyboard_gradio import (
+        serve_storyboard_gradio,
+    )
+
+    approved_path = (
+        serve_storyboard_gradio(
+            plan_path,
+            wait_for_approval=True,
         )
+    )
 
-        approved_path = (
-            serve_storyboard(
-                plan_path,
-                host="0.0.0.0",
-                port=args.storyboard_port,
-                wait_for_approval=True,
-            )
-        )
-
-        plan = load_plan(
-            approved_path
-        )
-
-    elif args.preview:
-
-        return 0
+    plan = load_plan(
+        approved_path
+    )
 
     # --------------------------------------------------------
     # GENERATION REQUIRES APPROVAL
