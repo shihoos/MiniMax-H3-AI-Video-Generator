@@ -114,7 +114,6 @@ RUNTIME_IMPORTS = [
     "pipeline.production_orchestrator",
     "pipeline.reference_manager",
     "pipeline.identity_continuity",
-    "pipeline.h3_reference_binding",
     "pipeline.h3_scene_continuity",
     "pipeline.identity_anchor_store",
 
