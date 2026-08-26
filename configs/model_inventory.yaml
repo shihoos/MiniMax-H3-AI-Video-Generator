@@ -1,4 +1,5 @@
 models:
+
   diffusion_model:
     filename: "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors"
     directory: "diffusion_models"
@@ -9,7 +10,7 @@ models:
     filename: "qwen3vl_32b_minimax_h3_int4_convrot.safetensors"
     directory: "text_encoders"
     required: true
-    purpose: "MiniMax H3 Qwen3-VL-32B encoder"
+    purpose: "MiniMax H3 Qwen3-VL-32B multimodal conditioning encoder"
 
   turbo_lora:
     filename: "minimax_h3_turbo_v4_step600_ema.safetensors"
@@ -35,15 +36,39 @@ models:
     required: true
     purpose: "MiniMax H3 3D latent upscaler"
 
+
 policy:
+
+  # The ComfyUI production inventory remains exact.
   exact_inventory: true
+
+  # Do not allow arbitrary additional ComfyUI production models.
   allow_extra_production_models: false
+
+  # Do not allow arbitrary GGUF/Q4 model files inside
+  # ComfyUI/models.
   allow_q4_models: false
 
-  # A separate local Qwen director is allowed.
-  # It is not a ComfyUI production model and must not
-  # be placed into ComfyUI/models.
+  # The director Qwen is explicitly allowed, but it is
+  # outside the ComfyUI production model inventory.
   allow_director_qwen: true
-  director_runtime: "llama-cpp-python"
+
+  director_model:
+    filename: "Qwen3-14B-Q4_K_M.gguf"
+    runtime: "llama-cpp-python"
+    purpose: >
+      Local story writer, character planner,
+      scene planner, shot planner and cinematic director.
+    loaded_during:
+      - planning
+    unloaded_before:
+      - h3_generation
+      - upscale
+      - final_assembly
+
+  # No additional Qwen model is required.
+  # The existing H3 Qwen3-VL checkpoint remains the
+  # multimodal H3 conditioning encoder.
+  allow_additional_qwen_models: false
 
   allow_separate_upscaler_dataset: false
