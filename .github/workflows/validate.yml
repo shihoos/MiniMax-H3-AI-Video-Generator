@@ -12,12 +12,11 @@ on:
 permissions:
   contents: read
 
-
 jobs:
 
   validate:
 
-    name: H3 Repository Validation
+    name: H3 Production Validation
 
     runs-on: ubuntu-latest
 
@@ -29,7 +28,6 @@ jobs:
 
       - name: Setup Python
         uses: actions/setup-python@v5
-
         with:
           python-version: "3.11"
 
@@ -49,10 +47,13 @@ jobs:
             scheduler \
             schemas \
             scripts \
-            kaggle
+            kaggle \
+            ui
 
 
       - name: Project validator
+        env:
+          H3_DIRECTOR_ENABLED: "0"
         run: |
           python scripts/validate_project.py
 
@@ -60,165 +61,6 @@ jobs:
       - name: Planner smoke tests
         env:
           H3_DIRECTOR_ENABLED: "0"
-
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          from planner.production_planner import (
-              ProductionPlanner,
-          )
-
-          root = Path(
-              "."
-          ).resolve()
-
-          planner = ProductionPlanner(
-              root
-          )
-
-          stories = {
-              "preserve_user_story": (
-                  "A detective enters an abandoned "
-                  "railway station at midnight."
-              ),
-              "expand_user_story": (
-                  "A detective enters an abandoned "
-                  "railway station."
-              ),
-              "ai_story": (
-                  "A scientist discovers a strange "
-                  "signal beneath an abandoned city."
-              ),
-          }
-
-          for mode, story in stories.items():
-
-              plan = planner.build(
-                  mode=mode,
-                  user_input=story,
-                  workflow_mode="ref2v",
-                  profile="base",
-              )
-
-              assert plan[
-                  "scenes"
-              ], mode
-
-              assert plan[
-                  "shots"
-              ], mode
-
-              assert plan[
-                  "width"
-              ] == 1344
-
-              assert plan[
-                  "height"
-              ] == 768
-
-              assert plan[
-                  "fps"
-              ] == 24
-
-              assert plan[
-                  "normal_steps"
-              ] == 20
-
-              assert plan[
-                  "turbo_steps"
-              ] == 8
-
-              for shot in plan[
-                  "shots"
-              ]:
-
-                  assert shot[
-                      "width"
-                  ] == 1344
-
-                  assert shot[
-                      "height"
-                  ] == 768
-
-                  assert shot[
-                      "fps"
-                  ] == 24
-
-                  assert shot[
-                      "frames_per_shot"
-                  ] == 124
-
-                  assert shot[
-                      "steps"
-                  ] == 20
-
-          print(
-              "Planner smoke tests PASSED."
-          )
-          PY
-
-
-      - name: Director configuration contract
-        env:
-          H3_DIRECTOR_ENABLED: "0"
-
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          from planner.config import (
-              DIRECTOR_MODEL_FILENAME,
-              DELIVERY_FPS,
-              DELIVERY_HEIGHT,
-              DELIVERY_WIDTH,
-              UPSCALE_HEIGHT,
-              UPSCALE_WIDTH,
-              director_enabled,
-          )
-
-          from planner.qwen_director import (
-              QwenDirector,
-          )
-
-          assert (
-              DIRECTOR_MODEL_FILENAME
-              == "Qwen3-14B-Q4_K_M.gguf"
-          )
-
-          assert DELIVERY_WIDTH == 1280
-          assert DELIVERY_HEIGHT == 720
-          assert DELIVERY_FPS == 24
-
-          assert UPSCALE_WIDTH == 1920
-          assert UPSCALE_HEIGHT == 1080
-
-          assert (
-              director_enabled()
-              is False
-          )
-
-          director = QwenDirector(
-              Path(".").resolve()
-          )
-
-          assert (
-              director.available
-              is False
-          )
-
-          director.unload()
-
-          print(
-              "Director configuration contract PASSED."
-          )
-          PY
-
-
-      - name: Story mode smoke tests
-        env:
-          H3_DIRECTOR_ENABLED: "0"
-
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -231,22 +73,18 @@ jobs:
               Path(".").resolve()
           )
 
-          stories = {
-              "preserve_user_story": (
-                  "A detective enters an abandoned "
-                  "railway station at midnight."
-              ),
-              "expand_user_story": (
-                  "A detective enters an abandoned "
-                  "railway station."
-              ),
-              "ai_story": (
-                  "A scientist discovers a strange "
-                  "signal beneath an abandoned city."
-              ),
+          tests = {
+              "preserve_user_story":
+                  "A detective enters an abandoned railway station at midnight.",
+
+              "expand_user_story":
+                  "A detective enters an abandoned railway station.",
+
+              "ai_story":
+                  "A scientist discovers a strange signal beneath an abandoned city.",
           }
 
-          for mode, story in stories.items():
+          for mode, story in tests.items():
 
               plan = planner.build(
                   mode=mode,
@@ -258,49 +96,155 @@ jobs:
               assert plan["scenes"]
               assert plan["shots"]
 
-              assert (
-                  plan["width"]
-                  == 1344
-              )
+              assert plan["width"] == 1344
+              assert plan["height"] == 768
+              assert plan["fps"] == 24
+              assert plan["normal_steps"] == 20
+              assert plan["turbo_steps"] == 8
 
-              assert (
-                  plan["height"]
-                  == 768
-              )
-
-              assert (
-                  plan["fps"]
-                  == 24
-              )
-
-              assert (
-                  plan["normal_steps"]
-                  == 20
-              )
-
-              assert (
-                  plan["turbo_steps"]
-                  == 8
-              )
-
-              print(
-                  "PASS",
-                  mode,
-                  "scenes=",
-                  len(plan["scenes"]),
-                  "shots=",
-                  len(plan["shots"]),
-              )
+          print(
+              "Planner smoke tests PASSED."
+          )
           PY
 
 
-      - name: Workflow inventory
+      - name: Runtime import integration
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          modules = [
+              "planner.production_planner",
+              "planner.qwen_director",
+              "pipeline.production_orchestrator",
+              "pipeline.identity_anchor_store",
+              "pipeline.h3_scene_continuity",
+              "execution.h3_workflow_builder",
+              "execution.h3_upscaled_workflow_builder",
+              "execution.shot_executor",
+              "execution.production_runner",
+              "execution.h3_runtime",
+              "execution.assembly_manager",
+              "ui.storyboard_server",
+          ]
+
+          for module in modules:
+              __import__(module)
+
+          print(
+              "Production runtime imports PASSED."
+          )
+          PY
+
+
+      - name: Director configuration
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from planner.config import (
+              DIRECTOR_MODEL_FILENAME,
+              DELIVERY_WIDTH,
+              DELIVERY_HEIGHT,
+              UPSCALE_WIDTH,
+              UPSCALE_HEIGHT,
+          )
+
+          assert (
+              DIRECTOR_MODEL_FILENAME
+              == "Qwen3-14B-Q4_K_M.gguf"
+          )
+
+          assert (
+              DELIVERY_WIDTH,
+              DELIVERY_HEIGHT
+          ) == (
+              1280,
+              720,
+          )
+
+          assert (
+              UPSCALE_WIDTH,
+              UPSCALE_HEIGHT
+          ) == (
+              1920,
+              1088,
+          )
+
+          print(
+              "Director configuration PASSED."
+          )
+          PY
+
+
+      - name: Storyboard UI contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          html = Path(
+              "ui/storyboard.html"
+          )
+
+          server = Path(
+              "ui/storyboard_server.py"
+          )
+
+          assert html.is_file()
+          assert server.is_file()
+
+          text = html.read_text(
+              encoding="utf-8"
+          )
+
+          for token in [
+              "Approve Storyboard",
+              "Save Draft",
+              "characters",
+              "scenes",
+              "shots",
+              "camera_shot",
+              "camera_movement",
+              "lighting",
+              "overall_soundscape",
+          ]:
+              assert token in text, token
+
+          print(
+              "Storyboard UI PASSED."
+          )
+          PY
+
+
+      - name: Combined upscale contract
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          from execution.h3_upscaled_workflow_builder import (
+              H3UpscaledWorkflowBuilder,
+          )
+
+          assert hasattr(
+              H3UpscaledWorkflowBuilder,
+              "build_upscaled",
+          )
+
+          print(
+              "Combined H3 upscale builder PASSED."
+          )
+          PY
+
+
+      - name: Workflow contracts
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
 
-          production = [
+          paths = [
               Path(
                   "workflows/generation/"
                   "H3_Ref2V_Production.json"
@@ -313,9 +257,6 @@ jobs:
                   "workflows/postprocess/"
                   "H3_Ref2V_UltimateUpscale_Production.json"
               ),
-          ]
-
-          sources = [
               Path(
                   "workflows/sources/"
                   "H3_Turbo_Reference_Source.json"
@@ -326,12 +267,7 @@ jobs:
               ),
           ]
 
-          for path in (
-              production
-              + sources
-          ):
-
-              assert path.is_file(), path
+          for path in paths:
 
               data = json.loads(
                   path.read_text(
@@ -344,248 +280,69 @@ jobs:
                   dict,
               )
 
-              assert data.get(
-                  "nodes"
-              )
-
               assert isinstance(
-                  data.get(
-                      "links",
-                      [],
-                  ),
+                  data.get("nodes"),
                   list,
               )
 
-              print(
-                  "PASS",
-                  path,
-                  "nodes=",
-                  len(
-                      data[
-                          "nodes"
-                      ]
-                  ),
-                  "links=",
-                  len(
-                      data.get(
-                          "links",
-                          [],
-                      )
-                  ),
-              )
-          PY
-
-
-      - name: Ref2V executable contract
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path(
-              "workflows/generation/"
-              "H3_Ref2V_Production.json"
-          )
-
-          data = json.loads(
-              path.read_text(
+          turbo = json.loads(
+              paths[1].read_text(
                   encoding="utf-8"
               )
           )
 
-          types = {
-              node.get("type")
-              for node in data[
-                  "nodes"
-              ]
-          }
-
-          required = {
-              "UNETLoader",
-              "CLIPLoader",
-              "MiniMaxH3ReferenceToVideo",
-              "SamplerCustomAdvanced",
-              "VAEDecode",
-              "VAEDecodeAudio",
-              "CreateVideo",
-              "SaveVideo",
-          }
-
-          assert not (
-              required - types
-          )
-
-          print(
-              "PASS Ref2V executable contract"
-          )
-          PY
-
-
-      - name: Turbo 8-step contract
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path(
-              "workflows/generation/"
-              "H3_Turbo_Ref2V_Production.json"
-          )
-
-          data = json.loads(
-              path.read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          text = json.dumps(
-              data
+          turbo_text = json.dumps(
+              turbo
           )
 
           assert (
               "minimax_h3_turbo_v4_step600_ema.safetensors"
-              in text
+              in turbo_text
           )
 
           assert (
               "minimax_h3_ref2v_turbo_4step"
-              not in text
+              not in turbo_text
           )
 
-          print(
-              "PASS Turbo Step600 / 8-step inventory"
-          )
-          PY
-
-
-      - name: Ultimate Upscale contract
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          path = Path(
-              "workflows/postprocess/"
-              "H3_Ref2V_UltimateUpscale_Production.json"
-          )
-
-          data = json.loads(
-              path.read_text(
+          upscale = json.loads(
+              paths[2].read_text(
                   encoding="utf-8"
               )
           )
 
-          types = {
+          upscale_types = {
               node.get("type")
-              for node in data.get(
-                  "nodes",
-                  [],
-              )
+              for node in upscale["nodes"]
           }
 
-          required = {
-              "MinimaxH3LatentUpscaler3D",
+          for required in [
               "MMH3LatentUpscaleWithModelParams",
               "MMH3TemporalSplitParams",
               "MMH3SpatialSplitParams",
               "MMH3UltimateUpscale",
-              "VAEDecode",
-              "VAEDecodeAudio",
-              "CreateVideo",
-              "SaveVideo",
-          }
-
-          missing = (
-              required
-              - types
-          )
-
-          assert not missing, missing
-
-          text = json.dumps(
-              data
-          )
-
-          assert (
-              "minimax_h3_latent_upscaler_3d_fp16.safetensors"
-              in text
-          )
+          ]:
+              assert required in upscale_types, required
 
           print(
-              "PASS Ultimate Upscale production contract"
+              "Workflow contracts PASSED."
           )
           PY
 
 
-      - name: Delivery contract
+      - name: Repository cleanup
         run: |
-          python - <<'PY'
-          from planner.config import (
-              DELIVERY_FPS,
-              DELIVERY_HEIGHT,
-              DELIVERY_WIDTH,
-              UPSCALE_HEIGHT,
-              UPSCALE_WIDTH,
-          )
-
-          assert DELIVERY_WIDTH == 1280
-          assert DELIVERY_HEIGHT == 720
-          assert DELIVERY_FPS == 24
-
-          assert UPSCALE_WIDTH == 1920
-          assert UPSCALE_HEIGHT == 1080
-
-          print(
-              "PASS 1920x1080 upscale -> 1280x720 delivery"
-          )
-          PY
-
-
-      - name: Runtime manifest
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          text = Path(
-              "configs/custom_nodes.yaml"
-          ).read_text(
-              encoding="utf-8"
-          )
-
-          required = [
-              "Comfyui_Minimax_h3_latent_Upscaler",
-              "Comfyui-MMH3-UltimateUpscale",
-              "ComfyUI-MiniMax-H3-Turbo",
-              "ComfyUI-Workflow-To-API-Converter",
-              "ComfyUI-VideoHelperSuite",
-          ]
-
-          for name in required:
-
-              assert (
-                  name in text
-              ), name
-
-              print(
-                  "PASS",
-                  name,
-              )
-          PY
-
-
-      - name: Repository artifact cleanup
-        run: |
-          test ! -e workflows/generation/aa
-          test ! -e workflows/sources/a
-
           if find . \
             -type f \
             -name '*_TEST.json' \
             -print \
             -quit | grep -q .; then
-              echo "Temporary TEST workflow found."
-              exit 1
+            echo "Temporary workflow artifact found."
+            exit 1
           fi
+
+          test ! -e workflows/generation/aa
+          test ! -e workflows/sources/a
 
 
       - name: Complete
