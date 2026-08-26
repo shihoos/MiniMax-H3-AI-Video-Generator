@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 
@@ -30,9 +31,20 @@ def discover_gpu_ids():
             "for production generation."
         )
 
+    count = (
+        torch.cuda.device_count()
+    )
+
+    if count <= 0:
+
+        raise RuntimeError(
+            "CUDA is available but no GPU "
+            "devices were detected."
+        )
+
     return list(
         range(
-            torch.cuda.device_count()
+            count
         )
     )
 
@@ -60,10 +72,13 @@ def load_clients(
         if not client.health_check():
 
             raise RuntimeError(
-                f"ComfyUI worker unavailable: {url}"
+                "ComfyUI worker unavailable: "
+                f"{url}"
             )
 
-        clients[index] = client
+        clients[
+            index
+        ] = client
 
     return clients
 
@@ -72,21 +87,38 @@ def load_plan(
     path: Path,
 ) -> dict:
 
+    path = (
+        Path(path)
+        .resolve()
+    )
+
     if not path.is_file():
+
         raise FileNotFoundError(
             path
         )
 
-    plan = json.loads(
-        path.read_text(
-            encoding="utf-8"
+    try:
+
+        plan = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
         )
-    )
+
+    except json.JSONDecodeError as exc:
+
+        raise RuntimeError(
+            "Production plan contains invalid JSON:\n"
+            f"{path}\n"
+            f"{exc}"
+        ) from exc
 
     if not isinstance(
         plan,
         dict,
     ):
+
         raise RuntimeError(
             "Production plan must be a JSON object."
         )
@@ -99,12 +131,24 @@ def save_plan(
     plan: dict,
 ) -> None:
 
+    path = (
+        Path(path)
+        .resolve()
+    )
+
     path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    path.write_text(
+    temporary = (
+        path.with_suffix(
+            path.suffix
+            + ".tmp"
+        )
+    )
+
+    temporary.write_text(
         json.dumps(
             plan,
             indent=2,
@@ -113,25 +157,108 @@ def save_plan(
         encoding="utf-8",
     )
 
+    temporary.replace(
+        path
+    )
+
+
+def _safe_production_id(
+    value: str,
+) -> str:
+
+    cleaned = "".join(
+        character
+        if (
+            character.isalnum()
+            or character in "._-"
+        )
+        else "_"
+        for character
+        in str(value)
+    ).strip(
+        "._-"
+    )
+
+    if not cleaned:
+
+        return (
+            "production_"
+            + uuid.uuid4().hex
+        )
+
+    return cleaned[:128]
+
+
+def create_cli_plan_path(
+    plan: dict,
+) -> Path:
+
+    production_id = str(
+        plan.get(
+            "production_id",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if not production_id:
+
+        production_id = (
+            "production_"
+            + uuid.uuid4().hex
+        )
+
+    production_id = (
+        _safe_production_id(
+            production_id
+        )
+    )
+
+    plan[
+        "production_id"
+    ] = production_id
+
+    production_dir = (
+        ROOT
+        / "data"
+        / "production"
+        / production_id
+    )
+
+    production_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    return (
+        production_dir
+        / "story_preview.json"
+    )
+
 
 def require_approval(
     plan: dict,
 ) -> None:
 
-    approval = plan.get(
-        "approval",
-        {},
-    ) or {}
+    approval = (
+        plan.get(
+            "approval",
+            {},
+        )
+        or {}
+    )
 
-    if (
+    status = (
         approval.get(
             "status"
         )
-        not in {
-            "approved",
-            "completed",
-        }
-    ):
+    )
+
+    if status not in {
+        "approved",
+        "completed",
+    }:
+
         raise RuntimeError(
             "Storyboard has not been approved.\n"
             "Use --storyboard to open the Gradio UI, "
@@ -163,6 +290,9 @@ def main():
             "preserve_user_story",
             "expand_user_story",
         ],
+        help=(
+            "Story direction mode."
+        ),
     )
 
     parser.add_argument(
@@ -173,6 +303,9 @@ def main():
             "turbo",
             "upscale",
         ],
+        help=(
+            "H3 production profile."
+        ),
     )
 
     parser.add_argument(
@@ -202,6 +335,9 @@ def main():
         ),
     )
 
+    # Retained for command-line compatibility with older
+    # launchers. The canonical Gradio implementation owns
+    # its current port configuration.
     parser.add_argument(
         "--storyboard-port",
         type=int,
@@ -223,7 +359,7 @@ def main():
         "--upscale",
         action="store_true",
         help=(
-            "Run the H3 latent 3D upscaler and "
+            "Enable H3 3D latent upscaling and "
             "MMH3 Ultimate Upscale before final "
             "720p delivery."
         ),
@@ -231,13 +367,14 @@ def main():
 
     args = parser.parse_args()
 
-    # --------------------------------------------------------
+    # ========================================================
     # CANONICAL INTERACTIVE FLOW
-    # --------------------------------------------------------
+    # ========================================================
 
     if args.storyboard:
 
         if args.plan:
+
             raise RuntimeError(
                 "--storyboard is an interactive UI flow "
                 "and cannot be combined with --plan."
@@ -254,17 +391,20 @@ def main():
 
         return 0
 
-    # --------------------------------------------------------
+    # ========================================================
     # LOAD OR CREATE PLAN
-    # --------------------------------------------------------
+    # ========================================================
 
     created_new_plan = False
 
     if args.plan:
 
-        plan_path = Path(
-            args.plan
-        ).resolve()
+        plan_path = (
+            Path(
+                args.plan
+            )
+            .resolve()
+        )
 
         plan = load_plan(
             plan_path
@@ -297,17 +437,17 @@ def main():
             )
         )
 
-        plan_path = Path(
-            plan[
-                "production_plan_path"
-            ]
-        ).resolve()
+        plan_path = (
+            create_cli_plan_path(
+                plan
+            )
+        )
 
         created_new_plan = True
 
-    # --------------------------------------------------------
+    # ========================================================
     # UPSCALE OVERRIDE
-    # --------------------------------------------------------
+    # ========================================================
 
     if args.upscale:
 
@@ -315,61 +455,77 @@ def main():
             "upscale_enabled"
         ] = True
 
-    elif args.profile == "upscale":
+    elif (
+        args.profile
+        == "upscale"
+    ):
 
         plan[
             "upscale_enabled"
         ] = True
+
+    # ========================================================
+    # PLAN PERSISTENCE
+    # ========================================================
 
     if (
         created_new_plan
         or args.upscale
         or args.profile == "upscale"
     ):
+
         save_plan(
             plan_path,
             plan,
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # PREVIEW
-    # --------------------------------------------------------
+    # ========================================================
 
     preview = {
         "preview": True,
+
         "story_mode": plan.get(
             "story_mode"
         ),
+
         "profile": plan.get(
             "profile"
         ),
+
         "production_id": plan.get(
             "production_id"
         ),
+
         "characters": len(
             plan.get(
                 "characters",
                 [],
             )
         ),
+
         "scenes": len(
             plan.get(
                 "scenes",
                 [],
             )
         ),
+
         "shots": len(
             plan.get(
                 "shots",
                 [],
             )
         ),
+
         "upscale_enabled": bool(
             plan.get(
                 "upscale_enabled",
                 False,
             )
         ),
+
         "preview_file": str(
             plan_path
         ),
@@ -384,19 +540,20 @@ def main():
     )
 
     if args.preview:
+
         return 0
 
-    # --------------------------------------------------------
+    # ========================================================
     # APPROVAL
-    # --------------------------------------------------------
+    # ========================================================
 
     require_approval(
         plan
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # WORKERS
-    # --------------------------------------------------------
+    # ========================================================
 
     runtime_workers = None
 
@@ -412,7 +569,9 @@ def main():
             H3Runtime,
         )
 
-        gpu_ids = discover_gpu_ids()
+        gpu_ids = (
+            discover_gpu_ids()
+        )
 
         runtime_workers = (
             H3Runtime.launch_workers(
@@ -431,8 +590,10 @@ def main():
 
     try:
 
-        clients = load_clients(
-            workers
+        clients = (
+            load_clients(
+                workers
+            )
         )
 
         # ----------------------------------------------------
@@ -450,7 +611,9 @@ def main():
             ):
 
                 check_worker(
-                    worker["port"]
+                    worker[
+                        "port"
+                    ]
                 )
 
         from execution.production_runner import (
@@ -467,36 +630,62 @@ def main():
             )
         )
 
+        final_video = Path(
+            result[
+                "final_video"
+            ]
+        ).resolve()
+
+        if not final_video.is_file():
+
+            raise RuntimeError(
+                "Production runner reported completion "
+                "but final video does not exist:\n"
+                f"{final_video}"
+            )
+
+        if final_video.stat().st_size <= 0:
+
+            raise RuntimeError(
+                "Production runner produced an empty final video:\n"
+                f"{final_video}"
+            )
+
         print(
             json.dumps(
                 {
                     "status":
                         "completed",
+
                     "production_id":
                         result[
                             "production_id"
                         ],
+
                     "profile":
                         plan.get(
                             "profile",
                             args.profile,
                         ),
+
                     "upscale_enabled":
                         result[
                             "upscale_enabled"
                         ],
+
                     "shot_outputs": [
-                        str(path)
+                        str(
+                            path
+                        )
                         for path
                         in result[
                             "shot_outputs"
                         ]
                     ],
+
                     "final_video":
                         str(
-                            result[
-                                "final_video"
-                            ]
+                            final_video
                         ),
                 },
                 indent=2,
@@ -520,6 +709,7 @@ def main():
 
 
 if __name__ == "__main__":
+
     raise SystemExit(
         main()
     )
