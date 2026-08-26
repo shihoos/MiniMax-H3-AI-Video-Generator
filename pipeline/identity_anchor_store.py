@@ -4,7 +4,10 @@ import json
 import shutil
 from pathlib import Path
 
-from planner.config import IDENTITY_DIR
+from planner.config import (
+    IDENTITY_DIR,
+    PROJECT_ROOT,
+)
 
 
 class IdentityAnchorStore:
@@ -19,15 +22,42 @@ class IdentityAnchorStore:
             project_root
         ).resolve()
 
+        # IDENTITY_DIR is defined from the real repository root
+        # in planner.config.py. The store must also work with an
+        # alternate project root, such as the temporary root used
+        # by CI wiring tests.
+        #
+        # Resolve the configured directory back to a path
+        # relative to the canonical repository root, then attach
+        # that relative path to the active project_root.
+
+        try:
+
+            identity_relative = (
+                IDENTITY_DIR
+                .resolve()
+                .relative_to(
+                    PROJECT_ROOT.resolve()
+                )
+            )
+
+        except ValueError:
+
+            # Defensive fallback if the configured path is already
+            # relative or otherwise cannot be related to PROJECT_ROOT.
+            identity_relative = Path(
+                "data"
+            ) / "production" / "identity"
+
         base = (
             self.project_root
-            / IDENTITY_DIR.relative_to(
-                self.project_root
-            )
+            / identity_relative
         )
 
         self.production_id = (
-            self._safe(production_id)
+            self._safe(
+                production_id
+            )
             if production_id
             else None
         )
@@ -127,6 +157,7 @@ class IdentityAnchorStore:
         ).resolve()
 
         if not source_frame.is_file():
+
             raise FileNotFoundError(
                 source_frame
             )
@@ -154,8 +185,9 @@ class IdentityAnchorStore:
             not destination.is_file()
             or destination.stat().st_size <= 0
         ):
+
             raise RuntimeError(
-                f"Identity anchor was not created correctly: "
+                "Identity anchor was not created correctly: "
                 f"{destination}"
             )
 
