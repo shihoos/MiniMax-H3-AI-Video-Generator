@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: minimax-h3-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
 
   validate:
@@ -19,6 +23,8 @@ jobs:
     name: H3 Production Validation
 
     runs-on: ubuntu-latest
+
+    timeout-minutes: 15
 
     steps:
 
@@ -161,9 +167,9 @@ jobs:
           expanded = (
               source
               + " The man crosses fractured ground "
-              "while distant mountains collapse into glowing dust. "
-              "A violent storm tears through the abyss "
-              "and forces him to continue toward the final horizon."
+              + "while distant mountains collapse into glowing dust. "
+              + "A violent storm tears through the abyss "
+              + "and forces him to continue toward the final horizon."
           )
 
           director._validate_mode_output(
@@ -222,8 +228,7 @@ jobs:
 
           names = {
               item["name"].lower()
-              for item
-              in sanitized
+              for item in sanitized
           }
 
           assert names == {
@@ -261,11 +266,13 @@ jobs:
               director._story_director_system(
                   "expand_user_story"
               )
+          )
 
           preserve = (
               director._story_director_system(
                   "preserve_user_story"
               )
+          )
 
           shots = (
               director._shot_director_system()
@@ -276,15 +283,37 @@ jobs:
           assert '"shots"' not in ai
           assert "genuinely developed story" in ai
 
-          assert "Preserve every important fact" in expand
-          assert "Do not simply copy the user's paragraphs" in expand
+          assert (
+              "Preserve every important fact"
+              in expand
+          )
 
-          assert "immutable source material" in preserve
-          assert "must equal the supplied story" in preserve
+          assert (
+              "Do not simply copy the user's paragraphs"
+              in expand
+          )
+
+          assert (
+              "immutable source material"
+              in preserve
+          )
+
+          assert (
+              "must equal the supplied story"
+              in preserve
+          )
 
           assert '"shots"' in shots
-          assert "Do NOT create new characters" in shots
-          assert "Only use names present in the character bible" in shots
+
+          assert (
+              "Do NOT create new characters"
+              in shots
+          )
+
+          assert (
+              "Only use names present in the character bible"
+              in shots
+          )
 
           print(
               "Qwen director contract PASSED."
