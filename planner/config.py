@@ -220,6 +220,7 @@ H3_MAX_REFERENCE_IMAGES = 9
 H3_MAX_REFERENCE_VIDEOS = 3
 H3_MAX_REFERENCE_AUDIO = 3
 H3_MAX_REFERENCE_FILES = 12
+H3_REF_IMAGE_SIZE = "match"
 
 
 # ============================================================
