@@ -20,7 +20,8 @@ class AssemblyManager:
         )
 
     @staticmethod
-    def check_ffmpeg():
+    def check_ffmpeg() -> None:
+
         result = subprocess.run(
             [
                 "ffmpeg",
@@ -66,7 +67,17 @@ class AssemblyManager:
             / "concat.txt"
         )
 
-        lines = []
+        destination = (
+            self.output_dir
+            / final_name
+        )
+
+        temp = (
+            self.output_dir
+            / ".final.tmp.mp4"
+        )
+
+        lines: list[str] = []
 
         for video in videos:
 
@@ -91,19 +102,11 @@ class AssemblyManager:
             )
 
         concat_file.write_text(
-            "\n".join(lines)
+            "\n".join(
+                lines
+            )
             + "\n",
             encoding="utf-8",
-        )
-
-        destination = (
-            self.output_dir
-            / final_name
-        )
-
-        temp = (
-            self.output_dir
-            / ".final.tmp.mp4"
         )
 
         command = [
@@ -115,7 +118,7 @@ class AssemblyManager:
             "0",
             "-i",
             str(concat_file),
-            "-vf",
+
             "-vf",
             (
                 f"fps={fps},"
@@ -125,6 +128,7 @@ class AssemblyManager:
                 f"({width}-iw)/2:"
                 f"({height}-ih)/2"
             ),
+
             "-c:v",
             "libx264",
             "-preset",
@@ -133,35 +137,51 @@ class AssemblyManager:
             "17",
             "-pix_fmt",
             "yuv420p",
+
             "-c:a",
             "aac",
             "-b:a",
             "192k",
+
             "-movflags",
             "+faststart",
+
             str(temp),
         ]
 
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        try:
 
-        concat_file.unlink(
-            missing_ok=True
-        )
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                "FFmpeg assembly failed:\n"
-                + result.stderr[-5000:]
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
             )
 
-        temp.replace(
-            destination
-        )
+            if result.returncode != 0:
 
-        return destination
+                raise RuntimeError(
+                    "FFmpeg assembly failed:\n"
+                    + result.stderr[-5000:]
+                )
+
+            temp.replace(
+                destination
+            )
+
+            return destination
+
+        finally:
+
+            concat_file.unlink(
+                missing_ok=True
+            )
+
+            if (
+                temp.exists()
+                and not destination.exists()
+            ):
+                temp.unlink(
+                    missing_ok=True
+                )
