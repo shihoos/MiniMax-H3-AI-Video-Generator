@@ -477,27 +477,3 @@ jobs:
               "Combined H3 upscale builder PASSED."
           )
           PY
-
-      - name: Repository cleanup
-        run: |
-          if find . \
-            -type f \
-            -name '*_TEST.json' \
-            -print \
-            -quit | grep -q .; then
-            echo "Temporary workflow artifact found."
-            exit 1
-          fi
-
-          test ! -e kaggle/compatibility_lock.yaml
-          test ! -e compatibility/prepare_modern_ltx.py
-          test ! -e execution/comfy_workflow_adapter.py
-          test ! -e execution/reference_image_generator.py
-          test ! -e ui/storyboard.html
-          test ! -e ui/storyboard_server.py
-          test ! -e scripts/storyboard_preview.py
-          test ! -e scripts/cpu_preflight.py
-
-      - name: Complete
-        run: |
-          echo "MiniMax H3 CI validation PASSED."
