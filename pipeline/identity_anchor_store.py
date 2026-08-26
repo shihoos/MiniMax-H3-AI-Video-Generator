@@ -30,7 +30,9 @@ class IdentityAnchorStore:
         )
 
     @staticmethod
-    def _safe(value: str) -> str:
+    def _safe(
+        value: str,
+    ) -> str:
         return "".join(
             char
             if (
@@ -41,7 +43,7 @@ class IdentityAnchorStore:
             for char in str(value)
         )
 
-    def character_dir(
+    def _character_dir(
         self,
         character_id: str,
     ) -> Path:
@@ -60,64 +62,15 @@ class IdentityAnchorStore:
 
         return path
 
-    def save_anchor(
-        self,
-        *,
-        character_id: str,
-        shot_id: str,
-        source_frame: Path,
-    ) -> Path:
-
-        source_frame = Path(
-            source_frame
-        )
-
-        if not source_frame.is_file():
-            raise FileNotFoundError(
-                source_frame
-            )
-
-        destination = (
-            self.character_dir(
-                character_id
-            )
-            / f"{self._safe(shot_id)}_anchor.png"
-        )
-
-        shutil.copy2(
-            source_frame,
-            destination,
-        )
-
-        metadata = {
-            "character_id": character_id,
-            "shot_id": shot_id,
-            "anchor": str(
-                destination
-            ),
-        }
-
-        (
-            destination.with_suffix(
-                ".json"
-            )
-        ).write_text(
-            json.dumps(
-                metadata,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-        return destination
-
     def latest_anchor(
         self,
         character_id: str,
-    ):
+    ) -> Path | None:
 
-        directory = self.character_dir(
-            character_id
+        directory = (
+            self._character_dir(
+                character_id
+            )
         )
 
         anchors = sorted(
@@ -134,3 +87,68 @@ class IdentityAnchorStore:
             if anchors
             else None
         )
+
+    def save_first_anchor(
+        self,
+        *,
+        character_id: str,
+        shot_id: str,
+        source_frame: Path,
+    ) -> Path:
+
+        existing = self.latest_anchor(
+            character_id
+        )
+
+        if existing is not None:
+            return existing
+
+        source_frame = Path(
+            source_frame
+        )
+
+        if not source_frame.is_file():
+            raise FileNotFoundError(
+                source_frame
+            )
+
+        directory = (
+            self._character_dir(
+                character_id
+            )
+        )
+
+        destination = (
+            directory
+            / (
+                f"{self._safe(shot_id)}"
+                "_anchor.png"
+            )
+        )
+
+        shutil.copy2(
+            source_frame,
+            destination,
+        )
+
+        metadata = {
+            "character_id": character_id,
+            "shot_id": shot_id,
+            "anchor_path": str(
+                destination
+            ),
+            "type": "first_successful_visual_anchor",
+        }
+
+        destination.with_suffix(
+            ".json"
+        ).write_text(
+            json.dumps(
+                metadata,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        return destination
