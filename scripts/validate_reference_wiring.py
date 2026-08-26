@@ -6,6 +6,12 @@ from pathlib import Path
 from execution.shot_executor import (
     ShotExecutor,
 )
+from pipeline.h3_scene_continuity import (
+    H3SceneContinuity,
+)
+from pipeline.identity_anchor_store import (
+    IdentityAnchorStore,
+)
 
 
 class FakeClient:
@@ -17,7 +23,7 @@ class FakeClient:
         return workflow
 
 
-def main():
+def main() -> None:
 
     with tempfile.TemporaryDirectory(
         prefix="h3_reference_test_"
@@ -25,7 +31,7 @@ def main():
 
         root = Path(
             raw_root
-        )
+        ).resolve()
 
         comfy_input = (
             root
@@ -52,6 +58,10 @@ def main():
             b"fake-png-data"
         )
 
+        # ----------------------------------------------------
+        # REFERENCE FILE PATH CONTRACT
+        # ----------------------------------------------------
+
         executor = ShotExecutor(
             comfy_client=FakeClient(),
             project_root=root,
@@ -77,20 +87,37 @@ def main():
             "shot_001_image_1_reference.png"
         )
 
-        assert returned == expected, (
-            f"Expected relative ComfyUI path "
-            f"{expected!r}, got {returned!r}"
-        )
+        if returned != expected:
+
+            raise RuntimeError(
+                "Reference path contract failed.\n"
+                f"Expected: {expected!r}\n"
+                f"Received: {returned!r}"
+            )
 
         copied = (
             comfy_input
             / returned
         )
 
-        assert copied.is_file(), (
-            f"Copied reference does not exist: "
-            f"{copied}"
-        )
+        if not copied.is_file():
+
+            raise RuntimeError(
+                "Reference file was not copied "
+                "to the expected ComfyUI input path.\n"
+                f"Expected file: {copied}"
+            )
+
+        if copied.stat().st_size <= 0:
+
+            raise RuntimeError(
+                "Copied reference file is empty.\n"
+                f"File: {copied}"
+            )
+
+        # ----------------------------------------------------
+        # WORKFLOW LOADER PATH CONTRACT
+        # ----------------------------------------------------
 
         workflow = {
             "nodes": [],
@@ -106,34 +133,63 @@ def main():
             )
         )
 
-        assert node_id == 1
-        assert output_slot == 0
+        if node_id != 1:
 
-        node = workflow[
-            "nodes"
-        ][0]
+            raise RuntimeError(
+                "Unexpected LoadImage node ID.\n"
+                f"Expected: 1\n"
+                f"Received: {node_id}"
+            )
 
-        assert (
-            node[
-                "widgets_values"
-            ][0]
-            == expected
-        ), (
-            "Workflow LoadImage path is not "
-            "the same relative path returned "
-            "by ShotExecutor.copy_input()."
+        if output_slot != 0:
+
+            raise RuntimeError(
+                "Unexpected LoadImage output slot.\n"
+                f"Expected: 0\n"
+                f"Received: {output_slot}"
+            )
+
+        nodes = workflow.get(
+            "nodes",
+            [],
         )
 
-        print(
-            "Reference media path wiring PASSED."
+        if len(nodes) != 1:
+
+            raise RuntimeError(
+                "Expected exactly one LoadImage node "
+                "in the test workflow."
+            )
+
+        node = nodes[0]
+
+        widgets = node.get(
+            "widgets_values",
+            [],
         )
 
-        from pipeline.h3_scene_continuity import (
-            H3SceneContinuity,
+        if not widgets:
+
+            raise RuntimeError(
+                "LoadImage node has no widgets_values."
+            )
+
+        workflow_path = (
+            widgets[0]
         )
-        from pipeline.identity_anchor_store import (
-            IdentityAnchorStore,
-        )
+
+        if workflow_path != expected:
+
+            raise RuntimeError(
+                "Workflow LoadImage path does not "
+                "match the copied ComfyUI-relative path.\n"
+                f"Expected: {expected!r}\n"
+                f"Received: {workflow_path!r}"
+            )
+
+        # ----------------------------------------------------
+        # PRODUCTION ISOLATION CONTRACT
+        # ----------------------------------------------------
 
         continuity_a = H3SceneContinuity(
             root,
@@ -155,28 +211,84 @@ def main():
             production_id="production_b",
         )
 
-        assert (
+        if (
             continuity_a.root
-            != continuity_b.root
-        )
+            == continuity_b.root
+        ):
 
-        assert (
+            raise RuntimeError(
+                "Continuity storage is not "
+                "production-isolated."
+            )
+
+        if (
             identity_a.root
-            != identity_b.root
-        )
+            == identity_b.root
+        ):
 
-        assert (
+            raise RuntimeError(
+                "Identity anchor storage is not "
+                "production-isolated."
+            )
+
+        if (
             "production_a"
-            in str(
+            not in str(
                 continuity_a.root
             )
-        )
+        ):
 
-        assert (
+            raise RuntimeError(
+                "Production A continuity path does not "
+                "contain production_a."
+            )
+
+        if (
             "production_b"
-            in str(
+            not in str(
                 continuity_b.root
             )
+        ):
+
+            raise RuntimeError(
+                "Production B continuity path does not "
+                "contain production_b."
+            )
+
+        if (
+            "production_a"
+            not in str(
+                identity_a.root
+            )
+        ):
+
+            raise RuntimeError(
+                "Production A identity path does not "
+                "contain production_a."
+            )
+
+        if (
+            "production_b"
+            not in str(
+                identity_b.root
+            )
+        ):
+
+            raise RuntimeError(
+                "Production B identity path does not "
+                "contain production_b."
+            )
+
+        print(
+            "Reference media path wiring PASSED."
+        )
+
+        print(
+            "Production isolation wiring PASSED."
+        )
+
+        print(
+            "Reference and production wiring validation PASSED."
         )
 
 
