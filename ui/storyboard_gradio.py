@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import traceback
 from datetime import datetime
@@ -12,6 +13,12 @@ ROOT = (
     .resolve()
     .parents[1]
 )
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(ROOT),
+    )
 
 
 class ProductionController:
@@ -229,7 +236,6 @@ class ProductionController:
                 + "\n```",
                 None,
             )
-        
 
     # ========================================================
     # APPROVAL + H3 PRODUCTION
@@ -372,9 +378,14 @@ class ProductionController:
 
         except Exception as exc:
 
+            traceback.print_exc()
+
             return (
                 "### PRODUCTION FAILED\n\n"
-                f"**{type(exc).__name__}:** {exc}",
+                f"**{type(exc).__name__}:** {exc}\n\n"
+                "```text\n"
+                + traceback.format_exc()
+                + "\n```",
                 None,
             )
 
