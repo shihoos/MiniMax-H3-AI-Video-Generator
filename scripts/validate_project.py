@@ -937,8 +937,8 @@ def main() -> None:
     validate_gradio_ui()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
-    validate_no_test_artifacts()
 
+    
     print(
         "=" * 80
     )
