@@ -80,7 +80,6 @@ REQUIRED_FILES = [
 
     "kaggle/bootstrap.py",
     "kaggle/preflight_h3.py",
-    "kaggle/start_comfyui.py",
     "kaggle/verify_live_runtime.py",
 
     # --------------------------------------------------------
