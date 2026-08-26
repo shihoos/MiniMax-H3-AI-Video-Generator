@@ -4,9 +4,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from pipeline.continuity_manager import (
-    ContinuityManager,
-)
 from pipeline.identity_continuity import (
     IdentityContinuity,
 )
@@ -79,10 +76,7 @@ class ProductionOrchestrator:
             self.project_root
         )
 
-        self.continuity_manager = (
-            ContinuityManager()
-        )
-
+        
     # ========================================================
     # CHARACTER REBINDING
     # ========================================================
