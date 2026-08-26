@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 
@@ -24,7 +23,6 @@ from planner.config import (
     H3_STEPS,
     H3_WIDTH,
     PROFILE_TURBO,
-    PRODUCTION_DIR,
     TURBO_STEPS,
     WORKFLOW_AUTO,
     WORKFLOW_REF2V,
@@ -76,7 +74,6 @@ class ProductionOrchestrator:
             self.project_root
         )
 
-        
     # ========================================================
     # CHARACTER REBINDING
     # ========================================================
@@ -364,13 +361,17 @@ class ProductionOrchestrator:
                 workflow_mode
                 == WORKFLOW_AUTO
             ):
+
                 if plan.get(
                     "profile"
                 ) == PROFILE_TURBO:
+
                     workflow_mode = (
                         WORKFLOW_TURBO_REF2V
                     )
+
                 else:
+
                     workflow_mode = (
                         WORKFLOW_REF2V
                     )
@@ -382,16 +383,21 @@ class ProductionOrchestrator:
                     "profile"
                 ) == PROFILE_TURBO
             ):
+
                 steps = TURBO_STEPS
+
                 workflow_mode = (
                     WORKFLOW_TURBO_REF2V
                 )
+
             else:
+
                 steps = H3_STEPS
 
                 if workflow_mode not in {
                     WORKFLOW_REF2V,
                 }:
+
                     workflow_mode = (
                         WORKFLOW_REF2V
                     )
@@ -599,11 +605,13 @@ class ProductionOrchestrator:
                 "scenes",
                 [],
             ):
+
                 if scene.get(
                     "scene_id"
                 ) == raw.get(
                     "scene_id"
                 ):
+
                     scene.setdefault(
                         "shot_ids",
                         [],
@@ -640,6 +648,7 @@ class ProductionOrchestrator:
         )
 
         try:
+
             plan = (
                 self.director.enrich_plan(
                     mode=mode,
@@ -647,12 +656,15 @@ class ProductionOrchestrator:
                     base_plan=base_plan,
                 )
             )
+
         finally:
+
             # Critical:
             # Qwen director must be fully released before H3.
             self.director.unload()
 
         if mode == PRESERVE_USER_STORY_MODE:
+
             plan["story"] = (
                 base_plan["story"]
             )
@@ -671,6 +683,10 @@ class ProductionOrchestrator:
             characters,
         )
 
+        # ----------------------------------------------------
+        # SCENE CONTINUITY LINKS
+        # ----------------------------------------------------
+
         # Continuity links are scoped within each scene.
         previous_by_scene = {}
 
@@ -678,6 +694,7 @@ class ProductionOrchestrator:
             "shots",
             [],
         ):
+
             scene_id = shot[
                 "scene_id"
             ]
@@ -689,6 +706,7 @@ class ProductionOrchestrator:
             )
 
             if previous:
+
                 shot[
                     "previous_shot"
                 ] = previous[
@@ -696,6 +714,7 @@ class ProductionOrchestrator:
                 ]
 
             if previous:
+
                 previous[
                     "next_shot"
                 ] = shot[
@@ -706,15 +725,22 @@ class ProductionOrchestrator:
                 scene_id
             ] = shot
 
+        # ----------------------------------------------------
+        # PARALLEL SAFETY
+        # ----------------------------------------------------
+
         # A scene is safe to run independently only if:
+        #
         # 1. no character is shared across scenes
         # 2. there is no cross-scene continuity dependency
+
         scene_characters = {}
 
         for shot in plan.get(
             "shots",
             [],
         ):
+
             scene_characters.setdefault(
                 shot[
                     "scene_id"
@@ -732,21 +758,30 @@ class ProductionOrchestrator:
             )
 
         seen_characters = {}
+
         shared = False
 
         for scene_id, names in (
             scene_characters.items()
         ):
+
             for name in names:
+
                 if name in seen_characters:
+
                     shared = True
-                seen_characters[name] = (
-                    scene_id
-                )
+
+                seen_characters[
+                    name
+                ] = scene_id
 
         plan[
             "parallel_safe"
         ] = not shared
+
+        # ----------------------------------------------------
+        # FINAL DELIVERY CONFIGURATION
+        # ----------------------------------------------------
 
         plan[
             "delivery_width"
@@ -760,48 +795,63 @@ class ProductionOrchestrator:
             "delivery_fps"
         ] = DELIVERY_FPS
 
-        plan["upscale_width"] = int(
+        plan[
+            "upscale_width"
+        ] = int(
             plan.get(
                 "upscale_width",
                 UPSCALE_WIDTH,
             )
         )
-        
-        plan["upscale_height"] = int(
+
+        plan[
+            "upscale_height"
+        ] = int(
             plan.get(
                 "upscale_height",
                 UPSCALE_HEIGHT,
             )
         )
-        
-        plan["preview_ready"] = True
-        plan["created_at"] = (
+
+        # ----------------------------------------------------
+        # PLAN METADATA
+        # ----------------------------------------------------
+
+        plan[
+            "preview_ready"
+        ] = True
+
+        plan[
+            "created_at"
+        ] = (
             datetime.now().isoformat()
         )
 
-        preview_path = (
-            PRODUCTION_DIR
-            / "story_preview.json"
-        )
-
-        preview_path.write_text(
-            json.dumps(
-                plan,
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
-
-        plan[
-            "production_plan_path"
-        ] = str(
-            preview_path
-        )
+        # ----------------------------------------------------
+        # PERSISTENCE BOUNDARY
+        # ----------------------------------------------------
+        #
+        # The orchestrator creates and normalizes the plan.
+        #
+        # It does NOT persist a global story_preview.json.
+        #
+        # The caller owns persistence:
+        #
+        # Gradio:
+        # data/production/sessions/<production_id>/
+        # story_preview.json
+        #
+        # CLI:
+        # data/production/<production_id>/
+        # story_preview.json
+        #
+        # This prevents different productions from overwriting
+        # one shared data/production/story_preview.json file.
 
         return plan
 
     def unload_models(
         self,
     ):
+
         self.director.unload()
