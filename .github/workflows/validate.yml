@@ -448,6 +448,10 @@ jobs:
           )
           PY
 
+      - name: Reference path wiring
+        run: |
+          python scripts/validate_reference_wiring.py
+          
       - name: Storyboard UI contract
         run: |
           python - <<'PY'
