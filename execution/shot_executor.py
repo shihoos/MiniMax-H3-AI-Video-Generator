@@ -3,13 +3,23 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from planner.config import (
+    H3_HEIGHT,
+    H3_MAX_REFERENCE_AUDIO,
+    H3_MAX_REFERENCE_FILES,
+    H3_MAX_REFERENCE_IMAGES,
+    H3_MAX_REFERENCE_VIDEOS,
+    H3_WIDTH,
+    TURBO_STEPS,
+)
+
 
 class ShotExecutor:
 
-    MAX_IMAGES = 9
-    MAX_VIDEOS = 3
-    MAX_AUDIO = 3
-    MAX_TOTAL_REFERENCES = 12
+    MAX_IMAGES = H3_MAX_REFERENCE_IMAGES
+    MAX_VIDEOS = H3_MAX_REFERENCE_VIDEOS
+    MAX_AUDIO = H3_MAX_REFERENCE_AUDIO
+    MAX_TOTAL_REFERENCES = H3_MAX_REFERENCE_FILES
 
     def __init__(
         self,
@@ -30,11 +40,28 @@ class ShotExecutor:
 
         self.project_root = Path(
             project_root
-        )
+        ).resolve()
+
+        self.comfy_input_root = (
+            self.project_root
+            / "ComfyUI"
+            / "input"
+        ).resolve()
 
         self.comfy_input_dir = Path(
             comfy_input_dir
-        )
+        ).resolve()
+
+        try:
+            self.comfy_input_dir.relative_to(
+                self.comfy_input_root
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "ComfyUI input directory must be inside "
+                f"{self.comfy_input_root}: "
+                f"{self.comfy_input_dir}"
+            ) from exc
 
         self.comfy_input_dir.mkdir(
             parents=True,
@@ -76,7 +103,7 @@ class ShotExecutor:
 
         source = Path(
             source
-        )
+        ).resolve()
 
         if not source.is_file():
             raise FileNotFoundError(
@@ -91,12 +118,42 @@ class ShotExecutor:
             )
         )
 
+        destination.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         shutil.copy2(
             source,
             destination,
         )
 
-        return destination.name
+        if (
+            not destination.is_file()
+            or destination.stat().st_size <= 0
+        ):
+            raise RuntimeError(
+                f"Copied media is missing or empty:\n"
+                f"{destination}"
+            )
+
+        try:
+            relative = (
+                destination.relative_to(
+                    self.comfy_input_root
+                )
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Copied media escaped the ComfyUI input root:\n"
+                f"{destination}"
+            ) from exc
+
+        # IMPORTANT:
+        # ComfyUI LoadImage / VHS loaders resolve files
+        # relative to ComfyUI/input. Never return only
+        # destination.name when the file lives in a subdirectory.
+        return relative.as_posix()
 
     def _prepare_media(
         self,
@@ -258,7 +315,7 @@ class ShotExecutor:
             shot.get(
                 "width"
             ),
-            1344,
+            H3_WIDTH,
             int,
         )
 
@@ -266,7 +323,7 @@ class ShotExecutor:
             shot.get(
                 "height"
             ),
-            768,
+            H3_HEIGHT,
             int,
         )
 
@@ -302,7 +359,7 @@ class ShotExecutor:
                     generation_mode=workflow_mode,
                     prompt=prompt,
                     seed=seed,
-                    turbo_steps=8,
+                    turbo_steps=TURBO_STEPS,
                     reference_images=images,
                     reference_videos=videos,
                     reference_audio=audio,
@@ -318,7 +375,7 @@ class ShotExecutor:
                 mode=workflow_mode,
                 prompt=prompt,
                 seed=seed,
-                turbo_steps=8,
+                turbo_steps=TURBO_STEPS,
                 reference_images=images,
                 reference_videos=videos,
                 reference_audio=audio,
