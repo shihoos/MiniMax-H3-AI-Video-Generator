@@ -588,6 +588,7 @@ def validate_runtime_imports():
         "execution.h3_runtime",
         "execution.assembly_manager",
         "ui.storyboard_server",
+        "ui.storyboard_gradio",
     ]
 
     for module in modules:
@@ -631,6 +632,12 @@ def validate_storyboard_ui():
         / "storyboard_server.py"
     )
 
+    gradio_ui = (
+        ROOT
+        / "ui"
+        / "storyboard_gradio.py"
+    )
+
     if not html.is_file():
         fail(
             "Storyboard HTML missing."
@@ -639,6 +646,11 @@ def validate_storyboard_ui():
     if not server.is_file():
         fail(
             "Storyboard server missing."
+        )
+        
+    if not gradio_ui.is_file():
+        fail(
+            "Gradio storyboard UI missing."
         )
 
     text = html.read_text(
@@ -699,6 +711,7 @@ def main():
     validate_upscale_builder()
     validate_storyboard_ui()
     validate_cleanup()
+    
 
     print(
         "=" * 80
