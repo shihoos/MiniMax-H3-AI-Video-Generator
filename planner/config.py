@@ -15,6 +15,14 @@ SCENES_DIR = DATA_DIR / "scenes"
 SHOTS_DIR = DATA_DIR / "shots"
 PRODUCTION_DIR = DATA_DIR / "production"
 
+CONTINUITY_DIR = (
+    PRODUCTION_DIR / "continuity"
+)
+
+IDENTITY_DIR = (
+    PRODUCTION_DIR / "identity"
+)
+
 
 def ensure_directories() -> None:
     for directory in (
@@ -24,6 +32,8 @@ def ensure_directories() -> None:
         SCENES_DIR,
         SHOTS_DIR,
         PRODUCTION_DIR,
+        CONTINUITY_DIR,
+        IDENTITY_DIR,
     ):
         directory.mkdir(
             parents=True,
@@ -87,19 +97,16 @@ H3_FRAMES_PER_SHOT = int(
     )
 )
 
-H3_REF_IMAGE_SIZE = os.getenv(
-    "H3_REF_IMAGE_SIZE",
-    "match",
-)
 
 # ============================================================
-# NORMAL H3 REF2V
+# NORMAL REF2V
 # ============================================================
 
 H3_STEPS = 20
 
+
 # ============================================================
-# H3 REFERENCE LIMITS
+# REFERENCE LIMITS
 # ============================================================
 
 H3_MAX_REFERENCE_IMAGES = 9
@@ -116,22 +123,35 @@ TURBO_STEPS = 8
 
 
 # ============================================================
-# UPSCALE
+# INTERNAL UPSCALE / REGENERATION TARGET
 # ============================================================
 
+# Important:
+# H3 generation remains 1344×768.
+# The MMH3 3D latent upscaler + Ultimate Upscale
+# refine internally at 1920×1080.
 UPSCALE_WIDTH = int(
     os.getenv(
         "H3_UPSCALE_WIDTH",
-        "2560",
+        "1920",
     )
 )
 
 UPSCALE_HEIGHT = int(
     os.getenv(
         "H3_UPSCALE_HEIGHT",
-        "1440",
+        "1080",
     )
 )
+
+
+# ============================================================
+# FINAL DELIVERY
+# ============================================================
+
+DELIVERY_WIDTH = 1280
+DELIVERY_HEIGHT = 720
+DELIVERY_FPS = 24
 
 
 # ============================================================
@@ -171,8 +191,12 @@ ALL_PROFILES = {
 # ============================================================
 
 AI_STORY_MODE = "ai_story"
-PRESERVE_USER_STORY_MODE = "preserve_user_story"
-EXPAND_USER_STORY_MODE = "expand_user_story"
+PRESERVE_USER_STORY_MODE = (
+    "preserve_user_story"
+)
+EXPAND_USER_STORY_MODE = (
+    "expand_user_story"
+)
 
 VALID_STORY_MODES = {
     AI_STORY_MODE,
@@ -185,6 +209,11 @@ VALID_STORY_MODES = {
 # SINGLE LOCAL QWEN INVENTORY
 # ============================================================
 
-# This is the H3 conditioning encoder.
-# No external Qwen API and no second Qwen model are used.
+# H3-specific Qwen3-VL conditioning encoder.
+#
+# It is used through the H3 multimodal workflow:
+# text + reference images + reference videos + audio context.
+#
+# No external Qwen API.
+# No second Qwen checkpoint.
 PLANNER_MODEL = H3_TEXT_ENCODER
