@@ -7,19 +7,52 @@ from pathlib import Path
 from pipeline.continuity_manager import (
     ContinuityManager,
 )
+from pipeline.identity_continuity import (
+    IdentityContinuity,
+)
+from pipeline.reference_manager import (
+    ReferenceManager,
+)
 from planner.config import (
+    DELIVERY_FPS,
+    DELIVERY_HEIGHT,
+    DELIVERY_WIDTH,
+    H3_FPS,
+    H3_FRAMES_PER_SHOT,
+    H3_HEIGHT,
+    H3_MAX_REFERENCE_AUDIO,
+    H3_MAX_REFERENCE_FILES,
+    H3_MAX_REFERENCE_IMAGES,
+    H3_MAX_REFERENCE_VIDEOS,
+    H3_STEPS,
+    H3_WIDTH,
+    PROFILE_TURBO,
     PRODUCTION_DIR,
+    TURBO_STEPS,
     WORKFLOW_AUTO,
+    WORKFLOW_REF2V,
+    WORKFLOW_TURBO_REF2V,
     ensure_directories,
 )
 from planner.production_planner import (
     ProductionPlanner,
 )
+from planner.qwen_director import (
+    QwenDirector,
+)
+from schemas.character import (
+    Character,
+)
+from schemas.shot import (
+    Shot,
+)
 
 
 class ProductionOrchestrator:
 
-    def __init__(self):
+    def __init__(
+        self,
+    ):
 
         ensure_directories()
 
@@ -33,9 +66,564 @@ class ProductionOrchestrator:
             self.project_root
         )
 
+        self.references = (
+            ReferenceManager(
+                self.project_root
+            )
+        )
+
+        self.director = QwenDirector(
+            self.project_root
+        )
+
         self.continuity_manager = (
             ContinuityManager()
         )
+
+    # ========================================================
+    # CHARACTER REBINDING
+    # ========================================================
+
+    def _character_objects(
+        self,
+        values: list[dict],
+    ) -> list[Character]:
+
+        characters = []
+
+        for value in values:
+
+            character = Character(
+                character_id=str(
+                    value.get(
+                        "character_id",
+                        "",
+                    )
+                ),
+                name=str(
+                    value.get(
+                        "name",
+                        "",
+                    )
+                ),
+                role=str(
+                    value.get(
+                        "role",
+                        "story character",
+                    )
+                ),
+                description=str(
+                    value.get(
+                        "description",
+                        "",
+                    )
+                ),
+                personality=str(
+                    value.get(
+                        "personality",
+                        "",
+                    )
+                ),
+                appearance=dict(
+                    value.get(
+                        "appearance",
+                        {},
+                    )
+                    or {}
+                ),
+                clothing=dict(
+                    value.get(
+                        "clothing",
+                        {},
+                    )
+                    or {}
+                ),
+                distinctive_features=list(
+                    value.get(
+                        "distinctive_features",
+                        [],
+                    )
+                    or []
+                ),
+                character_state=dict(
+                    value.get(
+                        "character_state",
+                        {},
+                    )
+                    or {}
+                ),
+                continuity_rules=list(
+                    value.get(
+                        "continuity_rules",
+                        [],
+                    )
+                    or []
+                ),
+            )
+
+            source = (
+                self.references.resolve_character(
+                    character.name
+                )
+            )
+
+            character.reference_paths = (
+                source[
+                    "reference_paths"
+                ]
+            )
+
+            character.reference_video_paths = (
+                source[
+                    "reference_video_paths"
+                ]
+            )
+
+            character.reference_audio_paths = (
+                source[
+                    "reference_audio_paths"
+                ]
+            )
+
+            character.reference_path = (
+                character.reference_paths[0]
+                if character.reference_paths
+                else None
+            )
+
+            character.reference_video_path = (
+                character.reference_video_paths[0]
+                if character.reference_video_paths
+                else None
+            )
+
+            character.reference_audio_path = (
+                character.reference_audio_paths[0]
+                if character.reference_audio_paths
+                else None
+            )
+
+            character.reference_mode = (
+                "provided"
+                if (
+                    character.reference_paths
+                    or character.reference_video_paths
+                    or character.reference_audio_paths
+                )
+                else "story_generated"
+            )
+
+            character.build_identity_profile()
+            character.build_story_state_profile()
+
+            characters.append(
+                character
+            )
+
+        self.references.validate(
+            characters,
+            require_images=False,
+        )
+
+        return characters
+
+    # ========================================================
+    # SHOT REBINDING
+    # ========================================================
+
+    @staticmethod
+    def _native_audio_policy(
+        soundscape: str,
+    ) -> str:
+
+        return (
+            f"{soundscape.strip()} "
+            "Native H3 audio policy: when no supplied "
+            "reference audio exists, generate suitable "
+            "scene ambience, dialogue and music natively "
+            "from the production context."
+        )
+
+    def _rebind_shots(
+        self,
+        plan: dict,
+        characters: list[Character],
+    ) -> None:
+
+        by_name = {
+            character.name.lower():
+                character
+            for character in characters
+        }
+
+        for scene in plan.get(
+            "scenes",
+            [],
+        ):
+            scene["shot_ids"] = []
+
+        for index, raw in enumerate(
+            plan.get(
+                "shots",
+                [],
+            ),
+            start=1,
+        ):
+
+            names = [
+                str(value)
+                for value in (
+                    raw.get(
+                        "characters",
+                        [],
+                    )
+                    or []
+                )
+            ]
+
+            selected = [
+                by_name[name.lower()]
+                for name in names
+                if name.lower()
+                in by_name
+            ]
+
+            images = []
+            videos = []
+            audio = []
+            bindings = {}
+
+            for character in selected:
+
+                character_images = (
+                    character.normalized_reference_paths()
+                )
+
+                character_videos = (
+                    character.normalized_video_paths()
+                )
+
+                character_audio = (
+                    character.normalized_audio_paths()
+                )
+
+                bindings[
+                    character.name
+                ] = character_images
+
+                for path in character_images:
+                    if (
+                        path not in images
+                        and len(images)
+                        < H3_MAX_REFERENCE_IMAGES
+                    ):
+                        images.append(
+                            path
+                        )
+
+                for path in character_videos:
+                    if (
+                        path not in videos
+                        and len(videos)
+                        < H3_MAX_REFERENCE_VIDEOS
+                    ):
+                        videos.append(
+                            path
+                        )
+
+                for path in character_audio:
+                    if (
+                        path not in audio
+                        and len(audio)
+                        < H3_MAX_REFERENCE_AUDIO
+                    ):
+                        audio.append(
+                            path
+                        )
+
+            locks = (
+                IdentityContinuity.build_locks(
+                    selected,
+                    names,
+                )
+            )
+
+            reference_bindings = (
+                IdentityContinuity
+                .build_reference_bindings(
+                    images,
+                    bindings,
+                )
+            )
+
+            workflow_mode = str(
+                plan.get(
+                    "workflow_mode",
+                    WORKFLOW_AUTO,
+                )
+            )
+
+            if (
+                workflow_mode
+                == WORKFLOW_AUTO
+            ):
+                if plan.get(
+                    "profile"
+                ) == PROFILE_TURBO:
+                    workflow_mode = (
+                        WORKFLOW_TURBO_REF2V
+                    )
+                else:
+                    workflow_mode = (
+                        WORKFLOW_REF2V
+                    )
+
+            if (
+                workflow_mode
+                == WORKFLOW_TURBO_REF2V
+                or plan.get(
+                    "profile"
+                ) == PROFILE_TURBO
+            ):
+                steps = TURBO_STEPS
+                workflow_mode = (
+                    WORKFLOW_TURBO_REF2V
+                )
+            else:
+                steps = H3_STEPS
+
+                if workflow_mode not in {
+                    WORKFLOW_REF2V,
+                }:
+                    workflow_mode = (
+                        WORKFLOW_REF2V
+                    )
+
+            soundscape = (
+                str(
+                    raw.get(
+                        "overall_soundscape",
+                        "",
+                    )
+                    or ""
+                )
+            )
+
+            negative = str(
+                raw.get(
+                    "negative_prompt",
+                    "",
+                )
+                or ""
+            )
+
+            description = str(
+                raw.get(
+                    "detailed_description",
+                    "",
+                )
+                or raw.get(
+                    "visual_prompt",
+                    "",
+                )
+            )
+
+            h3_object = Shot(
+                shot_id=str(
+                    raw.get(
+                        "shot_id",
+                        f"shot_{index:03d}",
+                    )
+                ),
+                scene_id=str(
+                    raw.get(
+                        "scene_id",
+                        "",
+                    )
+                ),
+                order=int(
+                    raw.get(
+                        "order",
+                        index,
+                    )
+                ),
+                duration_seconds=float(
+                    raw.get(
+                        "duration_seconds",
+                        5.2,
+                    )
+                ),
+                characters=names,
+                location=str(
+                    raw.get(
+                        "location",
+                        "",
+                    )
+                ),
+                action=str(
+                    raw.get(
+                        "action",
+                        "",
+                    )
+                ),
+                camera_shot=str(
+                    raw.get(
+                        "camera_shot",
+                        "",
+                    )
+                ),
+                camera_movement=str(
+                    raw.get(
+                        "camera_movement",
+                        "",
+                    )
+                ),
+                lighting=str(
+                    raw.get(
+                        "lighting",
+                        "",
+                    )
+                ),
+                mood=str(
+                    raw.get(
+                        "mood",
+                        "",
+                    )
+                ),
+                visual_prompt=str(
+                    raw.get(
+                        "visual_prompt",
+                        "",
+                    )
+                ),
+                retention_analysis=str(
+                    raw.get(
+                        "retention_analysis",
+                        "",
+                    )
+                ),
+                detailed_description=description,
+                overall_soundscape=(
+                    self._native_audio_policy(
+                        soundscape
+                    )
+                ),
+                non_diegetic_music=str(
+                    raw.get(
+                        "non_diegetic_music",
+                        "",
+                    )
+                ),
+                negative_prompt=negative,
+                continuity_notes=str(
+                    raw.get(
+                        "continuity_notes",
+                        "",
+                    )
+                ),
+                seed=(
+                    int(
+                        raw["seed"]
+                    )
+                    if raw.get(
+                        "seed"
+                    ) is not None
+                    else (
+                        100000
+                        + index
+                    )
+                ),
+                reference_images=images,
+                reference_videos=videos,
+                reference_audio=(
+                    audio[0]
+                    if audio
+                    else None
+                ),
+                reference_audio_paths=audio,
+                reference_audio_by_character={
+                    name: (
+                        by_name[name.lower()]
+                        .normalized_audio_paths()
+                    )
+                    for name in names
+                    if name.lower()
+                    in by_name
+                },
+                reference_video_by_character={
+                    name: (
+                        by_name[name.lower()]
+                        .normalized_video_paths()
+                    )
+                    for name in names
+                    if name.lower()
+                    in by_name
+                },
+                speaking_characters=list(
+                    raw.get(
+                        "speaking_characters",
+                        names,
+                    )
+                    or []
+                ),
+                speech_text=str(
+                    raw.get(
+                        "speech_text",
+                        "",
+                    )
+                ),
+                reference_bindings=(
+                    reference_bindings
+                ),
+                identity_locks=locks,
+                workflow_mode=workflow_mode,
+                keyframe_images=[],
+                keyframe_positions=[],
+                extend_take_source_video=None,
+                width=H3_WIDTH,
+                height=H3_HEIGHT,
+                fps=H3_FPS,
+                frames_per_shot=(
+                    H3_FRAMES_PER_SHOT
+                ),
+                steps=steps,
+            )
+
+            updated = (
+                h3_object.to_dict()
+            )
+
+            raw.clear()
+            raw.update(
+                updated
+            )
+
+            for scene in plan.get(
+                "scenes",
+                [],
+            ):
+                if scene.get(
+                    "scene_id"
+                ) == raw.get(
+                    "scene_id"
+                ):
+                    scene.setdefault(
+                        "shot_ids",
+                        [],
+                    ).append(
+                        raw["shot_id"]
+                    )
+
+        plan[
+            "characters"
+        ] = [
+            character.to_dict()
+            for character in characters
+        ]
+
+    # ========================================================
+    # PLAN
+    # ========================================================
 
     def create_production_plan(
         self,
@@ -45,51 +633,153 @@ class ProductionOrchestrator:
         profile: str = "base",
     ) -> dict:
 
-        plan = self.planner.build(
-            mode=mode,
-            user_input=user_input,
-            workflow_mode=workflow_mode,
-            profile=profile,
+        base_plan = (
+            self.planner.build(
+                mode=mode,
+                user_input=user_input,
+                workflow_mode=workflow_mode,
+                profile=profile,
+            )
         )
 
-        previous_shot = None
+        try:
+            plan = (
+                self.director.enrich_plan(
+                    mode=mode,
+                    user_input=user_input,
+                    base_plan=base_plan,
+                )
+            )
+        finally:
+            # Critical:
+            # Qwen director must be fully released before H3.
+            self.director.unload()
 
-        for shot in plan["shots"]:
+        if mode == PRESERVE_USER_STORY_MODE:
+            plan["story"] = (
+                base_plan["story"]
+            )
 
-            context = (
-                self.continuity_manager
-                .build_context(
-                    previous_shot
+        characters = (
+            self._character_objects(
+                plan.get(
+                    "characters",
+                    [],
+                )
+            )
+        )
+
+        self._rebind_shots(
+            plan,
+            characters,
+        )
+
+        # Continuity links are scoped within each scene.
+        previous_by_scene = {}
+
+        for shot in plan.get(
+            "shots",
+            [],
+        ):
+            scene_id = shot[
+                "scene_id"
+            ]
+
+            previous = (
+                previous_by_scene.get(
+                    scene_id
                 )
             )
 
-            if context:
-                shot["continuity_notes"] = (
-                    (
-                        shot.get(
-                            "continuity_notes",
-                            "",
-                        )
-                        + "\n"
-                        + context
-                    ).strip()
-                )
+            if previous:
+                shot[
+                    "previous_shot"
+                ] = previous[
+                    "shot_id"
+                ]
 
-            if previous_shot is not None:
-
-                shot["previous_shot"] = (
-                    previous_shot[
-                        "shot_id"
-                    ]
-                )
-
-                previous_shot[
+            if previous:
+                previous[
                     "next_shot"
                 ] = shot[
                     "shot_id"
                 ]
 
-            previous_shot = shot
+            previous_by_scene[
+                scene_id
+            ] = shot
+
+        # A scene is safe to run independently only if:
+        # 1. no character is shared across scenes
+        # 2. there is no cross-scene continuity dependency
+        scene_characters = {}
+
+        for shot in plan.get(
+            "shots",
+            [],
+        ):
+            scene_characters.setdefault(
+                shot[
+                    "scene_id"
+                ],
+                set(),
+            ).update(
+                str(name).lower()
+                for name in (
+                    shot.get(
+                        "characters",
+                        [],
+                    )
+                    or []
+                )
+            )
+
+        seen_characters = {}
+        shared = False
+
+        for scene_id, names in (
+            scene_characters.items()
+        ):
+            for name in names:
+                if name in seen_characters:
+                    shared = True
+                seen_characters[name] = (
+                    scene_id
+                )
+
+        plan[
+            "parallel_safe"
+        ] = not shared
+
+        plan[
+            "delivery_width"
+        ] = DELIVERY_WIDTH
+
+        plan[
+            "delivery_height"
+        ] = DELIVERY_HEIGHT
+
+        plan[
+            "delivery_fps"
+        ] = DELIVERY_FPS
+
+        plan[
+            "upscale_width"
+        ] = int(
+            plan.get(
+                "upscale_width",
+                1920,
+            )
+        )
+
+        plan[
+            "upscale_height"
+        ] = int(
+            plan.get(
+                "upscale_height",
+                1080,
+            )
+        )
 
         plan["preview_ready"] = True
         plan["created_at"] = (
@@ -118,8 +808,7 @@ class ProductionOrchestrator:
 
         return plan
 
-    def unload_models(self):
-        # There is no separate planner model.
-        # H3 loads its single locked Qwen encoder
-        # through the ComfyUI workflow.
-        return None
+    def unload_models(
+        self,
+    ):
+        self.director.unload()
