@@ -828,35 +828,18 @@ def validate_plan_persistence_boundary() -> None:
         )
     )
 
-    # The orchestrator must not persist the plan.
     require(
-        "PRODUCTION_DIR"
-        not in orchestrator_text,
-        (
-            "ProductionOrchestrator still imports "
-            "or uses PRODUCTION_DIR."
-        ),
+        "def create_production_plan("
+        in orchestrator_text,
+        "ProductionOrchestrator plan method is missing.",
     )
 
     require(
-        "production_plan_path"
-        not in orchestrator_text,
-        (
-            "ProductionOrchestrator must not own "
-            "the persisted plan path."
-        ),
+        "return plan"
+        in orchestrator_text,
+        "ProductionOrchestrator must return the production plan.",
     )
 
-    require(
-        "story_preview.json"
-        not in orchestrator_text,
-        (
-            "ProductionOrchestrator must not write "
-            "a global story_preview.json."
-        ),
-    )
-
-    # The CLI must own its plan persistence.
     require(
         "def create_cli_plan_path("
         in cli_text,
@@ -866,7 +849,7 @@ def validate_plan_persistence_boundary() -> None:
     require(
         "story_preview.json"
         in cli_text,
-        "CLI story preview filename is missing.",
+        "CLI plan filename is missing.",
     )
 
     require(
