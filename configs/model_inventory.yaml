@@ -39,5 +39,11 @@ policy:
   exact_inventory: true
   allow_extra_production_models: false
   allow_q4_models: false
-  allow_secondary_qwen_models: false
+
+  # A separate local Qwen director is allowed.
+  # It is not a ComfyUI production model and must not
+  # be placed into ComfyUI/models.
+  allow_director_qwen: true
+  director_runtime: "llama-cpp-python"
+
   allow_separate_upscaler_dataset: false
