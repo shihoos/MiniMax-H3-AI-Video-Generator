@@ -25,18 +25,13 @@ def discover_gpu_ids():
     if not torch.cuda.is_available():
         raise RuntimeError(
             "NVIDIA CUDA GPU is required "
-            "for production H3 generation."
-        )
-
-    count = torch.cuda.device_count()
-
-    if count <= 0:
-        raise RuntimeError(
-            "No CUDA GPUs detected."
+            "for production generation."
         )
 
     return list(
-        range(count)
+        range(
+            torch.cuda.device_count()
+        )
     )
 
 
@@ -112,8 +107,14 @@ def main():
     )
 
     parser.add_argument(
+        "--preview",
         "--plan-only",
         action="store_true",
+        dest="preview",
+        help=(
+            "Create the story/scenes/shots preview "
+            "without starting GPU generation."
+        ),
     )
 
     args = parser.parse_args()
@@ -131,36 +132,48 @@ def main():
         .create_production_plan(
             mode=args.mode,
             user_input=args.story,
+            workflow_mode="auto",
             profile=args.profile,
         )
     )
 
+    preview = {
+        "preview": True,
+        "story_mode": args.mode,
+        "profile": args.profile,
+        "characters": plan[
+            "character_count"
+        ],
+        "scenes": plan[
+            "scene_count"
+        ],
+        "shots": plan[
+            "shot_count"
+        ],
+        "audio_policy": plan[
+            "audio_policy"
+        ],
+        "preview_file": plan[
+            "production_plan_path"
+        ],
+    }
+
     print(
         json.dumps(
-            {
-                "plan": plan.get(
-                    "production_plan_path"
-                ),
-                "profile": args.profile,
-                "shots": len(
-                    plan.get(
-                        "shots",
-                        [],
-                    )
-                ),
-            },
+            preview,
             indent=2,
             ensure_ascii=False,
         )
     )
 
-    if args.plan_only:
+    if args.preview:
         return 0
 
     runtime_workers = None
 
     if args.workers:
         workers = args.workers
+
     else:
         from execution.h3_runtime import (
             H3Runtime,
@@ -177,10 +190,7 @@ def main():
 
         workers = [
             item["url"]
-            for item in (
-                runtime_workers
-                .values()
-            )
+            for item in runtime_workers.values()
         ]
 
     try:
@@ -228,6 +238,7 @@ def main():
     finally:
 
         if runtime_workers is not None:
+
             from execution.h3_runtime import (
                 H3Runtime,
             )
