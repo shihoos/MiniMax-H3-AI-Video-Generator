@@ -52,7 +52,6 @@ REQUIRED_FILES = [
     # --------------------------------------------------------
 
     "execution/assembly_manager.py",
-    "execution/checkpoint_manager.py",
     "execution/comfy_client.py",
     "execution/h3_runtime.py",
     "execution/h3_workflow_builder.py",
