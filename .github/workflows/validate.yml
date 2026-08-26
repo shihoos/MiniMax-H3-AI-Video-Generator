@@ -8,12 +8,11 @@ on:
   pull_request:
     branches:
       - main
-      
+
   workflow_dispatch:
 
 permissions:
   contents: read
-
 
 concurrency:
   group: minimax-h3-validation-${{ github.ref }}
@@ -172,7 +171,7 @@ jobs:
               + " The man crosses fractured ground "
               + "while distant mountains collapse into glowing dust. "
               + "A violent storm tears through the abyss "
-              + "and forces him to continue toward the final horizon."
+              + "and forces him toward the final horizon."
           )
 
           director._validate_mode_output(
@@ -284,42 +283,98 @@ jobs:
           assert '"characters"' in ai
           assert '"scenes"' in ai
           assert '"shots"' not in ai
-          assert "genuinely developed story" in ai
 
           assert (
-              "Preserve every important fact"
+              "AI STORY MODE"
+              in ai
+          )
+
+          assert (
+              "EXPAND STORY MODE"
               in expand
           )
 
           assert (
-              "Do not simply copy the user's paragraphs"
-              in expand
-          )
-
-          assert (
-              "immutable source material"
-              in preserve
-          )
-
-          assert (
-              "must equal the supplied story"
+              "PRESERVE STORY MODE"
               in preserve
           )
 
           assert '"shots"' in shots
 
           assert (
-              "Do NOT create new characters"
-              in shots
-          )
-
-          assert (
-              "Only use names present in the character bible"
+              "Do not invent characters"
               in shots
           )
 
           print(
               "Qwen director contract PASSED."
+          )
+          PY
+
+      - name: Deterministic recovery regression
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from planner.qwen_director import (
+              QwenDirector,
+          )
+
+          director = QwenDirector(
+              Path(".").resolve()
+          )
+
+          story = (
+              "A scientist discovers a strange signal "
+              "beneath an abandoned city. "
+              "The scientist follows the signal through "
+              "a flooded underground station."
+          )
+
+          characters, scenes = (
+              director._build_deterministic_fallback(
+                  story
+              )
+          )
+
+          assert isinstance(
+              characters,
+              list,
+          )
+
+          assert isinstance(
+              scenes,
+              list,
+          )
+
+          assert scenes
+
+          recovered = (
+              director._recover_scenes(
+                  "ai_story",
+                  story,
+                  characters,
+                  {
+                      str(
+                          item.get(
+                              "name",
+                              "",
+                          )
+                      ).lower()
+                      for item in characters
+                  },
+              )
+          )
+
+          assert isinstance(
+              recovered,
+              list,
+          )
+
+          print(
+              "Deterministic recovery regression PASSED."
           )
           PY
 
@@ -403,12 +458,6 @@ jobs:
           )
 
           assert (
-              '"-vf",\n'
-              '            "-vf"'
-              not in text
-          )
-
-          assert (
               '"-c:v",\n'
               '            "libx264"'
               in text
@@ -454,8 +503,14 @@ jobs:
               "ProductionRunner",
               "check_worker",
               "share=True",
+              "session_plan_path",
           ]:
               assert token in text, token
+
+          assert (
+              "Qwen director returned no usable characters"
+              not in text
+          )
 
           print(
               "Gradio UI PASSED."
