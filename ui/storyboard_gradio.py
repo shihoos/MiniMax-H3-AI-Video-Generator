@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -211,17 +212,24 @@ class ProductionController:
 
         except Exception as exc:
 
+            traceback.print_exc()
+
+            details = (
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"{traceback.format_exc()}"
+            )
+
             return (
                 "### STORYBOARD GENERATION FAILED",
                 "",
                 "",
                 "",
-                (
-                    f"**{type(exc).__name__}:** "
-                    f"{exc}"
-                ),
+                "```text\n"
+                + details
+                + "\n```",
                 None,
             )
+        
 
     # ========================================================
     # APPROVAL + H3 PRODUCTION
