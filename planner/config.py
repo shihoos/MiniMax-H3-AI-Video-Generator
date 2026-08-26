@@ -15,13 +15,8 @@ SCENES_DIR = DATA_DIR / "scenes"
 SHOTS_DIR = DATA_DIR / "shots"
 PRODUCTION_DIR = DATA_DIR / "production"
 
-CONTINUITY_DIR = (
-    PRODUCTION_DIR / "continuity"
-)
-
-IDENTITY_DIR = (
-    PRODUCTION_DIR / "identity"
-)
+CONTINUITY_DIR = PRODUCTION_DIR / "continuity"
+IDENTITY_DIR = PRODUCTION_DIR / "identity"
 
 
 def ensure_directories() -> None:
@@ -42,7 +37,7 @@ def ensure_directories() -> None:
 
 
 # ============================================================
-# LOCKED MODEL INVENTORY
+# LOCKED H3 MODEL INVENTORY
 # ============================================================
 
 H3_REF2VA_MODEL = (
@@ -68,6 +63,118 @@ H3_AUDIO_VAE = (
 H3_LATENT_UPSCALER_3D = (
     "minimax_h3_latent_upscaler_3d_fp16.safetensors"
 )
+
+
+# ============================================================
+# QWEN DIRECTOR MODEL
+# ============================================================
+
+# This is a SECOND Qwen model with a different job:
+#
+# Qwen3-14B-Q4_K_M
+#     = story writer / director / production planner
+#
+# The existing H3 Qwen3-VL checkpoint remains:
+#
+# qwen3vl_32b_minimax_h3_int4_convrot.safetensors
+#     = H3 multimodal conditioning encoder
+#
+# Do not mix their roles.
+
+DIRECTOR_MODEL_FILENAME = (
+    "Qwen3-14B-Q4_K_M.gguf"
+)
+
+DIRECTOR_MODEL_ENV = (
+    "H3_DIRECTOR_MODEL_PATH"
+)
+
+DIRECTOR_ENABLED_ENV = (
+    "H3_DIRECTOR_ENABLED"
+)
+
+DIRECTOR_N_CTX = int(
+    os.getenv(
+        "H3_DIRECTOR_N_CTX",
+        "8192",
+    )
+)
+
+DIRECTOR_N_GPU_LAYERS = int(
+    os.getenv(
+        "H3_DIRECTOR_N_GPU_LAYERS",
+        "-1",
+    )
+)
+
+DIRECTOR_N_BATCH = int(
+    os.getenv(
+        "H3_DIRECTOR_N_BATCH",
+        "512",
+    )
+)
+
+DIRECTOR_MAX_TOKENS = int(
+    os.getenv(
+        "H3_DIRECTOR_MAX_TOKENS",
+        "7000",
+    )
+)
+
+DIRECTOR_TEMPERATURE = float(
+    os.getenv(
+        "H3_DIRECTOR_TEMPERATURE",
+        "0.20",
+    )
+)
+
+DIRECTOR_TOP_P = float(
+    os.getenv(
+        "H3_DIRECTOR_TOP_P",
+        "0.85",
+    )
+)
+
+DIRECTOR_THREADS = int(
+    os.getenv(
+        "H3_DIRECTOR_THREADS",
+        str(
+            max(
+                2,
+                min(
+                    8,
+                    os.cpu_count()
+                    or 4,
+                ),
+            )
+        ),
+    )
+)
+
+DIRECTOR_MAX_PLAN_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_MAX_PLAN_CHARS",
+        "50000",
+    )
+)
+
+DIRECTOR_KAGGLE_INPUT_ROOT = Path(
+    "/kaggle/input"
+)
+
+
+def director_enabled() -> bool:
+    value = os.getenv(
+        DIRECTOR_ENABLED_ENV,
+        "1",
+    ).strip().lower()
+
+    return value not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 # ============================================================
@@ -106,7 +213,7 @@ H3_STEPS = 20
 
 
 # ============================================================
-# REFERENCE LIMITS
+# H3 REFERENCE LIMITS
 # ============================================================
 
 H3_MAX_REFERENCE_IMAGES = 9
@@ -123,13 +230,12 @@ TURBO_STEPS = 8
 
 
 # ============================================================
-# INTERNAL UPSCALE / REGENERATION TARGET
+# UPSCALE
 # ============================================================
 
-# Important:
-# H3 generation remains 1344×768.
-# The MMH3 3D latent upscaler + Ultimate Upscale
-# refine internally at 1920×1080.
+# H3 generates at its production resolution.
+# MMH3's 3D latent upscaler + Ultimate Upscale refine
+# internally at 1920x1080.
 UPSCALE_WIDTH = int(
     os.getenv(
         "H3_UPSCALE_WIDTH",
@@ -152,6 +258,21 @@ UPSCALE_HEIGHT = int(
 DELIVERY_WIDTH = 1280
 DELIVERY_HEIGHT = 720
 DELIVERY_FPS = 24
+
+
+# ============================================================
+# STORY MODES
+# ============================================================
+
+AI_STORY_MODE = "ai_story"
+PRESERVE_USER_STORY_MODE = "preserve_user_story"
+EXPAND_USER_STORY_MODE = "expand_user_story"
+
+VALID_STORY_MODES = {
+    AI_STORY_MODE,
+    PRESERVE_USER_STORY_MODE,
+    EXPAND_USER_STORY_MODE,
+}
 
 
 # ============================================================
@@ -184,36 +305,3 @@ ALL_PROFILES = {
     PROFILE_TURBO,
     PROFILE_UPSCALE,
 }
-
-
-# ============================================================
-# STORY MODES
-# ============================================================
-
-AI_STORY_MODE = "ai_story"
-PRESERVE_USER_STORY_MODE = (
-    "preserve_user_story"
-)
-EXPAND_USER_STORY_MODE = (
-    "expand_user_story"
-)
-
-VALID_STORY_MODES = {
-    AI_STORY_MODE,
-    PRESERVE_USER_STORY_MODE,
-    EXPAND_USER_STORY_MODE,
-}
-
-
-# ============================================================
-# SINGLE LOCAL QWEN INVENTORY
-# ============================================================
-
-# H3-specific Qwen3-VL conditioning encoder.
-#
-# It is used through the H3 multimodal workflow:
-# text + reference images + reference videos + audio context.
-#
-# No external Qwen API.
-# No second Qwen checkpoint.
-PLANNER_MODEL = H3_TEXT_ENCODER
