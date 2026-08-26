@@ -12,6 +12,8 @@ on:
 permissions:
   contents: read
 
+workflow_dispatch:
+
 concurrency:
   group: minimax-h3-validation-${{ github.ref }}
   cancel-in-progress: true
