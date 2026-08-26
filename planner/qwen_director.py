@@ -771,6 +771,17 @@ continuity_notes
             {
                 "mode": mode,
                 "user_story": story,
+                "input_policy": (
+                    "The user_story is complete creative source material. "
+                    "Read and use all of it. Do not filter, delete, or "
+                    "ignore tone statements, visual priorities, camera "
+                    "suggestions, sound ideas, or other creative guidance. "
+                    "You may interpret, improve, expand, combine, or "
+                    "reorganize those ideas according to the selected "
+                    "story mode. Character-name validation happens only "
+                    "after generation and must never be applied to the "
+                    "input text."
+                ),
                 "task": (
                     "Create the story/character/scene plan "
                     "according to the selected mode."
