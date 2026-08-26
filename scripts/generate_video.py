@@ -20,9 +20,11 @@ if str(ROOT) not in sys.path:
 
 
 def discover_gpu_ids():
+
     import torch
 
     if not torch.cuda.is_available():
+
         raise RuntimeError(
             "NVIDIA CUDA GPU is required "
             "for production generation."
@@ -38,6 +40,7 @@ def discover_gpu_ids():
 def load_clients(
     urls,
 ):
+
     from execution.comfy_client import (
         ComfyClient,
     )
@@ -47,6 +50,7 @@ def load_clients(
     for index, url in enumerate(
         urls
     ):
+
         client = ComfyClient(
             base_url=url,
             timeout=60,
@@ -54,6 +58,7 @@ def load_clients(
         )
 
         if not client.health_check():
+
             raise RuntimeError(
                 f"ComfyUI worker unavailable: {url}"
             )
@@ -61,6 +66,54 @@ def load_clients(
         clients[index] = client
 
     return clients
+
+
+def load_plan(
+    path: Path,
+) -> dict:
+
+    if not path.is_file():
+        raise FileNotFoundError(
+            path
+        )
+
+    plan = json.loads(
+        path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    if not isinstance(
+        plan,
+        dict,
+    ):
+        raise RuntimeError(
+            "Production plan must be a JSON object."
+        )
+
+    return plan
+
+
+def require_approval(
+    plan: dict,
+) -> None:
+
+    approval = plan.get(
+        "approval",
+        {},
+    )
+
+    if (
+        approval.get(
+            "status"
+        )
+        != "approved"
+    ):
+        raise RuntimeError(
+            "Storyboard has not been approved.\n"
+            "Run with --storyboard, approve it in the "
+            "browser, then continue."
+        )
 
 
 def main():
@@ -73,7 +126,10 @@ def main():
 
     parser.add_argument(
         "--story",
-        required=True,
+        default=None,
+        help=(
+            "Story or subject used for planning."
+        ),
     )
 
     parser.add_argument(
@@ -107,13 +163,45 @@ def main():
     )
 
     parser.add_argument(
+        "--plan",
+        default=None,
+        help=(
+            "Use an existing approved production plan."
+        ),
+    )
+
+    parser.add_argument(
+        "--storyboard",
+        action="store_true",
+        help=(
+            "Create the plan, launch the interactive "
+            "visual storyboard, wait for approval, "
+            "then continue to generation."
+        ),
+    )
+
+    parser.add_argument(
+        "--storyboard-port",
+        type=int,
+        default=8765,
+    )
+
+    parser.add_argument(
         "--preview",
         "--plan-only",
         action="store_true",
         dest="preview",
         help=(
-            "Create the story/scenes/shots preview "
-            "without starting GPU generation."
+            "Create the production plan only."
+        ),
+    )
+
+    parser.add_argument(
+        "--upscale",
+        action="store_true",
+        help=(
+            "Run the H3 latent 3D upscaler and "
+            "MMH3 Ultimate Upscale before final 720p delivery."
         ),
     )
 
@@ -123,39 +211,95 @@ def main():
         ProductionOrchestrator,
     )
 
-    orchestrator = (
-        ProductionOrchestrator()
-    )
+    if args.plan:
 
-    plan = (
-        orchestrator
-        .create_production_plan(
-            mode=args.mode,
-            user_input=args.story,
-            workflow_mode="auto",
-            profile=args.profile,
+        plan_path = Path(
+            args.plan
         )
-    )
+
+        plan = load_plan(
+            plan_path
+        )
+
+    else:
+
+        if not args.story:
+            raise RuntimeError(
+                "--story is required unless --plan is supplied."
+            )
+
+        orchestrator = (
+            ProductionOrchestrator()
+        )
+
+        plan = (
+            orchestrator
+            .create_production_plan(
+                mode=args.mode,
+                user_input=args.story,
+                workflow_mode="auto",
+                profile=args.profile,
+            )
+        )
+
+        plan[
+            "upscale_enabled"
+        ] = bool(
+            args.upscale
+            or args.profile
+            == "upscale"
+        )
+
+        plan_path = Path(
+            plan[
+                "production_plan_path"
+            ]
+        )
+
+        plan_path.write_text(
+            json.dumps(
+                plan,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
 
     preview = {
         "preview": True,
-        "story_mode": args.mode,
-        "profile": args.profile,
-        "characters": plan[
-            "character_count"
-        ],
-        "scenes": plan[
-            "scene_count"
-        ],
-        "shots": plan[
-            "shot_count"
-        ],
-        "audio_policy": plan[
-            "audio_policy"
-        ],
-        "preview_file": plan[
-            "production_plan_path"
-        ],
+        "story_mode": plan.get(
+            "story_mode"
+        ),
+        "profile": plan.get(
+            "profile"
+        ),
+        "characters": len(
+            plan.get(
+                "characters",
+                [],
+            )
+        ),
+        "scenes": len(
+            plan.get(
+                "scenes",
+                [],
+            )
+        ),
+        "shots": len(
+            plan.get(
+                "shots",
+                [],
+            )
+        ),
+        "upscale_enabled": bool(
+            plan.get(
+                "upscale_enabled",
+                False,
+            )
+        ),
+        "preview_file": str(
+            plan_path
+        ),
     }
 
     print(
@@ -166,15 +310,41 @@ def main():
         )
     )
 
-    if args.preview:
+    if args.storyboard:
+
+        from ui.storyboard_server import (
+            serve_storyboard,
+        )
+
+        approved_path = (
+            serve_storyboard(
+                plan_path,
+                host="0.0.0.0",
+                port=args.storyboard_port,
+                wait_for_approval=True,
+            )
+        )
+
+        plan = load_plan(
+            approved_path
+        )
+
+    elif args.preview:
+
         return 0
+
+    require_approval(
+        plan
+    )
 
     runtime_workers = None
 
     if args.workers:
+
         workers = args.workers
 
     else:
+
         from execution.h3_runtime import (
             H3Runtime,
         )
@@ -189,8 +359,11 @@ def main():
         )
 
         workers = [
-            item["url"]
-            for item in runtime_workers.values()
+            item[
+                "url"
+            ]
+            for item
+            in runtime_workers.values()
         ]
 
     try:
@@ -216,19 +389,27 @@ def main():
         print(
             json.dumps(
                 {
-                    "status": "completed",
-                    "profile": args.profile,
+                    "status":
+                        "completed",
+                    "profile":
+                        args.profile,
+                    "upscale_enabled":
+                        result[
+                            "upscale_enabled"
+                        ],
                     "shot_outputs": [
                         str(path)
-                        for path in result[
+                        for path
+                        in result[
                             "shot_outputs"
                         ]
                     ],
-                    "final_video": str(
-                        result[
-                            "final_video"
-                        ]
-                    ),
+                    "final_video":
+                        str(
+                            result[
+                                "final_video"
+                            ]
+                        ),
                 },
                 indent=2,
                 ensure_ascii=False,
