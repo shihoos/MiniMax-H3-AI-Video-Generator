@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import threading
 import traceback
@@ -29,12 +28,8 @@ class ProductionController:
     def __init__(
         self,
     ):
-        # One H3 generation is intentionally allowed at a time
-        # because the current runtime owns the complete local
-        # GPU/ComfyUI worker lifecycle.
-        #
-        # Storyboard state itself is session-scoped through
-        # gr.State and is not stored on this controller.
+        # Only one complete H3 production is allowed at a time.
+        # The runtime owns local GPU/ComfyUI worker lifecycle.
         self._lock = threading.Lock()
 
     @staticmethod
@@ -153,17 +148,41 @@ class ProductionController:
             plan_path_value
         ).resolve()
 
+        sessions_root = (
+            ROOT
+            / "data"
+            / "production"
+            / "sessions"
+        ).resolve()
+
+        try:
+            plan_path.relative_to(
+                sessions_root
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "Storyboard plan is outside the "
+                "managed session directory."
+            ) from exc
+
         if not plan_path.is_file():
             raise FileNotFoundError(
-                f"Storyboard plan does not exist:\n"
+                "Storyboard plan does not exist:\n"
                 f"{plan_path}"
             )
 
-        plan = json.loads(
-            plan_path.read_text(
-                encoding="utf-8"
+        try:
+            plan = json.loads(
+                plan_path.read_text(
+                    encoding="utf-8"
+                )
             )
-        )
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Storyboard plan is invalid JSON:\n"
+                f"{plan_path}\n"
+                f"{exc}"
+            ) from exc
 
         if not isinstance(
             plan,
@@ -207,6 +226,26 @@ class ProductionController:
                 },
             )
 
+        valid_modes = {
+            "ai_story",
+            "expand_user_story",
+            "preserve_user_story",
+        }
+
+        if mode not in valid_modes:
+            return (
+                "### ERROR\nInvalid story mode.",
+                "",
+                "",
+                "",
+                "",
+                None,
+                state
+                or {
+                    "status": "error"
+                },
+            )
+
         if not self._lock.acquire(
             blocking=False
         ):
@@ -225,7 +264,7 @@ class ProductionController:
 
         try:
 
-            # Production Gradio must always use the local director.
+            # Production Gradio always requires the local director.
             os.environ[
                 "H3_DIRECTOR_ENABLED"
             ] = "1"
@@ -265,8 +304,8 @@ class ProductionController:
                 False,
             ):
                 raise RuntimeError(
-                    "Production plan is still waiting for "
-                    "the Qwen director."
+                    "Production plan is still waiting "
+                    "for the Qwen director."
                 )
 
             characters = (
@@ -315,6 +354,8 @@ class ProductionController:
                 "profile"
             ] = "turbo"
 
+            # The chosen production profile is:
+            # H3 Turbo generation + combined upscale.
             plan[
                 "upscale_enabled"
             ] = True
@@ -341,7 +382,9 @@ class ProductionController:
                 plan
             )
 
+            # ------------------------------------------------
             # CHARACTER PREVIEW
+            # ------------------------------------------------
 
             character_text = "\n\n".join(
                 (
@@ -359,7 +402,9 @@ class ProductionController:
                 in characters
             )
 
+            # ------------------------------------------------
             # SCENE PREVIEW
+            # ------------------------------------------------
 
             scene_text = "\n\n".join(
                 (
@@ -378,19 +423,26 @@ class ProductionController:
                 in scenes
             )
 
+            # ------------------------------------------------
             # SHOT PREVIEW
+            # ------------------------------------------------
 
             shot_text = "\n\n".join(
                 (
                     f"### {shot.get('shot_id', '')}\n"
                     f"**Scene:** {shot.get('scene_id', '')}\n"
-                    f"**Duration:** {shot.get('duration_seconds', '')} sec\n"
+                    f"**Duration:** "
+                    f"{shot.get('duration_seconds', '')} sec\n"
                     f"**Characters:** "
                     f"{', '.join(shot.get('characters', []) or [])}\n"
-                    f"**Camera:** {shot.get('camera_shot', '')}\n"
-                    f"**Movement:** {shot.get('camera_movement', '')}\n"
-                    f"**Lighting:** {shot.get('lighting', '')}\n"
-                    f"**Action:** {shot.get('action', '')}\n\n"
+                    f"**Camera:** "
+                    f"{shot.get('camera_shot', '')}\n"
+                    f"**Movement:** "
+                    f"{shot.get('camera_movement', '')}\n"
+                    f"**Lighting:** "
+                    f"{shot.get('lighting', '')}\n"
+                    f"**Action:** "
+                    f"{shot.get('action', '')}\n\n"
                     f"**Visual Direction:** "
                     f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
                     f"**Soundscape:** "
@@ -475,6 +527,7 @@ class ProductionController:
     ):
 
         try:
+
             (
                 plan,
                 plan_path,
@@ -626,6 +679,169 @@ class ProductionController:
                         f"{worker['url']}"
                     )
 
+                # Validate actual custom-node registration,
+                # not just HTTP reachability.
+                from kaggle.verify_live_runtime import (
+                    check_worker,
+                )
+
+                check_worker(
+                    worker["port"]
+                )
+
+                clients[
+                    gpu_id
+                ] = client
+
+            # Keep the session-scoped production ID.
+            plan[
+                "production_id"
+            ] = str(
+                plan.get(
+                    "production_id",
+                    "",
+                )
+                or self._production_id()
+            )
+
+            result = (
+                ProductionRunner(
+                    project_root=ROOT,
+                    comfy_clients=clients,
+                )
+                .run(
+                    plan
+                )
+            )
+
+            final_video = Path(
+                result[
+                    "final_video"
+                ]
+            ).resolve()
+
+            if not final_video.is_file():
+                raise RuntimeError(
+                    "Production runner completed but "
+                    "final video was not found:\n"
+                    f"{final_video}"
+                )
+
+            if final_video.stat().st_size <= 0:
+                raise RuntimeError(
+                    "Production runner produced an empty "
+                    "final video:\n"
+                    f"{final_video}"
+                )
+
+            plan[
+                "production_id"
+            ] = result[
+                "production_id"
+            ]
+
+            plan[
+                "final_video"
+            ] = str(
+                final_video
+            )
+
+            plan[
+                "approval"
+            ] = {
+                "status": "completed",
+                "approved_at": (
+                    approval.get(
+                        "approved_at"
+                    )
+                ),
+                "completed_at": (
+                    datetime.now().isoformat()
+                ),
+            }
+
+            plan_path.write_text(
+                json.dumps(
+                    plan,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            updated_state = dict(
+                state
+                or {}
+            )
+
+            updated_state[
+                "status"
+            ] = "completed"
+
+            updated_state[
+                "production_id"
+            ] = result[
+                "production_id"
+            ]
+
+            updated_state[
+                "plan_path"
+            ] = str(
+                plan_path
+            )
+
+            return (
+                "### VIDEO GENERATION COMPLETE ✅\n\n"
+                f"Production: `{result['production_id']}`\n\n"
+                f"Final video: `{final_video}`\n\n"
+                "Profile: H3 Turbo 8-step\n\n"
+                "Upscale: H3 3D latent + "
+                "MMH3 Ultimate Upscale\n\n"
+                "Delivery: 1280×720",
+                str(
+                    final_video
+                ),
+                updated_state,
+            )
+
+        except Exception as exc:
+
+            traceback.print_exc()
+
+            details = (
+                f"{type(exc).__name__}: {exc}\n\n"
+                f"{traceback.format_exc()}"
+            )
+
+            return (
+                "### PRODUCTION FAILED\n\n"
+                "```text\n"
+                + details
+                + "\n```",
+                None,
+                state,
+            )
+
+        finally:
+
+            if runtime_workers is not None:
+
+                try:
+
+                    from execution.h3_runtime import (
+                        H3Runtime,
+                    )
+
+                    H3Runtime.stop_workers(
+                        runtime_workers
+                    )
+
+                except Exception:
+                    traceback.print_exc()
+
+            self._lock.release()
+
+
 def build_app(
     controller: ProductionController | None = None,
     initial_story: str | None = None,
@@ -712,7 +928,7 @@ def build_app(
         )
 
         status = gr.Markdown(
-            "Write your story and press Enter."
+            "Write your story and press Generate Storyboard."
         )
 
         with gr.Accordion(
@@ -796,11 +1012,13 @@ def serve_storyboard_gradio(
     initial_mode: str = "ai_story",
 ):
 
-    # plan_path and wait_for_approval are retained in the
-    # function signature for compatibility with older callers.
+    # plan_path and wait_for_approval are retained only for
+    # compatibility with older callers.
     #
-    # The canonical production flow is now fully session-scoped
-    # inside the Gradio application.
+    # The active application is fully session-scoped through
+    # Gradio state.
+
+    del wait_for_approval
 
     os.environ[
         "H3_DIRECTOR_ENABLED"
@@ -816,8 +1034,6 @@ def serve_storyboard_gradio(
         initial_mode=initial_mode,
     )
 
-    # Keep share=True because Kaggle is expected to expose
-    # the application through a Gradio share URL.
     demo.launch(
         server_name="0.0.0.0",
         server_port=8765,
@@ -833,7 +1049,6 @@ def serve_storyboard_gradio(
 
 
 def main():
-
     serve_storyboard_gradio()
 
 
