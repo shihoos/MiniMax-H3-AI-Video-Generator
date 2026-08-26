@@ -264,7 +264,9 @@ def main():
             ),
             encoding="utf-8",
         )
-
+        if args.upscale:
+            plan["upscale_enabled"] = True
+        
     preview = {
         "preview": True,
         "story_mode": plan.get(
