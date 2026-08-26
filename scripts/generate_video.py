@@ -232,7 +232,8 @@ def main():
 
         if not args.story:
             raise RuntimeError(
-                "--story is required unless --plan is supplied."
+                "--story is required unless "
+                "--plan is supplied."
             )
 
         orchestrator = (
@@ -249,20 +250,24 @@ def main():
             )
         )
 
-        plan[
-            "upscale_enabled"
-        ] = bool(
-            args.upscale
-            or args.profile
-            == "upscale"
-        )
-
         plan_path = Path(
             plan[
                 "production_plan_path"
             ]
         )
 
+    # Explicit CLI flag always wins.
+    if args.upscale:
+        plan[
+            "upscale_enabled"
+        ] = True
+
+    elif args.profile == "upscale":
+        plan[
+            "upscale_enabled"
+        ] = True
+
+    if not args.plan:
         plan_path.write_text(
             json.dumps(
                 plan,
@@ -271,8 +276,6 @@ def main():
             ),
             encoding="utf-8",
         )
-        if args.upscale:
-            plan["upscale_enabled"] = True
         
     preview = {
         "preview": True,
