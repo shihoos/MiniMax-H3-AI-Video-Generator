@@ -477,3 +477,7 @@ jobs:
               "Combined H3 upscale builder PASSED."
           )
           PY
+
+      - name: Complete
+        run: |
+          echo "MiniMax H3 CI validation PASSED."
