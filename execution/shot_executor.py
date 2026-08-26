@@ -9,6 +9,7 @@ class ShotExecutor:
     MAX_IMAGES = 9
     MAX_VIDEOS = 3
     MAX_AUDIO = 3
+    MAX_TOTAL_REFERENCES = 12
 
     def __init__(
         self,
@@ -16,14 +17,21 @@ class ShotExecutor:
         project_root,
         comfy_input_dir,
     ):
+
         from execution.h3_workflow_builder import (
             H3WorkflowBuilder,
         )
 
+        from execution.h3_upscaled_workflow_builder import (
+            H3UpscaledWorkflowBuilder,
+        )
+
         self.client = comfy_client
+
         self.project_root = Path(
             project_root
         )
+
         self.comfy_input_dir = Path(
             comfy_input_dir
         )
@@ -38,10 +46,18 @@ class ShotExecutor:
             comfy_client=self.client,
         )
 
+        self.upscaled_builder = (
+            H3UpscaledWorkflowBuilder(
+                project_root=self.project_root,
+                comfy_client=self.client,
+            )
+        )
+
     @staticmethod
     def _safe_name(
         value,
     ) -> str:
+
         return "".join(
             char
             if (
@@ -57,6 +73,7 @@ class ShotExecutor:
         source,
         prefix: str,
     ) -> str:
+
         source = Path(
             source
         )
@@ -85,96 +102,95 @@ class ShotExecutor:
         self,
         shot,
     ):
-        raw_images = (
-            list(
-                shot.get(
-                    "reference_images",
-                    [],
-                )
-                or []
+
+        images = list(
+            shot.get(
+                "reference_images",
+                [],
             )
+            or []
         )
 
-        raw_videos = (
-            list(
-                shot.get(
-                    "reference_videos",
-                    [],
-                )
-                or []
+        videos = list(
+            shot.get(
+                "reference_videos",
+                [],
             )
+            or []
         )
 
-        raw_audio = (
-            list(
-                shot.get(
-                    "reference_audio_paths",
-                    [],
-                )
-                or []
+        audio = list(
+            shot.get(
+                "reference_audio_paths",
+                [],
             )
+            or []
         )
 
-        if len(raw_images) > self.MAX_IMAGES:
+        if len(images) > self.MAX_IMAGES:
             raise RuntimeError(
                 f"{shot.get('shot_id')}: "
                 "maximum 9 reference images."
             )
 
-        if len(raw_videos) > self.MAX_VIDEOS:
+        if len(videos) > self.MAX_VIDEOS:
             raise RuntimeError(
                 f"{shot.get('shot_id')}: "
                 "maximum 3 reference videos."
             )
 
-        if len(raw_audio) > self.MAX_AUDIO:
+        if len(audio) > self.MAX_AUDIO:
             raise RuntimeError(
                 f"{shot.get('shot_id')}: "
                 "maximum 3 reference audio clips."
             )
 
         if (
-            len(raw_images)
-            + len(raw_videos)
-            + len(raw_audio)
-            > 12
+            len(images)
+            + len(videos)
+            + len(audio)
+            > self.MAX_TOTAL_REFERENCES
         ):
             raise RuntimeError(
                 f"{shot.get('shot_id')}: "
                 "maximum 12 reference files."
             )
 
-        images = [
+        copied_images = [
             self.copy_input(
                 value,
-                f"{shot['shot_id']}_image_{i + 1}",
+                f"{shot['shot_id']}_image_{index + 1}",
             )
-            for i, value in enumerate(
-                raw_images
+            for index, value in enumerate(
+                images
             )
         ]
 
-        videos = [
+        copied_videos = [
             self.copy_input(
                 value,
-                f"{shot['shot_id']}_video_{i + 1}",
+                f"{shot['shot_id']}_video_{index + 1}",
             )
-            for i, value in enumerate(
-                raw_videos
+            for index, value in enumerate(
+                videos
             )
         ]
 
-        audio = [
+        copied_audio = [
             self.copy_input(
                 value,
-                f"{shot['shot_id']}_audio_{i + 1}",
+                f"{shot['shot_id']}_audio_{index + 1}",
             )
-            for i, value in enumerate(
-                raw_audio
+            for index, value in enumerate(
+                audio
             )
         ]
 
-        return images, videos, audio
+        return (
+            copied_images,
+            copied_videos,
+            copied_audio,
+        )
 
     @staticmethod
     def _number(
@@ -182,11 +198,14 @@ class ShotExecutor:
         default,
         cast,
     ):
+
         if value is None:
             return default
 
         try:
-            return cast(value)
+            return cast(
+                value
+            )
         except (
             TypeError,
             ValueError,
@@ -199,7 +218,9 @@ class ShotExecutor:
         shot,
         workflow_mode,
         output_dir,
+        upscale=False,
     ):
+
         output_dir = Path(
             output_dir
         )
@@ -222,60 +243,101 @@ class ShotExecutor:
 
         if not prompt:
             raise RuntimeError(
-                f"{shot.get('shot_id')}: "
-                "empty H3 prompt."
+                f"{shot.get('shot_id')}: empty H3 prompt."
             )
 
         seed = self._number(
-            shot.get("seed"),
+            shot.get(
+                "seed"
+            ),
             135791113,
             int,
         )
 
         width = self._number(
-            shot.get("width"),
+            shot.get(
+                "width"
+            ),
             1344,
             int,
         )
 
         height = self._number(
-            shot.get("height"),
+            shot.get(
+                "height"
+            ),
             768,
             int,
         )
 
         duration = self._number(
-            shot.get("duration_seconds"),
+            shot.get(
+                "duration_seconds"
+            ),
             5.2,
             float,
         )
 
-        images, videos, audio = (
-            self._prepare_media(
-                shot
+        (
+            images,
+            videos,
+            audio,
+        ) = self._prepare_media(
+            shot
+        )
+
+        if upscale:
+
+            if workflow_mode not in {
+                "ref2v",
+                "turbo_ref2v",
+            }:
+                raise RuntimeError(
+                    "Combined upscale requires "
+                    "ref2v or turbo_ref2v generation mode."
+                )
+
+            workflow = (
+                self.upscaled_builder.build_upscaled(
+                    generation_mode=workflow_mode,
+                    prompt=prompt,
+                    seed=seed,
+                    turbo_steps=8,
+                    reference_images=images,
+                    reference_videos=videos,
+                    reference_audio=audio,
+                    width=width,
+                    height=height,
+                    duration_seconds=duration,
+                )
+            )
+
+        else:
+
+            workflow = self.builder.build(
+                mode=workflow_mode,
+                prompt=prompt,
+                seed=seed,
+                turbo_steps=8,
+                reference_images=images,
+                reference_videos=videos,
+                reference_audio=audio,
+                width=width,
+                height=height,
+                duration_seconds=duration,
+            )
+
+        prompt_id = (
+            self.client.queue_prompt(
+                workflow
             )
         )
 
-        workflow = self.builder.build(
-            mode=workflow_mode,
-            prompt=prompt,
-            seed=seed,
-            turbo_steps=8,
-            reference_images=images,
-            reference_videos=videos,
-            reference_audio=audio,
-            width=width,
-            height=height,
-            duration_seconds=duration,
-        )
-
-        prompt_id = self.client.queue_prompt(
-            workflow
-        )
-
-        history = self.client.wait_for_prompt(
-            prompt_id,
-            timeout=14400,
+        history = (
+            self.client.wait_for_prompt(
+                prompt_id,
+                timeout=14400,
+            )
         )
 
         outputs = (
@@ -298,8 +360,14 @@ class ShotExecutor:
         )
 
         return self.client.download_file(
-            filename=output["filename"],
-            subfolder=output["subfolder"],
-            file_type=output["type"],
+            filename=output[
+                "filename"
+            ],
+            subfolder=output[
+                "subfolder"
+            ],
+            file_type=output[
+                "type"
+            ],
             destination=destination,
         )
