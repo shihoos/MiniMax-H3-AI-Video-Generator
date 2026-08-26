@@ -7,13 +7,11 @@ from pathlib import Path
 from pipeline.continuity_manager import (
     ContinuityManager,
 )
-
 from planner.config import (
     PRODUCTION_DIR,
     WORKFLOW_AUTO,
     ensure_directories,
 )
-
 from planner.production_planner import (
     ProductionPlanner,
 )
@@ -54,26 +52,18 @@ class ProductionOrchestrator:
             profile=profile,
         )
 
-        # Apply existing project continuity state.
         previous_shot = None
-
-        all_shots = []
-
-        scenes_by_id = {
-            scene["scene_id"]: scene
-            for scene in plan["scenes"]
-        }
 
         for shot in plan["shots"]:
 
-            continuity_context = (
+            context = (
                 self.continuity_manager
                 .build_context(
                     previous_shot
                 )
             )
 
-            if continuity_context:
+            if context:
                 shot["continuity_notes"] = (
                     (
                         shot.get(
@@ -81,39 +71,37 @@ class ProductionOrchestrator:
                             "",
                         )
                         + "\n"
-                        + continuity_context
-                    )
-                    .strip()
+                        + context
+                    ).strip()
                 )
 
             if previous_shot is not None:
+
                 shot["previous_shot"] = (
-                    previous_shot["shot_id"]
+                    previous_shot[
+                        "shot_id"
+                    ]
                 )
 
-                previous_shot["next_shot"] = (
-                    shot["shot_id"]
-                )
+                previous_shot[
+                    "next_shot"
+                ] = shot[
+                    "shot_id"
+                ]
 
             previous_shot = shot
 
-            all_shots.append(
-                shot
-            )
-
-        plan["shots"] = all_shots
-
+        plan["preview_ready"] = True
         plan["created_at"] = (
-            datetime.now()
-            .isoformat()
+            datetime.now().isoformat()
         )
 
-        output_path = (
+        preview_path = (
             PRODUCTION_DIR
-            / "production_plan.json"
+            / "story_preview.json"
         )
 
-        output_path.write_text(
+        preview_path.write_text(
             json.dumps(
                 plan,
                 indent=2,
@@ -125,11 +113,13 @@ class ProductionOrchestrator:
         plan[
             "production_plan_path"
         ] = str(
-            output_path
+            preview_path
         )
 
         return plan
 
     def unload_models(self):
-        # No external planner model is loaded.
+        # There is no separate planner model.
+        # H3 loads its single locked Qwen encoder
+        # through the ComfyUI workflow.
         return None
