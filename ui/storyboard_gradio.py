@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import traceback
@@ -57,6 +58,25 @@ class ProductionController:
 
         try:
 
+            # Production Gradio is the actual creative-director
+            # interface. Never inherit H3_DIRECTOR_ENABLED=0 from
+            # a previous Kaggle/CI operation.
+            os.environ[
+                "H3_DIRECTOR_ENABLED"
+            ] = "1"
+
+            from planner.config import (
+                director_enabled,
+            )
+
+            if not director_enabled():
+
+                raise RuntimeError(
+                    "Qwen director is disabled. "
+                    "Production Gradio requires the local "
+                    "Qwen3-14B director to be enabled."
+                )
+
             from pipeline.production_orchestrator import (
                 ProductionOrchestrator,
             )
@@ -65,9 +85,6 @@ class ProductionController:
                 ProductionOrchestrator()
             )
 
-            # Production policy:
-            # Turbo 8-step + 3D latent upscale
-            # + Ultimate Upscale + 1280x720 delivery.
             plan = (
                 orchestrator
                 .create_production_plan(
@@ -77,6 +94,68 @@ class ProductionController:
                     profile="turbo",
                 )
             )
+
+            # ------------------------------------------------
+            # NEVER accept an empty deterministic skeleton as
+            # a valid storyboard.
+            # ------------------------------------------------
+
+            if plan.get(
+                "director_pending",
+                False,
+            ):
+
+                raise RuntimeError(
+                    "Production plan is still waiting for "
+                    "the Qwen director. No storyboard was created."
+                )
+
+            characters = (
+                plan.get(
+                    "characters",
+                    [],
+                )
+                or []
+            )
+
+            scenes = (
+                plan.get(
+                    "scenes",
+                    [],
+                )
+                or []
+            )
+
+            shots = (
+                plan.get(
+                    "shots",
+                    [],
+                )
+                or []
+            )
+
+            if not scenes:
+
+                raise RuntimeError(
+                    "Qwen director returned no scenes. "
+                    "The storyboard was not created."
+                )
+
+            if not shots:
+
+                raise RuntimeError(
+                    "Qwen director returned no shots. "
+                    "The storyboard was not created."
+                )
+
+            if not isinstance(
+                characters,
+                list,
+            ):
+
+                raise RuntimeError(
+                    "Invalid Qwen character plan."
+                )
 
             plan[
                 "profile"
@@ -111,29 +190,9 @@ class ProductionController:
             self._plan = plan
             self._plan_path = plan_path
 
-            characters = (
-                plan.get(
-                    "characters",
-                    [],
-                )
-                or []
-            )
-
-            scenes = (
-                plan.get(
-                    "scenes",
-                    [],
-                )
-                or []
-            )
-
-            shots = (
-                plan.get(
-                    "shots",
-                    [],
-                )
-                or []
-            )
+            # ------------------------------------------------
+            # CHARACTER PREVIEW
+            # ------------------------------------------------
 
             character_text = "\n\n".join(
                 (
@@ -151,6 +210,10 @@ class ProductionController:
                 in characters
             )
 
+            # ------------------------------------------------
+            # SCENE PREVIEW
+            # ------------------------------------------------
+
             scene_text = "\n\n".join(
                 (
                     f"### {scene.get('scene_id', '')} — "
@@ -167,6 +230,10 @@ class ProductionController:
                 for scene
                 in scenes
             )
+
+            # ------------------------------------------------
+            # SHOT PREVIEW
+            # ------------------------------------------------
 
             shot_text = "\n\n".join(
                 (
@@ -208,11 +275,9 @@ class ProductionController:
             return (
                 summary,
                 character_text
-                or "No characters generated.",
-                scene_text
-                or "No scenes generated.",
-                shot_text
-                or "No shots generated.",
+                or "No named characters generated.",
+                scene_text,
+                shot_text,
                 "READY — review the storyboard, then approve it.",
                 None,
             )
@@ -220,6 +285,11 @@ class ProductionController:
         except Exception as exc:
 
             traceback.print_exc()
+
+            # Do not leave an invalid/empty plan cached so the user
+            # cannot accidentally approve it.
+            self._plan = None
+            self._plan_path = None
 
             details = (
                 f"{type(exc).__name__}: {exc}\n\n"
@@ -251,7 +321,31 @@ class ProductionController:
         ):
 
             return (
-                "### ERROR\nGenerate a storyboard first.",
+                "### ERROR\nGenerate a valid storyboard first.",
+                None,
+            )
+
+        scenes = (
+            self._plan.get(
+                "scenes",
+                [],
+            )
+            or []
+        )
+
+        shots = (
+            self._plan.get(
+                "shots",
+                [],
+            )
+            or []
+        )
+
+        if not scenes or not shots:
+
+            return (
+                "### ERROR\nThe storyboard is incomplete. "
+                "Generate a valid Qwen storyboard before production.",
                 None,
             )
 
@@ -547,6 +641,13 @@ def serve_storyboard_gradio(
     plan_path: Path | None = None,
     wait_for_approval: bool = False,
 ):
+
+    # Production Gradio must always use the Qwen director.
+    # This is deliberately runtime-only so GitHub CI can still
+    # import this module with H3_DIRECTOR_ENABLED=0.
+    os.environ[
+        "H3_DIRECTOR_ENABLED"
+    ] = "1"
 
     demo = build_app()
 
