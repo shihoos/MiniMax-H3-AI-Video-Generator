@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import gc
+import importlib
 import json
 import os
 import re
@@ -85,7 +87,9 @@ class QwenDirector:
 
         if explicit:
             candidates.append(
-                Path(explicit)
+                Path(
+                    explicit
+                )
             )
 
         candidates.extend(
@@ -94,8 +98,10 @@ class QwenDirector:
                 / "data"
                 / "models"
                 / DIRECTOR_MODEL_FILENAME,
+
                 self.project_root
                 / DIRECTOR_MODEL_FILENAME,
+
                 DIRECTOR_KAGGLE_INPUT_ROOT
                 / DIRECTOR_MODEL_FILENAME,
             ]
@@ -120,20 +126,29 @@ class QwenDirector:
         unique = []
 
         for candidate in candidates:
-            candidate = Path(candidate)
+            candidate = Path(
+                candidate
+            )
 
             try:
                 key = str(
                     candidate.resolve()
                 )
             except OSError:
-                key = str(candidate)
+                key = str(
+                    candidate
+                )
 
             if key in seen:
                 continue
 
-            seen.add(key)
-            unique.append(candidate)
+            seen.add(
+                key
+            )
+
+            unique.append(
+                candidate
+            )
 
         existing = [
             path
@@ -177,94 +192,166 @@ class QwenDirector:
     # MODEL LIFECYCLE
     # ========================================================
 
-    def load(self) -> None:
-        if not self.available:
-            return
-    
-        if self._llama is not None:
-            return
-    
+    @staticmethod
+    def _load_nvidia_cuda_libraries() -> None:
+        """
+        Load NVIDIA CUDA runtime libraries globally before
+        llama.cpp loads libllama.so.
+
+        Kaggle may have the CUDA runtime installed as Python
+        packages without exposing libcudart.so.13 globally.
+        """
+
         try:
-            import ctypes
-            import importlib
-    
             cuda_runtime = importlib.import_module(
                 "nvidia.cuda_runtime"
             )
-    
+
             cublas = importlib.import_module(
                 "nvidia.cublas"
             )
-    
-            cuda_lib = (
-                Path(
-                    cuda_runtime.__path__[0]
+
+        except ImportError as exc:
+            raise RuntimeError(
+                "NVIDIA CUDA runtime Python packages are missing.\n"
+                "Run kaggle/bootstrap.py before loading "
+                "the Qwen director."
+            ) from exc
+
+        runtime_root = Path(
+            cuda_runtime.__path__[0]
+        )
+
+        cublas_root = Path(
+            cublas.__path__[0]
+        )
+
+        cuda_candidates = [
+            runtime_root
+            / "lib"
+            / "libcudart.so.13",
+            runtime_root
+            / "lib64"
+            / "libcudart.so.13",
+        ]
+
+        cublas_candidates = [
+            cublas_root
+            / "lib"
+            / "libcublas.so.13",
+            cublas_root
+            / "lib64"
+            / "libcublas.so.13",
+        ]
+
+        cuda_lib = next(
+            (
+                path
+                for path in cuda_candidates
+                if path.is_file()
+            ),
+            None,
+        )
+
+        cublas_lib = next(
+            (
+                path
+                for path in cublas_candidates
+                if path.is_file()
+            ),
+            None,
+        )
+
+        if cuda_lib is None:
+            raise RuntimeError(
+                "libcudart.so.13 was not found.\n"
+                f"Checked:\n"
+                + "\n".join(
+                    str(path)
+                    for path in cuda_candidates
                 )
-                / "lib"
-                / "libcudart.so.13"
             )
-    
-            cublas_lib = (
-                Path(
-                    cublas.__path__[0]
+
+        if cublas_lib is None:
+            raise RuntimeError(
+                "libcublas.so.13 was not found.\n"
+                f"Checked:\n"
+                + "\n".join(
+                    str(path)
+                    for path in cublas_candidates
                 )
-                / "lib"
-                / "libcublas.so.13"
             )
-    
-            if not cuda_lib.is_file():
-                raise RuntimeError(
-                    "Missing CUDA runtime library:\n"
-                    f"{cuda_lib}"
-                )
-    
-            if not cublas_lib.is_file():
-                raise RuntimeError(
-                    "Missing cuBLAS library:\n"
-                    f"{cublas_lib}"
-                )
-    
-            # Load CUDA libraries globally before llama.cpp loads
-            # libllama.so. This is required because the CUDA
-            # llama.cpp wheel does not bundle libcudart.
+
+        try:
             ctypes.CDLL(
                 str(cuda_lib),
                 mode=ctypes.RTLD_GLOBAL,
             )
-    
+
             ctypes.CDLL(
                 str(cublas_lib),
                 mode=ctypes.RTLD_GLOBAL,
             )
-    
+
+        except OSError as exc:
+            raise RuntimeError(
+                "Unable to load NVIDIA CUDA libraries:\n"
+                f"{exc}"
+            ) from exc
+
+    def load(self) -> None:
+        if not self.available:
+            return
+
+        if self._llama is not None:
+            return
+
+        # IMPORTANT:
+        # The CUDA 13 llama.cpp wheel expects libcudart.so.13
+        # and related NVIDIA libraries to be available before
+        # libllama.so is loaded.
+        self._load_nvidia_cuda_libraries()
+
+        try:
             from llama_cpp import Llama
+        except ImportError as exc:
+            raise RuntimeError(
+                "llama-cpp-python is not installed. "
+                "Run the Kaggle bootstrap before using "
+                "the Qwen director."
+            ) from exc
 
-    except ImportError as exc:
-        raise RuntimeError(
-            "Qwen CUDA runtime dependencies are not installed. "
-            "Run kaggle/bootstrap.py first."
-        ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                "llama-cpp-python native CUDA library "
+                "could not be loaded:\n"
+                f"{exc}"
+            ) from exc
 
-    except OSError as exc:
-        raise RuntimeError(
-            "Qwen CUDA native libraries could not be loaded:\n"
-            f"{exc}"
-        ) from exc
+        try:
+            self._llama = Llama(
+                model_path=str(
+                    self._model_path
+                ),
+                n_ctx=DIRECTOR_N_CTX,
+                n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
+                n_batch=DIRECTOR_N_BATCH,
+                n_threads=DIRECTOR_THREADS,
+                flash_attn=True,
+                verbose=False,
+            )
 
-    self._llama = Llama(
-        model_path=str(
-            self._model_path
-        ),
-        n_ctx=DIRECTOR_N_CTX,
-        n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
-        n_batch=DIRECTOR_N_BATCH,
-        n_threads=DIRECTOR_THREADS,
-        flash_attn=True,
-        verbose=False,
-    )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to initialize the Qwen3-14B "
+                "director model.\n"
+                f"Model: {self._model_path}\n"
+                f"Error: {exc}"
+            ) from exc
 
     def unload(self) -> None:
         model = self._llama
+
         self._llama = None
 
         if model is not None:
@@ -294,6 +381,7 @@ class QwenDirector:
     def _creative_character(
         character: dict,
     ) -> dict:
+
         return {
             "name": character.get(
                 "name",
@@ -337,6 +425,7 @@ class QwenDirector:
     def _creative_scene(
         scene: dict,
     ) -> dict:
+
         return {
             "scene_id": scene.get(
                 "scene_id",
@@ -404,6 +493,7 @@ class QwenDirector:
     def _creative_shot(
         shot: dict,
     ) -> dict:
+
         return {
             "shot_id": shot.get(
                 "shot_id",
@@ -491,6 +581,7 @@ class QwenDirector:
         self,
         plan: dict,
     ) -> dict:
+
         compact = {
             "story": plan.get(
                 "story",
@@ -504,7 +595,8 @@ class QwenDirector:
                 self._creative_character(
                     value
                 )
-                for value in plan.get(
+                for value
+                in plan.get(
                     "characters",
                     [],
                 )
@@ -513,7 +605,8 @@ class QwenDirector:
                 self._creative_scene(
                     value
                 )
-                for value in plan.get(
+                for value
+                in plan.get(
                     "scenes",
                     [],
                 )
@@ -522,7 +615,8 @@ class QwenDirector:
                 self._creative_shot(
                     value
                 )
-                for value in plan.get(
+                for value
+                in plan.get(
                     "shots",
                     [],
                 )
@@ -532,10 +626,14 @@ class QwenDirector:
         encoded = json.dumps(
             compact,
             ensure_ascii=False,
-            separators=(",", ":"),
+            separators=(
+                ",",
+                ":",
+            ),
         )
 
         if len(encoded) > DIRECTOR_MAX_PLAN_CHARS:
+
             encoded = encoded[
                 :DIRECTOR_MAX_PLAN_CHARS
             ]
@@ -557,6 +655,7 @@ class QwenDirector:
     ) -> str:
 
         if mode == PRESERVE_USER_STORY_MODE:
+
             mode_rule = (
                 "PRESERVE MODE: never change the user's "
                 "story facts, chronology, named entities, "
@@ -565,6 +664,7 @@ class QwenDirector:
             )
 
         elif mode == EXPAND_USER_STORY_MODE:
+
             mode_rule = (
                 "EXPAND MODE: preserve the user's core "
                 "facts and intent, but enrich the story "
@@ -574,6 +674,7 @@ class QwenDirector:
             )
 
         else:
+
             mode_rule = (
                 "AI STORY MODE: treat the user input as "
                 "the creative premise. Develop a complete "
@@ -686,7 +787,6 @@ Return a practical production plan, not an essay.
             text or ""
         ).strip()
 
-        # Remove fenced JSON if present.
         text = re.sub(
             r"^```(?:json)?",
             "",
@@ -700,10 +800,16 @@ Return a practical production plan, not an essay.
             text,
         ).strip()
 
-        start = text.find("{")
-        end = text.rfind("}")
+        start = text.find(
+            "{"
+        )
+
+        end = text.rfind(
+            "}"
+        )
 
         if start < 0 or end <= start:
+
             raise RuntimeError(
                 "Qwen director did not return a JSON object."
             )
@@ -713,10 +819,13 @@ Return a practical production plan, not an essay.
         ]
 
         try:
+
             value = json.loads(
                 candidate
             )
+
         except json.JSONDecodeError as exc:
+
             raise RuntimeError(
                 "Qwen director returned invalid JSON:\n"
                 + str(exc)
@@ -726,6 +835,7 @@ Return a practical production plan, not an essay.
             value,
             dict,
         ):
+
             raise RuntimeError(
                 "Qwen director output is not a JSON object."
             )
@@ -741,6 +851,7 @@ Return a practical production plan, not an essay.
     ) -> dict:
 
         if not director_enabled():
+
             return {
                 "enabled": False,
                 "plan": deepcopy(
@@ -752,6 +863,7 @@ Return a practical production plan, not an essay.
         self.load()
 
         if self._llama is None:
+
             raise RuntimeError(
                 "Qwen director model failed to load."
             )
@@ -774,12 +886,20 @@ Return a practical production plan, not an essay.
         ]
 
         try:
+
             response = (
-                self._llama.create_chat_completion(
+                self._llama
+                .create_chat_completion(
                     messages=messages,
-                    temperature=DIRECTOR_TEMPERATURE,
-                    top_p=DIRECTOR_TOP_P,
-                    max_tokens=DIRECTOR_MAX_TOKENS,
+                    temperature=(
+                        DIRECTOR_TEMPERATURE
+                    ),
+                    top_p=(
+                        DIRECTOR_TOP_P
+                    ),
+                    max_tokens=(
+                        DIRECTOR_MAX_TOKENS
+                    ),
                     response_format={
                         "type": "json_object"
                     },
@@ -788,13 +908,22 @@ Return a practical production plan, not an essay.
                     },
                 )
             )
+
         except TypeError:
+
             response = (
-                self._llama.create_chat_completion(
+                self._llama
+                .create_chat_completion(
                     messages=messages,
-                    temperature=DIRECTOR_TEMPERATURE,
-                    top_p=DIRECTOR_TOP_P,
-                    max_tokens=DIRECTOR_MAX_TOKENS,
+                    temperature=(
+                        DIRECTOR_TEMPERATURE
+                    ),
+                    top_p=(
+                        DIRECTOR_TOP_P
+                    ),
+                    max_tokens=(
+                        DIRECTOR_MAX_TOKENS
+                    ),
                     response_format={
                         "type": "json_object"
                     },
@@ -802,9 +931,13 @@ Return a practical production plan, not an essay.
             )
 
         content = (
-            response["choices"][0]
-            ["message"]
-            ["content"]
+            response[
+                "choices"
+            ][0][
+                "message"
+            ][
+                "content"
+            ]
         )
 
         return {
@@ -835,12 +968,16 @@ Return a practical production plan, not an essay.
             if key not in updated:
                 continue
 
-            value = updated[key]
+            value = updated[
+                key
+            ]
 
             if value is None:
                 continue
 
-            result[key] = value
+            result[
+                key
+            ] = value
 
         return result
 
@@ -858,7 +995,10 @@ Return a practical production plan, not an essay.
             base_plan=base_plan,
         )
 
-        if not result["enabled"]:
+        if not result[
+            "enabled"
+        ]:
+
             return base_plan
 
         creative = result[
@@ -869,7 +1009,10 @@ Return a practical production plan, not an essay.
             base_plan
         )
 
-        if mode != PRESERVE_USER_STORY_MODE:
+        if mode != (
+            PRESERVE_USER_STORY_MODE
+        ):
+
             generated_story = str(
                 creative.get(
                     "story",
@@ -879,11 +1022,14 @@ Return a practical production plan, not an essay.
             ).strip()
 
             if generated_story:
-                merged["story"] = (
-                    generated_story
-                )
 
-        merged["director_notes"] = str(
+                merged[
+                    "story"
+                ] = generated_story
+
+        merged[
+            "director_notes"
+        ] = str(
             creative.get(
                 "director_notes",
                 "",
@@ -911,7 +1057,8 @@ Return a practical production plan, not an essay.
                 )
             ).strip().lower():
                 character
-            for character in base_characters
+            for character
+            in base_characters
             if str(
                 character.get(
                     "name",
@@ -1012,9 +1159,10 @@ Return a practical production plan, not an essay.
             )
 
         if characters:
-            merged["characters"] = (
-                characters
-            )
+
+            merged[
+                "characters"
+            ] = characters
 
         # ----------------------------------------------------
         # Scenes
@@ -1064,9 +1212,12 @@ Return a practical production plan, not an essay.
             existing = base_scene_map.get(
                 scene_id,
                 {
-                    "scene_id": scene_id,
-                    "order": index,
-                    "shot_ids": [],
+                    "scene_id":
+                        scene_id,
+                    "order":
+                        index,
+                    "shot_ids":
+                        [],
                 },
             )
 
@@ -1095,7 +1246,10 @@ Return a practical production plan, not an essay.
             )
 
         if scenes:
-            merged["scenes"] = scenes
+
+            merged[
+                "scenes"
+            ] = scenes
 
         # ----------------------------------------------------
         # Shots
@@ -1126,7 +1280,8 @@ Return a practical production plan, not an essay.
                     index,
                 )
             ): shot
-            for index, shot in enumerate(
+            for index, shot
+            in enumerate(
                 base_shots,
                 start=1,
             )
@@ -1164,6 +1319,7 @@ Return a practical production plan, not an essay.
             )
 
             if existing is None:
+
                 existing = (
                     base_shots_by_order.get(
                         int(
@@ -1176,10 +1332,12 @@ Return a practical production plan, not an essay.
                 )
 
             if existing is None:
+
                 existing = {
                     "shot_id":
                         shot_id
-                        or f"shot_{index:03d}",
+                        or
+                        f"shot_{index:03d}",
                     "scene_id":
                         spec.get(
                             "scene_id",
@@ -1226,14 +1384,21 @@ Return a practical production plan, not an essay.
             )
 
         if shots:
-            merged["shots"] = shots
+
+            merged[
+                "shots"
+            ] = shots
 
         return merged
 
-    def close(self):
+    def close(
+        self
+    ):
         self.unload()
 
-    def __enter__(self):
+    def __enter__(
+        self
+    ):
         self.load()
         return self
 
