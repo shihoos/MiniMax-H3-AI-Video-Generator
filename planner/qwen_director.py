@@ -346,7 +346,7 @@ class QwenDirector:
                 f"cuBLAS: {cublas_lib}\n"
                 f"Error: {exc}"
             ) from exc
-            
+
     def load(self) -> None:
         if not self.available:
             return
@@ -916,22 +916,93 @@ Return a practical production plan, not an essay.
                 "Qwen director model failed to load."
             )
 
+        system_prompt = (
+            self._system_prompt(
+                mode
+            )
+        )
+
+        user_prompt = (
+            self._user_prompt(
+                mode,
+                user_input,
+                base_plan,
+            )
+        )
+
         messages = [
             {
                 "role": "system",
-                "content": self._system_prompt(
-                    mode
-                ),
+                "content": system_prompt,
             },
             {
                 "role": "user",
-                "content": self._user_prompt(
-                    mode,
-                    user_input,
-                    base_plan,
-                ),
+                "content": user_prompt,
             },
         ]
+
+        # ----------------------------------------------------
+        # Keep the complete request inside the actual Qwen
+        # context window.
+        #
+        # llama.cpp counts both the formatted prompt and the
+        # generated completion against n_ctx.
+        # ----------------------------------------------------
+
+        context_limit = int(
+            DIRECTOR_N_CTX
+        )
+
+        safety_margin = 128
+
+        try:
+
+            prompt_text = (
+                system_prompt
+                + "\n\n"
+                + user_prompt
+            )
+
+            prompt_tokens = len(
+                self._llama.tokenize(
+                    prompt_text.encode(
+                        "utf-8"
+                    ),
+                    add_bos=True,
+                    special=True,
+                )
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Unable to measure the Qwen director "
+                "prompt token count."
+            ) from exc
+
+        available_tokens = (
+            context_limit
+            - prompt_tokens
+            - safety_margin
+        )
+
+        if available_tokens < 512:
+
+            raise RuntimeError(
+                "Qwen director prompt is too large for "
+                f"the {context_limit}-token context window.\n"
+                f"Prompt tokens: {prompt_tokens}.\n"
+                f"Available completion tokens after the "
+                f"{safety_margin}-token safety margin: "
+                f"{available_tokens}."
+            )
+
+        max_tokens = min(
+            int(
+                DIRECTOR_MAX_TOKENS
+            ),
+            available_tokens,
+        )
 
         try:
 
@@ -945,38 +1016,31 @@ Return a practical production plan, not an essay.
                     top_p=(
                         DIRECTOR_TOP_P
                     ),
-                    max_tokens=(
-                        DIRECTOR_MAX_TOKENS
-                    ),
-                    response_format={
-                        "type": "json_object"
-                    },
-                    chat_template_kwargs={
-                        "enable_thinking": False,
-                    },
-                )
-            )
-
-        except TypeError:
-
-            response = (
-                self._llama
-                .create_chat_completion(
-                    messages=messages,
-                    temperature=(
-                        DIRECTOR_TEMPERATURE
-                    ),
-                    top_p=(
-                        DIRECTOR_TOP_P
-                    ),
-                    max_tokens=(
-                        DIRECTOR_MAX_TOKENS
-                    ),
+                    max_tokens=max_tokens,
                     response_format={
                         "type": "json_object"
                     },
                 )
             )
+
+        except TypeError as exc:
+
+            raise RuntimeError(
+                "The installed llama-cpp-python version "
+                "does not support the Qwen director "
+                "chat-completion interface."
+            ) from exc
+
+        except ValueError as exc:
+
+            raise RuntimeError(
+                "Qwen director generation exceeded the "
+                "available context window. "
+                f"Prompt tokens: {prompt_tokens}. "
+                f"Context limit: {context_limit}. "
+                f"Completion limit: {max_tokens}. "
+                f"Error: {exc}"
+            ) from exc
 
         content = (
             response[
