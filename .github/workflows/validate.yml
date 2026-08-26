@@ -47,6 +47,10 @@ jobs:
             kaggle \
             ui
 
+      - name: Reference path wiring
+        run: |
+          python scripts/validate_reference_wiring.py
+          
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -447,11 +451,7 @@ jobs:
               "Assembly contract PASSED."
           )
           PY
-
-      - name: Reference path wiring
-        run: |
-          python scripts/validate_reference_wiring.py
-          
+        
       - name: Storyboard UI contract
         run: |
           python - <<'PY'
