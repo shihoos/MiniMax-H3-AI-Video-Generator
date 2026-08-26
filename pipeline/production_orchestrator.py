@@ -34,6 +34,8 @@ from planner.config import (
     WORKFLOW_TURBO_REF2V,
     ensure_directories,
     PRESERVE_USER_STORY_MODE,
+    UPSCALE_HEIGHT,
+    UPSCALE_WIDTH,
 )
 from planner.production_planner import (
     ProductionPlanner,
@@ -764,24 +766,20 @@ class ProductionOrchestrator:
             "delivery_fps"
         ] = DELIVERY_FPS
 
-        plan[
-            "upscale_width"
-        ] = int(
+        plan["upscale_width"] = int(
             plan.get(
                 "upscale_width",
-                1920,
+                UPSCALE_WIDTH,
             )
         )
-
-        plan[
-            "upscale_height"
-        ] = int(
+        
+        plan["upscale_height"] = int(
             plan.get(
                 "upscale_height",
-                1080,
+                UPSCALE_HEIGHT,
             )
         )
-
+        
         plan["preview_ready"] = True
         plan["created_at"] = (
             datetime.now().isoformat()
