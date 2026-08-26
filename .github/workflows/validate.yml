@@ -176,6 +176,108 @@ jobs:
               )
           PY
 
+      - name: Story mode smoke tests
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from planner.production_planner import ProductionPlanner
+
+          planner = ProductionPlanner(
+              Path(".").resolve()
+          )
+
+          stories = {
+              "preserve_user_story": (
+                  "A detective enters an abandoned railway station at midnight."
+              ),
+              "expand_user_story": (
+                  "A detective enters an abandoned railway station."
+              ),
+              "ai_story": (
+                  "A scientist discovers a strange signal beneath an abandoned city."
+              ),
+          }
+
+          for mode, story in stories.items():
+              plan = planner.build(
+                  mode=mode,
+                  user_input=story,
+                  workflow_mode="ref2v",
+                  profile="base",
+              )
+
+              assert plan["scenes"], mode
+              assert plan["shots"], mode
+              assert plan["width"] == 1344
+              assert plan["height"] == 768
+              assert plan["fps"] == 24
+              assert plan["steps"] == 20
+
+              print(
+                  "PASS",
+                  mode,
+                  "scenes=",
+                  len(plan["scenes"]),
+                  "shots=",
+                  len(plan["shots"]),
+              )
+          PY
+
+      - name: Turbo contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import json
+
+          path = Path(
+              "workflows/generation/"
+              "H3_Turbo_Ref2V_Production.json"
+          )
+
+          data = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          text = json.dumps(data)
+
+          assert (
+              "minimax_h3_turbo_v4_step600_ema.safetensors"
+              in text
+          )
+
+          assert (
+              "minimax_h3_ref2v_turbo_4step"
+              not in text
+          )
+
+          print(
+              "PASS Turbo Step600 / 8-step inventory"
+          )
+          PY
+
+      - name: 720p delivery contract
+        run: |
+          python - <<'PY'
+          from planner.config import (
+              DELIVERY_WIDTH,
+              DELIVERY_HEIGHT,
+              DELIVERY_FPS,
+              UPSCALE_WIDTH,
+              UPSCALE_HEIGHT,
+          )
+
+          assert DELIVERY_WIDTH == 1280
+          assert DELIVERY_HEIGHT == 720
+          assert DELIVERY_FPS == 24
+
+          assert UPSCALE_WIDTH == 1920
+          assert UPSCALE_HEIGHT == 1080
+
+          print("PASS 1920x1080 upscale -> 1280x720 delivery")
+          PY
+          
       - name: Runtime manifest
         run: |
           python - <<'PY'
@@ -201,6 +303,48 @@ jobs:
                   "PASS",
                   name,
               )
+          PY
+
+      - name: Ultimate Upscale node contract
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path(
+              "workflows/postprocess/"
+              "H3_Ref2V_UltimateUpscale_Production.json"
+          )
+
+          data = json.loads(
+              path.read_text(
+                  encoding="utf-8"
+              )
+          )
+
+          types = {
+              node.get("type")
+              for node in data.get(
+                  "nodes",
+                  []
+              )
+          }
+
+          required = {
+              "MinimaxH3LatentUpscaler3D",
+              "MMH3LatentUpscaleWithModelParams",
+              "MMH3TemporalSplitParams",
+              "MMH3SpatialSplitParams",
+              "MMH3UltimateUpscale",
+          }
+
+          missing = required - types
+
+          assert not missing, missing
+
+          print(
+              "PASS Ultimate Upscale production contract"
+          )
           PY
 
       - name: Repository cleanup
