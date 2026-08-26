@@ -132,7 +132,7 @@ class H3SceneContinuity:
         for character_id in character_ids:
 
             anchor = (
-                self.identity_store.save_anchor(
+                self.identity_store.save_first_anchor(
                     character_id=character_id,
                     shot_id=shot["shot_id"],
                     source_frame=frame_path,
