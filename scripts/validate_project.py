@@ -345,8 +345,7 @@ def validate_python() -> None:
     excluded = {
         ".git",
         "ComfyUI",
-        "__pycache__",
-        ".runtime_ltx098",
+        "__pycache__",        
     }
 
     count = 0
