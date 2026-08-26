@@ -13,16 +13,30 @@ class H3SceneContinuity:
     def __init__(
         self,
         project_root: Path,
+        production_id: str | None = None,
     ):
+
         self.project_root = Path(
             project_root
-        )
+        ).resolve()
 
-        self.root = (
+        base = (
             self.project_root
             / "data"
             / "production"
             / "continuity"
+        )
+
+        self.production_id = (
+            self._safe(production_id)
+            if production_id
+            else None
+        )
+
+        self.root = (
+            base / self.production_id
+            if self.production_id
+            else base
         )
 
         self.root.mkdir(
@@ -32,8 +46,28 @@ class H3SceneContinuity:
 
         self.identity_store = (
             IdentityAnchorStore(
-                self.project_root
+                self.project_root,
+                production_id=self.production_id,
             )
+        )
+
+    @staticmethod
+    def _safe(
+        value: str | None,
+    ) -> str:
+
+        text = str(
+            value or ""
+        ).strip()
+
+        return "".join(
+            char
+            if (
+                char.isalnum()
+                or char in "._-"
+            )
+            else "_"
+            for char in text
         )
 
     def extract_last_frame(
@@ -45,17 +79,25 @@ class H3SceneContinuity:
 
         video_path = Path(
             video_path
-        )
+        ).resolve()
 
         if not video_path.is_file():
             raise FileNotFoundError(
                 video_path
             )
 
+        safe_scene = self._safe(
+            scene_id
+        )
+
+        safe_shot = self._safe(
+            shot_id
+        )
+
         destination = (
             self.root
-            / str(scene_id)
-            / f"{shot_id}_last_frame.png"
+            / safe_scene
+            / f"{safe_shot}_last_frame.png"
         )
 
         destination.parent.mkdir(
@@ -91,9 +133,12 @@ class H3SceneContinuity:
                 + result.stderr[-5000:]
             )
 
-        if not destination.is_file():
+        if (
+            not destination.is_file()
+            or destination.stat().st_size <= 0
+        ):
             raise RuntimeError(
-                f"Last frame was not created: "
+                f"Last frame was not created correctly: "
                 f"{destination}"
             )
 
@@ -132,7 +177,8 @@ class H3SceneContinuity:
         for character_id in character_ids:
 
             anchor = (
-                self.identity_store.save_first_anchor(
+                self.identity_store
+                .save_first_anchor(
                     character_id=character_id,
                     shot_id=shot["shot_id"],
                     source_frame=frame_path,
