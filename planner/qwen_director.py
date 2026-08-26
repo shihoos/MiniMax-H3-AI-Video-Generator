@@ -27,34 +27,8 @@ from planner.config import (
 
 
 class QwenDirector:
-    """
-    Local Qwen3-14B creative director.
+    """Local Qwen3-14B creative director for production planning."""
 
-    Pass 1:
-        user story
-            -> story
-            -> characters
-            -> scenes
-
-    Pass 2:
-        story + characters + scenes
-            -> cinematic shots
-
-    The deterministic ProductionPlanner remains the safe
-    fallback when H3_DIRECTOR_ENABLED=0.
-
-    This class is responsible for creative planning only.
-    The ProductionOrchestrator is responsible for converting
-    the creative plan into H3-ready references, identity locks,
-    workflow settings and delivery configuration.
-    """
-
-    # These are prose/instruction/metadata tokens that should
-    # NEVER be promoted into character names.
-    #
-    # Generic role descriptors such as "man" or "woman" are
-    # intentionally NOT forbidden. They are legitimate story
-    # characters when the story actually contains them.
     FORBIDDEN_CHARACTER_NAMES = {
         "treat",
         "develop",
@@ -119,8 +93,6 @@ class QwenDirector:
         "visual_prompt",
     }
 
-    # Generic roles that are valid characters and must not be
-    # removed by sanitization.
     VALID_GENERIC_ROLES = {
         "man",
         "woman",
@@ -142,6 +114,12 @@ class QwenDirector:
         "pilot",
     }
 
+    _MODE_LABELS = {
+        AI_STORY_MODE: "AI STORY MODE",
+        EXPAND_USER_STORY_MODE: "EXPAND STORY MODE",
+        PRESERVE_USER_STORY_MODE: "PRESERVE STORY MODE",
+    }
+
     def __init__(
         self,
         project_root: Path,
@@ -152,12 +130,11 @@ class QwenDirector:
 
         self._llama = None
 
-        if director_enabled():
-            self._model_path = (
-                self._find_model()
-            )
-        else:
-            self._model_path = None
+        self._model_path = (
+            self._find_model()
+            if director_enabled()
+            else None
+        )
 
     # ========================================================
     # MODEL DISCOVERY
@@ -172,7 +149,7 @@ class QwenDirector:
             "",
         ).strip()
 
-        candidates = []
+        candidates: list[Path] = []
 
         if explicit:
             candidates.append(
@@ -212,8 +189,8 @@ class QwenDirector:
             except OSError:
                 continue
 
-        seen = set()
-        unique = []
+        unique: list[Path] = []
+        seen: set[str] = set()
 
         for candidate in candidates:
 
@@ -286,11 +263,11 @@ class QwenDirector:
     # ========================================================
 
     @staticmethod
-    def _load_nvidia_cuda_libraries():
+    def _load_nvidia_cuda_libraries() -> None:
 
         import site
 
-        site_roots = []
+        site_roots: list[Path] = []
 
         try:
             site_roots.extend(
@@ -301,56 +278,53 @@ class QwenDirector:
         except Exception:
             pass
 
-        user_site = (
-            site.getusersitepackages()
-        )
-
-        if user_site:
-            site_roots.append(
-                Path(
-                    user_site
-                )
+        try:
+            user_site = (
+                site.getusersitepackages()
             )
 
-        cudart = []
-        cublas = []
+            if user_site:
+                site_roots.append(
+                    Path(
+                        user_site
+                    )
+                )
+        except Exception:
+            pass
+
+        cudart: list[Path] = []
+        cublas: list[Path] = []
 
         for site_root in site_roots:
 
-            root = (
+            nvidia_root = (
                 site_root
                 / "nvidia"
             )
 
-            if not root.is_dir():
+            if not nvidia_root.is_dir():
                 continue
 
             try:
                 cudart.extend(
-                    root.rglob(
+                    path
+                    for path
+                    in nvidia_root.rglob(
                         "libcudart.so.13*"
                     )
+                    if path.is_file()
                 )
 
                 cublas.extend(
-                    root.rglob(
+                    path
+                    for path
+                    in nvidia_root.rglob(
                         "libcublas.so.13*"
                     )
+                    if path.is_file()
                 )
             except OSError:
                 continue
-
-        cudart = [
-            path
-            for path in cudart
-            if path.is_file()
-        ]
-
-        cublas = [
-            path
-            for path in cublas
-            if path.is_file()
-        ]
 
         if not cudart:
             raise RuntimeError(
@@ -412,6 +386,7 @@ class QwenDirector:
                 str(cublas_lib),
                 mode=ctypes.RTLD_GLOBAL,
             )
+
         except OSError as exc:
             raise RuntimeError(
                 "Unable to load NVIDIA CUDA libraries:\n"
@@ -433,9 +408,7 @@ class QwenDirector:
         self._load_nvidia_cuda_libraries()
 
         try:
-            from llama_cpp import (
-                Llama
-            )
+            from llama_cpp import Llama
         except ImportError as exc:
             raise RuntimeError(
                 "llama-cpp-python is not installed."
@@ -453,6 +426,7 @@ class QwenDirector:
                 flash_attn=True,
                 verbose=False,
             )
+
         except Exception as exc:
             raise RuntimeError(
                 "Failed to initialize Qwen3-14B director.\n"
@@ -511,6 +485,7 @@ class QwenDirector:
         self,
         system_prompt: str,
         user_prompt: str,
+        minimum_completion: int = 512,
     ) -> tuple[int, int]:
 
         context = int(
@@ -519,16 +494,10 @@ class QwenDirector:
 
         safety = 128
 
-        prompt = (
+        prompt_tokens = self._count_tokens(
             system_prompt
             + "\n\n"
             + user_prompt
-        )
-
-        prompt_tokens = (
-            self._count_tokens(
-                prompt
-            )
         )
 
         available = (
@@ -537,12 +506,12 @@ class QwenDirector:
             - safety
         )
 
-        if available < 512:
+        if available < minimum_completion:
             raise RuntimeError(
-                "Qwen director prompt is too large.\n"
-                f"Prompt tokens: {prompt_tokens}\n"
-                f"Context window: {context}\n"
-                f"Available output tokens: {available}"
+                "Qwen director prompt is too large for the "
+                f"{context}-token context window.\n"
+                f"Prompt tokens: {prompt_tokens}.\n"
+                f"Available completion tokens: {available}."
             )
 
         return (
@@ -569,24 +538,24 @@ class QwenDirector:
             return """
 AI STORY MODE.
 
-The user's text is a premise or idea.
+The user supplied a premise or idea, not a finished production script.
 
-You are allowed and expected to:
-- invent a coherent protagonist when needed;
-- invent additional meaningful characters when needed;
-- create motivations and stakes;
-- develop the narrative;
-- create intermediate events;
-- create escalation;
-- create a climax;
-- create an ending;
-- expand the premise substantially.
+Develop it substantially into a coherent cinematic story.
+
+You MAY invent:
+- a protagonist;
+- supporting characters;
+- motivations;
+- stakes;
+- intermediate events;
+- escalation;
+- climax;
+- ending.
 
 Do not merely paraphrase the user's text.
 
-The result should feel like an actual developed cinematic
-story rather than a conversion of the user's paragraphs into
-scenes.
+The result must be a genuinely developed story,
+not a shot list.
 """.strip()
 
         if mode == EXPAND_USER_STORY_MODE:
@@ -597,36 +566,27 @@ EXPAND STORY MODE.
 The user's text is an existing story and is authoritative
 about its core facts.
 
+Preserve every important fact, named entity, chronology,
+major event, setting, intended outcome and explicit story constraint.
+
 You MAY enrich:
-- character motivation;
+- motivation;
 - emotional beats;
 - transitions;
 - intermediate events;
-- environment progression;
-- cinematic pacing;
-- tension;
+- pacing;
 - sensory detail;
-- dialogue when appropriate;
+- environment progression;
+- tension;
+- dialogue when useful;
 - cause-and-effect connections.
 
-You MUST preserve:
-- the user's named characters;
-- important entities;
-- chronology;
-- major events;
-- core setting;
-- intended outcome;
-- explicit story facts.
+Do not simply copy the user's paragraphs.
 
-Do NOT simply copy the user's paragraphs.
-Do NOT replace the supplied story with an unrelated story.
+Do not replace the supplied story with an unrelated story.
 
-Before generating, mentally separate:
-1. immutable story facts;
-2. details that can be enriched.
-
-The output must visibly be a richer version of the supplied
-story, not merely a shot annotation.
+The result must be recognizably the same story
+but meaningfully richer.
 """.strip()
 
         if mode == PRESERVE_USER_STORY_MODE:
@@ -634,30 +594,17 @@ story, not merely a shot annotation.
             return """
 PRESERVE STORY MODE.
 
-The user's story is immutable source material.
+The supplied story is immutable source material.
 
-You MUST preserve the supplied story itself.
+Preserve the story itself, its chronology, named characters,
+major events, setting, outcome and meaning exactly.
 
-Do not:
-- change events;
-- change chronology;
-- invent a different ending;
-- replace named characters;
-- remove important facts;
-- add contradictory events;
-- rewrite the meaning of the story.
+You may add production structure, visual detail, camera direction,
+lighting, sound direction, pacing and continuity metadata,
 
-You MAY only convert the supplied story into a cinematic
-production structure by improving:
-- scene boundaries;
-- camera direction;
-- lighting;
-- visual detail;
-- sound direction;
-- pacing;
-- continuity metadata.
+but you must not rewrite the story.
 
-The story returned in the JSON MUST equal the supplied story
+The story returned in JSON must equal the supplied story
 after whitespace normalization.
 """.strip()
 
@@ -666,7 +613,7 @@ after whitespace normalization.
         )
 
     # ========================================================
-    # PASS 1 — STORY / CHARACTERS / SCENES
+    # PASS 1
     # ========================================================
 
     def _story_director_system(
@@ -676,13 +623,13 @@ after whitespace normalization.
 
         return f"""
 You are the STORY DIRECTOR for a MiniMax H3 cinematic
-video-production system.
+production system.
 
 {self._mode_instruction(mode)}
 
 Your job in this pass is ONLY:
 
-1. Develop/preserve the story.
+1. Develop or preserve the story.
 2. Create the character bible.
 3. Create meaningful cinematic scenes.
 
@@ -691,37 +638,23 @@ Do NOT create shots in this pass.
 CHARACTER RULES:
 
 - A character must be a real story entity.
-- Never convert an ordinary word from prose into a character.
-- Never use verbs as character names.
-- Never use pronouns as character names.
-- Never use metadata as character names.
-- Never use camera terms as character names.
-- Never use words such as:
-  Treat, Develop, Clarify, Every, Above, Far, Tone, Visual,
-  Camera, Scene, Shot, Lighting, Soundscape, Continuity,
-  Story, Dialogue, Music.
-- Generic roles such as man, woman, girl, boy, soldier,
-  detective, scientist and robot are VALID characters when
-  the story actually refers to them.
-- Invented characters are allowed only in AI STORY and EXPAND
-  modes and must have a meaningful narrative purpose.
-- Do not create a character from sentence capitalization.
+- Never turn ordinary prose words, metadata, verbs or pronouns
+  into character names.
+- Generic roles such as man, woman, soldier, detective and scientist
+  are valid characters.
+- In AI STORY and EXPAND modes, invented characters are allowed
+  only when narratively useful.
 
 SCENE RULES:
 
-- Do not mechanically map one paragraph to one scene.
-- Merge related material into coherent cinematic beats.
-- Do not create scenes for "Tone", "Visual priority", or similar
-  metadata.
-- Prefer roughly 4–8 meaningful scenes.
-- Every scene must advance the story, establish a distinct
-  environment, introduce a meaningful action/beat, or build
-  the escalation.
-- Preserve continuity between scenes.
+- Do not mechanically map paragraphs to scenes.
+- Do not create scenes for Tone, Visual priority,
+  or similar metadata.
+- Prefer roughly 4–8 meaningful scenes when the story supports it.
+- Every scene must advance the story, establish a distinct environment,
+  introduce an action/beat, or build escalation.
 
-OUTPUT:
-
-Return JSON only.
+Return JSON only:
 
 {{
   "story": "string",
@@ -730,7 +663,7 @@ Return JSON only.
   "scenes": []
 }}
 
-Each character MUST contain:
+Each character must contain:
 
 name
 role
@@ -742,7 +675,7 @@ distinctive_features
 character_state
 continuity_rules
 
-Each scene MUST contain:
+Each scene must contain:
 
 scene_id
 order
@@ -771,20 +704,14 @@ continuity_notes
             {
                 "mode": mode,
                 "user_story": story,
-                "input_policy": (
-                    "The user_story is complete creative source material. "
-                    "Read and use all of it. Do not filter, delete, or "
-                    "ignore tone statements, visual priorities, camera "
-                    "suggestions, sound ideas, or other creative guidance. "
-                    "You may interpret, improve, expand, combine, or "
-                    "reorganize those ideas according to the selected "
-                    "story mode. Character-name validation happens only "
-                    "after generation and must never be applied to the "
-                    "input text."
-                ),
-                "task": (
-                    "Create the story/character/scene plan "
-                    "according to the selected mode."
+                "instruction": (
+                    "Read the entire user_story. "
+                    "It is creative source material. "
+                    "Do not filter out tone, visual priorities, "
+                    "camera suggestions, sound ideas, environment "
+                    "ideas or other descriptive guidance. "
+                    "Interpret those ideas according to the "
+                    "selected mode."
                 ),
             },
             ensure_ascii=False,
@@ -795,7 +722,7 @@ continuity_notes
         )
 
     # ========================================================
-    # PASS 2 — CINEMATIC SHOTS
+    # PASS 2
     # ========================================================
 
     def _shot_director_system(
@@ -805,46 +732,36 @@ continuity_notes
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-You receive:
-- the final story;
-- the authoritative character bible;
-- the authoritative scene plan.
+Create cinematic shot plans from the supplied story,
+character bible and one scene.
 
-Create the shot plan.
+Do NOT create new characters.
 
-CHARACTER RULES:
+Only use names present in the character bible.
 
-- Do NOT create new characters.
-- Use ONLY character names supplied in the character bible.
-- Never turn prose words into characters.
-- Never create shots whose characters are not in the bible.
+Every shot must belong to the supplied scene.
 
-SHOT RULES:
+Use multiple shots when the scene contains meaningful beats;
+normally 2–4 shots.
 
-- Do not make one shot per scene by default.
-- A meaningful scene normally requires 2–4 shots.
-- A complex action scene may require more.
-- A simple transition scene may require one.
-- Camera choices must serve the narrative.
-- Build visual escalation.
-- Preserve identity.
-- Preserve clothing.
-- Preserve story-state.
-- Preserve environmental continuity.
-- Include establishing, wide, tracking, medium, close,
-  reveal/detail and low/high-angle shots when appropriate.
-- Use camera variety intentionally.
-- Dialogue should only exist when justified by the story.
-- Soundscape should correspond to the environment and action.
-- Music should support the scene rather than replace sound effects.
+Use deliberate camera variety, continuity, visual escalation
+and environment detail.
 
-OUTPUT JSON ONLY:
+Preserve:
+- character identity;
+- clothing;
+- story state;
+- environmental continuity.
+
+Use dialogue only when justified.
+
+Return JSON only:
 
 {
   "shots": []
 }
 
-Each shot MUST contain:
+Each shot must contain:
 
 shot_id
 scene_id
@@ -868,18 +785,167 @@ speaking_characters
 speech_text
 """.strip()
 
+    @staticmethod
+    def _limit_text(
+        text: str,
+        max_chars: int,
+    ) -> str:
+
+        value = str(
+            text or ""
+        ).strip()
+
+        if len(value) <= max_chars:
+            return value
+
+        return (
+            value[
+                :max_chars
+            ].rstrip()
+            + "…"
+        )
+
     def _shot_director_user(
         self,
         story: str,
         characters: list[dict],
-        scenes: list[dict],
+        scene: dict,
     ) -> str:
+
+        compact_story = self._limit_text(
+            story,
+            4200,
+        )
+
+        compact_characters = []
+
+        for character in characters:
+
+            compact_characters.append(
+                {
+                    "name": character.get(
+                        "name",
+                        "",
+                    ),
+                    "role": character.get(
+                        "role",
+                        "",
+                    ),
+                    "description": self._limit_text(
+                        character.get(
+                            "description",
+                            "",
+                        ),
+                        500,
+                    ),
+                    "appearance": character.get(
+                        "appearance",
+                        {},
+                    ),
+                    "clothing": character.get(
+                        "clothing",
+                        {},
+                    ),
+                    "character_state": character.get(
+                        "character_state",
+                        {},
+                    ),
+                    "continuity_rules": character.get(
+                        "continuity_rules",
+                        [],
+                    ),
+                }
+            )
+
+        compact_scene = {
+            "scene_id": scene.get(
+                "scene_id",
+                "",
+            ),
+            "order": scene.get(
+                "order",
+                0,
+            ),
+            "location": scene.get(
+                "location",
+                "",
+            ),
+            "time_of_day": scene.get(
+                "time_of_day",
+                "",
+            ),
+            "weather": scene.get(
+                "weather",
+                "",
+            ),
+            "atmosphere": scene.get(
+                "atmosphere",
+                "",
+            ),
+            "description": self._limit_text(
+                scene.get(
+                    "description",
+                    "",
+                ),
+                2200,
+            ),
+            "mood": scene.get(
+                "mood",
+                "",
+            ),
+            "lighting": scene.get(
+                "lighting",
+                "",
+            ),
+            "environment_details": list(
+                scene.get(
+                    "environment_details",
+                    [],
+                )
+                or []
+            )[:12],
+            "key_props": list(
+                scene.get(
+                    "key_props",
+                    [],
+                )
+                or []
+            )[:8],
+            "scene_objective": self._limit_text(
+                scene.get(
+                    "scene_objective",
+                    "",
+                ),
+                700,
+            ),
+            "characters": list(
+                scene.get(
+                    "characters",
+                    [],
+                )
+                or []
+            ),
+            "story_summary": self._limit_text(
+                scene.get(
+                    "story_summary",
+                    "",
+                ),
+                900,
+            ),
+            "continuity_notes": self._limit_text(
+                scene.get(
+                    "continuity_notes",
+                    "",
+                ),
+                900,
+            ),
+        }
 
         return json.dumps(
             {
-                "story": story,
-                "characters": characters,
-                "scenes": scenes,
+                "story": compact_story,
+                "characters": compact_characters,
+                "scene": compact_scene,
             },
             ensure_ascii=False,
             separators=(
@@ -897,28 +963,28 @@ speech_text
         text: str,
     ) -> dict:
 
-        text = str(
+        value = str(
             text or ""
         ).strip()
 
-        text = re.sub(
+        value = re.sub(
             r"^```(?:json)?",
             "",
-            text,
+            value,
             flags=re.IGNORECASE,
         ).strip()
 
-        text = re.sub(
+        value = re.sub(
             r"```$",
             "",
-            text,
+            value,
         ).strip()
 
-        start = text.find(
+        start = value.find(
             "{"
         )
 
-        end = text.rfind(
+        end = value.rfind(
             "}"
         )
 
@@ -928,40 +994,39 @@ speech_text
             )
 
         try:
-
-            value = json.loads(
-                text[
+            parsed = json.loads(
+                value[
                     start:end + 1
                 ]
             )
-
         except json.JSONDecodeError as exc:
-
             raise RuntimeError(
-                "Qwen director returned invalid JSON:\n"
+                "Qwen director returned invalid JSON: "
                 f"{exc}"
             ) from exc
 
         if not isinstance(
-            value,
+            parsed,
             dict,
         ):
             raise RuntimeError(
                 "Qwen director output must be a JSON object."
             )
 
-        return value
+        return parsed
 
     def _chat_json(
         self,
         system_prompt: str,
         user_prompt: str,
+        minimum_completion: int = 512,
     ) -> dict:
 
-        prompt_tokens, max_tokens = (
+        _, max_tokens = (
             self._available_output_tokens(
                 system_prompt,
                 user_prompt,
+                minimum_completion=minimum_completion,
             )
         )
 
@@ -1011,7 +1076,7 @@ speech_text
         )
 
     # ========================================================
-    # CHARACTER SANITIZATION
+    # CHARACTER VALIDATION
     # ========================================================
 
     def _valid_character_name(
@@ -1028,18 +1093,17 @@ speech_text
 
         lowered = value.lower()
 
-        # Generic role descriptors are explicitly valid.
         if lowered in self.VALID_GENERIC_ROLES:
             return True
 
         if lowered in self.FORBIDDEN_CHARACTER_NAMES:
             return False
 
-        # Reject long instruction-like strings.
-        if len(value.split()) > 4:
+        if len(
+            value.split()
+        ) > 4:
             return False
 
-        # Reject obvious metadata punctuation.
         if any(
             token in value
             for token in (
@@ -1061,13 +1125,10 @@ speech_text
         characters,
     ) -> list[dict]:
 
-        result = []
-        seen = set()
+        result: list[dict] = []
+        seen: set[str] = set()
 
-        for value in (
-            characters
-            or []
-        ):
+        for value in characters or []:
 
             if not isinstance(
                 value,
@@ -1162,7 +1223,7 @@ speech_text
         return result
 
     # ========================================================
-    # SCENE SANITIZATION
+    # SCENE VALIDATION
     # ========================================================
 
     def _sanitize_scenes(
@@ -1171,7 +1232,7 @@ speech_text
         character_names: set[str],
     ) -> list[dict]:
 
-        result = []
+        result: list[dict] = []
 
         for index, value in enumerate(
             scenes or [],
@@ -1194,28 +1255,16 @@ speech_text
 
             lower = description.lower()
 
-            if (
-                lower.startswith(
-                    "tone:"
-                )
-                or lower.startswith(
-                    "visual priority:"
-                )
-                or lower.startswith(
-                    "visual priorities:"
+            if lower.startswith(
+                (
+                    "tone:",
+                    "visual priority:",
+                    "visual priorities:",
                 )
             ):
                 continue
 
-            scene_id = str(
-                value.get(
-                    "scene_id",
-                    f"scene_{index:03d}",
-                )
-                or f"scene_{index:03d}"
-            ).strip()
-
-            selected_characters = []
+            selected = []
 
             for name in (
                 value.get(
@@ -1233,9 +1282,17 @@ speech_text
                     name.lower()
                     in character_names
                 ):
-                    selected_characters.append(
+                    selected.append(
                         name
                     )
+
+            scene_id = str(
+                value.get(
+                    "scene_id",
+                    f"scene_{index:03d}",
+                )
+                or f"scene_{index:03d}"
+            ).strip()
 
             result.append(
                 {
@@ -1305,7 +1362,7 @@ speech_text
                         )
                         or ""
                     ),
-                    "characters": selected_characters,
+                    "characters": selected,
                     "story_summary": str(
                         value.get(
                             "story_summary",
@@ -1327,24 +1384,30 @@ speech_text
         return result
 
     # ========================================================
-    # SHOT SANITIZATION
+    # SHOT VALIDATION
     # ========================================================
 
     def _sanitize_shots(
         self,
         shots,
-        scenes: list[dict],
+        scene: dict,
         character_names: set[str],
     ) -> list[dict]:
 
-        scene_ids = {
-            scene[
-                "scene_id"
-            ]
-            for scene in scenes
-        }
+        result: list[dict] = []
 
-        result = []
+        scene_id = str(
+            scene.get(
+                "scene_id",
+                "",
+            )
+        )
+
+        allowed = {
+            name.lower(): name
+            for name
+            in character_names
+        }
 
         for index, value in enumerate(
             shots or [],
@@ -1357,18 +1420,19 @@ speech_text
             ):
                 continue
 
-            scene_id = str(
-                value.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
-            ).strip()
-
-            if scene_id not in scene_ids:
+            if (
+                str(
+                    value.get(
+                        "scene_id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+                != scene_id
+            ):
                 continue
 
-            selected_characters = []
+            selected = []
 
             for name in (
                 value.get(
@@ -1378,17 +1442,24 @@ speech_text
                 or []
             ):
 
-                name = str(
+                raw = str(
                     name
                 ).strip()
 
-                if (
-                    name.lower()
-                    in character_names
-                ):
-                    selected_characters.append(
-                        name
+                canonical = allowed.get(
+                    raw.lower()
+                )
+
+                if canonical is None:
+                    raise RuntimeError(
+                        "Qwen shot references unknown "
+                        f"character '{raw}' in scene "
+                        f"'{scene_id}'."
                     )
+
+                selected.append(
+                    canonical
+                )
 
             speaking = []
 
@@ -1400,17 +1471,24 @@ speech_text
                 or []
             ):
 
-                name = str(
+                raw = str(
                     name
                 ).strip()
 
-                if (
-                    name.lower()
-                    in character_names
-                ):
-                    speaking.append(
-                        name
+                canonical = allowed.get(
+                    raw.lower()
+                )
+
+                if canonical is None:
+                    raise RuntimeError(
+                        "Qwen shot references unknown "
+                        f"speaking character '{raw}' "
+                        f"in scene '{scene_id}'."
                     )
+
+                speaking.append(
+                    canonical
+                )
 
             try:
                 duration = float(
@@ -1420,7 +1498,10 @@ speech_text
                     )
                     or 5.2
                 )
-            except (TypeError, ValueError):
+            except (
+                TypeError,
+                ValueError,
+            ):
                 duration = 5.2
 
             result.append(
@@ -1433,15 +1514,21 @@ speech_text
                         or f"shot_{index:03d}"
                     ).strip(),
                     "scene_id": scene_id,
-                    "order": len(result) + 1,
+                    "order": index,
                     "duration_seconds": duration,
-                    "characters": selected_characters,
+                    "characters": selected,
                     "location": str(
                         value.get(
                             "location",
+                            scene.get(
+                                "location",
+                                "",
+                            ),
+                        )
+                        or scene.get(
+                            "location",
                             "",
                         )
-                        or ""
                     ),
                     "action": str(
                         value.get(
@@ -1467,16 +1554,28 @@ speech_text
                     "lighting": str(
                         value.get(
                             "lighting",
+                            scene.get(
+                                "lighting",
+                                "",
+                            ),
+                        )
+                        or scene.get(
+                            "lighting",
                             "",
                         )
-                        or ""
                     ),
                     "mood": str(
                         value.get(
                             "mood",
+                            scene.get(
+                                "mood",
+                                "",
+                            ),
+                        )
+                        or scene.get(
+                            "mood",
                             "",
                         )
-                        or ""
                     ),
                     "visual_prompt": str(
                         value.get(
@@ -1540,122 +1639,80 @@ speech_text
 
         return result
 
-    # ========================================================
-    # SHOT COVERAGE
-    # ========================================================
+    @staticmethod
+    def _fallback_shot(
+        scene: dict,
+        index: int,
+    ) -> dict:
 
-    def _ensure_scene_shot_coverage(
-        self,
-        scenes: list[dict],
-        shots: list[dict],
-    ) -> list[dict]:
-
-        by_scene = {}
-
-        for shot in shots:
-            by_scene.setdefault(
-                shot[
-                    "scene_id"
-                ],
-                0,
-            )
-
-            by_scene[
-                shot[
-                    "scene_id"
-                ]
-            ] += 1
-
-        for scene in scenes:
-
-            scene_id = scene[
-                "scene_id"
-            ]
-
-            if by_scene.get(
-                scene_id,
-                0,
-            ) > 0:
-                continue
-
-            shots.append(
-                {
-                    "shot_id": (
-                        f"shot_{len(shots) + 1:03d}"
-                    ),
-                    "scene_id": scene_id,
-                    "order": len(shots) + 1,
-                    "duration_seconds": 5.2,
-                    "characters": list(
-                        scene.get(
-                            "characters",
-                            [],
-                        )
-                        or []
-                    ),
-                    "location": scene.get(
-                        "location",
-                        "",
-                    ),
-                    "action": (
-                        scene.get(
-                            "scene_objective",
-                            "",
-                        )
-                        or scene.get(
-                            "description",
-                            "",
-                        )
-                    ),
-                    "camera_shot": (
-                        "wide establishing shot"
-                    ),
-                    "camera_movement": (
-                        "slow controlled cinematic movement"
-                    ),
-                    "lighting": scene.get(
-                        "lighting",
-                        "",
-                    ),
-                    "mood": scene.get(
-                        "mood",
-                        "",
-                    ),
-                    "visual_prompt": scene.get(
-                        "description",
-                        "",
-                    ),
-                    "retention_analysis": (
-                        "Maintain story and visual continuity."
-                    ),
-                    "detailed_description": scene.get(
-                        "description",
-                        "",
-                    ),
-                    "overall_soundscape": (
-                        "Natural cinematic environmental "
-                        "sound appropriate to the scene."
-                    ),
-                    "non_diegetic_music": (
-                        "Subtle cinematic score when appropriate."
-                    ),
-                    "negative_prompt": (
-                        "identity drift, duplicate character, "
-                        "face deformation, inconsistent clothing"
-                    ),
-                    "continuity_notes": scene.get(
-                        "continuity_notes",
-                        "",
-                    ),
-                    "speaking_characters": [],
-                    "speech_text": "",
-                }
-            )
-
-        return shots
+        return {
+            "shot_id": f"shot_{index:03d}",
+            "scene_id": scene["scene_id"],
+            "order": index,
+            "duration_seconds": 5.2,
+            "characters": list(
+                scene.get(
+                    "characters",
+                    [],
+                )
+                or []
+            ),
+            "location": scene.get(
+                "location",
+                "",
+            ),
+            "action": (
+                scene.get(
+                    "scene_objective",
+                    "",
+                )
+                or scene.get(
+                    "description",
+                    "",
+                )
+            ),
+            "camera_shot": "wide establishing shot",
+            "camera_movement": "slow controlled cinematic movement",
+            "lighting": scene.get(
+                "lighting",
+                "",
+            ),
+            "mood": scene.get(
+                "mood",
+                "",
+            ),
+            "visual_prompt": scene.get(
+                "description",
+                "",
+            ),
+            "retention_analysis": (
+                "Maintain narrative and visual continuity."
+            ),
+            "detailed_description": scene.get(
+                "description",
+                "",
+            ),
+            "overall_soundscape": (
+                "Natural cinematic environmental "
+                "sound appropriate to the scene."
+            ),
+            "non_diegetic_music": (
+                "Subtle cinematic score when appropriate."
+            ),
+            "negative_prompt": (
+                "identity drift, duplicate character, "
+                "face deformation, inconsistent clothing"
+            ),
+            "continuity_notes": scene.get(
+                "continuity_notes",
+                "",
+            ),
+            "speaking_characters": [],
+            "speech_text": "",
+        }
 
     # ========================================================
-    # MODE OUTPUT VALIDATION
+    # MODE VALIDATION
     # ========================================================
 
     @staticmethod
@@ -1671,6 +1728,48 @@ speech_text
             ).strip(),
         )
 
+    @staticmethod
+    def _significant_words(
+        text: str,
+    ) -> set[str]:
+
+        words = re.findall(
+            r"[A-Za-z][A-Za-z'-]{4,}",
+            str(
+                text or ""
+            ).lower(),
+        )
+
+        stop = {
+            "about",
+            "after",
+            "again",
+            "their",
+            "there",
+            "which",
+            "while",
+            "where",
+            "would",
+            "could",
+            "should",
+            "every",
+            "through",
+            "story",
+            "world",
+            "person",
+            "scene",
+            "camera",
+            "visual",
+            "tone",
+            "with",
+        }
+
+        return {
+            word
+            for word in words
+            if word not in stop
+        }
+
     def _validate_mode_output(
         self,
         mode: str,
@@ -1678,55 +1777,151 @@ speech_text
         story: str,
     ) -> None:
 
+        source = (
+            self._normalize_story_for_comparison(
+                user_input
+            )
+        )
+
+        result = (
+            self._normalize_story_for_comparison(
+                story
+            )
+        )
+
+        if not result:
+            raise RuntimeError(
+                "Qwen director returned an empty story."
+            )
+
         if mode == PRESERVE_USER_STORY_MODE:
-
-            source = (
-                self._normalize_story_for_comparison(
-                    user_input
-                )
-            )
-
-            result = (
-                self._normalize_story_for_comparison(
-                    story
-                )
-            )
 
             if source != result:
                 raise RuntimeError(
-                    "Preserve Story mode changed the supplied story."
+                    "Preserve Story mode changed "
+                    "the supplied story."
                 )
 
-        elif mode == EXPAND_USER_STORY_MODE:
+            return
 
-            source = (
-                self._normalize_story_for_comparison(
-                    user_input
-                )
-            )
+        if mode == EXPAND_USER_STORY_MODE:
 
-            result = (
-                self._normalize_story_for_comparison(
-                    story
-                )
-            )
-
-            if not result:
+            if source == result:
                 raise RuntimeError(
-                    "Expand Story mode returned an empty story."
+                    "Expand Story mode returned "
+                    "the supplied story unchanged."
                 )
 
             if len(result) < max(
-                80,
+                120,
                 int(
-                    len(source) * 0.75
+                    len(source)
+                    * 1.20
                 ),
             ):
                 raise RuntimeError(
-                    "Expand Story mode produced a story that "
-                    "is unexpectedly shorter than the supplied "
-                    "story."
+                    "Expand Story mode did not produce "
+                    "a meaningfully richer story."
                 )
+
+            overlap = len(
+                self._significant_words(
+                    source
+                )
+                & self._significant_words(
+                    result
+                )
+            )
+
+            source_words = max(
+                1,
+                len(
+                    self._significant_words(
+                        source
+                    )
+                ),
+            )
+
+            if (
+                overlap
+                / source_words
+                < 0.50
+            ):
+                raise RuntimeError(
+                    "Expand Story mode changed too much "
+                    "of the supplied story."
+                )
+
+            return
+
+        if mode == AI_STORY_MODE:
+
+            if source == result:
+                raise RuntimeError(
+                    "AI Story mode returned "
+                    "the premise unchanged."
+                )
+
+            if len(result) < max(
+                250,
+                int(
+                    len(source)
+                    * 1.50
+                ),
+            ):
+                raise RuntimeError(
+                    "AI Story mode did not substantially "
+                    "develop the supplied premise."
+                )
+
+            return
+
+        raise ValueError(
+            f"Unsupported story mode: {mode}"
+        )
+
+    def _validate_shot_character_contract(
+        self,
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+
+        allowed = {
+            str(
+                value.get(
+                    "name",
+                    "",
+                )
+            ).strip().lower()
+            for value in characters
+        }
+
+        for shot in shots:
+
+            for field in (
+                "characters",
+                "speaking_characters",
+            ):
+
+                for name in (
+                    shot.get(
+                        field,
+                        [],
+                    )
+                    or []
+                ):
+
+                    if (
+                        str(name)
+                        .strip()
+                        .lower()
+                        not in allowed
+                    ):
+                        raise RuntimeError(
+                            f"Shot {shot.get('shot_id', '')} "
+                            f"contains unknown character "
+                            f"'{name}'."
+                        )
 
     # ========================================================
     # GENERATION
@@ -1750,6 +1945,11 @@ speech_text
                 "director_notes": "",
             }
 
+        if mode not in self._MODE_LABELS:
+            raise ValueError(
+                f"Unsupported story mode: {mode}"
+            )
+
         self.load()
 
         if self._llama is None:
@@ -1769,6 +1969,7 @@ speech_text
                 mode,
                 user_input,
             ),
+            minimum_completion=900,
         )
 
         characters = (
@@ -1779,6 +1980,35 @@ speech_text
                 )
             )
         )
+
+        if not characters:
+
+            characters = [
+                deepcopy(value)
+                for value
+                in (
+                    base_plan.get(
+                        "characters",
+                        [],
+                    )
+                    or []
+                )
+                if isinstance(
+                    value,
+                    dict,
+                )
+            ]
+
+            characters = [
+                value
+                for value in characters
+                if self._valid_character_name(
+                    value.get(
+                        "name",
+                        "",
+                    )
+                )
+            ]
 
         character_names = {
             character[
@@ -1797,6 +2027,11 @@ speech_text
                 character_names,
             )
         )
+
+        if not scenes:
+            raise RuntimeError(
+                "Qwen director returned no usable scenes."
+            )
 
         story = str(
             story_plan.get(
@@ -1821,107 +2056,80 @@ speech_text
         ).strip()
 
         # ----------------------------------------------------
-        # Fallback only if Qwen failed to create a character.
-        # This never allows prose tokens to become characters.
-        # ----------------------------------------------------
-
-        if not characters:
-
-            fallback = []
-
-            for value in (
-                base_plan.get(
-                    "characters",
-                    [],
-                )
-                or []
-            ):
-
-                if not isinstance(
-                    value,
-                    dict,
-                ):
-                    continue
-
-                name = str(
-                    value.get(
-                        "name",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                if not name:
-                    continue
-
-                if not self._valid_character_name(
-                    name
-                ):
-                    continue
-
-                fallback.append(
-                    deepcopy(
-                        value
-                    )
-                )
-
-            characters = fallback
-
-            character_names = {
-                character[
-                    "name"
-                ].lower()
-                for character
-                in characters
-            }
-
-        # ----------------------------------------------------
         # PASS 2
+        #
+        # One scene at a time prevents the old 8192-token
+        # overflow caused by sending the entire scene tree
+        # plus all metadata in a single shot-planning request.
         # ----------------------------------------------------
 
-        shot_plan = self._chat_json(
-            self._shot_director_system(),
-            self._shot_director_user(
-                story,
-                characters,
-                scenes,
-            ),
-        )
+        all_shots: list[dict] = []
 
-        shots = (
-            self._sanitize_shots(
-                shot_plan.get(
-                    "shots",
-                    [],
+        for scene in scenes:
+
+            shot_plan = self._chat_json(
+                self._shot_director_system(),
+                self._shot_director_user(
+                    story,
+                    characters,
+                    scene,
                 ),
-                scenes,
-                character_names,
+                minimum_completion=700,
             )
-        )
 
-        shots = (
-            self._ensure_scene_shot_coverage(
-                scenes,
-                shots,
+            scene_shots = (
+                self._sanitize_shots(
+                    shot_plan.get(
+                        "shots",
+                        [],
+                    ),
+                    scene,
+                    character_names,
+                )
             )
-        )
 
-        # Re-number after coverage correction.
+            if not scene_shots:
+
+                scene_shots = [
+                    self._fallback_shot(
+                        scene,
+                        len(all_shots) + 1,
+                    )
+                ]
+
+            all_shots.extend(
+                scene_shots
+            )
+
+        if not all_shots:
+            raise RuntimeError(
+                "Qwen director returned no usable shots."
+            )
+
         for index, shot in enumerate(
-            shots,
+            all_shots,
             start=1,
         ):
-            shot[
-                "order"
-            ] = index
+
+            shot["order"] = index
+
+            if not shot.get(
+                "shot_id"
+            ):
+                shot["shot_id"] = (
+                    f"shot_{index:03d}"
+                )
 
         for index, scene in enumerate(
             scenes,
             start=1,
         ):
-            scene[
-                "order"
-            ] = index
+            scene["order"] = index
+
+        self._validate_shot_character_contract(
+            all_shots,
+            characters,
+        )
 
         return {
             "enabled": True,
@@ -1931,7 +2139,7 @@ speech_text
                 "director_notes": director_notes,
                 "characters": characters,
                 "scenes": scenes,
-                "shots": shots,
+                "shots": all_shots,
             },
             "director_notes": director_notes,
         }
@@ -1997,16 +2205,14 @@ speech_text
         )
 
         # ----------------------------------------------------
-        # Story
+        # STORY
         # ----------------------------------------------------
 
         if mode == PRESERVE_USER_STORY_MODE:
 
             merged[
                 "story"
-            ] = str(
-                user_input
-            ).strip()
+            ] = user_input.strip()
 
         else:
 
@@ -2035,36 +2241,31 @@ speech_text
         ).strip()
 
         # ----------------------------------------------------
-        # Characters
+        # CHARACTERS
         # ----------------------------------------------------
 
-        base_characters = list(
-            merged.get(
-                "characters",
-                [],
-            )
-            or []
-        )
-
-        existing_by_name = {
+        base_characters = {
             str(
-                character.get(
+                item.get(
                     "name",
                     "",
                 )
             ).strip().lower():
-                character
-            for character
-            in base_characters
-            if str(
-                character.get(
-                    "name",
-                    "",
+                item
+            for item in (
+                merged.get(
+                    "characters",
+                    [],
                 )
-            ).strip()
+                or []
+            )
+            if isinstance(
+                item,
+                dict,
+            )
         }
 
-        characters = []
+        characters: list[dict] = []
 
         for index, spec in enumerate(
             creative.get(
@@ -2094,36 +2295,46 @@ speech_text
                 continue
 
             existing = (
-                existing_by_name.get(
-                    name.lower()
+                base_characters.get(
+                    name.lower(),
+                    {
+                        "character_id":
+                            f"character_{index:03d}",
+                        "name":
+                            name,
+                        "role":
+                            "story character",
+                        "description":
+                            "",
+                        "personality":
+                            "",
+                        "appearance":
+                            {},
+                        "clothing":
+                            {},
+                        "distinctive_features":
+                            [],
+                        "character_state":
+                            {},
+                        "continuity_rules":
+                            [],
+                        "reference_mode":
+                            "story_generated",
+                        "reference_paths":
+                            [],
+                        "reference_video_paths":
+                            [],
+                        "reference_audio_paths":
+                            [],
+                        "reference_path":
+                            None,
+                        "reference_video_path":
+                            None,
+                        "reference_audio_path":
+                            None,
+                    },
                 )
             )
-
-            if existing is None:
-
-                existing = {
-                    "character_id": (
-                        f"character_{index:03d}"
-                    ),
-                    "name": name,
-                    "role": "story character",
-                    "description": "",
-                    "personality": "",
-                    "appearance": {},
-                    "clothing": {},
-                    "distinctive_features": [],
-                    "character_state": {},
-                    "continuity_rules": [],
-                    "reference_mode": (
-                        "story_generated"
-                    ),
-                    "reference_paths": [],
-                    "reference_video_paths": [],
-                    "reference_audio_paths": [],
-                    "reference_path": None,
-                    "reference_video_path": None,
-                    "reference_audio_path": None,
-                }
 
             characters.append(
                 self._merge_dict(
@@ -2143,35 +2354,41 @@ speech_text
                 )
             )
 
-        if characters:
-            merged[
-                "characters"
-            ] = characters
-
-        # ----------------------------------------------------
-        # Scenes
-        # ----------------------------------------------------
-
-        base_scenes = list(
-            merged.get(
-                "scenes",
-                [],
+        if not characters:
+            raise RuntimeError(
+                "Qwen director produced no usable characters."
             )
-            or []
-        )
 
-        base_scene_map = {
+        merged[
+            "characters"
+        ] = characters
+
+        # ----------------------------------------------------
+        # SCENES
+        # ----------------------------------------------------
+
+        base_scenes = {
             str(
-                scene.get(
+                item.get(
                     "scene_id",
                     "",
                 )
-            ): scene
-            for scene
-            in base_scenes
+            ):
+                item
+            for item in (
+                merged.get(
+                    "scenes",
+                    [],
+                )
+                or []
+            )
+            if isinstance(
+                item,
+                dict,
+            )
         }
 
-        scenes = []
+        scenes: list[dict] = []
 
         for index, spec in enumerate(
             creative.get(
@@ -2195,13 +2412,18 @@ speech_text
                 or f"scene_{index:03d}"
             ).strip()
 
-            existing = base_scene_map.get(
-                scene_id,
-                {
-                    "scene_id": scene_id,
-                    "order": index,
-                    "shot_ids": [],
-                },
+            existing = (
+                base_scenes.get(
+                    scene_id,
+                    {
+                        "scene_id":
+                            scene_id,
+                        "order":
+                            index,
+                        "shot_ids":
+                            [],
+                    },
+                )
             )
 
             scenes.append(
@@ -2228,35 +2450,37 @@ speech_text
                 )
             )
 
-        if scenes:
-            merged[
-                "scenes"
-            ] = scenes
-
-        # ----------------------------------------------------
-        # Shots
-        # ----------------------------------------------------
-
-        base_shots = list(
-            merged.get(
-                "shots",
-                [],
+        if not scenes:
+            raise RuntimeError(
+                "Qwen director produced no usable scenes "
+                "during plan merge."
             )
-            or []
-        )
 
-        base_shot_map = {
-            str(
-                shot.get(
-                    "shot_id",
-                    "",
-                )
-            ): shot
-            for shot
-            in base_shots
+        merged[
+            "scenes"
+        ] = scenes
+
+        # ----------------------------------------------------
+        # SHOTS
+        # ----------------------------------------------------
+
+        scene_ids = {
+            scene[
+                "scene_id"
+            ]
+            for scene
+            in scenes
         }
 
-        shots = []
+        allowed = {
+            character[
+                "name"
+            ].lower()
+            for character
+            in characters
+        }
+
+        cleaned_shots: list[dict] = []
 
         for index, spec in enumerate(
             creative.get(
@@ -2272,60 +2496,90 @@ speech_text
             ):
                 continue
 
-            shot_id = str(
+            scene_id = str(
                 spec.get(
-                    "shot_id",
+                    "scene_id",
                     "",
                 )
-                or f"shot_{index:03d}"
+                or ""
             ).strip()
 
-            existing = base_shot_map.get(
-                shot_id,
-                {
-                    "shot_id": shot_id,
-                    "scene_id": spec.get(
-                        "scene_id",
-                        "",
-                    ),
-                    "order": index,
-                    "duration_seconds": 5.2,
-                },
-            )
+            if scene_id not in scene_ids:
 
-            shots.append(
-                self._merge_dict(
-                    existing,
-                    spec,
-                    {
-                        "shot_id",
-                        "scene_id",
-                        "order",
-                        "duration_seconds",
-                        "characters",
-                        "location",
-                        "action",
-                        "camera_shot",
-                        "camera_movement",
-                        "lighting",
-                        "mood",
-                        "visual_prompt",
-                        "retention_analysis",
-                        "detailed_description",
-                        "overall_soundscape",
-                        "non_diegetic_music",
-                        "negative_prompt",
-                        "continuity_notes",
-                        "speaking_characters",
-                        "speech_text",
-                    },
+                raise RuntimeError(
+                    f"Shot {spec.get('shot_id', '')} "
+                    f"references unknown scene "
+                    f"'{scene_id}'."
                 )
+
+            for field in (
+                "characters",
+                "speaking_characters",
+            ):
+
+                for name in (
+                    spec.get(
+                        field,
+                        [],
+                    )
+                    or []
+                ):
+
+                    if (
+                        str(name)
+                        .strip()
+                        .lower()
+                        not in allowed
+                    ):
+
+                        raise RuntimeError(
+                            f"Shot {spec.get('shot_id', '')} "
+                            f"contains unknown character "
+                            f"'{name}'."
+                        )
+
+            shot = deepcopy(
+                spec
             )
 
-        if shots:
-            merged[
-                "shots"
-            ] = shots
+            shot[
+                "order"
+            ] = index
+
+            cleaned_shots.append(
+                shot
+            )
+
+        if not cleaned_shots:
+
+            raise RuntimeError(
+                "Qwen director produced no usable shots "
+                "during plan merge."
+            )
+
+        merged[
+            "shots"
+        ] = cleaned_shots
+
+        for scene in merged[
+            "scenes"
+        ]:
+
+            scene[
+                "shot_ids"
+            ] = [
+                shot[
+                    "shot_id"
+                ]
+                for shot
+                in cleaned_shots
+                if shot[
+                    "scene_id"
+                ]
+                == scene[
+                    "scene_id"
+                ]
+            ]
 
         return merged
 
