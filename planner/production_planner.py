@@ -469,73 +469,134 @@ class ProductionPlanner:
         self,
         story: str,
     ) -> list[str]:
-
+    
         candidates = []
-
-        # Deterministic fallback detection is intentionally
-        # limited to concrete role descriptors.
+    
+        role_names = {
+            "woman",
+            "man",
+            "girl",
+            "boy",
+            "child",
+            "person",
+            "hero",
+            "heroine",
+            "explorer",
+            "detective",
+            "scientist",
+            "soldier",
+            "warrior",
+            "king",
+            "queen",
+            "robot",
+            "android",
+            "pilot",
+        }
+    
+        # --------------------------------------------------------
+        # Deterministic fallback character detection.
         #
-        # Qwen is responsible for creative character creation
-        # and naming during production.
-        for pattern, label in self.ROLE_PATTERNS:
-
-            count = len(
-                re.findall(
-                    pattern,
-                    story,
-                    flags=re.IGNORECASE,
+        # This is intentionally conservative:
+        # we look for an article followed by up to three ordinary
+        # descriptive words and then a known character-role noun.
+        #
+        # Examples accepted:
+        #   "a man"
+        #   "a lone man"
+        #   "a young woman"
+        #   "an elderly detective"
+        #   "the frightened soldier"
+        #
+        # We do NOT treat arbitrary capitalized/prose words as
+        # character names.
+        # --------------------------------------------------------
+    
+        pattern = re.compile(
+            r"\b(?:a|an|the)\s+"
+            r"(?:"
+            r"[a-z][a-z'-]*\s+"
+            r"){0,3}"
+            r"("
+            + "|".join(
+                sorted(
+                    role_names,
+                    key=len,
+                    reverse=True,
                 )
             )
-
-            if count:
+            + r")\b",
+            flags=re.IGNORECASE,
+        )
+    
+        for match in pattern.finditer(
+            story
+        ):
+    
+            value = (
+                match.group(1)
+                .strip()
+                .lower()
+            )
+    
+            if value in role_names:
                 candidates.append(
-                    label
+                    value
                 )
-
-        # Explicitly named characters are allowed only when
-        # the user actually says "named X" or "called X".
+    
+        # --------------------------------------------------------
+        # Explicit names are allowed only when the user clearly
+        # marks them as names:
+        #
+        #   named Maya
+        #   called Maya
+        #
+        # Do NOT scrape all capitalized words from prose.
+        # --------------------------------------------------------
+    
         explicit_names = re.findall(
             r"\b(?:named|called)\s+"
             r"([A-Z][A-Za-z0-9'_-]+"
             r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
             story,
         )
-
+    
         for name in explicit_names:
-
+    
             name = name.strip()
-
+    
             if not name:
                 continue
-
-            if name in (
-                self.COMMON_PROPER_WORDS
-            ):
+    
+            if name in self.COMMON_PROPER_WORDS:
                 continue
-
+    
             candidates.append(
                 name
             )
 
-        result = []
-        seen = set()
+    # --------------------------------------------------------
+    # Deduplicate while preserving order.
+    # --------------------------------------------------------
 
-        for value in candidates:
+    result = []
+    seen = set()
 
-            key = value.lower()
+    for value in candidates:
 
-            if key in seen:
-                continue
+        key = value.lower()
 
-            seen.add(
-                key
-            )
+        if key in seen:
+            continue
 
-            result.append(
-                value
-            )
+        seen.add(
+            key
+        )
 
-        return result
+        result.append(
+            value
+        )
+
+    return result
 
     @staticmethod
     def _appearance_from_story(
