@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from planner.config import (
     DELIVERY_FPS,
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
+    H3_MAX_REFERENCE_IMAGES,
     PROFILE_BASE,
     PROFILE_TURBO,
     PROFILE_UPSCALE,
@@ -40,7 +42,7 @@ class ProductionRunner:
 
         self.project_root = Path(
             project_root
-        )
+        ).resolve()
 
         self.clients = dict(
             comfy_clients
@@ -57,16 +59,17 @@ class ProductionRunner:
             / "input"
         )
 
+        self.production_id = None
+
+        self.production_input_root = (
+            self.input_root
+        )
+
         self.output_root = (
             self.project_root
             / "data"
             / "production"
             / "h3"
-        )
-
-        self.output_root.mkdir(
-            parents=True,
-            exist_ok=True,
         )
 
         self.continuity = (
@@ -78,6 +81,99 @@ class ProductionRunner:
         self.identity_anchors = (
             IdentityAnchorStore(
                 self.project_root
+            )
+        )
+
+    @staticmethod
+    def _safe_name(
+        value,
+    ) -> str:
+
+        text = str(
+            value or ""
+        ).strip()
+
+        cleaned = "".join(
+            char
+            if (
+                char.isalnum()
+                or char in "._-"
+            )
+            else "_"
+            for char in text
+        )
+
+        return (
+            cleaned[:96]
+            or "production"
+        )
+
+    def _resolve_production_id(
+        self,
+        production_plan: dict,
+    ) -> str:
+
+        requested = str(
+            production_plan.get(
+                "production_id",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if requested:
+            return self._safe_name(
+                requested
+            )
+
+        return (
+            "production_"
+            f"{uuid.uuid4().hex}"
+        )
+
+    def _prepare_production_paths(
+        self,
+        production_id: str,
+    ) -> None:
+
+        self.production_id = (
+            production_id
+        )
+
+        self.production_input_root = (
+            self.input_root
+            / production_id
+        )
+
+        self.output_root = (
+            self.project_root
+            / "data"
+            / "production"
+            / production_id
+            / "h3"
+        )
+
+        self.production_input_root.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.output_root.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        self.continuity = (
+            H3SceneContinuity(
+                self.project_root,
+                production_id=production_id,
+            )
+        )
+
+        self.identity_anchors = (
+            IdentityAnchorStore(
+                self.project_root,
+                production_id=production_id,
             )
         )
 
@@ -93,9 +189,9 @@ class ProductionRunner:
             ],
             project_root=self.project_root,
             comfy_input_dir=(
-                self.input_root
+                self.production_input_root
                 / f"gpu_{gpu_id}"
-                / scene_id
+                / self._safe_name(scene_id)
             ),
         )
 
@@ -110,6 +206,7 @@ class ProductionRunner:
                 "workflow_mode",
                 "",
             )
+            or ""
         ).strip()
 
         if explicit in {
@@ -229,7 +326,9 @@ class ProductionRunner:
 
         shot[
             "reference_images"
-        ] = references[:9]
+        ] = references[
+            :H3_MAX_REFERENCE_IMAGES
+        ]
 
     def _persist_first_appearance_anchors(
         self,
@@ -298,7 +397,7 @@ class ProductionRunner:
         output_dir = (
             self.output_root
             / f"gpu_{gpu_id}"
-            / scene_id
+            / self._safe_name(scene_id)
         )
 
         output_dir.mkdir(
@@ -356,7 +455,9 @@ class ProductionRunner:
 
                 shot[
                     "reference_images"
-                ] = references[:9]
+                ] = references[
+                    :H3_MAX_REFERENCE_IMAGES
+                ]
 
             workflow_mode = (
                 self._workflow_for_shot(
@@ -421,11 +522,26 @@ class ProductionRunner:
                 "Production plan contains no shots."
             )
 
+        production_id = (
+            self._resolve_production_id(
+                production_plan
+            )
+        )
+
+        production_plan[
+            "production_id"
+        ] = production_id
+
+        self._prepare_production_paths(
+            production_id
+        )
+
         profile = str(
             production_plan.get(
                 "profile",
                 PROFILE_BASE,
             )
+            or PROFILE_BASE
         ).strip().lower()
 
         if profile not in {
@@ -457,6 +573,7 @@ class ProductionRunner:
                     "scene_id",
                     "",
                 )
+                or ""
             ).strip()
 
             if not scene_id:
@@ -570,7 +687,13 @@ class ProductionRunner:
             self.project_root
             / "data"
             / "production"
+            / production_id
             / "final"
+        )
+
+        assembly_dir.mkdir(
+            parents=True,
+            exist_ok=True,
         )
 
         assembler = AssemblyManager(
@@ -581,10 +704,7 @@ class ProductionRunner:
             assembler.assemble(
                 videos,
                 final_name=(
-                    f"h3_"
-                    f"{profile}"
-                    f"{'_upscaled' if upscale_enabled else ''}"
-                    f"_720p.mp4"
+                    "final.mp4"
                 ),
                 width=int(
                     production_plan.get(
@@ -608,6 +728,7 @@ class ProductionRunner:
         )
 
         return {
+            "production_id": production_id,
             "shot_outputs": videos,
             "final_video": final_video,
             "profile": profile,
