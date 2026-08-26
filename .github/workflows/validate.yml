@@ -108,6 +108,198 @@ jobs:
           PY
 
 
+      - name: Story director regression tests
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from planner.production_planner import (
+              ProductionPlanner,
+          )
+
+          from planner.qwen_director import (
+              QwenDirector,
+          )
+
+          root = Path(
+              "."
+          ).resolve()
+
+          planner = ProductionPlanner(
+              root
+          )
+
+          story = """
+          A lone man walks through an endless abyss at the edge
+          of a collapsing world.
+
+          Tone: epic, mysterious, dark, cinematic.
+
+          Visual priority: immense scale, realistic destruction,
+          atmospheric depth.
+          """.strip()
+
+          normalized = planner.normalize_story(
+              "ai_story",
+              story,
+          )
+
+          assert normalized == story, (
+              "normalize_story() modified the user story."
+          )
+
+          forbidden_in_story = [
+              "Treat this as a cinematic story beat.",
+              "Clarify the visible subject.",
+              "Develop the visible environment.",
+          ]
+
+          for token in forbidden_in_story:
+              assert token not in normalized, token
+
+          detected = {
+              value.lower()
+              for value
+              in planner.detect_character_descriptors(
+                  story
+              )
+          }
+
+          assert "man" in detected
+
+          for invalid in [
+              "treat",
+              "develop",
+              "clarify",
+              "every",
+              "above",
+              "far",
+              "tone",
+              "visual",
+          ]:
+              assert invalid not in detected, (
+                  f"Invalid prose token detected as "
+                  f"character: {invalid}"
+              )
+
+          director = QwenDirector(
+              root
+          )
+
+          sanitized = (
+              director._sanitize_characters(
+                  [
+                      {
+                          "name": "man",
+                          "role": "protagonist",
+                      },
+                      {
+                          "name": "Treat",
+                          "role": "invalid",
+                      },
+                      {
+                          "name": "Develop",
+                          "role": "invalid",
+                      },
+                      {
+                          "name": "Visual",
+                          "role": "invalid",
+                      },
+                      {
+                          "name": "Above",
+                          "role": "invalid",
+                      },
+                  ]
+              )
+          )
+
+          names = {
+              value["name"].lower()
+              for value
+              in sanitized
+          }
+
+          assert names == {
+              "man"
+          }, names
+
+          print(
+              "Story director regression tests PASSED."
+          )
+          PY
+
+
+      - name: Qwen director contract
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          from planner.qwen_director import (
+              QwenDirector,
+          )
+
+          director = QwenDirector(
+              Path(".").resolve()
+          )
+
+          story_system = (
+              director._story_director_system(
+                  "ai_story"
+              )
+          )
+
+          shot_system = (
+              director._shot_director_system()
+          )
+
+          assert (
+              '"characters"' in story_system
+          )
+
+          assert (
+              '"scenes"' in story_system
+          )
+
+          assert (
+              '"shots"' not in story_system
+          )
+
+          assert (
+              '"shots"' in shot_system
+          )
+
+          assert (
+              "Do not create characters"
+              in shot_system
+          )
+
+          assert (
+              "Only use character names supplied"
+              in shot_system
+          )
+
+          for invalid in [
+              "Treat",
+              "Develop",
+              "Clarify",
+              "Tone",
+              "Visual",
+          ]:
+              assert (
+                  invalid.lower()
+                  in director.FORBIDDEN_CHARACTER_NAMES
+              )
+
+          print(
+              "Qwen director contract PASSED."
+          )
+          PY
+
+
       - name: Runtime import integration
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -126,6 +318,7 @@ jobs:
               "execution.h3_runtime",
               "execution.assembly_manager",
               "ui.storyboard_server",
+              "ui.storyboard_gradio",
           ]
 
           for module in modules:
@@ -142,8 +335,6 @@ jobs:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python - <<'PY'
-          from pathlib import Path
-
           from planner.config import (
               DIRECTOR_MODEL_FILENAME,
               DELIVERY_WIDTH,
@@ -214,6 +405,39 @@ jobs:
 
           print(
               "Storyboard UI PASSED."
+          )
+          PY
+
+
+      - name: Gradio production UI contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "ui/storyboard_gradio.py"
+          )
+
+          assert path.is_file()
+
+          text = path.read_text(
+              encoding="utf-8"
+          )
+
+          for token in [
+              "Your Story",
+              "AI Story",
+              "Expand Story",
+              "Preserve Story",
+              "Generate Storyboard",
+              "Approve & Generate Video",
+              "ProductionController",
+              "share=True",
+          ]:
+              assert token in text, token
+
+          print(
+              "Gradio production UI PASSED."
           )
           PY
 
