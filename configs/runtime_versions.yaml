@@ -51,3 +51,8 @@ director:
 storyboard:
   host: "0.0.0.0"
   port: 8765
+  gradio_version: "6.0.0"
+
+storyboard:
+  host: "0.0.0.0"
+  port: 8765
