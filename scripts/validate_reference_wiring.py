@@ -128,6 +128,57 @@ def main():
             "Reference media path wiring PASSED."
         )
 
+        from pipeline.h3_scene_continuity import (
+            H3SceneContinuity,
+        )
+        from pipeline.identity_anchor_store import (
+            IdentityAnchorStore,
+        )
+
+        continuity_a = H3SceneContinuity(
+            root,
+            production_id="production_a",
+        )
+
+        continuity_b = H3SceneContinuity(
+            root,
+            production_id="production_b",
+        )
+
+        identity_a = IdentityAnchorStore(
+            root,
+            production_id="production_a",
+        )
+
+        identity_b = IdentityAnchorStore(
+            root,
+            production_id="production_b",
+        )
+
+        assert (
+            continuity_a.root
+            != continuity_b.root
+        )
+
+        assert (
+            identity_a.root
+            != identity_b.root
+        )
+
+        assert (
+            "production_a"
+            in str(
+                continuity_a.root
+            )
+        )
+
+        assert (
+            "production_b"
+            in str(
+                continuity_b.root
+            )
+        )
+
 
 if __name__ == "__main__":
     main()
