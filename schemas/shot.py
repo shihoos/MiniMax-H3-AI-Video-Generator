@@ -93,7 +93,7 @@ class Shot:
     height: int = 768
     fps: int = 24
     frames_per_shot: int = 124
-    steps: int = 14
+    steps: int = 20
 
     previous_shot: Optional[str] = None
     next_shot: Optional[str] = None
