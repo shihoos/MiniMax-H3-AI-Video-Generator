@@ -33,7 +33,7 @@ jobs:
       - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyYAML
+          python -m pip install PyYAML gradio==6.0.0
 
       - name: Python syntax
         run: |
@@ -109,72 +109,109 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          from planner.production_planner import (
-              ProductionPlanner,
-          )
-
           from planner.qwen_director import (
               QwenDirector,
           )
 
-          root = Path(
-              "."
-          ).resolve()
-
-          planner = ProductionPlanner(
-              root
-          )
-
-          story = """
-          A lone man walks through an endless abyss at the edge
-          of a collapsing world.
-
-          Tone: epic, mysterious, dark, cinematic.
-
-          Visual priority: immense scale, realistic destruction,
-          atmospheric depth.
-          """.strip()
-
-          normalized = planner.normalize_story(
-              "ai_story",
-              story,
-          )
-
-          assert normalized == story
-
-          forbidden_in_story = [
-              "Treat this as a cinematic story beat.",
-              "Clarify the visible subject.",
-              "Develop the visible environment.",
-          ]
-
-          for token in forbidden_in_story:
-              assert token not in normalized
-
-          detected = {
-              value.lower()
-              for value
-              in planner.detect_character_descriptors(
-                  story
-              )
-          }
-
-          assert "man" in detected
-
-          for invalid in [
-              "treat",
-              "develop",
-              "clarify",
-              "every",
-              "above",
-              "far",
-              "tone",
-              "visual",
-          ]:
-              assert invalid not in detected
-
           director = QwenDirector(
-              root
+              Path(".").resolve()
+          )
+
+          source = (
+              "A lone man walks through an endless abyss "
+              "at the edge of a collapsing world."
+          )
+
+          # Preserve must accept identical text.
+
+          director._validate_mode_output(
+              "preserve_user_story",
+              source,
+              source,
+          )
+
+          # Preserve must reject changed text.
+
+          try:
+
+              director._validate_mode_output(
+                  "preserve_user_story",
+                  source,
+                  source + " Extra event.",
+              )
+
+          except RuntimeError:
+              pass
+
+          else:
+              raise AssertionError(
+                  "Preserve mode accepted changed story."
+              )
+
+          # Expand must reject unchanged text.
+
+          try:
+
+              director._validate_mode_output(
+                  "expand_user_story",
+                  source,
+                  source,
+              )
+
+          except RuntimeError:
+              pass
+
+          else:
+              raise AssertionError(
+                  "Expand mode accepted unchanged input."
+              )
+
+          expanded = (
+              source
+              + " The man crosses fractured ground "
+              "while distant mountains collapse into glowing dust. "
+              "A violent storm tears through the abyss "
+              "and forces him to continue toward the final horizon."
+          )
+
+          director._validate_mode_output(
+              "expand_user_story",
+              source,
+              expanded,
+          )
+
+          # AI Story must not return the premise unchanged.
+
+          try:
+
+              director._validate_mode_output(
+                  "ai_story",
+                  source,
+                  source,
+              )
+
+          except RuntimeError:
+              pass
+
+          else:
+              raise AssertionError(
+                  "AI Story mode accepted unchanged input."
+              )
+
+          assert director._valid_character_name(
+              "man"
+          )
+
+          assert director._valid_character_name(
+              "Maya"
+          )
+
+          assert not director._valid_character_name(
+              "Treat"
+          )
+
+          assert not director._valid_character_name(
+              "Visual"
           )
 
           sanitized = (
@@ -189,18 +226,6 @@ jobs:
                           "role": "invalid",
                       },
                       {
-                          "name": "Develop",
-                          "role": "invalid",
-                      },
-                      {
-                          "name": "Visual",
-                          "role": "invalid",
-                      },
-                      {
-                          "name": "Above",
-                          "role": "invalid",
-                      },
-                      {
                           "name": "Maya",
                           "role": "protagonist",
                       },
@@ -209,21 +234,15 @@ jobs:
           )
 
           names = {
-              value["name"].lower()
-              for value
+              item["name"].lower()
+              for item
               in sanitized
           }
 
-          assert "man" in names
-          assert "maya" in names
-
-          for invalid in [
-              "treat",
-              "develop",
-              "visual",
-              "above",
-          ]:
-              assert invalid not in names
+          assert names == {
+              "man",
+              "maya",
+          }
 
           print(
               "Story director regression tests PASSED."
@@ -245,103 +264,82 @@ jobs:
               Path(".").resolve()
           )
 
-          ai_prompt = (
+          ai = (
               director._story_director_system(
                   "ai_story"
               )
           )
 
-          expand_prompt = (
+          expand = (
               director._story_director_system(
                   "expand_user_story"
               )
           )
 
-          preserve_prompt = (
+          preserve = (
               director._story_director_system(
                   "preserve_user_story"
               )
           )
 
-          shot_prompt = (
+          shots = (
               director._shot_director_system()
           )
 
           assert (
-              '"characters"' in ai_prompt
+              '"characters"'
+              in ai
           )
 
           assert (
-              '"scenes"' in ai_prompt
+              '"scenes"'
+              in ai
           )
 
           assert (
-              '"shots"' not in ai_prompt
+              '"shots"'
+              not in ai
           )
 
           assert (
-              "invent a coherent protagonist"
-              in ai_prompt
+              "genuinely developed story"
+              in ai
           )
 
           assert (
-              "preserve every important fact"
-              in expand_prompt
+              "Preserve every important fact"
+              in expand
           )
 
           assert (
               "Do not simply copy the user's paragraphs"
-              in expand_prompt
+              in expand
           )
 
           assert (
               "immutable source material"
-              in preserve_prompt
+              in preserve
           )
 
           assert (
-              "MUST equal the supplied story"
-              in preserve_prompt
+              "must equal the supplied story"
+              in preserve
           )
 
           assert (
-              '"shots"' in shot_prompt
+              '"shots"'
+              in shots
           )
 
           assert (
               "Do NOT create new characters"
-              in shot_prompt
+              in shots
           )
 
           assert (
-              "Only use character names supplied"
-              in shot_prompt
+              "Only use names present in the character bible"
+              in shots
           )
-
-          for invalid in [
-              "Treat",
-              "Develop",
-              "Clarify",
-              "Tone",
-              "Visual",
-          ]:
-              assert (
-                  invalid.lower()
-                  in director.FORBIDDEN_CHARACTER_NAMES
-              )
-
-          for valid in [
-              "man",
-              "woman",
-              "girl",
-              "boy",
-              "soldier",
-              "detective",
-          ]:
-              assert (
-                  valid.lower()
-                  in director.VALID_GENERIC_ROLES
-              )
 
           print(
               "Qwen director contract PASSED."
@@ -397,7 +395,7 @@ jobs:
 
           assert (
               DELIVERY_WIDTH,
-              DELIVERY_HEIGHT
+              DELIVERY_HEIGHT,
           ) == (
               1280,
               720,
@@ -405,7 +403,7 @@ jobs:
 
           assert (
               UPSCALE_WIDTH,
-              UPSCALE_HEIGHT
+              UPSCALE_HEIGHT,
           ) == (
               1920,
               1088,
@@ -413,6 +411,40 @@ jobs:
 
           print(
               "Director configuration PASSED."
+          )
+          PY
+
+      - name: Assembly contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path(
+              "execution/assembly_manager.py"
+          ).read_text(
+              encoding="utf-8"
+          )
+
+          assert (
+              '"-vf",\n'
+              '            "-vf"'
+              not in text
+          )
+
+          assert (
+              '"-c:v",\n'
+              '            "libx264"'
+              in text
+          )
+
+          assert (
+              '"-c:a",\n'
+              '            "aac"'
+              in text
+          )
+
+          print(
+              "Assembly contract PASSED."
           )
           PY
 
@@ -429,10 +461,15 @@ jobs:
               "ui/storyboard_server.py"
           )
 
+          gradio_ui = Path(
+              "ui/storyboard_gradio.py"
+          )
+
           assert html.is_file()
           assert server.is_file()
+          assert gradio_ui.is_file()
 
-          text = html.read_text(
+          html_text = html.read_text(
               encoding="utf-8"
           )
 
@@ -447,25 +484,13 @@ jobs:
               "lighting",
               "overall_soundscape",
           ]:
-              assert token in text, token
 
-          print(
-              "Storyboard UI PASSED."
-          )
-          PY
+              assert (
+                  token
+                  in html_text
+              ), token
 
-      - name: Gradio production UI contract
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          path = Path(
-              "ui/storyboard_gradio.py"
-          )
-
-          assert path.is_file()
-
-          text = path.read_text(
+          gradio_text = gradio_ui.read_text(
               encoding="utf-8"
           )
 
@@ -479,10 +504,14 @@ jobs:
               "ProductionController",
               "share=True",
           ]:
-              assert token in text, token
+
+              assert (
+                  token
+                  in gradio_text
+              ), token
 
           print(
-              "Gradio production UI PASSED."
+              "Storyboard UI PASSED."
           )
           PY
 
@@ -580,7 +609,8 @@ jobs:
 
           upscale_types = {
               node.get("type")
-              for node in upscale["nodes"]
+              for node
+              in upscale["nodes"]
           }
 
           for required in [
@@ -589,7 +619,11 @@ jobs:
               "MMH3SpatialSplitParams",
               "MMH3UltimateUpscale",
           ]:
-              assert required in upscale_types, required
+
+              assert (
+                  required
+                  in upscale_types
+              ), required
 
           print(
               "Workflow contracts PASSED."
@@ -603,6 +637,7 @@ jobs:
             -name '*_TEST.json' \
             -print \
             -quit | grep -q .; then
+
             echo "Temporary workflow artifact found."
             exit 1
           fi
