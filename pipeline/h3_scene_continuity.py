@@ -3,6 +3,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from pipeline.identity_anchor_store import (
+    IdentityAnchorStore,
+)
+
 
 class H3SceneContinuity:
 
@@ -24,6 +28,12 @@ class H3SceneContinuity:
         self.root.mkdir(
             parents=True,
             exist_ok=True,
+        )
+
+        self.identity_store = (
+            IdentityAnchorStore(
+                self.project_root
+            )
         )
 
     def extract_last_frame(
@@ -100,4 +110,54 @@ class H3SceneContinuity:
             video_path=video_path,
             scene_id=scene_id,
             shot_id=shot_id,
+        )
+
+    def persist_character_anchors(
+        self,
+        *,
+        shot: dict,
+        frame_path: Path,
+    ) -> list[str]:
+
+        character_ids = (
+            shot.get(
+                "character_ids",
+                [],
+            )
+            or []
+        )
+
+        saved = []
+
+        for character_id in character_ids:
+
+            anchor = (
+                self.identity_store.save_anchor(
+                    character_id=character_id,
+                    shot_id=shot["shot_id"],
+                    source_frame=frame_path,
+                )
+            )
+
+            saved.append(
+                str(anchor)
+            )
+
+        return saved
+
+    def character_anchor(
+        self,
+        character_id: str,
+    ):
+
+        anchor = (
+            self.identity_store.latest_anchor(
+                character_id
+            )
+        )
+
+        return (
+            str(anchor)
+            if anchor
+            else None
         )
