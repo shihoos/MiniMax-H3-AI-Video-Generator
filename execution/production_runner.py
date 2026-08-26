@@ -163,19 +163,9 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        self.continuity = (
-            H3SceneContinuity(
-                self.project_root,
-                production_id=production_id,
-            )
-        )
+        self.continuity = None
 
-        self.identity_anchors = (
-            IdentityAnchorStore(
-                self.project_root,
-                production_id=production_id,
-            )
-        )
+        self.identity_anchors = None
 
     def _executor(
         self,
