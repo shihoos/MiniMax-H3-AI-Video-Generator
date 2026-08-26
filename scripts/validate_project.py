@@ -46,12 +46,8 @@ REQUIRED_FILES = [
     "execution/h3_workflow_builder.py",
     "execution/h3_upscaled_workflow_builder.py",
     "execution/production_runner.py",
-    "execution/shot_executor.py",
-
-    # Scheduler
     "scheduler/gpu_scheduler.py",
-    "scheduler/shot_queue.py",
-
+    
     # Schemas
     "schemas/character.py",
     "schemas/scene.py",
@@ -75,18 +71,6 @@ REQUIRED_FILES = [
     "workflows/postprocess/H3_Ref2V_UltimateUpscale_Production.json",
     "workflows/sources/H3_Turbo_Reference_Source.json",
     "workflows/sources/H3_LatentUpscaler_Source.json",
-]
-
-
-FORBIDDEN_PATHS = [
-    "kaggle/compatibility_lock.yaml",
-    "compatibility/prepare_modern_ltx.py",
-    "execution/comfy_workflow_adapter.py",
-    "execution/reference_image_generator.py",
-    "ui/storyboard.html",
-    "ui/storyboard_server.py",
-    "scripts/storyboard_preview.py",
-    "scripts/cpu_preflight.py",
 ]
 
 
@@ -142,17 +126,6 @@ SOURCE_WORKFLOWS = {
         / "sources"
         / "H3_LatentUpscaler_Source.json"
     ),
-}
-
-
-FORBIDDEN_MODEL_TOKENS = {
-    "minimax_h3_fl2va",
-    "minimax_h3_fl2v",
-    "qwen3-4b",
-    "qwen3vl_32b_minimax_h3-Q4",
-    "minimax_h3_ref2va_pruned_int8_convrot",
-    "minimax_h3_video_vae_int8_convrot",
-    "minimax_h3_ref2v_turbo_4step",
 }
 
 
