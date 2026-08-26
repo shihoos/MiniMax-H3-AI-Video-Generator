@@ -24,7 +24,6 @@ from planner.config import (
     PROFILE_UPSCALE,
     WORKFLOW_REF2V,
     WORKFLOW_TURBO_REF2V,
-    WORKFLOW_UPSCALE,
 )
 from scheduler.gpu_scheduler import (
     GPUScheduler,
@@ -88,18 +87,16 @@ class ProductionRunner:
         scene_id: str,
     ):
 
-        input_dir = (
-            self.input_root
-            / f"gpu_{gpu_id}"
-            / scene_id
-        )
-
         return ShotExecutor(
             comfy_client=self.clients[
                 gpu_id
             ],
             project_root=self.project_root,
-            comfy_input_dir=input_dir,
+            comfy_input_dir=(
+                self.input_root
+                / f"gpu_{gpu_id}"
+                / scene_id
+            ),
         )
 
     @staticmethod
@@ -118,15 +115,11 @@ class ProductionRunner:
         if explicit in {
             WORKFLOW_REF2V,
             WORKFLOW_TURBO_REF2V,
-            WORKFLOW_UPSCALE,
         }:
             return explicit
 
         if profile == PROFILE_TURBO:
             return WORKFLOW_TURBO_REF2V
-
-        if profile == PROFILE_UPSCALE:
-            return WORKFLOW_UPSCALE
 
         return WORKFLOW_REF2V
 
@@ -134,6 +127,7 @@ class ProductionRunner:
     def _sort_shots(
         shots,
     ):
+
         return sorted(
             shots,
             key=lambda shot: int(
@@ -157,7 +151,8 @@ class ProductionRunner:
                 )
             ).strip().lower():
                 character
-            for character in production_plan.get(
+            for character
+            in production_plan.get(
                 "characters",
                 [],
             )
@@ -173,9 +168,9 @@ class ProductionRunner:
         self,
         shot: dict,
         character_map: dict,
-    ):
+    ) -> None:
 
-        refs = list(
+        references = list(
             shot.get(
                 "reference_images",
                 [],
@@ -206,15 +201,18 @@ class ProductionRunner:
             ):
                 continue
 
-            character_id = character.get(
-                "character_id"
+            character_id = (
+                character.get(
+                    "character_id"
+                )
             )
 
             if not character_id:
                 continue
 
             anchor = (
-                self.identity_anchors.latest_anchor(
+                self.identity_anchors
+                .latest_anchor(
                     character_id
                 )
             )
@@ -222,23 +220,23 @@ class ProductionRunner:
             if (
                 anchor
                 and str(anchor)
-                not in refs
-                and len(refs) < 9
+                not in references
             ):
-                refs.append(
-                    str(anchor)
+                references.insert(
+                    0,
+                    str(anchor),
                 )
 
         shot[
             "reference_images"
-        ] = refs[:9]
+        ] = references[:9]
 
     def _persist_first_appearance_anchors(
         self,
         shot: dict,
         character_map: dict,
         frame_path: Path,
-    ):
+    ) -> None:
 
         for name in (
             shot.get(
@@ -263,8 +261,10 @@ class ProductionRunner:
             ):
                 continue
 
-            character_id = character.get(
-                "character_id"
+            character_id = (
+                character.get(
+                    "character_id"
+                )
             )
 
             if not character_id:
@@ -273,7 +273,9 @@ class ProductionRunner:
             self.identity_anchors.save_first_anchor(
                 character_id=character_id,
                 shot_id=str(
-                    shot["shot_id"]
+                    shot[
+                        "shot_id"
+                    ]
                 ),
                 source_frame=frame_path,
             )
@@ -285,6 +287,7 @@ class ProductionRunner:
         shots,
         profile,
         character_map,
+        upscale_enabled,
     ):
 
         executor = self._executor(
@@ -316,8 +319,6 @@ class ProductionRunner:
                 original
             )
 
-            # Reuse the first successful generated
-            # appearance as a persistent identity anchor.
             self._add_identity_anchors(
                 shot,
                 character_map,
@@ -336,7 +337,7 @@ class ProductionRunner:
                     )
                 )
 
-                refs = list(
+                references = list(
                     shot.get(
                         "reference_images",
                         [],
@@ -346,16 +347,16 @@ class ProductionRunner:
 
                 if (
                     str(last_frame)
-                    not in refs
+                    not in references
                 ):
-                    refs.insert(
+                    references.insert(
                         0,
                         str(last_frame),
                     )
 
                 shot[
                     "reference_images"
-                ] = refs[:9]
+                ] = references[:9]
 
             workflow_mode = (
                 self._workflow_for_shot(
@@ -364,10 +365,13 @@ class ProductionRunner:
                 )
             )
 
-            result = executor.execute_shot(
-                shot=shot,
-                workflow_mode=workflow_mode,
-                output_dir=output_dir,
+            result = (
+                executor.execute_shot(
+                    shot=shot,
+                    workflow_mode=workflow_mode,
+                    output_dir=output_dir,
+                    upscale=upscale_enabled,
+                )
             )
 
             result = Path(
@@ -378,8 +382,6 @@ class ProductionRunner:
                 result
             )
 
-            # The final frame becomes the continuity frame
-            # and, on first appearance, the character anchor.
             anchor_frame = (
                 self.continuity
                 .prepare_next_shot(
@@ -401,18 +403,6 @@ class ProductionRunner:
             previous_shot = shot
 
         return results
-
-    def _parallel_safe(
-        self,
-        production_plan: dict,
-    ) -> bool:
-
-        return bool(
-            production_plan.get(
-                "parallel_safe",
-                False,
-            )
-        )
 
     def run(
         self,
@@ -447,7 +437,18 @@ class ProductionRunner:
                 f"Unsupported profile: {profile}"
             )
 
-        scenes = {}
+        upscale_enabled = bool(
+            production_plan.get(
+                "upscale_enabled",
+                profile
+                == PROFILE_UPSCALE,
+            )
+        )
+
+        scenes: dict[
+            str,
+            list[dict],
+        ] = {}
 
         for shot in shots:
 
@@ -480,10 +481,15 @@ class ProductionRunner:
             scenes.items()
         )
 
-        if (
-            self._parallel_safe(
-                production_plan
+        parallel_safe = bool(
+            production_plan.get(
+                "parallel_safe",
+                False,
             )
+        )
+
+        if (
+            parallel_safe
             and len(self.clients) > 1
         ):
 
@@ -504,6 +510,7 @@ class ProductionRunner:
                             job[1],
                             profile,
                             character_map,
+                            upscale_enabled,
                         ),
                     ),
                 )
@@ -511,25 +518,26 @@ class ProductionRunner:
 
         else:
 
-            # Story continuity takes precedence over parallelism.
-            # Use one worker sequentially when scenes share
-            # characters or continuity dependencies.
             gpu_id = sorted(
                 self.clients
             )[0]
 
             scene_results = []
 
-            for job in scene_jobs:
+            for scene_id, scene_shots in (
+                scene_jobs
+            ):
+
                 scene_results.append(
                     (
-                        job[0],
+                        scene_id,
                         self._run_scene(
                             gpu_id,
-                            job[0],
-                            job[1],
+                            scene_id,
+                            scene_shots,
                             profile,
                             character_map,
+                            upscale_enabled,
                         ),
                     )
                 )
@@ -542,7 +550,8 @@ class ProductionRunner:
                         0,
                     )
                 )
-                for shot in scenes[
+                for shot
+                in scenes[
                     item[0]
                 ]
             )
@@ -568,33 +577,39 @@ class ProductionRunner:
             assembly_dir
         )
 
-        final_video = assembler.assemble(
-            videos,
-            final_name=(
-                f"h3_{profile}_720p.mp4"
-            ),
-            width=int(
-                production_plan.get(
-                    "delivery_width",
-                    DELIVERY_WIDTH,
-                )
-            ),
-            height=int(
-                production_plan.get(
-                    "delivery_height",
-                    DELIVERY_HEIGHT,
-                )
-            ),
-            fps=int(
-                production_plan.get(
-                    "delivery_fps",
-                    DELIVERY_FPS,
-                )
-            ),
+        final_video = (
+            assembler.assemble(
+                videos,
+                final_name=(
+                    f"h3_"
+                    f"{profile}"
+                    f"{'_upscaled' if upscale_enabled else ''}"
+                    f"_720p.mp4"
+                ),
+                width=int(
+                    production_plan.get(
+                        "delivery_width",
+                        DELIVERY_WIDTH,
+                    )
+                ),
+                height=int(
+                    production_plan.get(
+                        "delivery_height",
+                        DELIVERY_HEIGHT,
+                    )
+                ),
+                fps=int(
+                    production_plan.get(
+                        "delivery_fps",
+                        DELIVERY_FPS,
+                    )
+                ),
+            )
         )
 
         return {
             "shot_outputs": videos,
             "final_video": final_video,
             "profile": profile,
+            "upscale_enabled": upscale_enabled,
         }
