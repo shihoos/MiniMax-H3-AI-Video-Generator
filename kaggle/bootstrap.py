@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -41,9 +42,7 @@ RUNTIME_MANIFEST = (
 )
 
 
-def run(
-    *args,
-):
+def run(*args) -> None:
     print(
         "+",
         " ".join(
@@ -63,12 +62,23 @@ def run(
 
 def load_yaml(
     path: Path,
-):
-    return yaml.safe_load(
+) -> dict:
+
+    value = yaml.safe_load(
         path.read_text(
             encoding="utf-8"
         )
     )
+
+    if not isinstance(
+        value,
+        dict,
+    ):
+        raise RuntimeError(
+            f"Invalid YAML mapping: {path}"
+        )
+
+    return value
 
 
 def find_kaggle_file(
@@ -80,7 +90,6 @@ def find_kaggle_file(
     for path in KAGGLE_INPUT.rglob(
         "*"
     ):
-
         if (
             path.is_file()
             and path.name.lower()
@@ -110,7 +119,7 @@ def find_kaggle_file(
 def link_model(
     source: Path,
     destination: Path,
-):
+) -> None:
 
     destination.parent.mkdir(
         parents=True,
@@ -134,6 +143,101 @@ def link_model(
         )
 
 
+def _site_packages() -> list[Path]:
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import site; "
+                "print('\\n'.join(site.getsitepackages()))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    return [
+        Path(
+            line.strip()
+        )
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
+
+def _cuda_library_dirs() -> list[Path]:
+
+    directories = []
+
+    for site_root in _site_packages():
+
+        nvidia_root = (
+            site_root
+            / "nvidia"
+        )
+
+        if not nvidia_root.is_dir():
+            continue
+
+        for pattern in (
+            "libcudart.so.13*",
+            "libcublas.so.13*",
+        ):
+
+            for library in nvidia_root.rglob(
+                pattern
+            ):
+
+                if not library.is_file():
+                    continue
+
+                directory = (
+                    library.parent
+                )
+
+                if directory not in directories:
+                    directories.append(
+                        directory
+                    )
+
+    return directories
+
+
+def _configure_cuda_environment(
+    directories: list[Path],
+) -> dict[str, str]:
+
+    environment = dict(
+        os.environ
+    )
+
+    existing = environment.get(
+        "LD_LIBRARY_PATH",
+        "",
+    )
+
+    values = [
+        str(path)
+        for path in directories
+    ]
+
+    if existing:
+        values.append(
+            existing
+        )
+
+    environment[
+        "LD_LIBRARY_PATH"
+    ] = ":".join(
+        values
+    )
+
+    return environment
+
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -146,15 +250,15 @@ def install_director_runtime(
         "cuda_runtime"
     ]
 
-    package = llama_config[
+    llama_package = llama_config[
         "package"
     ]
 
-    version = llama_config[
+    llama_version = llama_config[
         "version"
     ]
 
-    index = llama_config[
+    cuda_index = llama_config[
         "cuda_index"
     ]
 
@@ -177,17 +281,15 @@ def install_director_runtime(
     print(
         "=" * 80
     )
-
     print(
-        "INSTALLING QWEN DIRECTOR CUDA RUNTIME"
+        "INSTALLING QWEN DIRECTOR RUNTIME"
     )
-
     print(
         "=" * 80
     )
 
     # --------------------------------------------------------
-    # CUDA runtime libraries required by the CUDA 13
+    # CUDA runtime libraries required by the CUDA-enabled
     # llama.cpp wheel.
     # --------------------------------------------------------
 
@@ -202,150 +304,66 @@ def install_director_runtime(
         f"{cublas_package}=={cublas_version}",
     )
 
-    # --------------------------------------------------------
-    # Verify the NVIDIA Python packages and locate their
-    # native library directories.
-    # --------------------------------------------------------
-
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import site; "
-                "print('\\n'.join(site.getsitepackages()))"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+    library_dirs = (
+        _cuda_library_dirs()
     )
 
-    site_roots = [
-        Path(
-            line.strip()
-        )
-        for line
-        in probe.stdout.splitlines()
-        if line.strip()
-    ]
-
-    library_directories = []
-
-    for site_root in site_roots:
-
-        nvidia_root = (
-            site_root
-            / "nvidia"
-        )
-
-        if not nvidia_root.is_dir():
-            continue
-
-        for library in nvidia_root.rglob(
-            "libcudart.so*"
-        ):
-
-            if library.is_file():
-
-                parent = (
-                    library.parent
-                )
-
-                if parent not in library_directories:
-                    library_directories.append(
-                        parent
-                    )
-
-        for library in nvidia_root.rglob(
-            "libcublas.so*"
-        ):
-
-            if library.is_file():
-
-                parent = (
-                    library.parent
-                )
-
-                if parent not in library_directories:
-                    library_directories.append(
-                        parent
-                    )
-
-    if not library_directories:
+    if not library_dirs:
         raise RuntimeError(
-            "NVIDIA CUDA Python packages were installed, "
+            "NVIDIA CUDA runtime packages installed, "
             "but no native CUDA library directories were found."
         )
 
-    cuda_runtime_libraries = []
-
-    cublas_libraries = []
-
-    for directory in library_directories:
-
-        if any(
+    has_cudart = any(
+        any(
             path.name.startswith(
                 "libcudart.so.13"
             )
-            for path
-            in directory.iterdir()
+            for path in directory.iterdir()
             if path.is_file()
-        ):
-            cuda_runtime_libraries.append(
-                directory
-            )
+        )
+        for directory in library_dirs
+    )
 
-        if any(
+    has_cublas = any(
+        any(
             path.name.startswith(
                 "libcublas.so.13"
             )
-            for path
-            in directory.iterdir()
+            for path in directory.iterdir()
             if path.is_file()
-        ):
-            cublas_libraries.append(
-                directory
-            )
-
-    if not cuda_runtime_libraries:
-        raise RuntimeError(
-            "libcudart.so.13 was not found after installing "
-            f"{cuda_runtime_package}=={cuda_runtime_version}."
         )
-
-    if not cublas_libraries:
-        raise RuntimeError(
-            "libcublas.so.13 was not found after installing "
-            f"{cublas_package}=={cublas_version}."
-        )
-
-    runtime_library_paths = []
-
-    for directory in (
-        cuda_runtime_libraries
-        + cublas_libraries
-    ):
-
-        if directory not in runtime_library_paths:
-
-            runtime_library_paths.append(
-                directory
-            )
-
-    print(
-        "[CUDA RUNTIME]"
+        for directory in library_dirs
     )
 
-    for directory in runtime_library_paths:
+    if not has_cudart:
+        raise RuntimeError(
+            "libcudart.so.13 was not found."
+        )
 
+    if not has_cublas:
+        raise RuntimeError(
+            "libcublas.so.13 was not found."
+        )
+
+    environment = (
+        _configure_cuda_environment(
+            library_dirs
+        )
+    )
+
+    print(
+        "[CUDA RUNTIME LIBRARIES]"
+    )
+
+    for directory in library_dirs:
         print(
             " ",
             directory,
         )
 
     # --------------------------------------------------------
-    # Install llama-cpp-python CUDA wheel.
+    # CUDA-enabled llama.cpp wheel.
     # --------------------------------------------------------
 
     run(
@@ -356,43 +374,14 @@ def install_director_runtime(
         "-q",
         "--only-binary=:all:",
         "--disable-pip-version-check",
-        f"{package}=={version}",
+        f"{llama_package}=={llama_version}",
         "--extra-index-url",
-        index,
+        cuda_index,
     )
 
     # --------------------------------------------------------
-    # Verify the CUDA llama.cpp wheel in an environment where
-    # the native NVIDIA libraries are explicitly visible.
+    # Verify the native shared library can actually load.
     # --------------------------------------------------------
-
-    environment = {
-        **__import__(
-            "os"
-        ).environ
-    }
-
-    existing_ld = environment.get(
-        "LD_LIBRARY_PATH",
-        "",
-    )
-
-    ld_parts = [
-        str(path)
-        for path
-        in runtime_library_paths
-    ]
-
-    if existing_ld:
-        ld_parts.append(
-            existing_ld
-        )
-
-    environment[
-        "LD_LIBRARY_PATH"
-    ] = ":".join(
-        ld_parts
-    )
 
     verification = subprocess.run(
         [
@@ -421,12 +410,11 @@ def install_director_runtime(
 
     if verification.returncode != 0:
         raise RuntimeError(
-            "llama-cpp-python CUDA import failed "
-            "after installing the required CUDA runtime libraries."
+            "llama-cpp-python CUDA import failed."
         )
 
 
-def install_nodes():
+def install_nodes() -> None:
 
     manifest = load_yaml(
         NODE_MANIFEST
@@ -456,7 +444,9 @@ def install_nodes():
 
             destination = (
                 CUSTOM
-                / node["name"]
+                / node[
+                    "name"
+                ]
             )
 
             if not destination.exists():
@@ -499,7 +489,7 @@ def install_nodes():
             )
 
 
-def install_models():
+def install_models() -> None:
 
     manifest = load_yaml(
         MODEL_MANIFEST
@@ -513,10 +503,8 @@ def install_models():
             "filename"
         ]
 
-        source = (
-            find_kaggle_file(
-                filename
-            )
+        source = find_kaggle_file(
+            filename
         )
 
         destination = (
@@ -538,7 +526,7 @@ def install_models():
         )
 
 
-def verify_inventory():
+def verify_inventory() -> None:
 
     manifest = load_yaml(
         MODEL_MANIFEST
@@ -590,7 +578,6 @@ def verify_inventory():
     )
 
     if missing:
-
         raise RuntimeError(
             "Missing H3 models:\n"
             + "\n".join(
@@ -601,7 +588,6 @@ def verify_inventory():
         )
 
     if unexpected:
-
         raise RuntimeError(
             "Unexpected H3 production models:\n"
             + "\n".join(
