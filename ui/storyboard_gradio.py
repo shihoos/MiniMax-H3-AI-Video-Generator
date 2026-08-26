@@ -30,6 +30,7 @@ class ProductionController:
 
     @staticmethod
     def _production_id() -> str:
+
         return (
             "production_"
             + datetime.now().strftime(
@@ -73,12 +74,15 @@ class ProductionController:
         ).strip()
 
         if not production_id:
+
             production_id = (
                 ProductionController
                 ._production_id()
             )
 
-        plan["production_id"] = production_id
+        plan[
+            "production_id"
+        ] = production_id
 
         session_dir = (
             ProductionController
@@ -116,12 +120,15 @@ class ProductionController:
         ).strip()
 
         if not plan_path_value:
+
             raise RuntimeError(
                 "Generate a valid storyboard first."
             )
 
         plan_path = (
-            Path(plan_path_value)
+            Path(
+                plan_path_value
+            )
             .resolve()
         )
 
@@ -133,28 +140,35 @@ class ProductionController:
         ).resolve()
 
         try:
+
             plan_path.relative_to(
                 sessions_root
             )
+
         except ValueError as exc:
+
             raise RuntimeError(
                 "Storyboard plan is outside the "
                 "managed session directory."
             ) from exc
 
         if not plan_path.is_file():
+
             raise FileNotFoundError(
                 "Storyboard plan does not exist:\n"
                 f"{plan_path}"
             )
 
         try:
+
             plan = json.loads(
                 plan_path.read_text(
                     encoding="utf-8"
                 )
             )
+
         except json.JSONDecodeError as exc:
+
             raise RuntimeError(
                 "Storyboard plan is invalid JSON:\n"
                 f"{plan_path}\n"
@@ -165,6 +179,7 @@ class ProductionController:
             plan,
             dict,
         ):
+
             raise RuntimeError(
                 "Storyboard plan must be a JSON object."
             )
@@ -185,6 +200,7 @@ class ProductionController:
         ).strip()
 
         if not story:
+
             return (
                 "### ERROR\nPlease write a story or premise.",
                 "",
@@ -202,6 +218,7 @@ class ProductionController:
         }
 
         if mode not in valid_modes:
+
             return (
                 "### ERROR\nInvalid story mode.",
                 "",
@@ -215,6 +232,7 @@ class ProductionController:
         if not self._lock.acquire(
             blocking=False
         ):
+
             return (
                 "### BUSY\nAnother production operation is running.",
                 "",
@@ -236,6 +254,7 @@ class ProductionController:
             )
 
             if not director_enabled():
+
                 raise RuntimeError(
                     "Qwen director is disabled. "
                     "Production Gradio requires the local "
@@ -284,25 +303,32 @@ class ProductionController:
                 or []
             )
 
-            if not characters:
-                raise RuntimeError(
-                    "Qwen director returned no usable characters."
-                )
+            # Characters are optional.
+            # Scenes and shots are required for production.
 
             if not scenes:
+
                 raise RuntimeError(
-                    "Qwen director returned no usable scenes."
+                    "Production planner produced no usable scenes."
                 )
 
             if not shots:
+
                 raise RuntimeError(
-                    "Qwen director returned no usable shots."
+                    "Production planner produced no usable shots."
                 )
 
-            plan["profile"] = "turbo"
-            plan["upscale_enabled"] = True
+            plan[
+                "profile"
+            ] = "turbo"
 
-            plan["approval"] = {
+            plan[
+                "upscale_enabled"
+            ] = True
+
+            plan[
+                "approval"
+            ] = {
                 "status": "draft",
                 "approved_at": None,
             }
@@ -322,68 +348,81 @@ class ProductionController:
                 plan
             )
 
-            character_text = "\n\n".join(
-                (
-                    f"### {character.get('name', '')}\n"
-                    f"**Role:** {character.get('role', '')}\n\n"
-                    f"{character.get('description', '')}\n\n"
-                    f"**Personality:** "
-                    f"{character.get('personality', '')}\n\n"
-                    f"**Appearance:** "
-                    f"{json.dumps(character.get('appearance', {}), ensure_ascii=False)}\n\n"
-                    f"**Continuity:** "
-                    f"{', '.join(character.get('continuity_rules', []) or [])}"
+            character_text = (
+                "\n\n".join(
+                    (
+                        f"### {character.get('name', '')}\n"
+                        f"**Role:** {character.get('role', '')}\n\n"
+                        f"{character.get('description', '')}\n\n"
+                        f"**Personality:** "
+                        f"{character.get('personality', '')}\n\n"
+                        f"**Appearance:** "
+                        f"{json.dumps(character.get('appearance', {}), ensure_ascii=False)}\n\n"
+                        f"**Continuity:** "
+                        f"{', '.join(character.get('continuity_rules', []) or [])}"
+                    )
+                    for character
+                    in characters
                 )
-                for character
-                in characters
             )
 
-            scene_text = "\n\n".join(
-                (
-                    f"### {scene.get('scene_id', '')} — "
-                    f"{scene.get('location', '')}\n\n"
-                    f"{scene.get('description', '')}\n\n"
-                    f"**Time:** {scene.get('time_of_day', '')}\n"
-                    f"**Mood:** {scene.get('mood', '')}\n"
-                    f"**Lighting:** {scene.get('lighting', '')}\n"
-                    f"**Characters:** "
-                    f"{', '.join(scene.get('characters', []) or [])}\n\n"
-                    f"**Continuity:** "
-                    f"{scene.get('continuity_notes', '')}"
+            if not character_text:
+
+                character_text = (
+                    "No named characters were "
+                    "required for this story."
                 )
-                for scene
-                in scenes
+
+            scene_text = (
+                "\n\n".join(
+                    (
+                        f"### {scene.get('scene_id', '')} — "
+                        f"{scene.get('location', '')}\n\n"
+                        f"{scene.get('description', '')}\n\n"
+                        f"**Time:** {scene.get('time_of_day', '')}\n"
+                        f"**Mood:** {scene.get('mood', '')}\n"
+                        f"**Lighting:** {scene.get('lighting', '')}\n"
+                        f"**Characters:** "
+                        f"{', '.join(scene.get('characters', []) or [])}\n\n"
+                        f"**Continuity:** "
+                        f"{scene.get('continuity_notes', '')}"
+                    )
+                    for scene
+                    in scenes
+                )
             )
 
-            shot_text = "\n\n".join(
-                (
-                    f"### {shot.get('shot_id', '')}\n"
-                    f"**Scene:** {shot.get('scene_id', '')}\n"
-                    f"**Duration:** "
-                    f"{shot.get('duration_seconds', '')} sec\n"
-                    f"**Characters:** "
-                    f"{', '.join(shot.get('characters', []) or [])}\n"
-                    f"**Camera:** "
-                    f"{shot.get('camera_shot', '')}\n"
-                    f"**Movement:** "
-                    f"{shot.get('camera_movement', '')}\n"
-                    f"**Lighting:** "
-                    f"{shot.get('lighting', '')}\n"
-                    f"**Action:** "
-                    f"{shot.get('action', '')}\n\n"
-                    f"**Visual Direction:** "
-                    f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
-                    f"**Soundscape:** "
-                    f"{shot.get('overall_soundscape', '')}\n"
-                    f"**Music:** "
-                    f"{shot.get('non_diegetic_music', '')}\n"
-                    f"**Dialogue:** "
-                    f"{shot.get('speech_text', '')}\n"
-                    f"**Continuity:** "
-                    f"{shot.get('continuity_notes', '')}"
+            shot_text = (
+                "\n\n".join(
+                    (
+                        f"### {shot.get('shot_id', '')}\n"
+                        f"**Scene:** {shot.get('scene_id', '')}\n"
+                        f"**Duration:** "
+                        f"{shot.get('duration_seconds', '')} sec\n"
+                        f"**Characters:** "
+                        f"{', '.join(shot.get('characters', []) or [])}\n"
+                        f"**Camera:** "
+                        f"{shot.get('camera_shot', '')}\n"
+                        f"**Movement:** "
+                        f"{shot.get('camera_movement', '')}\n"
+                        f"**Lighting:** "
+                        f"{shot.get('lighting', '')}\n"
+                        f"**Action:** "
+                        f"{shot.get('action', '')}\n\n"
+                        f"**Visual Direction:** "
+                        f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
+                        f"**Soundscape:** "
+                        f"{shot.get('overall_soundscape', '')}\n"
+                        f"**Music:** "
+                        f"{shot.get('non_diegetic_music', '')}\n"
+                        f"**Dialogue:** "
+                        f"{shot.get('speech_text', '')}\n"
+                        f"**Continuity:** "
+                        f"{shot.get('continuity_notes', '')}"
+                    )
+                    for shot
+                    in shots
                 )
-                for shot
-                in shots
             )
 
             summary = (
@@ -400,7 +439,7 @@ class ProductionController:
 
             return (
                 summary,
-                character_text or "No named characters generated.",
+                character_text,
                 scene_text,
                 shot_text,
                 "READY — review the storyboard, then approve it.",
@@ -459,6 +498,7 @@ class ProductionController:
         if not self._lock.acquire(
             blocking=False
         ):
+
             return (
                 "### BUSY\nA production job is already running.",
                 None,
@@ -486,6 +526,7 @@ class ProductionController:
             )
 
             if not scenes or not shots:
+
                 raise RuntimeError(
                     "The storyboard is incomplete."
                 )
@@ -504,6 +545,7 @@ class ProductionController:
                 )
                 == "completed"
             ):
+
                 return (
                     "### COMPLETE\n"
                     "This production has already completed.",
@@ -534,6 +576,7 @@ class ProductionController:
             import torch
 
             if not torch.cuda.is_available():
+
                 raise RuntimeError(
                     "No NVIDIA CUDA GPU is available."
                 )
@@ -557,6 +600,7 @@ class ProductionController:
             )
 
             if not gpu_ids:
+
                 raise RuntimeError(
                     "No CUDA GPU was detected."
                 )
@@ -583,6 +627,7 @@ class ProductionController:
                 )
 
                 if not client.health_check():
+
                     raise RuntimeError(
                         "ComfyUI worker unavailable: "
                         f"{worker['url']}"
@@ -630,6 +675,7 @@ class ProductionController:
             )
 
             if not final_video.is_file():
+
                 raise RuntimeError(
                     "Production runner completed but "
                     "final video was not found:\n"
@@ -637,6 +683,7 @@ class ProductionController:
                 )
 
             if final_video.stat().st_size <= 0:
+
                 raise RuntimeError(
                     "Production runner produced an empty "
                     "final video:\n"
@@ -686,7 +733,9 @@ class ProductionController:
                 "Upscale: H3 3D latent + "
                 "MMH3 Ultimate Upscale\n\n"
                 "Delivery: 1280×720",
-                str(final_video),
+                str(
+                    final_video
+                ),
                 plan_path_value,
             )
 
@@ -723,6 +772,7 @@ class ProductionController:
                     )
 
                 except Exception:
+
                     traceback.print_exc()
 
             self._lock.release()
@@ -735,6 +785,7 @@ def build_app(
 ):
 
     try:
+
         import gradio as gr
 
     except ImportError as exc:
@@ -797,8 +848,6 @@ def build_app(
             label="Story Mode",
         )
 
-        # This replaces gr.State completely.
-        # It contains only the session plan path.
         session_plan_path = gr.Textbox(
             value="",
             visible=False,
@@ -818,18 +867,21 @@ def build_app(
             "Characters",
             open=True,
         ):
+
             characters = gr.Markdown()
 
         with gr.Accordion(
             "Scenes",
             open=True,
         ):
+
             scenes = gr.Markdown()
 
         with gr.Accordion(
             "Shots & Director Plan",
             open=True,
         ):
+
             shots = gr.Markdown()
 
         approve = gr.Button(
