@@ -469,9 +469,9 @@ class ProductionPlanner:
         self,
         story: str,
     ) -> list[str]:
-    
+
         candidates = []
-    
+
         role_names = {
             "woman",
             "man",
@@ -492,7 +492,7 @@ class ProductionPlanner:
             "android",
             "pilot",
         }
-    
+
         # --------------------------------------------------------
         # Deterministic fallback character detection.
         #
@@ -510,7 +510,7 @@ class ProductionPlanner:
         # We do NOT treat arbitrary capitalized/prose words as
         # character names.
         # --------------------------------------------------------
-    
+
         pattern = re.compile(
             r"\b(?:a|an|the)\s+"
             r"(?:"
@@ -527,22 +527,22 @@ class ProductionPlanner:
             + r")\b",
             flags=re.IGNORECASE,
         )
-    
+
         for match in pattern.finditer(
             story
         ):
-    
+
             value = (
                 match.group(1)
                 .strip()
                 .lower()
             )
-    
+
             if value in role_names:
                 candidates.append(
                     value
                 )
-    
+
         # --------------------------------------------------------
         # Explicit names are allowed only when the user clearly
         # marks them as names:
@@ -552,51 +552,51 @@ class ProductionPlanner:
         #
         # Do NOT scrape all capitalized words from prose.
         # --------------------------------------------------------
-    
+
         explicit_names = re.findall(
             r"\b(?:named|called)\s+"
             r"([A-Z][A-Za-z0-9'_-]+"
             r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
             story,
         )
-    
+
         for name in explicit_names:
-    
+
             name = name.strip()
-    
+
             if not name:
                 continue
-    
+
             if name in self.COMMON_PROPER_WORDS:
                 continue
-    
+
             candidates.append(
                 name
             )
 
-    # --------------------------------------------------------
-    # Deduplicate while preserving order.
-    # --------------------------------------------------------
+        # --------------------------------------------------------
+        # Deduplicate while preserving order.
+        # --------------------------------------------------------
 
-    result = []
-    seen = set()
+        result = []
+        seen = set()
 
-    for value in candidates:
+        for value in candidates:
 
-        key = value.lower()
+            key = value.lower()
 
-        if key in seen:
-            continue
+            if key in seen:
+                continue
 
-        seen.add(
-            key
-        )
+            seen.add(
+                key
+            )
 
-        result.append(
-            value
-        )
+            result.append(
+                value
+            )
 
-    return result
+        return result
 
     @staticmethod
     def _appearance_from_story(
@@ -1084,6 +1084,7 @@ class ProductionPlanner:
         characters: list[Character],
         names: list[str],
     ):
+
         by_name = {
             character.name.lower():
                 character
