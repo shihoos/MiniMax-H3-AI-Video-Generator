@@ -169,21 +169,6 @@ SOURCE_WORKFLOWS = {
 }
 
 
-# These are model names/tokens that must not appear
-# in active production workflow definitions.
-#
-# This is NOT a deleted-file blacklist.
-FORBIDDEN_MODEL_TOKENS = {
-    "minimax_h3_fl2va",
-    "minimax_h3_fl2v",
-    "qwen3-4b",
-    "qwen3vl_32b_minimax_h3-Q4",
-    "minimax_h3_ref2va_pruned_int8_convrot",
-    "minimax_h3_video_vae_int8_convrot",
-    "minimax_h3_ref2v_turbo_4step",
-}
-
-
 LOCKED_MODELS = {
     "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
     "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",
