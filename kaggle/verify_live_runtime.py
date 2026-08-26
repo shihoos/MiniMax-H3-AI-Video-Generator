@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -11,6 +12,7 @@ ROOT = (
     .resolve()
     .parents[1]
 )
+
 
 PRODUCTION = {
     "ref2v": (
@@ -32,6 +34,7 @@ PRODUCTION = {
         / "H3_Ref2V_UltimateUpscale_Production.json"
     ),
 }
+
 
 REQUIRED_LIVE_NODES = {
     "BasicScheduler",
@@ -57,35 +60,181 @@ def get(
     base: str,
     endpoint: str,
 ):
-    with urllib.request.urlopen(
-        base + endpoint,
-        timeout=60,
-    ) as response:
+    url = (
+        base.rstrip("/")
+        + endpoint
+    )
+
+    request = urllib.request.Request(
+        url=url,
+        method="GET",
+    )
+
+    try:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=60,
+        ) as response:
+
+            body = response.read()
+
+    except urllib.error.HTTPError as exc:
+
+        details = (
+            exc.read()
+            .decode(
+                "utf-8",
+                errors="replace",
+            )
+        )
+
+        raise RuntimeError(
+            f"ComfyUI returned HTTP {exc.code} "
+            f"for {endpoint}.\n"
+            f"{details}"
+        ) from exc
+
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+    ) as exc:
+
+        raise RuntimeError(
+            "Unable to contact ComfyUI.\n"
+            f"URL: {url}\n"
+            f"Error: {exc}"
+        ) from exc
+
+    if not body:
+
+        raise RuntimeError(
+            f"ComfyUI returned an empty response "
+            f"for {endpoint}."
+        )
+
+    try:
+
         return json.loads(
-            response.read().decode(
+            body.decode(
                 "utf-8"
             )
         )
+
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+
+        raise RuntimeError(
+            f"ComfyUI returned invalid JSON "
+            f"for {endpoint}."
+        ) from exc
+
+
+def check_basic_endpoints(
+    base: str,
+) -> None:
+
+    # --------------------------------------------------------
+    # SYSTEM HEALTH
+    # --------------------------------------------------------
+
+    system_stats = get(
+        base,
+        "/system_stats",
+    )
+
+    if not isinstance(
+        system_stats,
+        dict,
+    ):
+
+        raise RuntimeError(
+            "ComfyUI /system_stats returned "
+            "an invalid response."
+        )
+
+    print(
+        "PASS /system_stats"
+    )
+
+    # --------------------------------------------------------
+    # NODE REGISTRY
+    # --------------------------------------------------------
+
+    object_info = get(
+        base,
+        "/object_info",
+    )
+
+    if not isinstance(
+        object_info,
+        dict,
+    ):
+
+        raise RuntimeError(
+            "ComfyUI /object_info returned "
+            "an invalid response."
+        )
+
+    print(
+        "PASS /object_info"
+    )
 
 
 def workflow_types(
     path: Path,
 ) -> set[str]:
 
-    data = json.loads(
-        path.read_text(
-            encoding="utf-8"
+    if not path.is_file():
+
+        raise RuntimeError(
+            f"Production workflow is missing:\n{path}"
         )
-    )
+
+    try:
+
+        data = json.loads(
+            path.read_text(
+                encoding="utf-8"
+            )
+        )
+
+    except json.JSONDecodeError as exc:
+
+        raise RuntimeError(
+            f"Invalid workflow JSON:\n{path}\n{exc}"
+        ) from exc
+
+    if not isinstance(
+        data,
+        dict,
+    ):
+
+        raise RuntimeError(
+            f"Workflow root must be an object:\n{path}"
+        )
 
     return {
-        str(node.get("type"))
+        str(
+            node.get(
+                "type"
+            )
+        )
         for node in data.get(
             "nodes",
-            []
+            [],
         )
-        if isinstance(node, dict)
-        and node.get("type")
+        if (
+            isinstance(
+                node,
+                dict,
+            )
+            and node.get(
+                "type"
+            )
+        )
     }
 
 
@@ -97,6 +246,22 @@ def check_worker(
         f"http://127.0.0.1:{port}"
     )
 
+    print(
+        f"\n=== WORKER {port} ==="
+    )
+
+    # --------------------------------------------------------
+    # HTTP HEALTH
+    # --------------------------------------------------------
+
+    check_basic_endpoints(
+        base
+    )
+
+    # --------------------------------------------------------
+    # LIVE NODE REGISTRY
+    # --------------------------------------------------------
+
     objects = get(
         base,
         "/object_info",
@@ -104,10 +269,6 @@ def check_worker(
 
     available = set(
         objects
-    )
-
-    print(
-        f"\n=== WORKER {port} ==="
     )
 
     missing = (
@@ -118,6 +279,7 @@ def check_worker(
     for node in sorted(
         REQUIRED_LIVE_NODES
     ):
+
         print(
             "OK   "
             if node in available
@@ -126,15 +288,24 @@ def check_worker(
         )
 
     if missing:
+
         raise RuntimeError(
             "Worker is missing required H3 nodes: "
             + ", ".join(
-                sorted(missing)
+                sorted(
+                    missing
+                )
             )
         )
 
-    # Verify every executable production workflow
-    # contains only registered runtime node types.
+    print(
+        "PASS required H3 node inventory"
+    )
+
+    # --------------------------------------------------------
+    # WORKFLOW → LIVE NODE COMPATIBILITY
+    # --------------------------------------------------------
+
     ignored = {
         "MarkdownNote",
         "Note",
@@ -151,10 +322,14 @@ def check_worker(
         "RandomNoise",
     }
 
-    for name, path in PRODUCTION.items():
+    for name, path in (
+        PRODUCTION.items()
+    ):
 
         types = (
-            workflow_types(path)
+            workflow_types(
+                path
+            )
             - ignored
         )
 
@@ -164,10 +339,15 @@ def check_worker(
         )
 
         if unknown:
+
             raise RuntimeError(
                 f"{name}: unregistered executable "
                 "node types: "
-                + ", ".join(sorted(unknown))
+                + ", ".join(
+                    sorted(
+                        unknown
+                    )
+                )
             )
 
         print(
@@ -182,16 +362,38 @@ def main() -> None:
         "0",
     )
 
-    ids = [
-        int(value.strip())
-        for value in configured.split(",")
-        if value.strip()
-    ]
+    ids = []
+
+    for value in (
+        configured.split(",")
+    ):
+
+        value = value.strip()
+
+        if not value:
+            continue
+
+        try:
+
+            ids.append(
+                int(value)
+            )
+
+        except ValueError as exc:
+
+            raise RuntimeError(
+                "H3_GPU_IDS contains an invalid GPU ID: "
+                f"{value!r}"
+            ) from exc
 
     if not ids:
+
         ids = [0]
 
-    for index, _ in enumerate(ids):
+    for index, _gpu_id in enumerate(
+        ids
+    ):
+
         check_worker(
             8188 + index
         )
