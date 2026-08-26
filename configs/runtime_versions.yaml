@@ -10,7 +10,13 @@ llama_cpp:
   version: "0.3.35"
   cuda_wheel: "cu130"
   cuda_index: "https://abetlen.github.io/llama-cpp-python/whl/cu130"
-
+  
+cuda_runtime:
+  runtime_package: "nvidia-cuda-runtime"
+  runtime_version: "13.3.29"
+  cublas_package: "nvidia-cublas"
+  cublas_version: "13.6.1.10"
+  
 generation:
   width: 1344
   height: 768
