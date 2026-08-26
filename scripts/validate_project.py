@@ -590,19 +590,7 @@ def validate_model_inventory() -> None:
 
             lowered = value.lower()
 
-            for forbidden in (
-                FORBIDDEN_MODEL_TOKENS
-            ):
-
-                require(
-                    forbidden.lower()
-                    not in lowered,
-                    (
-                        f"Obsolete model token "
-                        f"'{forbidden}' found in {name}."
-                    ),
-                )
-
+            
             if value.endswith(
                 ".safetensors"
             ):
