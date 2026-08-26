@@ -4,11 +4,6 @@ import json
 import shutil
 from pathlib import Path
 
-from planner.config import (
-    IDENTITY_DIR,
-    PROJECT_ROOT,
-)
-
 
 class IdentityAnchorStore:
 
@@ -18,40 +13,26 @@ class IdentityAnchorStore:
         production_id: str | None = None,
     ):
 
-        self.project_root = Path(
-            project_root
-        ).resolve()
+        self.project_root = (
+            Path(project_root)
+            .resolve()
+        )
 
-        # IDENTITY_DIR is defined from the real repository root
-        # in planner.config.py. The store must also work with an
-        # alternate project root, such as the temporary root used
-        # by CI wiring tests.
+        # Always derive runtime storage from the supplied
+        # project root. This is essential for both:
         #
-        # Resolve the configured directory back to a path
-        # relative to the canonical repository root, then attach
-        # that relative path to the active project_root.
-
-        try:
-
-            identity_relative = (
-                IDENTITY_DIR
-                .resolve()
-                .relative_to(
-                    PROJECT_ROOT.resolve()
-                )
-            )
-
-        except ValueError:
-
-            # Defensive fallback if the configured path is already
-            # relative or otherwise cannot be related to PROJECT_ROOT.
-            identity_relative = Path(
-                "data"
-            ) / "production" / "identity"
+        # 1. normal production runs
+        # 2. isolated temporary test environments
+        #
+        # Never resolve this through planner.config.IDENTITY_DIR,
+        # because that constant belongs to the repository root
+        # and breaks when a test supplies another project root.
 
         base = (
             self.project_root
-            / identity_relative
+            / "data"
+            / "production"
+            / "identity"
         )
 
         self.production_id = (
@@ -145,19 +126,21 @@ class IdentityAnchorStore:
         source_frame: Path,
     ) -> Path:
 
-        existing = self.latest_anchor(
-            character_id
+        existing = (
+            self.latest_anchor(
+                character_id
+            )
         )
 
         if existing is not None:
             return existing
 
-        source_frame = Path(
-            source_frame
-        ).resolve()
+        source_frame = (
+            Path(source_frame)
+            .resolve()
+        )
 
         if not source_frame.is_file():
-
             raise FileNotFoundError(
                 source_frame
             )
@@ -185,9 +168,8 @@ class IdentityAnchorStore:
             not destination.is_file()
             or destination.stat().st_size <= 0
         ):
-
             raise RuntimeError(
-                "Identity anchor was not created correctly: "
+                "Identity anchor was not created correctly:\n"
                 f"{destination}"
             )
 
@@ -198,9 +180,8 @@ class IdentityAnchorStore:
             "anchor_path": str(
                 destination
             ),
-            "type": (
-                "first_successful_visual_anchor"
-            ),
+            "type":
+                "first_successful_visual_anchor",
         }
 
         destination.with_suffix(
