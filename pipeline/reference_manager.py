@@ -95,7 +95,6 @@ class ReferenceManager:
         directory,
         extensions,
     ):
-
         directory = Path(
             directory
         )
@@ -104,7 +103,7 @@ class ReferenceManager:
             return []
 
         return sorted(
-            (
+            [
                 path
                 for path in directory.iterdir()
                 if (
@@ -112,8 +111,9 @@ class ReferenceManager:
                     and path.suffix.lower()
                     in extensions
                 )
-            ),
-            key=lambda p: p.name.lower(),
+            ],
+            key=lambda path:
+                path.name.lower(),
         )
 
     def character_asset_names(
@@ -140,6 +140,7 @@ class ReferenceManager:
             )
 
         if self.references_dir.is_dir():
+
             for directory in (
                 self.references_dir.iterdir()
             ):
@@ -150,8 +151,8 @@ class ReferenceManager:
 
         return sorted(
             names,
-            key=lambda name:
-                self._key(name),
+            key=lambda value:
+                self._key(value),
         )
 
     def resolve_character(
@@ -197,21 +198,24 @@ class ReferenceManager:
             self.characters_dir,
             IMAGE_EXTENSIONS,
         ):
-            if self._key(
-                path.stem
-            ) == key:
+            if (
+                self._key(path.stem)
+                == key
+            ):
                 if path not in images:
-                    images.append(path)
+                    images.append(
+                        path
+                    )
 
         for path in self._files(
             self.references_dir,
             IMAGE_EXTENSIONS
             | VIDEO_EXTENSIONS,
         ):
-
-            if self._key(
-                path.stem
-            ) != key:
+            if (
+                self._key(path.stem)
+                != key
+            ):
                 continue
 
             if (
@@ -219,34 +223,41 @@ class ReferenceManager:
                 in IMAGE_EXTENSIONS
             ):
                 if path not in images:
-                    images.append(path)
+                    images.append(
+                        path
+                    )
 
-            elif (
-                path.suffix.lower()
-                in VIDEO_EXTENSIONS
-            ):
+            else:
                 if path not in videos:
-                    videos.append(path)
+                    videos.append(
+                        path
+                    )
 
         for path in self._files(
             self.audio_dir,
             AUDIO_EXTENSIONS,
         ):
-            if self._key(
-                path.stem
-            ) == key:
+            if (
+                self._key(path.stem)
+                == key
+            ):
                 if path not in audio:
-                    audio.append(path)
+                    audio.append(
+                        path
+                    )
 
         for path in self._files(
             self.video_dir,
             VIDEO_EXTENSIONS,
         ):
-            if self._key(
-                path.stem
-            ) == key:
+            if (
+                self._key(path.stem)
+                == key
+            ):
                 if path not in videos:
-                    videos.append(path)
+                    videos.append(
+                        path
+                    )
 
         return {
             "reference_paths": [
@@ -274,19 +285,21 @@ class ReferenceManager:
         character_name,
     ):
 
-        result = self.resolve_character(
-            character_name
+        resolved = (
+            self.resolve_character(
+                character_name
+            )
         )
 
-        images = result[
+        images = resolved[
             "reference_paths"
         ]
 
-        videos = result[
+        videos = resolved[
             "reference_video_paths"
         ]
 
-        audio = result[
+        audio = resolved[
             "reference_audio_paths"
         ]
 
@@ -294,6 +307,8 @@ class ReferenceManager:
             "mode": (
                 "provided"
                 if images
+                or videos
+                or audio
                 else "missing"
             ),
             "path": (
@@ -368,7 +383,7 @@ class ReferenceManager:
             character.reference_mode = (
                 "provided"
                 if character.reference_paths
-                else "missing"
+                else "story_generated"
             )
 
             character.build_identity_profile()
@@ -378,26 +393,23 @@ class ReferenceManager:
     def validate(
         self,
         characters,
-        require_images=True,
-    ):
+        require_images: bool = False,
+    ) -> bool:
 
         errors = []
 
         for character in characters:
 
             images = (
-                character
-                .normalized_reference_paths()
+                character.normalized_reference_paths()
             )
 
             videos = (
-                character
-                .normalized_video_paths()
+                character.normalized_video_paths()
             )
 
             audio = (
-                character
-                .normalized_audio_paths()
+                character.normalized_audio_paths()
             )
 
             if (
@@ -406,25 +418,25 @@ class ReferenceManager:
             ):
                 errors.append(
                     f"{character.name}: "
-                    "no character reference image"
+                    "reference image required"
                 )
 
             if len(images) > self.MAX_IMAGES:
                 errors.append(
                     f"{character.name}: "
-                    "too many reference images"
+                    "too many images"
                 )
 
             if len(videos) > self.MAX_VIDEOS:
                 errors.append(
                     f"{character.name}: "
-                    "too many reference videos"
+                    "too many videos"
                 )
 
             if len(audio) > self.MAX_AUDIO:
                 errors.append(
                     f"{character.name}: "
-                    "too many reference audio files"
+                    "too many audio files"
                 )
 
             total = (
@@ -446,10 +458,12 @@ class ReferenceManager:
                 + videos
                 + audio
             ):
-                if not Path(path).is_file():
+                if not Path(
+                    path
+                ).is_file():
                     errors.append(
                         f"{character.name}: "
-                        f"missing media: {path}"
+                        f"missing media {path}"
                     )
 
         if errors:
