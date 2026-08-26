@@ -25,18 +25,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-
       - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install PyYAML
-
 
       - name: Python syntax
         run: |
@@ -50,13 +47,11 @@ jobs:
             kaggle \
             ui
 
-
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python scripts/validate_project.py
-
 
       - name: Planner smoke tests
         env:
@@ -107,7 +102,6 @@ jobs:
           )
           PY
 
-
       - name: Story director regression tests
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -146,9 +140,7 @@ jobs:
               story,
           )
 
-          assert normalized == story, (
-              "normalize_story() modified the user story."
-          )
+          assert normalized == story
 
           forbidden_in_story = [
               "Treat this as a cinematic story beat.",
@@ -157,7 +149,7 @@ jobs:
           ]
 
           for token in forbidden_in_story:
-              assert token not in normalized, token
+              assert token not in normalized
 
           detected = {
               value.lower()
@@ -179,10 +171,7 @@ jobs:
               "tone",
               "visual",
           ]:
-              assert invalid not in detected, (
-                  f"Invalid prose token detected as "
-                  f"character: {invalid}"
-              )
+              assert invalid not in detected
 
           director = QwenDirector(
               root
@@ -211,6 +200,10 @@ jobs:
                           "name": "Above",
                           "role": "invalid",
                       },
+                      {
+                          "name": "Maya",
+                          "role": "protagonist",
+                      },
                   ]
               )
           )
@@ -221,15 +214,21 @@ jobs:
               in sanitized
           }
 
-          assert names == {
-              "man"
-          }, names
+          assert "man" in names
+          assert "maya" in names
+
+          for invalid in [
+              "treat",
+              "develop",
+              "visual",
+              "above",
+          ]:
+              assert invalid not in names
 
           print(
               "Story director regression tests PASSED."
           )
           PY
-
 
       - name: Qwen director contract
         env:
@@ -246,40 +245,77 @@ jobs:
               Path(".").resolve()
           )
 
-          story_system = (
+          ai_prompt = (
               director._story_director_system(
                   "ai_story"
               )
           )
 
-          shot_system = (
+          expand_prompt = (
+              director._story_director_system(
+                  "expand_user_story"
+              )
+          )
+
+          preserve_prompt = (
+              director._story_director_system(
+                  "preserve_user_story"
+              )
+          )
+
+          shot_prompt = (
               director._shot_director_system()
           )
 
           assert (
-              '"characters"' in story_system
+              '"characters"' in ai_prompt
           )
 
           assert (
-              '"scenes"' in story_system
+              '"scenes"' in ai_prompt
           )
 
           assert (
-              '"shots"' not in story_system
+              '"shots"' not in ai_prompt
           )
 
           assert (
-              '"shots"' in shot_system
+              "invent a coherent protagonist"
+              in ai_prompt
           )
 
           assert (
-              "Do not create characters"
-              in shot_system
+              "preserve every important fact"
+              in expand_prompt
+          )
+
+          assert (
+              "Do not simply copy the user's paragraphs"
+              in expand_prompt
+          )
+
+          assert (
+              "immutable source material"
+              in preserve_prompt
+          )
+
+          assert (
+              "MUST equal the supplied story"
+              in preserve_prompt
+          )
+
+          assert (
+              '"shots"' in shot_prompt
+          )
+
+          assert (
+              "Do NOT create new characters"
+              in shot_prompt
           )
 
           assert (
               "Only use character names supplied"
-              in shot_system
+              in shot_prompt
           )
 
           for invalid in [
@@ -294,11 +330,23 @@ jobs:
                   in director.FORBIDDEN_CHARACTER_NAMES
               )
 
+          for valid in [
+              "man",
+              "woman",
+              "girl",
+              "boy",
+              "soldier",
+              "detective",
+          ]:
+              assert (
+                  valid.lower()
+                  in director.VALID_GENERIC_ROLES
+              )
+
           print(
               "Qwen director contract PASSED."
           )
           PY
-
 
       - name: Runtime import integration
         env:
@@ -328,7 +376,6 @@ jobs:
               "Production runtime imports PASSED."
           )
           PY
-
 
       - name: Director configuration
         env:
@@ -369,7 +416,6 @@ jobs:
           )
           PY
 
-
       - name: Storyboard UI contract
         run: |
           python - <<'PY'
@@ -408,7 +454,6 @@ jobs:
           )
           PY
 
-
       - name: Gradio production UI contract
         run: |
           python - <<'PY'
@@ -441,7 +486,6 @@ jobs:
           )
           PY
 
-
       - name: Combined upscale contract
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -460,7 +504,6 @@ jobs:
               "Combined H3 upscale builder PASSED."
           )
           PY
-
 
       - name: Workflow contracts
         run: |
@@ -553,7 +596,6 @@ jobs:
           )
           PY
 
-
       - name: Repository cleanup
         run: |
           if find . \
@@ -567,7 +609,6 @@ jobs:
 
           test ! -e workflows/generation/aa
           test ! -e workflows/sources/a
-
 
       - name: Complete
         run: |
