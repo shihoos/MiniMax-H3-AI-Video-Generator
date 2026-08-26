@@ -18,15 +18,16 @@ class IdentityAnchorStore:
             .resolve()
         )
 
-        # Always derive runtime storage from the supplied
-        # project root. This is essential for both:
+        # Derive storage from the supplied project root.
         #
-        # 1. normal production runs
-        # 2. isolated temporary test environments
+        # This is important for:
+        # - normal repository execution
+        # - temporary isolated tests
+        # - production-scoped storage
         #
-        # Never resolve this through planner.config.IDENTITY_DIR,
-        # because that constant belongs to the repository root
-        # and breaks when a test supplies another project root.
+        # Do not use planner.config.IDENTITY_DIR here because
+        # that constant points at the real repository root and
+        # cannot be made relative to an arbitrary temporary root.
 
         base = (
             self.project_root
@@ -141,6 +142,7 @@ class IdentityAnchorStore:
         )
 
         if not source_frame.is_file():
+
             raise FileNotFoundError(
                 source_frame
             )
@@ -168,18 +170,26 @@ class IdentityAnchorStore:
             not destination.is_file()
             or destination.stat().st_size <= 0
         ):
+
             raise RuntimeError(
-                "Identity anchor was not created correctly:\n"
+                "Identity anchor was not "
+                "created correctly:\n"
                 f"{destination}"
             )
 
         metadata = {
-            "character_id": character_id,
-            "shot_id": shot_id,
-            "production_id": self.production_id,
-            "anchor_path": str(
-                destination
-            ),
+            "character_id":
+                character_id,
+
+            "shot_id":
+                shot_id,
+
+            "production_id":
+                self.production_id,
+
+            "anchor_path":
+                str(destination),
+
             "type":
                 "first_successful_visual_anchor",
         }
