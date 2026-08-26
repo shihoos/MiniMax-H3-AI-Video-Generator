@@ -3,23 +3,91 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-DATA_DIR = PROJECT_ROOT / "data"
+PROJECT_ROOT = Path(
+    __file__
+).resolve().parents[1]
 
-STORIES_DIR = DATA_DIR / "stories"
-CHARACTERS_DIR = DATA_DIR / "characters"
-GENERATED_CHARACTERS_DIR = CHARACTERS_DIR / "generated"
-SCENES_DIR = DATA_DIR / "scenes"
-SHOTS_DIR = DATA_DIR / "shots"
-PRODUCTION_DIR = DATA_DIR / "production"
+CONFIG_ROOT = (
+    PROJECT_ROOT / "configs"
+)
 
-CONTINUITY_DIR = PRODUCTION_DIR / "continuity"
-IDENTITY_DIR = PRODUCTION_DIR / "identity"
+RUNTIME_CONFIG_PATH = (
+    CONFIG_ROOT / "runtime_versions.yaml"
+)
+
+
+def _load_runtime_config() -> dict:
+    if not RUNTIME_CONFIG_PATH.is_file():
+        raise RuntimeError(
+            f"Missing runtime configuration: "
+            f"{RUNTIME_CONFIG_PATH}"
+        )
+
+    with RUNTIME_CONFIG_PATH.open(
+        "r",
+        encoding="utf-8",
+    ) as handle:
+        data = yaml.safe_load(
+            handle
+        )
+
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            "runtime_versions.yaml must contain a mapping."
+        )
+
+    return data
+
+
+RUNTIME = _load_runtime_config()
+
+
+# ============================================================
+# DIRECTORIES
+# ============================================================
+
+DATA_DIR = (
+    PROJECT_ROOT / "data"
+)
+
+STORIES_DIR = (
+    DATA_DIR / "stories"
+)
+
+CHARACTERS_DIR = (
+    DATA_DIR / "characters"
+)
+
+GENERATED_CHARACTERS_DIR = (
+    CHARACTERS_DIR / "generated"
+)
+
+SCENES_DIR = (
+    DATA_DIR / "scenes"
+)
+
+SHOTS_DIR = (
+    DATA_DIR / "shots"
+)
+
+PRODUCTION_DIR = (
+    DATA_DIR / "production"
+)
+
+CONTINUITY_DIR = (
+    PRODUCTION_DIR / "continuity"
+)
+
+IDENTITY_DIR = (
+    PRODUCTION_DIR / "identity"
+)
 
 
 def ensure_directories() -> None:
+
     for directory in (
         STORIES_DIR,
         CHARACTERS_DIR,
@@ -37,7 +105,7 @@ def ensure_directories() -> None:
 
 
 # ============================================================
-# LOCKED H3 MODEL INVENTORY
+# MODEL INVENTORY
 # ============================================================
 
 H3_REF2VA_MODEL = (
@@ -64,26 +132,18 @@ H3_LATENT_UPSCALER_3D = (
     "minimax_h3_latent_upscaler_3d_fp16.safetensors"
 )
 
-
-# ============================================================
-# QWEN DIRECTOR MODEL
-# ============================================================
-
-# This is a SECOND Qwen model with a different job:
-#
-# Qwen3-14B-Q4_K_M
-#     = story writer / director / production planner
-#
-# The existing H3 Qwen3-VL checkpoint remains:
-#
-# qwen3vl_32b_minimax_h3_int4_convrot.safetensors
-#     = H3 multimodal conditioning encoder
-#
-# Do not mix their roles.
-
 DIRECTOR_MODEL_FILENAME = (
-    "Qwen3-14B-Q4_K_M.gguf"
+    RUNTIME[
+        "director"
+    ][
+        "model_filename"
+    ]
 )
+
+
+# ============================================================
+# DIRECTOR MODEL
+# ============================================================
 
 DIRECTOR_MODEL_ENV = (
     "H3_DIRECTOR_MODEL_PATH"
@@ -96,42 +156,78 @@ DIRECTOR_ENABLED_ENV = (
 DIRECTOR_N_CTX = int(
     os.getenv(
         "H3_DIRECTOR_N_CTX",
-        "8192",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "context"
+            ]
+        ),
     )
 )
 
 DIRECTOR_N_GPU_LAYERS = int(
     os.getenv(
         "H3_DIRECTOR_N_GPU_LAYERS",
-        "-1",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "gpu_layers"
+            ]
+        ),
     )
 )
 
 DIRECTOR_N_BATCH = int(
     os.getenv(
         "H3_DIRECTOR_N_BATCH",
-        "512",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "batch"
+            ]
+        ),
     )
 )
 
 DIRECTOR_MAX_TOKENS = int(
     os.getenv(
         "H3_DIRECTOR_MAX_TOKENS",
-        "7000",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "max_tokens"
+            ]
+        ),
     )
 )
 
 DIRECTOR_TEMPERATURE = float(
     os.getenv(
         "H3_DIRECTOR_TEMPERATURE",
-        "0.20",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "temperature"
+            ]
+        ),
     )
 )
 
 DIRECTOR_TOP_P = float(
     os.getenv(
         "H3_DIRECTOR_TOP_P",
-        "0.85",
+        str(
+            RUNTIME[
+                "director"
+            ][
+                "top_p"
+            ]
+        ),
     )
 )
 
@@ -139,24 +235,16 @@ DIRECTOR_THREADS = int(
     os.getenv(
         "H3_DIRECTOR_THREADS",
         str(
-            max(
-                2,
-                min(
-                    8,
-                    os.cpu_count()
-                    or 4,
-                ),
-            )
+            RUNTIME[
+                "director"
+            ][
+                "threads"
+            ]
         ),
     )
 )
 
-DIRECTOR_MAX_PLAN_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_MAX_PLAN_CHARS",
-        "50000",
-    )
-)
+DIRECTOR_MAX_PLAN_CHARS = 50000
 
 DIRECTOR_KAGGLE_INPUT_ROOT = Path(
     "/kaggle/input"
@@ -164,6 +252,7 @@ DIRECTOR_KAGGLE_INPUT_ROOT = Path(
 
 
 def director_enabled() -> bool:
+
     value = os.getenv(
         DIRECTOR_ENABLED_ENV,
         "1",
@@ -178,76 +267,118 @@ def director_enabled() -> bool:
 
 
 # ============================================================
-# H3 GENERATION
+# GENERATION
 # ============================================================
 
-H3_FPS = 24
+H3_FPS = int(
+    RUNTIME[
+        "generation"
+    ][
+        "fps"
+    ]
+)
 
 H3_WIDTH = int(
     os.getenv(
         "H3_WIDTH",
-        "1344",
+        str(
+            RUNTIME[
+                "generation"
+            ][
+                "width"
+            ]
+        ),
     )
 )
 
 H3_HEIGHT = int(
     os.getenv(
         "H3_HEIGHT",
-        "768",
+        str(
+            RUNTIME[
+                "generation"
+            ][
+                "height"
+            ]
+        ),
     )
 )
 
 H3_FRAMES_PER_SHOT = int(
     os.getenv(
         "H3_FRAMES_PER_SHOT",
-        "124",
+        str(
+            RUNTIME[
+                "generation"
+            ][
+                "frames_per_shot"
+            ]
+        ),
     )
+)
+
+H3_STEPS = int(
+    RUNTIME[
+        "generation"
+    ][
+        "normal_steps"
+    ]
+)
+
+TURBO_STEPS = int(
+    RUNTIME[
+        "generation"
+    ][
+        "turbo_steps"
+    ]
+)
+
+H3_REF_IMAGE_SIZE = str(
+    RUNTIME[
+        "generation"
+    ][
+        "ref_image_size"
+    ]
 )
 
 
 # ============================================================
-# NORMAL REF2V
-# ============================================================
-
-H3_STEPS = 20
-
-
-# ============================================================
-# H3 REFERENCE LIMITS
+# REFERENCES
 # ============================================================
 
 H3_MAX_REFERENCE_IMAGES = 9
 H3_MAX_REFERENCE_VIDEOS = 3
 H3_MAX_REFERENCE_AUDIO = 3
 H3_MAX_REFERENCE_FILES = 12
-H3_REF_IMAGE_SIZE = "match"
-
-
-# ============================================================
-# TURBO
-# ============================================================
-
-TURBO_STEPS = 8
 
 
 # ============================================================
 # UPSCALE
 # ============================================================
 
-# H3 generates at its production resolution.
-# MMH3's 3D latent upscaler + Ultimate Upscale refine
-# internally at 1920x1080.
 UPSCALE_WIDTH = int(
     os.getenv(
         "H3_UPSCALE_WIDTH",
-        "1920",
+        str(
+            RUNTIME[
+                "upscale"
+            ][
+                "width"
+            ]
+        ),
     )
 )
 
 UPSCALE_HEIGHT = int(
     os.getenv(
         "H3_UPSCALE_HEIGHT",
-        "1080",
+        str(
+            RUNTIME[
+                "upscale"
+            ][
+                "height"
+            ]
+        ),
     )
 )
 
@@ -256,9 +387,29 @@ UPSCALE_HEIGHT = int(
 # FINAL DELIVERY
 # ============================================================
 
-DELIVERY_WIDTH = 1280
-DELIVERY_HEIGHT = 720
-DELIVERY_FPS = 24
+DELIVERY_WIDTH = int(
+    RUNTIME[
+        "delivery"
+    ][
+        "width"
+    ]
+)
+
+DELIVERY_HEIGHT = int(
+    RUNTIME[
+        "delivery"
+    ][
+        "height"
+    ]
+)
+
+DELIVERY_FPS = int(
+    RUNTIME[
+        "delivery"
+    ][
+        "fps"
+    ]
+)
 
 
 # ============================================================
@@ -266,8 +417,14 @@ DELIVERY_FPS = 24
 # ============================================================
 
 AI_STORY_MODE = "ai_story"
-PRESERVE_USER_STORY_MODE = "preserve_user_story"
-EXPAND_USER_STORY_MODE = "expand_user_story"
+
+PRESERVE_USER_STORY_MODE = (
+    "preserve_user_story"
+)
+
+EXPAND_USER_STORY_MODE = (
+    "expand_user_story"
+)
 
 VALID_STORY_MODES = {
     AI_STORY_MODE,
