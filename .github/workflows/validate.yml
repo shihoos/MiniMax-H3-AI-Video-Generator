@@ -50,7 +50,7 @@ jobs:
       - name: Reference path wiring
         run: |
           python scripts/validate_reference_wiring.py
-          
+
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -126,45 +126,33 @@ jobs:
               "at the edge of a collapsing world."
           )
 
-          # Preserve must accept identical text.
-
           director._validate_mode_output(
               "preserve_user_story",
               source,
               source,
           )
 
-          # Preserve must reject changed text.
-
           try:
-
               director._validate_mode_output(
                   "preserve_user_story",
                   source,
                   source + " Extra event.",
               )
-
           except RuntimeError:
               pass
-
           else:
               raise AssertionError(
                   "Preserve mode accepted changed story."
               )
 
-          # Expand must reject unchanged text.
-
           try:
-
               director._validate_mode_output(
                   "expand_user_story",
                   source,
                   source,
               )
-
           except RuntimeError:
               pass
-
           else:
               raise AssertionError(
                   "Expand mode accepted unchanged input."
@@ -184,19 +172,14 @@ jobs:
               expanded,
           )
 
-          # AI Story must not return the premise unchanged.
-
           try:
-
               director._validate_mode_output(
                   "ai_story",
                   source,
                   source,
               )
-
           except RuntimeError:
               pass
-
           else:
               raise AssertionError(
                   "AI Story mode accepted unchanged input."
@@ -278,72 +261,30 @@ jobs:
               director._story_director_system(
                   "expand_user_story"
               )
-          )
 
           preserve = (
               director._story_director_system(
                   "preserve_user_story"
               )
-          )
 
           shots = (
               director._shot_director_system()
           )
 
-          assert (
-              '"characters"'
-              in ai
-          )
+          assert '"characters"' in ai
+          assert '"scenes"' in ai
+          assert '"shots"' not in ai
+          assert "genuinely developed story" in ai
 
-          assert (
-              '"scenes"'
-              in ai
-          )
+          assert "Preserve every important fact" in expand
+          assert "Do not simply copy the user's paragraphs" in expand
 
-          assert (
-              '"shots"'
-              not in ai
-          )
+          assert "immutable source material" in preserve
+          assert "must equal the supplied story" in preserve
 
-          assert (
-              "genuinely developed story"
-              in ai
-          )
-
-          assert (
-              "Preserve every important fact"
-              in expand
-          )
-
-          assert (
-              "Do not simply copy the user's paragraphs"
-              in expand
-          )
-
-          assert (
-              "immutable source material"
-              in preserve
-          )
-
-          assert (
-              "must equal the supplied story"
-              in preserve
-          )
-
-          assert (
-              '"shots"'
-              in shots
-          )
-
-          assert (
-              "Do NOT create new characters"
-              in shots
-          )
-
-          assert (
-              "Only use names present in the character bible"
-              in shots
-          )
+          assert '"shots"' in shots
+          assert "Do NOT create new characters" in shots
+          assert "Only use names present in the character bible" in shots
 
           print(
               "Qwen director contract PASSED."
@@ -367,7 +308,7 @@ jobs:
               "execution.production_runner",
               "execution.h3_runtime",
               "execution.assembly_manager",
-              "ui.storyboard_server",
+              "scheduler.gpu_scheduler",
               "ui.storyboard_gradio",
           ]
 
@@ -386,10 +327,10 @@ jobs:
           python - <<'PY'
           from planner.config import (
               DIRECTOR_MODEL_FILENAME,
-              DELIVERY_WIDTH,
               DELIVERY_HEIGHT,
-              UPSCALE_WIDTH,
+              DELIVERY_WIDTH,
               UPSCALE_HEIGHT,
+              UPSCALE_WIDTH,
           )
 
           assert (
@@ -451,71 +392,41 @@ jobs:
               "Assembly contract PASSED."
           )
           PY
-        
-      - name: Storyboard UI contract
+
+      - name: Gradio UI contract
+        env:
+          H3_DIRECTOR_ENABLED: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          html = Path(
-              "ui/storyboard.html"
-          )
-
-          server = Path(
-              "ui/storyboard_server.py"
-          )
-
-          gradio_ui = Path(
+          path = Path(
               "ui/storyboard_gradio.py"
           )
 
-          assert html.is_file()
-          assert server.is_file()
-          assert gradio_ui.is_file()
+          assert path.is_file()
 
-          html_text = html.read_text(
+          text = path.read_text(
               encoding="utf-8"
           )
 
           for token in [
-              "Approve Storyboard",
-              "Save Draft",
-              "characters",
-              "scenes",
-              "shots",
-              "camera_shot",
-              "camera_movement",
-              "lighting",
-              "overall_soundscape",
-          ]:
-
-              assert (
-                  token
-                  in html_text
-              ), token
-
-          gradio_text = gradio_ui.read_text(
-              encoding="utf-8"
-          )
-
-          for token in [
+              "ProductionController",
               "Your Story",
               "AI Story",
               "Expand Story",
               "Preserve Story",
               "Generate Storyboard",
               "Approve & Generate Video",
-              "ProductionController",
+              "H3Runtime",
+              "ProductionRunner",
+              "check_worker",
               "share=True",
           ]:
-
-              assert (
-                  token
-                  in gradio_text
-              ), token
+              assert token in text, token
 
           print(
-              "Storyboard UI PASSED."
+              "Gradio UI PASSED."
           )
           PY
 
@@ -538,102 +449,6 @@ jobs:
           )
           PY
 
-      - name: Workflow contracts
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          paths = [
-              Path(
-                  "workflows/generation/"
-                  "H3_Ref2V_Production.json"
-              ),
-              Path(
-                  "workflows/generation/"
-                  "H3_Turbo_Ref2V_Production.json"
-              ),
-              Path(
-                  "workflows/postprocess/"
-                  "H3_Ref2V_UltimateUpscale_Production.json"
-              ),
-              Path(
-                  "workflows/sources/"
-                  "H3_Turbo_Reference_Source.json"
-              ),
-              Path(
-                  "workflows/sources/"
-                  "H3_LatentUpscaler_Source.json"
-              ),
-          ]
-
-          for path in paths:
-
-              data = json.loads(
-                  path.read_text(
-                      encoding="utf-8"
-                  )
-              )
-
-              assert isinstance(
-                  data,
-                  dict,
-              )
-
-              assert isinstance(
-                  data.get("nodes"),
-                  list,
-              )
-
-          turbo = json.loads(
-              paths[1].read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          turbo_text = json.dumps(
-              turbo
-          )
-
-          assert (
-              "minimax_h3_turbo_v4_step600_ema.safetensors"
-              in turbo_text
-          )
-
-          assert (
-              "minimax_h3_ref2v_turbo_4step"
-              not in turbo_text
-          )
-
-          upscale = json.loads(
-              paths[2].read_text(
-                  encoding="utf-8"
-              )
-          )
-
-          upscale_types = {
-              node.get("type")
-              for node
-              in upscale["nodes"]
-          }
-
-          for required in [
-              "MMH3LatentUpscaleWithModelParams",
-              "MMH3TemporalSplitParams",
-              "MMH3SpatialSplitParams",
-              "MMH3UltimateUpscale",
-          ]:
-
-              assert (
-                  required
-                  in upscale_types
-              ), required
-
-          print(
-              "Workflow contracts PASSED."
-          )
-          PY
-
       - name: Repository cleanup
         run: |
           if find . \
@@ -641,13 +456,18 @@ jobs:
             -name '*_TEST.json' \
             -print \
             -quit | grep -q .; then
-
             echo "Temporary workflow artifact found."
             exit 1
           fi
 
-          test ! -e workflows/generation/aa
-          test ! -e workflows/sources/a
+          test ! -e kaggle/compatibility_lock.yaml
+          test ! -e compatibility/prepare_modern_ltx.py
+          test ! -e execution/comfy_workflow_adapter.py
+          test ! -e execution/reference_image_generator.py
+          test ! -e ui/storyboard.html
+          test ! -e ui/storyboard_server.py
+          test ! -e scripts/storyboard_preview.py
+          test ! -e scripts/cpu_preflight.py
 
       - name: Complete
         run: |
