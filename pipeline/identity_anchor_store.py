@@ -18,17 +18,6 @@ class IdentityAnchorStore:
             .resolve()
         )
 
-        # Derive storage from the supplied project root.
-        #
-        # This is important for:
-        # - normal repository execution
-        # - temporary isolated tests
-        # - production-scoped storage
-        #
-        # Do not use planner.config.IDENTITY_DIR here because
-        # that constant points at the real repository root and
-        # cannot be made relative to an arbitrary temporary root.
-
         base = (
             self.project_root
             / "data"
@@ -142,7 +131,6 @@ class IdentityAnchorStore:
         )
 
         if not source_frame.is_file():
-
             raise FileNotFoundError(
                 source_frame
             )
