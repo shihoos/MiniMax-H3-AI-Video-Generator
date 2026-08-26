@@ -369,70 +369,32 @@ class ProductionPlanner:
         mode: str,
         user_input: str,
     ) -> str:
-
+    
         story = self._clean_text(
             user_input
         )
-
+    
         if not story:
             raise ValueError(
                 "Story cannot be empty."
             )
-
+    
         if mode not in VALID_STORY_MODES:
             raise ValueError(
                 f"Unsupported story mode: {mode}"
             )
-
-        if mode == PRESERVE_USER_STORY_MODE:
-            # Exact user story after whitespace cleanup.
-            return story
-
-        units = self._split_story(
-            story
-        )
-
-        if mode == EXPAND_USER_STORY_MODE:
-            expanded = []
-
-            for unit in units:
-                expanded.append(
-                    (
-                        f"{unit.text} "
-                        "Develop the visible environment, "
-                        "subject action, camera movement, "
-                        "lighting, atmosphere and continuity "
-                        "while preserving the supplied story facts."
-                    )
-                )
-
-            return "\n\n".join(
-                expanded
-            )
-
-        # AI_STORY_MODE:
+    
+        # IMPORTANT:
+        # The story itself is never rewritten here.
         #
-        # No external model is called. We produce a richer
-        # deterministic cinematic structure while preserving
-        # the supplied facts.
-        expanded = []
-
-        for unit in units:
-            expanded.append(
-                (
-                    f"{unit.text} "
-                    "Treat this as a cinematic story beat. "
-                    "Clarify the visible subject, environment, "
-                    "emotional intent, action progression, "
-                    "camera language, lighting, soundscape and "
-                    "continuity implications without inventing "
-                    "contradictory story facts."
-                )
-            )
-
-        return "\n\n".join(
-            expanded
-        )
+        # Qwen is the story/director model and is responsible for:
+        #   - developing AI stories
+        #   - expanding supplied stories
+        #   - cinematic interpretation
+        #
+        # The deterministic planner must never inject words such
+        # as "Treat", "Develop", "Clarify", etc. into the story.
+        return story
 
     # ============================================================
     # CHARACTER DISCOVERY
@@ -487,16 +449,18 @@ class ProductionPlanner:
             )
 
         return result
-
     def detect_character_descriptors(
         self,
         story: str,
     ) -> list[str]:
-
+    
         candidates = []
-
+    
+        # Deterministic fallback detection is intentionally limited
+        # to concrete role descriptors. Qwen is responsible for
+        # creative character creation and naming.
         for pattern, label in self.ROLE_PATTERNS:
-
+    
             count = len(
                 re.findall(
                     pattern,
@@ -504,38 +468,58 @@ class ProductionPlanner:
                     flags=re.IGNORECASE,
                 )
             )
-
-            for _ in range(count):
+    
+            if count:
                 candidates.append(
                     label
                 )
-
-        for name in self._proper_names(
-            story
-        ):
+    
+        # Explicitly named characters can still be detected when
+        # the user actually says "named X" or "called X".
+        explicit_names = re.findall(
+            r"\b(?:named|called)\s+"
+            r"([A-Z][A-Za-z0-9'_-]+"
+            r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
+            story,
+        )
+    
+        for name in explicit_names:
+    
+            name = name.strip()
+    
+            if not name:
+                continue
+    
+            if name in (
+                self.COMMON_PROPER_WORDS
+            ):
+                continue
+    
             candidates.append(
                 name
             )
-
-        # Deduplicate while preserving order.
+    
         result = []
-        counts = {}
-
+        seen = set()
+    
         for value in candidates:
-
+    
             key = value.lower()
-
-            if key in counts:
-                counts[key] += 1
+    
+            if key in seen:
                 continue
-
-            counts[key] = 1
+    
+            seen.add(
+                key
+            )
+    
             result.append(
                 value
             )
-
+    
         return result
 
+    
     @staticmethod
     def _appearance_from_story(
         name: str,
