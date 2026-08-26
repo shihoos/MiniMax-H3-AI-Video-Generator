@@ -290,7 +290,6 @@ def main():
             "upscale_enabled"
         ] = True
 
-    # Save new plans and any explicit CLI override.
     if (
         created_new_plan
         or args.upscale
@@ -356,20 +355,24 @@ def main():
 
     if args.storyboard:
 
-    from ui.storyboard_gradio import (
-        serve_storyboard_gradio,
-    )
-
-    approved_path = (
-        serve_storyboard_gradio(
-            plan_path,
-            wait_for_approval=True,
+        from ui.storyboard_gradio import (
+            serve_storyboard_gradio,
         )
-    )
 
-    plan = load_plan(
-        approved_path
-    )
+        approved_path = (
+            serve_storyboard_gradio(
+                plan_path,
+                wait_for_approval=True,
+            )
+        )
+
+        plan = load_plan(
+            approved_path
+        )
+
+    elif args.preview:
+
+        return 0
 
     # --------------------------------------------------------
     # GENERATION REQUIRES APPROVAL
