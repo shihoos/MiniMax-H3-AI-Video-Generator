@@ -1,41 +1,105 @@
-# Python
+# ============================================================
+# PYTHON
+# ============================================================
+
 __pycache__/
 *.py[cod]
 *.pyo
+*.pyd
 
-# Generated character references
-data/characters/generated/*
-!data/characters/generated/.gitkeep
+# ============================================================
+# VIRTUAL ENVIRONMENTS
+# ============================================================
 
-# Environments
 .venv/
 venv/
 env/
-.env
+ENV/
+.python-version
 
-# Jupyter
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# ============================================================
+# JUPYTER
+# ============================================================
+
 .ipynb_checkpoints/
 
-# Large AI models
+# ============================================================
+# LARGE AI MODELS
+# ============================================================
+
 models/
+
 *.safetensors
 *.ckpt
 *.pt
 *.pth
 *.gguf
+*.bin
 
-# Local ComfyUI runtime
+# ============================================================
+# LOCAL COMFYUI RUNTIME
+# ============================================================
+
 ComfyUI/
+
+# Old runtime artifacts
 .runtime_ltx098/
 cloudflared
 
-# Generated data
+# ============================================================
+# GENERATED DATA
+# ============================================================
+
+# Generated story / planner JSON
 data/stories/*.json
 data/characters/*.json
 data/scenes/*.json
 data/shots/*.json
 
-# Generated video
+# Generated character references
+data/characters/generated/*
+!data/characters/generated/.gitkeep
+
+# ============================================================
+# PRODUCTION RUNTIME OUTPUTS
+# ============================================================
+
+# Interactive production sessions
+data/production/sessions/*
+!data/production/sessions/.gitkeep
+
+# H3 shot outputs / temporary runtime files
+data/production/*/h3/*
+!data/production/*/h3/.gitkeep
+
+# Final assembled videos
+data/production/*/final/*
+!data/production/*/final/.gitkeep
+
+# Per-production continuity state
+data/production/*/continuity/*
+!data/production/*/continuity/.gitkeep
+
+# Per-production identity anchors
+data/production/*/identity/*
+!data/production/*/identity/.gitkeep
+
+# Generic legacy production runtime artifacts
+data/production/continuity/*
+!data/production/continuity/.gitkeep
+
+data/production/identity/*
+!data/production/identity/.gitkeep
+
+# ============================================================
+# LEGACY OUTPUT DIRECTORIES
+# ============================================================
+
 output/raw/*
 !output/raw/.gitkeep
 
@@ -48,19 +112,85 @@ output/upscaled/*
 output/final/*
 !output/final/.gitkeep
 
-# Optional user assets
+# ============================================================
+# USER-PROVIDED ASSETS
+# ============================================================
+
+# Character images supplied locally
 assets/characters/*
 !assets/characters/.gitkeep
 
+# Reference images / videos
 assets/references/*
 !assets/references/.gitkeep
 
+# Audio references
 assets/audio/*
 !assets/audio/.gitkeep
 
+# Music
 assets/music/*
 !assets/music/.gitkeep
 
-# Logs
+# ============================================================
+# LOGS
+# ============================================================
+
 *.log
 logs/
+
+# Production logs
+data/production/**/*.log
+
+# ============================================================
+# TEMPORARY / TEST ARTIFACTS
+# ============================================================
+
+*_TEST.json
+*.tmp
+*.temp
+*.bak
+
+# ============================================================
+# OS FILES
+# ============================================================
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ============================================================
+# IDE / EDITOR
+# ============================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================
+# BUILD / CACHE
+# ============================================================
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ============================================================
+# LOCAL TEST / RUNTIME DIRECTORIES
+# ============================================================
+
+.runtime/
+runtime/
+tmp/
+temp/
+
+# ============================================================
+# KAGGLE / NOTEBOOK OUTPUT
+# ============================================================
+
+.kaggle/
+*.ipynb_checkpoints
