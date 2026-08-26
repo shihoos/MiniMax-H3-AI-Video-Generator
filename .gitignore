@@ -51,6 +51,10 @@ ComfyUI/
 .runtime_ltx098/
 cloudflared
 
+# ComfyUI worker logs
+data/workers/*
+!data/workers/.gitkeep
+
 # ============================================================
 # GENERATED DATA
 # ============================================================
