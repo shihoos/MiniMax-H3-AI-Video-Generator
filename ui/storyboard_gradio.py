@@ -34,6 +34,7 @@ class ProductionController:
 
     @staticmethod
     def _production_id() -> str:
+
         return (
             "production_"
             + datetime.now().strftime(
@@ -77,6 +78,7 @@ class ProductionController:
         ).strip()
 
         if not production_id:
+
             production_id = (
                 ProductionController
                 ._production_id()
@@ -120,33 +122,47 @@ class ProductionController:
 
     @staticmethod
     def _load_state_plan(
-        state: dict | None,
+        state: str | dict | None,
     ) -> tuple[dict, Path]:
 
-        if not isinstance(
-            state,
-            dict,
-        ):
+        if state is None:
+
             raise RuntimeError(
                 "Storyboard session state is missing."
             )
 
-        plan_path_value = str(
-            state.get(
-                "plan_path",
-                "",
-            )
-            or ""
-        ).strip()
+        if isinstance(
+            state,
+            dict,
+        ):
+
+            plan_path_value = str(
+                state.get(
+                    "plan_path",
+                    "",
+                )
+                or ""
+            ).strip()
+
+        else:
+
+            plan_path_value = str(
+                state
+                or ""
+            ).strip()
 
         if not plan_path_value:
+
             raise RuntimeError(
                 "Generate a valid storyboard first."
             )
 
-        plan_path = Path(
-            plan_path_value
-        ).resolve()
+        plan_path = (
+            Path(
+                plan_path_value
+            )
+            .resolve()
+        )
 
         sessions_root = (
             ROOT
@@ -156,28 +172,35 @@ class ProductionController:
         ).resolve()
 
         try:
+
             plan_path.relative_to(
                 sessions_root
             )
+
         except ValueError as exc:
+
             raise RuntimeError(
                 "Storyboard plan is outside the "
                 "managed session directory."
             ) from exc
 
         if not plan_path.is_file():
+
             raise FileNotFoundError(
                 "Storyboard plan does not exist:\n"
                 f"{plan_path}"
             )
 
         try:
+
             plan = json.loads(
                 plan_path.read_text(
                     encoding="utf-8"
                 )
             )
+
         except json.JSONDecodeError as exc:
+
             raise RuntimeError(
                 "Storyboard plan is invalid JSON:\n"
                 f"{plan_path}\n"
@@ -188,6 +211,7 @@ class ProductionController:
             plan,
             dict,
         ):
+
             raise RuntimeError(
                 "Storyboard plan must be a JSON object."
             )
@@ -205,7 +229,6 @@ class ProductionController:
         self,
         story: str,
         mode: str,
-        state: dict | None = None,
     ):
 
         story = str(
@@ -213,6 +236,7 @@ class ProductionController:
         ).strip()
 
         if not story:
+
             return (
                 "### ERROR\nPlease write a story or premise.",
                 "",
@@ -220,9 +244,8 @@ class ProductionController:
                 "",
                 "",
                 None,
-                state
-                or {
-                    "status": "empty"
+                {
+                    "status": "empty",
                 },
             )
 
@@ -233,6 +256,7 @@ class ProductionController:
         }
 
         if mode not in valid_modes:
+
             return (
                 "### ERROR\nInvalid story mode.",
                 "",
@@ -240,15 +264,15 @@ class ProductionController:
                 "",
                 "",
                 None,
-                state
-                or {
-                    "status": "error"
+                {
+                    "status": "error",
                 },
             )
 
         if not self._lock.acquire(
             blocking=False
         ):
+
             return (
                 "### BUSY\nAnother production operation is running.",
                 "",
@@ -256,9 +280,8 @@ class ProductionController:
                 "",
                 "",
                 None,
-                state
-                or {
-                    "status": "busy"
+                {
+                    "status": "busy",
                 },
             )
 
@@ -303,6 +326,7 @@ class ProductionController:
                 "director_pending",
                 False,
             ):
+
                 raise RuntimeError(
                     "Production plan is still waiting "
                     "for the Qwen director."
@@ -333,11 +357,13 @@ class ProductionController:
             )
 
             if not scenes:
+
                 raise RuntimeError(
                     "Qwen director returned no scenes."
                 )
 
             if not shots:
+
                 raise RuntimeError(
                     "Qwen director returned no shots."
                 )
@@ -346,6 +372,7 @@ class ProductionController:
                 characters,
                 list,
             ):
+
                 raise RuntimeError(
                     "Invalid Qwen character plan."
                 )
@@ -354,8 +381,7 @@ class ProductionController:
                 "profile"
             ] = "turbo"
 
-            # The chosen production profile is:
-            # H3 Turbo generation + combined upscale.
+            # H3 Turbo generation plus combined upscale.
             plan[
                 "upscale_enabled"
             ] = True
@@ -507,9 +533,8 @@ class ProductionController:
                 + details
                 + "\n```",
                 None,
-                state
-                or {
-                    "status": "error"
+                {
+                    "status": "error",
                 },
             )
 
@@ -523,7 +548,7 @@ class ProductionController:
 
     def approve_and_generate(
         self,
-        state: dict | None,
+        state: dict | str | None,
     ):
 
         try:
@@ -541,15 +566,15 @@ class ProductionController:
                 "### ERROR\n"
                 + str(exc),
                 None,
-                state
-                or {
-                    "status": "error"
+                {
+                    "status": "error",
                 },
             )
 
         if not self._lock.acquire(
             blocking=False
         ):
+
             return (
                 "### BUSY\nA production job is already running.",
                 None,
@@ -577,6 +602,7 @@ class ProductionController:
             )
 
             if not scenes or not shots:
+
                 raise RuntimeError(
                     "The storyboard is incomplete."
                 )
@@ -595,6 +621,7 @@ class ProductionController:
                 )
                 == "completed"
             ):
+
                 return (
                     "### COMPLETE\n"
                     "This production has already completed.",
@@ -625,6 +652,7 @@ class ProductionController:
             import torch
 
             if not torch.cuda.is_available():
+
                 raise RuntimeError(
                     "No NVIDIA CUDA GPU is available."
                 )
@@ -648,6 +676,7 @@ class ProductionController:
             )
 
             if not gpu_ids:
+
                 raise RuntimeError(
                     "No CUDA GPU was detected."
                 )
@@ -674,6 +703,7 @@ class ProductionController:
                 )
 
                 if not client.health_check():
+
                     raise RuntimeError(
                         "ComfyUI worker unavailable: "
                         f"{worker['url']}"
@@ -714,13 +744,17 @@ class ProductionController:
                 )
             )
 
-            final_video = Path(
-                result[
-                    "final_video"
-                ]
-            ).resolve()
+            final_video = (
+                Path(
+                    result[
+                        "final_video"
+                    ]
+                )
+                .resolve()
+            )
 
             if not final_video.is_file():
+
                 raise RuntimeError(
                     "Production runner completed but "
                     "final video was not found:\n"
@@ -728,6 +762,7 @@ class ProductionController:
                 )
 
             if final_video.stat().st_size <= 0:
+
                 raise RuntimeError(
                     "Production runner produced an empty "
                     "final video:\n"
@@ -769,9 +804,15 @@ class ProductionController:
                 encoding="utf-8",
             )
 
-            updated_state = dict(
-                state
-                or {}
+            updated_state = (
+                dict(
+                    state
+                    if isinstance(
+                        state,
+                        dict,
+                    )
+                    else {}
+                )
             )
 
             updated_state[
@@ -837,6 +878,7 @@ class ProductionController:
                     )
 
                 except Exception:
+
                     traceback.print_exc()
 
             self._lock.release()
@@ -849,6 +891,7 @@ def build_app(
 ):
 
     try:
+
         import gradio as gr
 
     except ImportError as exc:
@@ -863,10 +906,11 @@ def build_app(
         or ProductionController()
     )
 
+    # Gradio state starts empty and is written by the
+    # Generate Storyboard event. It is NOT passed as an
+    # input to that first event.
     session_state = gr.State(
-        {
-            "status": "empty"
-        }
+        None
     )
 
     with gr.Blocks(
@@ -935,18 +979,21 @@ def build_app(
             "Characters",
             open=True,
         ):
+
             characters = gr.Markdown()
 
         with gr.Accordion(
             "Scenes",
             open=True,
         ):
+
             scenes = gr.Markdown()
 
         with gr.Accordion(
             "Shots & Director Plan",
             open=True,
         ):
+
             shots = gr.Markdown()
 
         approve = gr.Button(
@@ -970,12 +1017,15 @@ def build_app(
             session_state,
         ]
 
+        # IMPORTANT:
+        # session_state is only an OUTPUT here.
+        # Passing it as an INPUT caused the Gradio 6
+        # KeyError: 0 during preprocess_data().
         generate.click(
             fn=controller.generate_storyboard,
             inputs=[
                 story,
                 mode,
-                session_state,
             ],
             outputs=generate_outputs,
         )
@@ -985,11 +1035,12 @@ def build_app(
             inputs=[
                 story,
                 mode,
-                session_state,
             ],
             outputs=generate_outputs,
         )
 
+        # The approval step consumes the state created by
+        # Generate Storyboard.
         approve.click(
             fn=controller.approve_and_generate,
             inputs=[
@@ -1049,8 +1100,10 @@ def serve_storyboard_gradio(
 
 
 def main():
+
     serve_storyboard_gradio()
 
 
 if __name__ == "__main__":
+
     main()
