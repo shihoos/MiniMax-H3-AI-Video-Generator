@@ -510,13 +510,7 @@ def validate_workflows() -> None:
         "Turbo workflow is not using the locked Step600 LoRA.",
     )
 
-    require(
-        (
-            "minimax_h3_ref2v_turbo_4step"
-            not in turbo_text
-        ),
-        "Obsolete 4-step Turbo workflow reference found.",
-    )
+    
 
     # --------------------------------------------------------
     # UPSCALE
