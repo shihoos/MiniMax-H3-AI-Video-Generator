@@ -44,7 +44,6 @@ REQUIRED_FILES = [
     "pipeline/production_orchestrator.py",
     "pipeline/reference_manager.py",
     "pipeline/identity_continuity.py",
-    "pipeline/h3_reference_binding.py",
     "pipeline/h3_scene_continuity.py",
     "pipeline/identity_anchor_store.py",
 
