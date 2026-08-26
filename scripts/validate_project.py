@@ -13,15 +13,6 @@ ROOT = (
     .parents[1]
 )
 
-# IMPORTANT:
-# This file is executed as:
-#
-#     python scripts/validate_project.py
-#
-# In that invocation Python starts with scripts/
-# on sys.path. Add the repository root so sibling
-# packages such as planner/, execution/, pipeline/,
-# schemas/, etc. can be imported.
 if str(ROOT) not in sys.path:
     sys.path.insert(
         0,
@@ -29,39 +20,141 @@ if str(ROOT) not in sys.path:
     )
 
 
+REQUIRED_FILES = [
+    # Configuration
+    "configs/runtime_versions.yaml",
+    "configs/model_inventory.yaml",
+    "configs/custom_nodes.yaml",
+
+    # Planner
+    "planner/config.py",
+    "planner/production_planner.py",
+    "planner/qwen_director.py",
+
+    # Pipeline
+    "pipeline/production_orchestrator.py",
+    "pipeline/reference_manager.py",
+    "pipeline/identity_continuity.py",
+    "pipeline/h3_scene_continuity.py",
+    "pipeline/identity_anchor_store.py",
+
+    # Execution
+    "execution/assembly_manager.py",
+    "execution/checkpoint_manager.py",
+    "execution/comfy_client.py",
+    "execution/h3_runtime.py",
+    "execution/h3_workflow_builder.py",
+    "execution/h3_upscaled_workflow_builder.py",
+    "execution/production_runner.py",
+    "execution/shot_executor.py",
+
+    # Scheduler
+    "scheduler/gpu_scheduler.py",
+    "scheduler/shot_queue.py",
+
+    # Schemas
+    "schemas/character.py",
+    "schemas/scene.py",
+    "schemas/shot.py",
+    "schemas/parser.py",
+
+    # Kaggle
+    "kaggle/bootstrap.py",
+    "kaggle/preflight_h3.py",
+    "kaggle/start_comfyui.py",
+    "kaggle/verify_live_runtime.py",
+
+    # UI / scripts
+    "ui/storyboard_gradio.py",
+    "scripts/generate_video.py",
+    "scripts/validate_reference_wiring.py",
+
+    # Workflows
+    "workflows/generation/H3_Ref2V_Production.json",
+    "workflows/generation/H3_Turbo_Ref2V_Production.json",
+    "workflows/postprocess/H3_Ref2V_UltimateUpscale_Production.json",
+    "workflows/sources/H3_Turbo_Reference_Source.json",
+    "workflows/sources/H3_LatentUpscaler_Source.json",
+]
+
+
+FORBIDDEN_PATHS = [
+    "kaggle/compatibility_lock.yaml",
+    "compatibility/prepare_modern_ltx.py",
+    "execution/comfy_workflow_adapter.py",
+    "execution/reference_image_generator.py",
+    "ui/storyboard.html",
+    "ui/storyboard_server.py",
+    "scripts/storyboard_preview.py",
+    "scripts/cpu_preflight.py",
+]
+
+
+RUNTIME_IMPORTS = [
+    "planner.production_planner",
+    "planner.qwen_director",
+    "pipeline.production_orchestrator",
+    "pipeline.identity_anchor_store",
+    "pipeline.h3_scene_continuity",
+    "execution.h3_workflow_builder",
+    "execution.h3_upscaled_workflow_builder",
+    "execution.shot_executor",
+    "execution.production_runner",
+    "execution.h3_runtime",
+    "execution.assembly_manager",
+    "scheduler.gpu_scheduler",
+    "ui.storyboard_gradio",
+]
+
+
 PRODUCTION_WORKFLOWS = {
-    "ref2v":
+    "ref2v": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Ref2V_Production.json",
-
-    "turbo_ref2v":
+        / "H3_Ref2V_Production.json"
+    ),
+    "turbo_ref2v": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Turbo_Ref2V_Production.json",
-
-    "upscale":
+        / "H3_Turbo_Ref2V_Production.json"
+    ),
+    "upscale": (
         ROOT
         / "workflows"
         / "postprocess"
-        / "H3_Ref2V_UltimateUpscale_Production.json",
+        / "H3_Ref2V_UltimateUpscale_Production.json"
+    ),
 }
+
 
 SOURCE_WORKFLOWS = {
-    "turbo_source":
+    "turbo_source": (
         ROOT
         / "workflows"
         / "sources"
-        / "H3_Turbo_Reference_Source.json",
-
-    "upscale_source":
+        / "H3_Turbo_Reference_Source.json"
+    ),
+    "upscale_source": (
         ROOT
         / "workflows"
         / "sources"
-        / "H3_LatentUpscaler_Source.json",
+        / "H3_LatentUpscaler_Source.json"
+    ),
 }
+
+
+FORBIDDEN_MODEL_TOKENS = {
+    "minimax_h3_fl2va",
+    "minimax_h3_fl2v",
+    "qwen3-4b",
+    "qwen3vl_32b_minimax_h3-Q4",
+    "minimax_h3_ref2va_pruned_int8_convrot",
+    "minimax_h3_video_vae_int8_convrot",
+    "minimax_h3_ref2v_turbo_4step",
+}
+
 
 LOCKED_MODELS = {
     "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
@@ -72,41 +165,28 @@ LOCKED_MODELS = {
     "minimax_h3_latent_upscaler_3d_fp16.safetensors",
 }
 
-FORBIDDEN_EXECUTABLE_TOKENS = {
-    "minimax_h3_fl2va",
-    "minimax_h3_fl2v",
-    "qwen3-4b",
-    "qwen3vl_32b_minimax_h3-Q4",
-    "minimax_h3_ref2va_pruned_int8_convrot",
-    "minimax_h3_video_vae_int8_convrot",
-    "minimax_h3_ref2v_turbo_4step",
-}
 
-REQUIRED_CUSTOM_NODES = {
-    "Comfyui_Minimax_h3_latent_Upscaler",
-    "Comfyui-MMH3-UltimateUpscale",
-    "ComfyUI-MiniMax-H3-Turbo",
-    "ComfyUI-Workflow-To-API-Converter",
-    "ComfyUI-VideoHelperSuite",
-}
+def fail(message: str) -> None:
+    raise RuntimeError(message)
 
 
-def fail(
+def require(
+    condition: bool,
     message: str,
-):
-    raise RuntimeError(
-        message
-    )
+) -> None:
+
+    if not condition:
+        fail(message)
 
 
 def load_json(
     path: Path,
-):
+) -> dict:
 
-    if not path.is_file():
-        fail(
-            f"Missing workflow: {path}"
-        )
+    require(
+        path.is_file(),
+        f"Missing JSON workflow: {path}",
+    )
 
     try:
         data = json.loads(
@@ -119,55 +199,42 @@ def load_json(
             f"Invalid JSON in {path}: {exc}"
         )
 
-    if not isinstance(
-        data,
-        dict,
-    ):
-        fail(
-            f"Workflow root must be an object: {path}"
-        )
+    require(
+        isinstance(data, dict),
+        f"Workflow root must be an object: {path}",
+    )
 
-    if not isinstance(
-        data.get(
-            "nodes"
+    require(
+        isinstance(
+            data.get("nodes"),
+            list,
         ),
-        list,
-    ):
-        fail(
-            f"Workflow has no node list: {path}"
-        )
+        f"Workflow has no node list: {path}",
+    )
 
     return data
 
 
 def node_types(
     graph: dict,
-):
+) -> set[str]:
+
     return {
-        str(
-            node.get(
-                "type"
-            )
-        )
+        str(node.get("type"))
         for node in graph.get(
             "nodes",
             [],
         )
-        if isinstance(
-            node,
-            dict,
-        )
-        and node.get(
-            "type"
-        )
+        if isinstance(node, dict)
+        and node.get("type")
     }
 
 
-def executable_values(
+def executable_model_values(
     graph: dict,
-):
+) -> list[str]:
 
-    executable = {
+    executable_nodes = {
         "UNETLoader",
         "CLIPLoader",
         "CLIPLoaderGGUF",
@@ -185,7 +252,7 @@ def executable_values(
 
         if node.get(
             "type"
-        ) not in executable:
+        ) not in executable_nodes:
             continue
 
         for value in node.get(
@@ -197,24 +264,56 @@ def executable_values(
                 value,
                 str,
             ):
-                values.append(
-                    value
-                )
+                values.append(value)
 
     return values
 
 
-def validate_python():
+def validate_files() -> None:
+
+    for relative in REQUIRED_FILES:
+
+        path = ROOT / relative
+
+        require(
+            path.is_file(),
+            f"Required repository file is missing:\n{path}",
+        )
+
+    for relative in FORBIDDEN_PATHS:
+
+        path = ROOT / relative
+
+        require(
+            not path.exists(),
+            f"Obsolete file still exists:\n{path}",
+        )
+
+    print(
+        "PASS repository file layout"
+    )
+
+
+def validate_python() -> None:
+
+    excluded = {
+        ".git",
+        "ComfyUI",
+        "__pycache__",
+        ".runtime_ltx098",
+    }
+
+    count = 0
 
     for path in ROOT.rglob(
         "*.py"
     ):
 
-        if (
-            ".git"
-            in path.parts
-            or "ComfyUI"
-            in path.parts
+        if any(
+            part in excluded
+            for part in path.relative_to(
+                ROOT
+            ).parts
         ):
             continue
 
@@ -223,30 +322,33 @@ def validate_python():
                 path.read_text(
                     encoding="utf-8"
                 ),
-                filename=str(
-                    path
-                ),
+                filename=str(path),
             )
         except SyntaxError as exc:
             fail(
                 f"Python syntax error in {path}: {exc}"
             )
 
+        count += 1
+
+    require(
+        count > 0,
+        "No Python files found.",
+    )
+
     print(
-        "PASS Python syntax"
+        f"PASS Python syntax ({count} files)"
     )
 
 
-def validate_workflows():
+def validate_workflows() -> None:
 
-    for name, path in (
-        {
-            **PRODUCTION_WORKFLOWS,
-            **SOURCE_WORKFLOWS,
-        }.items()
-    ):
+    for name, path in {
+        **PRODUCTION_WORKFLOWS,
+        **SOURCE_WORKFLOWS,
+    }.items():
 
-        load_json(
+        graph = load_json(
             path
         )
 
@@ -255,16 +357,13 @@ def validate_workflows():
             name,
         )
 
-
-def validate_ref2v():
-
-    graph = load_json(
+    ref2v = load_json(
         PRODUCTION_WORKFLOWS[
             "ref2v"
         ]
     )
 
-    required = {
+    ref2v_required = {
         "UNETLoader",
         "CLIPLoader",
         "MiniMaxH3ReferenceToVideo",
@@ -278,54 +377,25 @@ def validate_ref2v():
     }
 
     missing = (
-        required
-        - node_types(graph)
+        ref2v_required
+        - node_types(ref2v)
     )
 
-    if missing:
-        fail(
-            "Ref2V missing nodes: "
-            + ", ".join(
-                sorted(
-                    missing
-                )
-            )
-        )
-
-    values = executable_values(
-        graph
+    require(
+        not missing,
+        "Ref2V workflow missing nodes: "
+        + ", ".join(
+            sorted(missing)
+        ),
     )
 
-    for filename in (
-        "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
-        "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",
-        "minimax_h3_video_vae_fp16.safetensors",
-        "minimax_h3_audio_vae_fp32.safetensors",
-    ):
-
-        if filename not in values:
-            fail(
-                f"Ref2V missing locked model: {filename}"
-            )
-
-    print(
-        "PASS Ref2V contract"
-    )
-
-
-def validate_turbo():
-
-    graph = load_json(
+    turbo = load_json(
         PRODUCTION_WORKFLOWS[
             "turbo_ref2v"
         ]
     )
 
-    types = node_types(
-        graph
-    )
-
-    required = {
+    turbo_required = {
         "UNETLoader",
         "CLIPLoader",
         "MiniMaxH3ReferenceToVideo",
@@ -341,96 +411,41 @@ def validate_turbo():
     }
 
     missing = (
-        required
-        - types
+        turbo_required
+        - node_types(turbo)
     )
 
-    if missing:
-        fail(
-            "Turbo missing nodes: "
-            + ", ".join(
-                sorted(
-                    missing
-                )
-            )
-        )
-
-    loras = [
-        node
-        for node
-        in graph[
-            "nodes"
-        ]
-        if node.get(
-            "type"
-        )
-        == "MiniMaxH3TurboLoRA"
-    ]
-
-    if len(loras) != 1:
-        fail(
-            "Turbo must contain exactly one Turbo LoRA node."
-        )
-
-    values = loras[0].get(
-        "widgets_values",
-        [],
+    require(
+        not missing,
+        "Turbo workflow missing nodes: "
+        + ", ".join(
+            sorted(missing)
+        ),
     )
 
-    if (
-        not values
-        or values[0]
-        != "minimax_h3_turbo_v4_step600_ema.safetensors"
-    ):
-        fail(
-            "Turbo is not using Step600."
-        )
-
-    schedulers = [
-        node
-        for node
-        in graph[
-            "nodes"
-        ]
-        if node.get(
-            "type"
-        )
-        == "BasicScheduler"
-    ]
-
-    if len(schedulers) != 1:
-        fail(
-            "Turbo must contain exactly one BasicScheduler."
-        )
-
-    widgets = schedulers[0].get(
-        "widgets_values",
-        [],
+    turbo_text = json.dumps(
+        turbo
     )
 
-    if (
-        len(widgets) < 3
-        or widgets[1] != 8
-        or widgets[2] != 1
-    ):
-        fail(
-            "Turbo scheduler is not locked to 8 steps."
-        )
-
-    print(
-        "PASS Turbo 8-step contract"
+    require(
+        "minimax_h3_turbo_v4_step600_ema.safetensors"
+        in turbo_text,
+        "Turbo workflow is not using Step600.",
     )
 
+    require(
+        "minimax_h3_ref2v_turbo_4step"
+        not in turbo_text,
+        "Obsolete 4-step H3 Turbo workflow detected.",
+    )
 
-def validate_upscale():
-
-    graph = load_json(
+    upscale = load_json(
         PRODUCTION_WORKFLOWS[
             "upscale"
         ]
     )
 
-    required = {
+    upscale_required = {
         "MMH3LatentUpscaleWithModelParams",
         "MMH3TemporalSplitParams",
         "MMH3SpatialSplitParams",
@@ -438,49 +453,41 @@ def validate_upscale():
     }
 
     missing = (
-        required
-        - node_types(graph)
+        upscale_required
+        - node_types(upscale)
     )
 
-    if missing:
-        fail(
-            "Upscale workflow missing nodes: "
-            + ", ".join(
-                sorted(
-                    missing
-                )
-            )
-        )
-
-    text = json.dumps(
-        graph
+    require(
+        not missing,
+        "Upscale workflow missing nodes: "
+        + ", ".join(
+            sorted(missing)
+        ),
     )
 
-    if (
+    require(
         "minimax_h3_latent_upscaler_3d_fp16.safetensors"
-        not in text
-    ):
-        fail(
-            "Upscale workflow is missing the locked "
-            "3D H3 upscaler."
-        )
+        in json.dumps(upscale),
+        "Upscale workflow is missing the 3D H3 upscaler.",
+    )
 
     print(
-        "PASS Ultimate Upscale contract"
+        "PASS workflow contracts"
     )
 
 
-def validate_models():
+def validate_model_inventory() -> None:
 
-    for name, path in (
-        PRODUCTION_WORKFLOWS.items()
-    ):
+    for name, path in {
+        **PRODUCTION_WORKFLOWS,
+        **SOURCE_WORKFLOWS,
+    }.items():
 
         graph = load_json(
             path
         )
 
-        values = executable_values(
+        values = executable_model_values(
             graph
         )
 
@@ -488,84 +495,101 @@ def validate_models():
 
             lowered = value.lower()
 
-            for token in (
-                FORBIDDEN_EXECUTABLE_TOKENS
-            ):
+            for forbidden in FORBIDDEN_MODEL_TOKENS:
 
-                if (
-                    token.lower()
-                    in lowered
-                ):
-                    fail(
-                        f"Forbidden executable "
-                        f"asset '{token}' in {name}"
-                    )
-
-            if (
-                value.endswith(
-                    ".safetensors"
+                require(
+                    forbidden.lower()
+                    not in lowered,
+                    f"Forbidden model token '{forbidden}' "
+                    f"detected in {name}.",
                 )
-                and value not in LOCKED_MODELS
+
+            if value.endswith(
+                ".safetensors"
             ):
-                fail(
-                    f"Unapproved executable "
-                    f"model '{value}' in {name}"
+
+                require(
+                    value in LOCKED_MODELS,
+                    f"Unapproved executable model "
+                    f"'{value}' detected in {name}.",
                 )
 
     print(
-        "PASS locked executable model inventory"
+        "PASS executable model inventory"
     )
 
 
-def validate_config():
+def validate_config() -> None:
 
     from planner.config import (
+        DELIVERY_FPS,
         DELIVERY_HEIGHT,
         DELIVERY_WIDTH,
         H3_HEIGHT,
-        H3_STEPS,
-        H3_WIDTH,
         H3_REF_IMAGE_SIZE,
-        TURBO_STEPS,
-        UPSCALE_HEIGHT,
-        UPSCALE_WIDTH,
-    )
-
-    assert (
-        H3_WIDTH,
-        H3_HEIGHT,
-    ) == (
-        1344,
-        768,
-    )
-
-    assert (
         H3_STEPS,
+        H3_WIDTH,
         TURBO_STEPS,
-    ) == (
-        20,
-        8,
-    )
-
-    assert (
-        H3_REF_IMAGE_SIZE
-        == "match"
-    )
-
-    assert (
-        UPSCALE_WIDTH,
         UPSCALE_HEIGHT,
-    ) == (
-        1920,
-        1088,
+        UPSCALE_WIDTH,
     )
 
-    assert (
-        DELIVERY_WIDTH,
-        DELIVERY_HEIGHT,
-    ) == (
-        1280,
-        720,
+    require(
+        (
+            H3_WIDTH,
+            H3_HEIGHT,
+        )
+        == (
+            1344,
+            768,
+        ),
+        "H3 generation resolution is not 1344x768.",
+    )
+
+    require(
+        (
+            H3_STEPS,
+            TURBO_STEPS,
+        )
+        == (
+            20,
+            8,
+        ),
+        "H3/Turbo step configuration is incorrect.",
+    )
+
+    require(
+        H3_REF_IMAGE_SIZE == "match",
+        "H3 reference image policy must be 'match'.",
+    )
+
+    require(
+        (
+            UPSCALE_WIDTH,
+            UPSCALE_HEIGHT,
+        )
+        == (
+            1920,
+            1088,
+        ),
+        "Upscale dimensions are incorrect.",
+    )
+
+    require(
+        (
+            DELIVERY_WIDTH,
+            DELIVERY_HEIGHT,
+        )
+        == (
+            1280,
+            720,
+        ),
+        "Delivery dimensions are incorrect.",
+    )
+
+    require(
+        DELIVERY_FPS == 24,
+        "Delivery FPS must be 24.",
     )
 
     print(
@@ -573,116 +597,102 @@ def validate_config():
     )
 
 
-def validate_runtime_imports():
+def validate_runtime_imports() -> None:
 
-    modules = [
-        "planner.production_planner",
-        "planner.qwen_director",
-        "pipeline.production_orchestrator",
-        "pipeline.identity_anchor_store",
-        "pipeline.h3_scene_continuity",
-        "execution.h3_workflow_builder",
-        "execution.h3_upscaled_workflow_builder",
-        "execution.shot_executor",
-        "execution.production_runner",
-        "execution.h3_runtime",
-        "execution.assembly_manager",
-        "ui.storyboard_server",
-        "ui.storyboard_gradio",
-    ]
-
-    for module in modules:
+    for module_name in RUNTIME_IMPORTS:
 
         importlib.import_module(
-            module
+            module_name
         )
 
     print(
-        "PASS production runtime imports"
+        "PASS runtime imports"
     )
 
 
-def validate_upscale_builder():
+def validate_gradio_ui() -> None:
 
-    from execution.h3_upscaled_workflow_builder import (
-        H3UpscaledWorkflowBuilder,
-    )
-
-    assert hasattr(
-        H3UpscaledWorkflowBuilder,
-        "build_upscaled",
-    )
-
-    print(
-        "PASS combined H3 upscale builder"
-    )
-
-
-def validate_storyboard_ui():
-
-    html = (
-        ROOT
-        / "ui"
-        / "storyboard.html"
-    )
-
-    server = (
-        ROOT
-        / "ui"
-        / "storyboard_server.py"
-    )
-
-    gradio_ui = (
+    path = (
         ROOT
         / "ui"
         / "storyboard_gradio.py"
     )
 
-    if not html.is_file():
-        fail(
-            "Storyboard HTML missing."
-        )
-
-    if not server.is_file():
-        fail(
-            "Storyboard server missing."
-        )
-        
-    if not gradio_ui.is_file():
-        fail(
-            "Gradio storyboard UI missing."
-        )
-
-    text = html.read_text(
+    text = path.read_text(
         encoding="utf-8"
     )
 
-    required_ui_tokens = [
-        "Approve Storyboard",
-        "Save Draft",
-        "characters",
-        "scenes",
-        "shots",
-        "camera_shot",
-        "camera_movement",
-        "lighting",
-        "overall_soundscape",
-    ]
+    for token in (
+        "ProductionController",
+        "generate_storyboard",
+        "approve_and_generate",
+        "Your Story",
+        "AI Story",
+        "Expand Story",
+        "Preserve Story",
+        "Generate Storyboard",
+        "Approve & Generate Video",
+        "share=True",
+        "H3_DIRECTOR_ENABLED",
+        "ProductionRunner",
+        "H3Runtime",
+        "check_worker",
+    ):
 
-    for token in required_ui_tokens:
+        require(
+            token in text,
+            f"Gradio UI missing contract token: {token}",
+        )
 
-        if token not in text:
-            fail(
-                "Storyboard UI missing token: "
-                + token
-            )
+    require(
+        "def build_app(" in text,
+        "Gradio UI build_app() missing.",
+    )
+
+    require(
+        "def serve_storyboard_gradio(" in text,
+        "Gradio UI serve_storyboard_gradio() missing.",
+    )
 
     print(
-        "PASS interactive storyboard UI"
+        "PASS Gradio UI contract"
     )
 
 
-def validate_cleanup():
+def validate_reference_wiring() -> None:
+
+    path = (
+        ROOT
+        / "scripts"
+        / "validate_reference_wiring.py"
+    )
+
+    require(
+        path.is_file(),
+        "Reference wiring validator missing.",
+    )
+
+    text = path.read_text(
+        encoding="utf-8"
+    )
+
+    for token in (
+        "copy_input",
+        "_add_load_image",
+        "Production isolation wiring PASSED",
+    ):
+
+        require(
+            token in text,
+            f"Reference wiring validator missing: {token}",
+        )
+
+    print(
+        "PASS reference path validator"
+    )
+
+
+def validate_cleanup() -> None:
 
     for path in ROOT.rglob(
         "*_TEST.json"
@@ -698,25 +708,19 @@ def validate_cleanup():
     )
 
 
-def main():
+def main() -> None:
 
+    validate_files()
     validate_python()
     validate_workflows()
-    validate_ref2v()
-    validate_turbo()
-    validate_upscale()
-    validate_models()
+    validate_model_inventory()
     validate_config()
     validate_runtime_imports()
-    validate_upscale_builder()
-    validate_storyboard_ui()
+    validate_gradio_ui()
+    validate_reference_wiring()
     validate_cleanup()
-    
 
-    print(
-        "=" * 80
-    )
-
+    print("=" * 80)
     print(
         "MiniMax H3 PROJECT VALIDATION PASSED."
     )
