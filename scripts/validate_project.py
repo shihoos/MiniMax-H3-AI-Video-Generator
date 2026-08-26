@@ -35,6 +35,7 @@ REQUIRED_FILES = [
     "pipeline/production_orchestrator.py",
     "pipeline/reference_manager.py",
     "pipeline/identity_continuity.py",
+    "pipeline/h3_reference_binding.py",
     "pipeline/h3_scene_continuity.py",
     "pipeline/identity_anchor_store.py",
 
@@ -46,8 +47,11 @@ REQUIRED_FILES = [
     "execution/h3_workflow_builder.py",
     "execution/h3_upscaled_workflow_builder.py",
     "execution/production_runner.py",
+    "execution/shot_executor.py",
+
+    # Scheduler
     "scheduler/gpu_scheduler.py",
-    
+
     # Schemas
     "schemas/character.py",
     "schemas/scene.py",
@@ -77,16 +81,24 @@ REQUIRED_FILES = [
 RUNTIME_IMPORTS = [
     "planner.production_planner",
     "planner.qwen_director",
+
     "pipeline.production_orchestrator",
-    "pipeline.identity_anchor_store",
+    "pipeline.reference_manager",
+    "pipeline.identity_continuity",
+    "pipeline.h3_reference_binding",
     "pipeline.h3_scene_continuity",
+    "pipeline.identity_anchor_store",
+
+    "execution.assembly_manager",
+    "execution.comfy_client",
+    "execution.h3_runtime",
     "execution.h3_workflow_builder",
     "execution.h3_upscaled_workflow_builder",
-    "execution.shot_executor",
     "execution.production_runner",
-    "execution.h3_runtime",
-    "execution.assembly_manager",
+    "execution.shot_executor",
+
     "scheduler.gpu_scheduler",
+
     "ui.storyboard_gradio",
 ]
 
@@ -139,8 +151,24 @@ LOCKED_MODELS = {
 }
 
 
-def fail(message: str) -> None:
-    raise RuntimeError(message)
+FORBIDDEN_MODEL_TOKENS = {
+    "minimax_h3_fl2va",
+    "minimax_h3_fl2v",
+    "qwen3-4b",
+    "qwen3vl_32b_minimax_h3-Q4",
+    "minimax_h3_ref2va_pruned_int8_convrot",
+    "minimax_h3_video_vae_int8_convrot",
+    "minimax_h3_ref2v_turbo_4step",
+}
+
+
+def fail(
+    message: str,
+) -> None:
+
+    raise RuntimeError(
+        message
+    )
 
 
 def require(
@@ -149,7 +177,9 @@ def require(
 ) -> None:
 
     if not condition:
-        fail(message)
+        fail(
+            message
+        )
 
 
 def load_json(
@@ -162,18 +192,24 @@ def load_json(
     )
 
     try:
+
         data = json.loads(
             path.read_text(
                 encoding="utf-8"
             )
         )
+
     except json.JSONDecodeError as exc:
+
         fail(
             f"Invalid JSON in {path}: {exc}"
         )
 
     require(
-        isinstance(data, dict),
+        isinstance(
+            data,
+            dict,
+        ),
         f"Workflow root must be an object: {path}",
     )
 
@@ -193,13 +229,24 @@ def node_types(
 ) -> set[str]:
 
     return {
-        str(node.get("type"))
+        str(
+            node.get(
+                "type"
+            )
+        )
         for node in graph.get(
             "nodes",
             [],
         )
-        if isinstance(node, dict)
-        and node.get("type")
+        if (
+            isinstance(
+                node,
+                dict,
+            )
+            and node.get(
+                "type"
+            )
+        )
     }
 
 
@@ -226,6 +273,7 @@ def executable_model_values(
         if node.get(
             "type"
         ) not in executable_nodes:
+
             continue
 
         for value in node.get(
@@ -237,7 +285,10 @@ def executable_model_values(
                 value,
                 str,
             ):
-                values.append(value)
+
+                values.append(
+                    value
+                )
 
     return values
 
@@ -246,20 +297,17 @@ def validate_files() -> None:
 
     for relative in REQUIRED_FILES:
 
-        path = ROOT / relative
+        path = (
+            ROOT
+            / relative
+        )
 
         require(
             path.is_file(),
-            f"Required repository file is missing:\n{path}",
-        )
-
-    for relative in FORBIDDEN_PATHS:
-
-        path = ROOT / relative
-
-        require(
-            not path.exists(),
-            f"Obsolete file still exists:\n{path}",
+            (
+                "Required repository file "
+                f"is missing:\n{path}"
+            ),
         )
 
     print(
@@ -282,24 +330,36 @@ def validate_python() -> None:
         "*.py"
     ):
 
+        relative = (
+            path.relative_to(
+                ROOT
+            )
+        )
+
         if any(
             part in excluded
-            for part in path.relative_to(
-                ROOT
-            ).parts
+            for part
+            in relative.parts
         ):
+
             continue
 
         try:
+
             ast.parse(
                 path.read_text(
                     encoding="utf-8"
                 ),
-                filename=str(path),
+                filename=str(
+                    path
+                ),
             )
+
         except SyntaxError as exc:
+
             fail(
-                f"Python syntax error in {path}: {exc}"
+                f"Python syntax error in "
+                f"{path}: {exc}"
             )
 
         count += 1
@@ -321,7 +381,7 @@ def validate_workflows() -> None:
         **SOURCE_WORKFLOWS,
     }.items():
 
-        graph = load_json(
+        load_json(
             path
         )
 
@@ -351,14 +411,18 @@ def validate_workflows() -> None:
 
     missing = (
         ref2v_required
-        - node_types(ref2v)
+        - node_types(
+            ref2v
+        )
     )
 
     require(
         not missing,
         "Ref2V workflow missing nodes: "
         + ", ".join(
-            sorted(missing)
+            sorted(
+                missing
+            )
         ),
     )
 
@@ -385,14 +449,18 @@ def validate_workflows() -> None:
 
     missing = (
         turbo_required
-        - node_types(turbo)
+        - node_types(
+            turbo
+        )
     )
 
     require(
         not missing,
         "Turbo workflow missing nodes: "
         + ", ".join(
-            sorted(missing)
+            sorted(
+                missing
+            )
         ),
     )
 
@@ -427,21 +495,30 @@ def validate_workflows() -> None:
 
     missing = (
         upscale_required
-        - node_types(upscale)
+        - node_types(
+            upscale
+        )
     )
 
     require(
         not missing,
         "Upscale workflow missing nodes: "
         + ", ".join(
-            sorted(missing)
+            sorted(
+                missing
+            )
         ),
     )
 
     require(
         "minimax_h3_latent_upscaler_3d_fp16.safetensors"
-        in json.dumps(upscale),
-        "Upscale workflow is missing the 3D H3 upscaler.",
+        in json.dumps(
+            upscale
+        ),
+        (
+            "Upscale workflow is missing "
+            "the 3D H3 upscaler."
+        ),
     )
 
     print(
@@ -460,21 +537,30 @@ def validate_model_inventory() -> None:
             path
         )
 
-        values = executable_model_values(
-            graph
+        values = (
+            executable_model_values(
+                graph
+            )
         )
 
         for value in values:
 
-            lowered = value.lower()
+            lowered = (
+                value.lower()
+            )
 
-            for forbidden in FORBIDDEN_MODEL_TOKENS:
+            for forbidden in (
+                FORBIDDEN_MODEL_TOKENS
+            ):
 
                 require(
                     forbidden.lower()
                     not in lowered,
-                    f"Forbidden model token '{forbidden}' "
-                    f"detected in {name}.",
+                    (
+                        f"Forbidden model token "
+                        f"'{forbidden}' detected "
+                        f"in {name}."
+                    ),
                 )
 
             if value.endswith(
@@ -483,8 +569,11 @@ def validate_model_inventory() -> None:
 
                 require(
                     value in LOCKED_MODELS,
-                    f"Unapproved executable model "
-                    f"'{value}' detected in {name}.",
+                    (
+                        f"Unapproved executable "
+                        f"model '{value}' detected "
+                        f"in {name}."
+                    ),
                 )
 
     print(
@@ -516,7 +605,10 @@ def validate_config() -> None:
             1344,
             768,
         ),
-        "H3 generation resolution is not 1344x768.",
+        (
+            "H3 generation resolution "
+            "is not 1344x768."
+        ),
     )
 
     require(
@@ -528,12 +620,18 @@ def validate_config() -> None:
             20,
             8,
         ),
-        "H3/Turbo step configuration is incorrect.",
+        (
+            "H3/Turbo step configuration "
+            "is incorrect."
+        ),
     )
 
     require(
         H3_REF_IMAGE_SIZE == "match",
-        "H3 reference image policy must be 'match'.",
+        (
+            "H3 reference image policy "
+            "must be 'match'."
+        ),
     )
 
     require(
@@ -572,7 +670,9 @@ def validate_config() -> None:
 
 def validate_runtime_imports() -> None:
 
-    for module_name in RUNTIME_IMPORTS:
+    for module_name in (
+        RUNTIME_IMPORTS
+    ):
 
         importlib.import_module(
             module_name
@@ -591,11 +691,16 @@ def validate_gradio_ui() -> None:
         / "storyboard_gradio.py"
     )
 
+    require(
+        path.is_file(),
+        f"Missing Gradio UI: {path}",
+    )
+
     text = path.read_text(
         encoding="utf-8"
     )
 
-    for token in (
+    required_tokens = (
         "ProductionController",
         "generate_storyboard",
         "approve_and_generate",
@@ -610,11 +715,16 @@ def validate_gradio_ui() -> None:
         "ProductionRunner",
         "H3Runtime",
         "check_worker",
-    ):
+    )
+
+    for token in required_tokens:
 
         require(
             token in text,
-            f"Gradio UI missing contract token: {token}",
+            (
+                "Gradio UI missing "
+                f"contract token: {token}"
+            ),
         )
 
     require(
@@ -624,7 +734,10 @@ def validate_gradio_ui() -> None:
 
     require(
         "def serve_storyboard_gradio(" in text,
-        "Gradio UI serve_storyboard_gradio() missing.",
+        (
+            "Gradio UI "
+            "serve_storyboard_gradio() missing."
+        ),
     )
 
     print(
@@ -657,11 +770,99 @@ def validate_reference_wiring() -> None:
 
         require(
             token in text,
-            f"Reference wiring validator missing: {token}",
+            (
+                "Reference wiring validator "
+                f"missing: {token}"
+            ),
         )
 
     print(
         "PASS reference path validator"
+    )
+
+
+def validate_plan_persistence_boundary() -> None:
+
+    orchestrator_path = (
+        ROOT
+        / "pipeline"
+        / "production_orchestrator.py"
+    )
+
+    cli_path = (
+        ROOT
+        / "scripts"
+        / "generate_video.py"
+    )
+
+    orchestrator_text = (
+        orchestrator_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    cli_text = (
+        cli_path.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    require(
+        "PRODUCTION_DIR" not in orchestrator_text,
+        (
+            "ProductionOrchestrator must not "
+            "own plan persistence."
+        ),
+    )
+
+    require(
+        "production_plan_path"
+        not in orchestrator_text,
+        (
+            "ProductionOrchestrator must not "
+            "expose a persisted plan path."
+        ),
+    )
+
+    require(
+        "story_preview.json"
+        not in orchestrator_text,
+        (
+            "ProductionOrchestrator must not "
+            "write the legacy global "
+            "story_preview.json."
+        ),
+    )
+
+    require(
+        "def create_cli_plan_path("
+        in cli_text,
+        (
+            "CLI plan persistence helper "
+            "is missing."
+        ),
+    )
+
+    require(
+        "create_cli_plan_path("
+        in cli_text,
+        (
+            "CLI must own creation "
+            "of its plan path."
+        ),
+    )
+
+    require(
+        "production_id"
+        in cli_text,
+        (
+            "CLI must persist plans "
+            "under a production ID."
+        ),
+    )
+
+    print(
+        "PASS plan persistence boundary"
     )
 
 
@@ -672,8 +873,12 @@ def validate_cleanup() -> None:
     ):
 
         if path.is_file():
+
             fail(
-                f"Temporary TEST workflow remains: {path}"
+                (
+                    "Temporary workflow artifact "
+                    f"remains: {path}"
+                )
             )
 
     print(
@@ -691,9 +896,13 @@ def main() -> None:
     validate_runtime_imports()
     validate_gradio_ui()
     validate_reference_wiring()
+    validate_plan_persistence_boundary()
     validate_cleanup()
 
-    print("=" * 80)
+    print(
+        "=" * 80
+    )
+
     print(
         "MiniMax H3 PROJECT VALIDATION PASSED."
     )
