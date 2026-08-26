@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import ctypes
 import gc
-import importlib
 import json
 import os
 import re
@@ -195,96 +194,142 @@ class QwenDirector:
     @staticmethod
     def _load_nvidia_cuda_libraries() -> None:
         """
-        Load NVIDIA CUDA runtime libraries globally before
-        llama.cpp loads libllama.so.
+        Load the CUDA 13 runtime libraries before llama.cpp
+        loads libllama.so.
 
-        Kaggle may have the CUDA runtime installed as Python
-        packages without exposing libcudart.so.13 globally.
+        Kaggle installs the NVIDIA CUDA packages under a
+        shared nvidia/cu13/lib directory, so do not assume
+        package-specific paths such as:
+
+            nvidia/cuda_runtime/lib
+            nvidia/cublas/lib
         """
 
+        import site
+
+        site_roots = []
+
         try:
-            cuda_runtime = importlib.import_module(
-                "nvidia.cuda_runtime"
+            site_roots.extend(
+                Path(path)
+                for path in site.getsitepackages()
+                if path
             )
+        except Exception:
+            pass
 
-            cublas = importlib.import_module(
-                "nvidia.cublas"
-            )
-
-        except ImportError as exc:
-            raise RuntimeError(
-                "NVIDIA CUDA runtime Python packages are missing.\n"
-                "Run kaggle/bootstrap.py before loading "
-                "the Qwen director."
-            ) from exc
-
-        runtime_root = Path(
-            cuda_runtime.__path__[0]
+        user_site = (
+            site.getusersitepackages()
         )
 
-        cublas_root = Path(
-            cublas.__path__[0]
-        )
+        if user_site:
+            site_roots.append(
+                Path(
+                    user_site
+                )
+            )
 
-        cuda_candidates = [
-            runtime_root
-            / "lib"
-            / "libcudart.so.13",
-            runtime_root
-            / "lib64"
-            / "libcudart.so.13",
+        cudart_candidates = []
+        cublas_candidates = []
+
+        for site_root in site_roots:
+
+            nvidia_root = (
+                site_root
+                / "nvidia"
+            )
+
+            if not nvidia_root.is_dir():
+                continue
+
+            try:
+
+                cudart_candidates.extend(
+                    nvidia_root.rglob(
+                        "libcudart.so.13*"
+                    )
+                )
+
+                cublas_candidates.extend(
+                    nvidia_root.rglob(
+                        "libcublas.so.13*"
+                    )
+                )
+
+            except OSError:
+                continue
+
+        cudart_candidates = [
+            path
+            for path in cudart_candidates
+            if path.is_file()
         ]
 
         cublas_candidates = [
-            cublas_root
-            / "lib"
-            / "libcublas.so.13",
-            cublas_root
-            / "lib64"
-            / "libcublas.so.13",
+            path
+            for path in cublas_candidates
+            if path.is_file()
         ]
 
-        cuda_lib = next(
-            (
-                path
-                for path in cuda_candidates
-                if path.is_file()
-            ),
-            None,
-        )
-
-        cublas_lib = next(
-            (
-                path
-                for path in cublas_candidates
-                if path.is_file()
-            ),
-            None,
-        )
-
-        if cuda_lib is None:
+        if not cudart_candidates:
             raise RuntimeError(
-                "libcudart.so.13 was not found.\n"
-                f"Checked:\n"
-                + "\n".join(
-                    str(path)
-                    for path in cuda_candidates
-                )
+                "libcudart.so.13 was not found in the "
+                "installed NVIDIA Python packages."
             )
 
-        if cublas_lib is None:
+        if not cublas_candidates:
             raise RuntimeError(
-                "libcublas.so.13 was not found.\n"
-                f"Checked:\n"
-                + "\n".join(
-                    str(path)
-                    for path in cublas_candidates
-                )
+                "libcublas.so.13 was not found in the "
+                "installed NVIDIA Python packages."
             )
+
+        # Prefer the CUDA 13 shared runtime directory that
+        # contains both libraries, exactly as installed by
+        # the Kaggle bootstrap.
+        cudart_lib = cudart_candidates[0]
+
+        matching_cublas = [
+            path
+            for path in cublas_candidates
+            if path.parent
+            == cudart_lib.parent
+        ]
+
+        cublas_lib = (
+            matching_cublas[0]
+            if matching_cublas
+            else cublas_candidates[0]
+        )
+
+        library_dirs = [
+            str(
+                cudart_lib.parent
+            ),
+            str(
+                cublas_lib.parent
+            ),
+        ]
+
+        existing_ld = os.environ.get(
+            "LD_LIBRARY_PATH",
+            "",
+        )
+
+        if existing_ld:
+            library_dirs.append(
+                existing_ld
+            )
+
+        os.environ[
+            "LD_LIBRARY_PATH"
+        ] = ":".join(
+            library_dirs
+        )
 
         try:
+
             ctypes.CDLL(
-                str(cuda_lib),
+                str(cudart_lib),
                 mode=ctypes.RTLD_GLOBAL,
             )
 
@@ -294,11 +339,14 @@ class QwenDirector:
             )
 
         except OSError as exc:
+
             raise RuntimeError(
                 "Unable to load NVIDIA CUDA libraries:\n"
-                f"{exc}"
+                f"CUDA runtime: {cudart_lib}\n"
+                f"cuBLAS: {cublas_lib}\n"
+                f"Error: {exc}"
             ) from exc
-
+            
     def load(self) -> None:
         if not self.available:
             return
