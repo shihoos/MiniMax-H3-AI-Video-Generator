@@ -57,8 +57,9 @@ class ProductionController:
                 ProductionOrchestrator()
             )
 
-            # Production policy is intentionally fixed:
-            # Turbo + 3D latent upscale + Ultimate Upscale.
+            # Production policy:
+            # Turbo 8-step + 3D latent upscale
+            # + Ultimate Upscale + 1280x720 delivery.
             plan = (
                 orchestrator
                 .create_production_plan(
@@ -171,8 +172,7 @@ class ProductionController:
                     f"**Lighting:** {shot.get('lighting', '')}\n"
                     f"**Action:** {shot.get('action', '')}\n\n"
                     f"**Visual Direction:** "
-                    f"{shot.get('detailed_description', '') "
-                    f"or shot.get('visual_prompt', '')}\n\n"
+                    f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
                     f"**Soundscape:** "
                     f"{shot.get('overall_soundscape', '')}\n"
                     f"**Music:** "
@@ -494,8 +494,6 @@ def build_app():
             final_video,
         ]
 
-        # Enter in the story box OR clicking the button
-        # triggers the exact same operation.
         generate.click(
             fn=controller.generate_storyboard,
             inputs=[
@@ -531,7 +529,6 @@ def serve_storyboard_gradio(
     wait_for_approval: bool = False,
 ):
 
-    # New production UI mode.
     demo = build_app()
 
     demo.launch(
