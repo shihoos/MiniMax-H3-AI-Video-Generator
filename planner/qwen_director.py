@@ -180,30 +180,88 @@ class QwenDirector:
     def load(self) -> None:
         if not self.available:
             return
-
+    
         if self._llama is not None:
             return
-
+    
         try:
+            import ctypes
+            import importlib
+    
+            cuda_runtime = importlib.import_module(
+                "nvidia.cuda_runtime"
+            )
+    
+            cublas = importlib.import_module(
+                "nvidia.cublas"
+            )
+    
+            cuda_lib = (
+                Path(
+                    cuda_runtime.__path__[0]
+                )
+                / "lib"
+                / "libcudart.so.13"
+            )
+    
+            cublas_lib = (
+                Path(
+                    cublas.__path__[0]
+                )
+                / "lib"
+                / "libcublas.so.13"
+            )
+    
+            if not cuda_lib.is_file():
+                raise RuntimeError(
+                    "Missing CUDA runtime library:\n"
+                    f"{cuda_lib}"
+                )
+    
+            if not cublas_lib.is_file():
+                raise RuntimeError(
+                    "Missing cuBLAS library:\n"
+                    f"{cublas_lib}"
+                )
+    
+            # Load CUDA libraries globally before llama.cpp loads
+            # libllama.so. This is required because the CUDA
+            # llama.cpp wheel does not bundle libcudart.
+            ctypes.CDLL(
+                str(cuda_lib),
+                mode=ctypes.RTLD_GLOBAL,
+            )
+    
+            ctypes.CDLL(
+                str(cublas_lib),
+                mode=ctypes.RTLD_GLOBAL,
+            )
+    
             from llama_cpp import Llama
-        except ImportError as exc:
-            raise RuntimeError(
-                "llama-cpp-python is not installed. "
-                "Run the Kaggle bootstrap before using "
-                "the Qwen director."
-            ) from exc
 
-        self._llama = Llama(
-            model_path=str(
-                self._model_path
-            ),
-            n_ctx=DIRECTOR_N_CTX,
-            n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
-            n_batch=DIRECTOR_N_BATCH,
-            n_threads=DIRECTOR_THREADS,
-            flash_attn=True,
-            verbose=False,
-        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "Qwen CUDA runtime dependencies are not installed. "
+            "Run kaggle/bootstrap.py first."
+        ) from exc
+
+    except OSError as exc:
+        raise RuntimeError(
+            "Qwen CUDA native libraries could not be loaded:\n"
+            f"{exc}"
+        ) from exc
+
+    self._llama = Llama(
+        model_path=str(
+            self._model_path
+        ),
+        n_ctx=DIRECTOR_N_CTX,
+        n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
+        n_batch=DIRECTOR_N_BATCH,
+        n_threads=DIRECTOR_THREADS,
+        flash_attn=True,
+        verbose=False,
+    )
 
     def unload(self) -> None:
         model = self._llama
