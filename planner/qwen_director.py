@@ -8,12 +8,6 @@ import re
 from copy import deepcopy
 from pathlib import Path
 
-from pipeline.identity_continuity import (
-    IdentityContinuity,
-)
-from pipeline.reference_manager import (
-    ReferenceManager,
-)
 from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_KAGGLE_INPUT_ROOT,
@@ -314,29 +308,59 @@ class QwenDirector:
         list[dict],
     ]:
 
+        story = (
+            str(
+                story or ""
+            )
+            .strip()
+        )
+
+        if not story:
+
+            return (
+                [],
+                [],
+            )
+
         planner = self._planner()
 
-        characters = (
-            planner.create_characters(
-                story
-            )
-        )
+        try:
 
-        scenes = (
-            planner.create_scenes(
-                story,
-                characters,
+            characters = (
+                planner.create_characters(
+                    story
+                )
+                or []
             )
-        )
+
+        except Exception:
+
+            characters = []
+
+        try:
+
+            scenes = (
+                planner.create_scenes(
+                    story,
+                    characters,
+                )
+                or []
+            )
+
+        except Exception:
+
+            scenes = []
 
         character_dicts = [
             character.to_dict()
             for character in characters
+            if character is not None
         ]
 
         scene_dicts = [
             scene.to_dict()
             for scene in scenes
+            if scene is not None
         ]
 
         return (
@@ -462,6 +486,7 @@ class QwenDirector:
         )
 
         if old_ld:
+
             directories.append(
                 old_ld
             )
@@ -784,6 +809,95 @@ Return JSON:
         )
 
     # ========================================================
+    # CHARACTER RECOVERY
+    # ========================================================
+
+    def _character_recovery_system(
+        self,
+        mode: str,
+    ) -> str:
+
+        return f"""
+You are the CHARACTER DIRECTOR for MiniMax H3.
+
+{self._mode_instruction(mode)}
+
+The main story response did not contain a usable
+character list.
+
+Read the supplied generated story and extract or
+create the characters required by that story.
+
+Do NOT invent unrelated characters.
+
+Return JSON only:
+
+{{
+  "characters": [
+    {{
+      "name": "string",
+      "role": "string",
+      "description": "string",
+      "personality": "string",
+      "appearance": {{}},
+      "clothing": {{}},
+      "distinctive_features": [],
+      "character_state": {{}},
+      "continuity_rules": []
+    }}
+  ]
+}}
+""".strip()
+
+    def _character_recovery_user(
+        self,
+        story: str,
+    ) -> str:
+
+        return json.dumps(
+            {
+                "story": self._limit_text(
+                    story,
+                    5500,
+                ),
+            },
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+    def _recover_characters(
+        self,
+        mode: str,
+        story: str,
+    ) -> list[dict]:
+
+        try:
+
+            response = self._chat_json(
+                self._character_recovery_system(
+                    mode
+                ),
+                self._character_recovery_user(
+                    story
+                ),
+                minimum_completion=450,
+            )
+
+        except Exception:
+
+            return []
+
+        return self._sanitize_characters(
+            response.get(
+                "characters",
+                [],
+            )
+        )
+
+    # ========================================================
     # SCENE RECOVERY
     # ========================================================
 
@@ -967,8 +1081,7 @@ speech_text
                             {},
                         ),
                     }
-                    for value
-                    in characters
+                    for value in characters
                 ],
                 "scene": {
                     "scene_id": scene.get(
@@ -1574,11 +1687,14 @@ speech_text
                     name
                 ).strip()
 
-                canonical = allowed.get(
-                    raw.lower()
+                canonical = (
+                    allowed.get(
+                        raw.lower()
+                    )
                 )
 
                 if canonical is not None:
+
                     selected.append(
                         canonical
                     )
@@ -1597,11 +1713,14 @@ speech_text
                     name
                 ).strip()
 
-                canonical = allowed.get(
-                    raw.lower()
+                canonical = (
+                    allowed.get(
+                        raw.lower()
+                    )
                 )
 
                 if canonical is not None:
+
                     speaking.append(
                         canonical
                     )
@@ -2099,43 +2218,6 @@ speech_text
             )
 
         # ----------------------------------------------------
-        # DETERMINISTIC FALLBACK DATA
-        # ----------------------------------------------------
-        #
-        # ProductionPlanner.build() intentionally supplies
-        # an empty creative skeleton while Qwen is enabled.
-        # Therefore use the planner's deterministic methods
-        # directly here when Qwen omits structural data.
-
-        fallback_characters = []
-        fallback_scenes = []
-
-        if (
-            not base_plan.get(
-                "characters"
-            )
-            or not base_plan.get(
-                "scenes"
-            )
-        ):
-
-            try:
-
-                (
-                    fallback_characters,
-                    fallback_scenes,
-                ) = (
-                    self._build_deterministic_fallback(
-                        user_input
-                    )
-                )
-
-            except Exception:
-
-                fallback_characters = []
-                fallback_scenes = []
-
-        # ----------------------------------------------------
         # PASS 1
         # ----------------------------------------------------
 
@@ -2149,49 +2231,6 @@ speech_text
             ),
             minimum_completion=650,
         )
-
-        # ----------------------------------------------------
-        # CHARACTERS
-        # ----------------------------------------------------
-
-        characters = (
-            self._sanitize_characters(
-                story_plan.get(
-                    "characters",
-                    [],
-                )
-            )
-        )
-
-        if not characters:
-
-            characters = (
-                self._sanitize_characters(
-                    base_plan.get(
-                        "characters",
-                        [],
-                    )
-                    or []
-                )
-            )
-
-        if not characters:
-
-            characters = (
-                self._sanitize_characters(
-                    fallback_characters
-                )
-            )
-
-        # A valid story can genuinely contain no
-        # characters. We therefore do NOT crash here.
-        character_names = {
-            character[
-                "name"
-            ].lower()
-            for character
-            in characters
-        }
 
         # ----------------------------------------------------
         # STORY
@@ -2220,7 +2259,73 @@ speech_text
         ).strip()
 
         # ----------------------------------------------------
-        # SCENES
+        # CHARACTERS FROM QWEN
+        # ----------------------------------------------------
+
+        characters = (
+            self._sanitize_characters(
+                story_plan.get(
+                    "characters",
+                    [],
+                )
+            )
+        )
+
+        # ----------------------------------------------------
+        # CHARACTER RECOVERY FROM GENERATED STORY
+        # ----------------------------------------------------
+
+        if not characters:
+
+            characters = (
+                self._recover_characters(
+                    mode=mode,
+                    story=story,
+                )
+            )
+
+        # ----------------------------------------------------
+        # DETERMINISTIC RECOVERY FROM GENERATED STORY
+        # ----------------------------------------------------
+
+        fallback_characters = []
+        fallback_scenes = []
+
+        if (
+            not characters
+            or not story_plan.get(
+                "scenes"
+            )
+        ):
+
+            (
+                fallback_characters,
+                fallback_scenes,
+            ) = (
+                self._build_deterministic_fallback(
+                    story
+                )
+            )
+
+        if not characters:
+
+            characters = (
+                self._sanitize_characters(
+                    fallback_characters
+                )
+            )
+
+        # A story is allowed to have zero named characters.
+        character_names = {
+            character[
+                "name"
+            ].lower()
+            for character
+            in characters
+        }
+
+        # ----------------------------------------------------
+        # SCENES FROM QWEN
         # ----------------------------------------------------
 
         scenes = (
@@ -2233,18 +2338,9 @@ speech_text
             )
         )
 
-        if not scenes:
-
-            scenes = (
-                self._sanitize_scenes(
-                    base_plan.get(
-                        "scenes",
-                        [],
-                    )
-                    or [],
-                    character_names,
-                )
-            )
+        # ----------------------------------------------------
+        # SCENE RECOVERY FROM GENERATED STORY
+        # ----------------------------------------------------
 
         if not scenes:
 
@@ -2266,12 +2362,12 @@ speech_text
                 )
             )
 
-        # Last deterministic scene fallback.
+        # ----------------------------------------------------
+        # FINAL SCENE SAFETY FALLBACK
+        # ----------------------------------------------------
+
         if not scenes:
 
-            # Create a minimal scene directly from the user's
-            # story rather than throwing away an otherwise valid
-            # production request.
             scenes = [
                 {
                     "scene_id": "scene_001",
@@ -2388,8 +2484,6 @@ speech_text
                 "order"
             ] = index
 
-        # Character validation is only required
-        # when characters actually exist.
         if characters:
 
             self._validate_shot_character_contract(
@@ -2449,10 +2543,6 @@ speech_text
             base_plan
         )
 
-        # ----------------------------------------------------
-        # STORY
-        # ----------------------------------------------------
-
         if mode == PRESERVE_USER_STORY_MODE:
 
             merged[
@@ -2491,10 +2581,6 @@ speech_text
             or ""
         )
 
-        # ----------------------------------------------------
-        # CHARACTERS
-        # ----------------------------------------------------
-
         creative_characters = (
             creative.get(
                 "characters",
@@ -2511,13 +2597,6 @@ speech_text
                 creative_characters
             )
 
-        # Otherwise preserve deterministic data
-        # already present in the plan.
-
-        # ----------------------------------------------------
-        # SCENES
-        # ----------------------------------------------------
-
         creative_scenes = (
             creative.get(
                 "scenes",
@@ -2533,10 +2612,6 @@ speech_text
             ] = deepcopy(
                 creative_scenes
             )
-
-        # ----------------------------------------------------
-        # SHOTS
-        # ----------------------------------------------------
 
         creative_shots = (
             creative.get(
