@@ -413,6 +413,25 @@ def install_director_runtime(
             "llama-cpp-python CUDA import failed."
         )
 
+def install_storyboard_runtime(
+    runtime: dict,
+) -> None:
+
+    version = runtime[
+        "storyboard"
+    ][
+        "gradio_version"
+    ]
+
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        f"gradio=={version}",
+    )
 
 def install_nodes() -> None:
 
@@ -623,9 +642,8 @@ def main():
         director_model,
     )
 
-    install_director_runtime(
-        runtime
-    )
+    install_director_runtime(runtime)
+    install_storyboard_runtime(runtime)
 
     install_nodes()
     install_models()
