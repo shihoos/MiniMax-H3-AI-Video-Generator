@@ -47,10 +47,6 @@ models/
 
 ComfyUI/
 
-# Old runtime artifacts
-.runtime_ltx098/
-cloudflared
-
 # ComfyUI worker logs
 data/workers/*
 !data/workers/.gitkeep
@@ -146,14 +142,6 @@ logs/
 # Production logs
 data/production/**/*.log
 
-# ============================================================
-# TEMPORARY / TEST ARTIFACTS
-# ============================================================
-
-*_TEST.json
-*.tmp
-*.temp
-*.bak
 
 # ============================================================
 # OS FILES
