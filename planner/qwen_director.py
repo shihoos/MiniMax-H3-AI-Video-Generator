@@ -198,11 +198,7 @@ class QwenDirector:
         loads libllama.so.
 
         Kaggle installs the NVIDIA CUDA packages under a
-        shared nvidia/cu13/lib directory, so do not assume
-        package-specific paths such as:
-
-            nvidia/cuda_runtime/lib
-            nvidia/cublas/lib
+        shared nvidia/cu13/lib directory.
         """
 
         import site
@@ -283,10 +279,9 @@ class QwenDirector:
                 "installed NVIDIA Python packages."
             )
 
-        # Prefer the CUDA 13 shared runtime directory that
-        # contains both libraries, exactly as installed by
-        # the Kaggle bootstrap.
-        cudart_lib = cudart_candidates[0]
+        cudart_lib = (
+            cudart_candidates[0]
+        )
 
         matching_cublas = [
             path
@@ -348,21 +343,20 @@ class QwenDirector:
             ) from exc
 
     def load(self) -> None:
+
         if not self.available:
             return
 
         if self._llama is not None:
             return
 
-        # IMPORTANT:
-        # The CUDA 13 llama.cpp wheel expects libcudart.so.13
-        # and related NVIDIA libraries to be available before
-        # libllama.so is loaded.
         self._load_nvidia_cuda_libraries()
 
         try:
             from llama_cpp import Llama
+
         except ImportError as exc:
+
             raise RuntimeError(
                 "llama-cpp-python is not installed. "
                 "Run the Kaggle bootstrap before using "
@@ -370,6 +364,7 @@ class QwenDirector:
             ) from exc
 
         except OSError as exc:
+
             raise RuntimeError(
                 "llama-cpp-python native CUDA library "
                 "could not be loaded:\n"
@@ -377,6 +372,7 @@ class QwenDirector:
             ) from exc
 
         try:
+
             self._llama = Llama(
                 model_path=str(
                     self._model_path
@@ -390,6 +386,7 @@ class QwenDirector:
             )
 
         except Exception as exc:
+
             raise RuntimeError(
                 "Failed to initialize the Qwen3-14B "
                 "director model.\n"
@@ -398,6 +395,7 @@ class QwenDirector:
             ) from exc
 
     def unload(self) -> None:
+
         model = self._llama
 
         self._llama = None
@@ -408,9 +406,11 @@ class QwenDirector:
         gc.collect()
 
         try:
+
             import torch
 
             if torch.cuda.is_available():
+
                 torch.cuda.empty_cache()
 
                 try:
@@ -538,89 +538,60 @@ class QwenDirector:
         }
 
     @staticmethod
-    def _creative_shot(
-        shot: dict,
+    def _scene_context(
+        scene: dict,
     ) -> dict:
 
+        """
+        Smaller scene representation for Qwen context.
+
+        Shot-level data is deliberately excluded because Qwen
+        is responsible for creating/revising the shots.
+        """
+
         return {
-            "shot_id": shot.get(
-                "shot_id",
-                "",
-            ),
-            "scene_id": shot.get(
+            "scene_id": scene.get(
                 "scene_id",
                 "",
             ),
-            "order": shot.get(
+            "order": scene.get(
                 "order",
                 0,
             ),
-            "duration_seconds": shot.get(
-                "duration_seconds",
-                5.2,
-            ),
-            "characters": shot.get(
-                "characters",
-                [],
-            ),
-            "location": shot.get(
+            "location": scene.get(
                 "location",
                 "",
             ),
-            "action": shot.get(
-                "action",
+            "time_of_day": scene.get(
+                "time_of_day",
                 "",
             ),
-            "camera_shot": shot.get(
-                "camera_shot",
+            "atmosphere": scene.get(
+                "atmosphere",
                 "",
             ),
-            "camera_movement": shot.get(
-                "camera_movement",
+            "description": scene.get(
+                "description",
                 "",
             ),
-            "lighting": shot.get(
-                "lighting",
-                "",
-            ),
-            "mood": shot.get(
+            "mood": scene.get(
                 "mood",
                 "",
             ),
-            "visual_prompt": shot.get(
-                "visual_prompt",
+            "lighting": scene.get(
+                "lighting",
                 "",
             ),
-            "retention_analysis": shot.get(
-                "retention_analysis",
-                "",
-            ),
-            "detailed_description": shot.get(
-                "detailed_description",
-                "",
-            ),
-            "overall_soundscape": shot.get(
-                "overall_soundscape",
-                "",
-            ),
-            "non_diegetic_music": shot.get(
-                "non_diegetic_music",
-                "",
-            ),
-            "negative_prompt": shot.get(
-                "negative_prompt",
-                "",
-            ),
-            "continuity_notes": shot.get(
-                "continuity_notes",
-                "",
-            ),
-            "speaking_characters": shot.get(
-                "speaking_characters",
+            "characters": scene.get(
+                "characters",
                 [],
             ),
-            "speech_text": shot.get(
-                "speech_text",
+            "scene_objective": scene.get(
+                "scene_objective",
+                "",
+            ),
+            "continuity_notes": scene.get(
+                "continuity_notes",
                 "",
             ),
         }
@@ -628,45 +599,69 @@ class QwenDirector:
     def _compact_plan(
         self,
         plan: dict,
+        mode: str,
     ) -> dict:
 
+        """
+        Build only the context Qwen actually needs.
+
+        AI STORY:
+            No existing plan is required.
+
+        EXPAND / PRESERVE:
+            Keep the existing story, character identity and
+            scene continuity, but do NOT send the old shot
+            graph back into the model.
+
+        This prevents the director prompt from consuming the
+        entire 8192-token context window.
+        """
+
+        if mode == AI_STORY_MODE:
+
+            return {
+                "story_mode": AI_STORY_MODE,
+            }
+
         compact = {
-            "story": plan.get(
-                "story",
-                "",
+            "story": str(
+                plan.get(
+                    "story",
+                    "",
+                )
+                or ""
             ),
-            "story_mode": plan.get(
-                "story_mode",
-                "",
+            "story_mode": str(
+                plan.get(
+                    "story_mode",
+                    mode,
+                )
+                or mode
             ),
             "characters": [
                 self._creative_character(
                     value
                 )
                 for value
-                in plan.get(
-                    "characters",
-                    [],
+                in (
+                    plan.get(
+                        "characters",
+                        [],
+                    )
+                    or []
                 )
             ],
             "scenes": [
-                self._creative_scene(
+                self._scene_context(
                     value
                 )
                 for value
-                in plan.get(
-                    "scenes",
-                    [],
-                )
-            ],
-            "shots": [
-                self._creative_shot(
-                    value
-                )
-                for value
-                in plan.get(
-                    "shots",
-                    [],
+                in (
+                    plan.get(
+                        "scenes",
+                        [],
+                    )
+                    or []
                 )
             ],
         }
@@ -682,14 +677,90 @@ class QwenDirector:
 
         if len(encoded) > DIRECTOR_MAX_PLAN_CHARS:
 
-            encoded = encoded[
-                :DIRECTOR_MAX_PLAN_CHARS
-            ]
+            # Keep the story and character identities,
+            # progressively removing the least important
+            # scene fields instead of slicing JSON blindly.
+            reduced_scenes = []
 
-            return {
-                "truncated_context": True,
-                "context": encoded,
-            }
+            for scene in compact[
+                "scenes"
+            ]:
+
+                reduced_scenes.append(
+                    {
+                        "scene_id":
+                            scene.get(
+                                "scene_id",
+                                "",
+                            ),
+                        "order":
+                            scene.get(
+                                "order",
+                                0,
+                            ),
+                        "location":
+                            scene.get(
+                                "location",
+                                "",
+                            ),
+                        "description":
+                            scene.get(
+                                "description",
+                                "",
+                            ),
+                        "characters":
+                            scene.get(
+                                "characters",
+                                [],
+                            ),
+                        "continuity_notes":
+                            scene.get(
+                                "continuity_notes",
+                                "",
+                            ),
+                    }
+                )
+
+            compact[
+                "scenes"
+            ] = reduced_scenes
+
+        encoded = json.dumps(
+            compact,
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+        if len(encoded) > DIRECTOR_MAX_PLAN_CHARS:
+
+            compact[
+                "scenes"
+            ] = [
+                {
+                    "scene_id":
+                        scene.get(
+                            "scene_id",
+                            "",
+                        ),
+                    "location":
+                        scene.get(
+                            "location",
+                            "",
+                        ),
+                    "description":
+                        scene.get(
+                            "description",
+                            "",
+                        ),
+                }
+                for scene
+                in compact[
+                    "scenes"
+                ]
+            ]
 
         return compact
 
@@ -795,6 +866,9 @@ overall_soundscape, non_diegetic_music,
 negative_prompt, continuity_notes,
 speaking_characters, speech_text.
 
+Create enough scenes and shots to turn the supplied
+story into a coherent cinematic production.
+
 Return a practical production plan, not an essay.
 """.strip()
 
@@ -805,12 +879,17 @@ Return a practical production plan, not an essay.
         plan: dict,
     ) -> str:
 
+        compact_plan = (
+            self._compact_plan(
+                plan,
+                mode,
+            )
+        )
+
         payload = {
             "mode": mode,
             "user_input": user_input,
-            "existing_plan": self._compact_plan(
-                plan
-            ),
+            "existing_context": compact_plan,
         }
 
         return (
@@ -818,8 +897,170 @@ Return a practical production plan, not an essay.
             + json.dumps(
                 payload,
                 ensure_ascii=False,
-                indent=2,
+                separators=(
+                    ",",
+                    ":",
+                ),
             )
+        )
+
+    # ========================================================
+    # TOKEN BUDGET
+    # ========================================================
+
+    def _count_tokens(
+        self,
+        text: str,
+    ) -> int:
+
+        try:
+
+            return len(
+                self._llama.tokenize(
+                    text.encode(
+                        "utf-8"
+                    ),
+                    add_bos=True,
+                    special=True,
+                )
+            )
+
+        except Exception as exc:
+
+            raise RuntimeError(
+                "Unable to measure the Qwen director "
+                "prompt token count."
+            ) from exc
+
+    def _fit_user_prompt(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> tuple[
+        str,
+        int,
+        int,
+    ]:
+
+        context_limit = int(
+            DIRECTOR_N_CTX
+        )
+
+        safety_margin = 128
+
+        prompt_text = (
+            system_prompt
+            + "\n\n"
+            + user_prompt
+        )
+
+        prompt_tokens = (
+            self._count_tokens(
+                prompt_text
+            )
+        )
+
+        if prompt_tokens <= (
+            context_limit
+            - safety_margin
+        ):
+
+            available_tokens = (
+                context_limit
+                - prompt_tokens
+                - safety_margin
+            )
+
+            return (
+                user_prompt,
+                prompt_tokens,
+                available_tokens,
+            )
+
+        # The user prompt is the part we can safely reduce.
+        # Keep the user story and mode while removing any
+        # unnecessary existing context.
+        fallback_payload = {
+            "mode": None,
+            "user_input": None,
+            "existing_context": {},
+        }
+
+        try:
+
+            parsed = json.loads(
+                user_prompt[
+                    user_prompt.find("{"):
+                ]
+            )
+
+            if isinstance(
+                parsed,
+                dict,
+            ):
+
+                fallback_payload[
+                    "mode"
+                ] = parsed.get(
+                    "mode",
+                    "",
+                )
+
+                fallback_payload[
+                    "user_input"
+                ] = parsed.get(
+                    "user_input",
+                    "",
+                )
+
+        except Exception:
+            pass
+
+        fallback_user_prompt = (
+            "Develop the following production request.\n\n"
+            + json.dumps(
+                fallback_payload,
+                ensure_ascii=False,
+                separators=(
+                    ",",
+                    ":",
+                ),
+            )
+        )
+
+        fallback_text = (
+            system_prompt
+            + "\n\n"
+            + fallback_user_prompt
+        )
+
+        fallback_tokens = (
+            self._count_tokens(
+                fallback_text
+            )
+        )
+
+        available_tokens = (
+            context_limit
+            - fallback_tokens
+            - safety_margin
+        )
+
+        if available_tokens >= 512:
+
+            return (
+                fallback_user_prompt,
+                fallback_tokens,
+                available_tokens,
+            )
+
+        raise RuntimeError(
+            "Qwen director system prompt itself is too "
+            "large for the configured context window.\n"
+            f"Prompt tokens: {fallback_tokens}\n"
+            f"Context limit: {context_limit}\n"
+            f"Safety margin: {safety_margin}\n"
+            f"Available completion tokens: {available_tokens}"
         )
 
     # ========================================================
@@ -930,6 +1171,15 @@ Return a practical production plan, not an essay.
             )
         )
 
+        (
+            fitted_user_prompt,
+            prompt_tokens,
+            available_tokens,
+        ) = self._fit_user_prompt(
+            system_prompt,
+            user_prompt,
+        )
+
         messages = [
             {
                 "role": "system",
@@ -937,65 +1187,9 @@ Return a practical production plan, not an essay.
             },
             {
                 "role": "user",
-                "content": user_prompt,
+                "content": fitted_user_prompt,
             },
         ]
-
-        # ----------------------------------------------------
-        # Keep the complete request inside the actual Qwen
-        # context window.
-        #
-        # llama.cpp counts both the formatted prompt and the
-        # generated completion against n_ctx.
-        # ----------------------------------------------------
-
-        context_limit = int(
-            DIRECTOR_N_CTX
-        )
-
-        safety_margin = 128
-
-        try:
-
-            prompt_text = (
-                system_prompt
-                + "\n\n"
-                + user_prompt
-            )
-
-            prompt_tokens = len(
-                self._llama.tokenize(
-                    prompt_text.encode(
-                        "utf-8"
-                    ),
-                    add_bos=True,
-                    special=True,
-                )
-            )
-
-        except Exception as exc:
-
-            raise RuntimeError(
-                "Unable to measure the Qwen director "
-                "prompt token count."
-            ) from exc
-
-        available_tokens = (
-            context_limit
-            - prompt_tokens
-            - safety_margin
-        )
-
-        if available_tokens < 512:
-
-            raise RuntimeError(
-                "Qwen director prompt is too large for "
-                f"the {context_limit}-token context window.\n"
-                f"Prompt tokens: {prompt_tokens}.\n"
-                f"Available completion tokens after the "
-                f"{safety_margin}-token safety margin: "
-                f"{available_tokens}."
-            )
 
         max_tokens = min(
             int(
@@ -1003,6 +1197,15 @@ Return a practical production plan, not an essay.
             ),
             available_tokens,
         )
+
+        if max_tokens < 512:
+
+            raise RuntimeError(
+                "Insufficient Qwen output capacity.\n"
+                f"Prompt tokens: {prompt_tokens}\n"
+                f"Available completion tokens: "
+                f"{available_tokens}"
+            )
 
         try:
 
@@ -1035,10 +1238,10 @@ Return a practical production plan, not an essay.
 
             raise RuntimeError(
                 "Qwen director generation exceeded the "
-                "available context window. "
-                f"Prompt tokens: {prompt_tokens}. "
-                f"Context limit: {context_limit}. "
-                f"Completion limit: {max_tokens}. "
+                "available context window.\n"
+                f"Prompt tokens: {prompt_tokens}\n"
+                f"Context limit: {DIRECTOR_N_CTX}\n"
+                f"Completion limit: {max_tokens}\n"
                 f"Error: {exc}"
             ) from exc
 
