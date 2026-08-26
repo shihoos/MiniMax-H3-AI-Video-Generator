@@ -116,11 +116,12 @@ class AssemblyManager:
             "-i",
             str(concat_file),
             "-vf",
+            "-vf",
             (
                 f"fps={fps},"
                 f"scale={width}:{height}:"
-                "force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:"
+                "force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}:"
                 f"({width}-iw)/2:"
                 f"({height}-ih)/2"
             ),
