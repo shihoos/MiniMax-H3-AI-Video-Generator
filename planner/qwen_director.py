@@ -872,6 +872,69 @@ Return JSON only:
             ),
         )
 
+    def _story_text_system(
+        self,
+        mode: str,
+    ) -> str:
+
+        if mode == AI_STORY_MODE:
+            return """
+You are the narrative writer for MiniMax H3.
+
+The user provides a premise.
+
+Write a complete cinematic short-film story.
+Add a protagonist objective, meaningful conflict,
+escalation, character reactions, a climax, and a resolution.
+Add substantive events; do not merely paraphrase the premise.
+
+Output ONLY the story prose.
+Do not output JSON.
+Do not output labels, analysis, notes, camera directions,
+or explanations.
+""".strip()
+
+        if mode == EXPAND_USER_STORY_MODE:
+            return """
+You are the narrative expansion writer for MiniMax H3.
+
+Expand the supplied story substantially while preserving
+its important characters, events, chronology, setting,
+outcome, and explicit constraints.
+
+Add motivation, emotional depth, cause and effect,
+transitions, intermediate events, stakes, tension,
+sensory detail, character reactions, stronger escalation,
+and richer consequences.
+
+Do not merely add adjectives.
+Do not replace the original plot.
+Do not convert the story into camera directions.
+
+Output ONLY the expanded story prose.
+Do not output JSON, labels, analysis, notes, or explanations.
+""".strip()
+
+        raise ValueError(
+            "Preserve Story does not use a story-text pass."
+        )
+
+    def _story_text_user(
+        self,
+        mode: str,
+        story: str,
+    ) -> str:
+
+        return (
+            "MODE: "
+            + str(mode)
+            + "\n\nSOURCE STORY / PREMISE:\n"
+            + self._limit_text(
+                story,
+                7000,
+            )
+        )
+
     def _metadata_director_system(
         self,
         mode: str,
@@ -1369,54 +1432,47 @@ Return JSON only:
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-You are given ONE scene and the production visual language bible.
+Create exactly 2 or 3 distinct shots for ONE scene.
 
-Create 2–4 distinct shots for that scene.
-
-Do not create new characters.
-Use only the supplied character names.
-
-SHOT / FRAMING VOCABULARY:
-extreme wide, wide, full shot, medium wide, medium, medium close-up,
-close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert,
-low angle, high angle, dutch angle, bird's eye, worm's eye.
-
-CAMERA MOVEMENT VOCABULARY:
-static/locked-off, slow pan, tilt, dolly in, dolly out, truck left,
-truck right, pedestal, crane, handheld, steadicam glide, whip pan,
-slow push-in, slow pull-out, orbit, tracking shot.
-
-LIGHTING VOCABULARY:
-warm tungsten (~3200K), cool daylight (~5600K), golden-hour backlight,
-blue-hour ambient, cool moonlight, practical neon, hard chiaroscuro,
-soft diffused overcast, firelight flicker, harsh overhead fluorescent,
-mixed practical and ambient light.
-
-LENS / DEPTH OF FIELD:
-wide-angle immersive perspective, normal perspective, telephoto compression,
-shallow depth of field with subject isolation and soft bokeh,
-deep focus with foreground/midground/background clarity.
-
-COMPOSITION:
-rule of thirds, centered symmetry, leading lines, foreground framing,
-negative space, silhouette, depth layering, visual obstruction, diagonal
-composition, subject isolation.
-
-Use the visual language bible as the consistency anchor.
-Do not randomly change the established palette or camera philosophy.
-
-Use cinematic progression across the shot list:
-1. establishing/orientation
-2. subject/action
-3. detail/reaction/escalation
-4. payoff/reveal when justified
+Use ONLY characters supplied in the scene.
 
 Every shot must materially advance or visualize the scene.
-Vary shot type, movement, composition, lens/depth of field, and lighting
-quality when the scene supports that variation. Do not default to the
-same medium shot and controlled movement combination.
+Use clear cinematic progression:
+1. orientation / establishing
+2. action / subject
+3. detail, reaction, escalation, or reveal when justified
 
-Return JSON only:
+Vary framing, movement, lens/DOF, composition, and lighting
+when the scene supports it. Do not repeat the same camera
+combination by default.
+
+FRAMING:
+extreme wide, wide, full shot, medium wide, medium,
+medium close-up, close-up, extreme close-up,
+over-the-shoulder, two-shot, POV, insert,
+low angle, high angle, dutch angle.
+
+MOVEMENT:
+static, slow pan, tilt, dolly in, dolly out, truck,
+pedestal, crane, handheld, steadicam glide,
+whip pan, push-in, pull-out, orbit, tracking shot.
+
+LENS / DOF:
+wide-angle, normal perspective, telephoto compression,
+shallow depth of field, deep focus, selective focus.
+
+COMPOSITION:
+rule of thirds, centered symmetry, leading lines,
+foreground framing, negative space, silhouette,
+depth layering, diagonal composition, subject isolation.
+
+LIGHTING:
+warm tungsten, cool daylight, golden-hour backlight,
+blue-hour ambient, moonlight, practical neon,
+hard chiaroscuro, soft diffused overcast,
+firelight flicker, mixed practical and ambient.
+
+Return JSON only with this compact structure:
 
 {
   "shots": [
@@ -1427,19 +1483,15 @@ Return JSON only:
       "characters": [],
       "location": "string",
       "action": "string",
-      "camera_shot": "string from the framing vocabulary",
-      "camera_movement": "string from the movement vocabulary",
+      "camera_shot": "string",
+      "camera_movement": "string",
       "lens_and_depth_of_field": "string",
-      "lighting": "string with quality and temperature",
-      "color_temperature": "string",
       "composition_notes": "string",
+      "lighting": "string",
+      "color_temperature": "string",
       "mood": "string",
       "visual_prompt": "string",
-      "retention_analysis": "string",
       "detailed_description": "string",
-      "overall_soundscape": "string",
-      "non_diegetic_music": "string",
-      "negative_prompt": "string",
       "continuity_notes": "string",
       "speaking_characters": [],
       "speech_text": ""
@@ -1661,10 +1713,133 @@ Return JSON only:
         top_p: float | None = None,
         call_name: str = "unknown",
         max_completion: int | None = None,
+        json_mode: bool = True,
     ) -> dict:
 
         if self._llama is None:
+            raise RuntimeError(
+                "Qwen director model is not loaded."
+            )
 
+        if temperature is None:
+            temperature = DIRECTOR_TEMPERATURE
+
+        if top_p is None:
+            top_p = DIRECTOR_TOP_P
+
+        _, max_tokens = (
+            self._available_output_tokens(
+                system_prompt,
+                user_prompt,
+                minimum_completion=minimum_completion,
+            )
+        )
+
+        if max_completion is not None:
+            max_tokens = min(
+                max_tokens,
+                int(max_completion),
+            )
+
+        kwargs = {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                },
+            ],
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+        }
+
+        if json_mode:
+            kwargs["response_format"] = {
+                "type": "json_object",
+            }
+
+        started = time.perf_counter()
+        response = None
+
+        try:
+            response = (
+                self._llama.create_chat_completion(
+                    **kwargs
+                )
+            )
+        finally:
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            usage = (
+                response.get(
+                    "usage",
+                    {},
+                )
+                if isinstance(
+                    response,
+                    dict,
+                )
+                else {}
+            )
+
+            print(
+                "[QWEN]",
+                call_name,
+                f"elapsed={elapsed:.2f}s",
+                f"prompt_tokens={usage.get('prompt_tokens', 0)}",
+                f"completion_tokens={usage.get('completion_tokens', 0)}",
+                f"max_tokens={max_tokens}",
+                flush=True,
+            )
+
+        try:
+            content = (
+                response[
+                    "choices"
+                ][0][
+                    "message"
+                ][
+                    "content"
+                ]
+            )
+        except (
+            KeyError,
+            IndexError,
+            TypeError,
+        ) as exc:
+            raise RuntimeError(
+                "Qwen director returned an "
+                "unexpected completion structure."
+            ) from exc
+
+        if not content:
+            raise RuntimeError(
+                "Qwen returned an empty response."
+            )
+
+        return self._extract_json(
+            content
+        )
+
+    def _chat_text(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        minimum_completion: int = 256,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        call_name: str = "unknown",
+        max_completion: int | None = None,
+    ) -> str:
+
+        if self._llama is None:
             raise RuntimeError(
                 "Qwen director model is not loaded."
             )
@@ -1690,9 +1865,9 @@ Return JSON only:
             )
 
         started = time.perf_counter()
+        response = None
 
         try:
-
             response = (
                 self._llama.create_chat_completion(
                     messages=[
@@ -1708,45 +1883,37 @@ Return JSON only:
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
-                    response_format={
-                        "type": "json_object",
-                    },
                 )
             )
-
         finally:
-
             elapsed = (
                 time.perf_counter()
                 - started
             )
 
-            try:
-
-                usage = (
-                    response.get(
-                        "usage",
-                        {},
-                    )
-                    if "response" in locals()
-                    else {}
+            usage = (
+                response.get(
+                    "usage",
+                    {},
                 )
-
-                print(
-                    "[QWEN]",
-                    call_name,
-                    f"elapsed={elapsed:.2f}s",
-                    f"prompt_tokens={usage.get('prompt_tokens', 0)}",
-                    f"completion_tokens={usage.get('completion_tokens', 0)}",
-                    f"max_tokens={max_tokens}",
-                    flush=True,
+                if isinstance(
+                    response,
+                    dict,
                 )
+                else {}
+            )
 
-            except Exception:
-                pass
+            print(
+                "[QWEN]",
+                call_name,
+                f"elapsed={elapsed:.2f}s",
+                f"prompt_tokens={usage.get('prompt_tokens', 0)}",
+                f"completion_tokens={usage.get('completion_tokens', 0)}",
+                f"max_tokens={max_tokens}",
+                flush=True,
+            )
 
         try:
-
             content = (
                 response[
                     "choices"
@@ -1756,27 +1923,26 @@ Return JSON only:
                     "content"
                 ]
             )
-
         except (
             KeyError,
             IndexError,
             TypeError,
         ) as exc:
-
             raise RuntimeError(
                 "Qwen director returned an "
                 "unexpected completion structure."
             ) from exc
 
-        if not content:
+        content = str(
+            content or ""
+        ).strip()
 
+        if not content:
             raise RuntimeError(
                 "Qwen returned an empty response."
             )
 
-        return self._extract_json(
-            content
-        )
+        return content
 
     # ========================================================
     # CHARACTER SANITIZATION
@@ -3175,19 +3341,16 @@ Return JSON only:
                 "Qwen director model failed to load."
             )
 
-        # ----------------------------------------------------
-        # PASS 1
-        # ----------------------------------------------------
-
         temperature, top_p = (
             self._sampling_for_mode(
                 mode
             )
         )
 
-        # Preserve Story never asks Qwen to regenerate the immutable
-        # narrative. This removes the largest unnecessary completion
-        # cost from Preserve mode.
+        # ----------------------------------------------------
+        # PASS 1A: narrative
+        # ----------------------------------------------------
+
         if mode == PRESERVE_USER_STORY_MODE:
 
             story = (
@@ -3196,55 +3359,47 @@ Return JSON only:
                 )
             )
 
-            story_plan = self._chat_json(
-                self._metadata_director_system(
-                    mode
-                ),
-                self._metadata_director_user(
-                    mode,
+            story_plan = {
+                "story":
                     story,
-                ),
-                minimum_completion=700,
-                temperature=0.20,
-                top_p=0.82,
-                call_name="preserve_metadata_pass",
-                max_completion=3200,
-            )
+            }
+
+            self._current_visual_language = {}
 
         else:
 
-            # AI Story / Expand Story first generate ONLY the narrative.
-            # This prevents a single large JSON completion from mixing
-            # narrative writing with characters/scenes metadata and then
-            # echoing the source story unchanged.
-            story_plan = self._chat_json(
+            story = ""
+
+            story_system = (
                 self._story_text_system(
                     mode
-                ),
+                )
+            )
+
+            story_user = (
                 self._story_text_user(
                     mode,
                     user_input,
-                ),
-                minimum_completion=500,
-                temperature=temperature,
-                top_p=top_p,
-                call_name=(
-                    "ai_story_text_pass"
-                    if mode == AI_STORY_MODE
-                    else "expand_story_text_pass"
-                ),
-                max_completion=1800,
+                )
             )
 
-            story = str(
-                story_plan.get(
-                    "story",
-                    "",
-                )
-                or ""
-            ).strip()
-
             try:
+
+                story = (
+                    self._chat_text(
+                        story_system,
+                        story_user,
+                        minimum_completion=350,
+                        temperature=temperature,
+                        top_p=top_p,
+                        call_name=(
+                            "ai_story_text_pass"
+                            if mode == AI_STORY_MODE
+                            else "expand_story_text_pass"
+                        ),
+                        max_completion=1600,
+                    )
+                )
 
                 self._validate_mode_output(
                     mode,
@@ -3255,47 +3410,36 @@ Return JSON only:
             except RuntimeError as first_error:
 
                 retry_user = (
-                    self._story_text_user(
-                        mode,
-                        user_input,
-                    )
+                    story_user
                     + "\n\n"
-                    "REPAIR REQUIRED. The previous narrative failed validation: "
-                    + str(first_error)
-                    + "\n"
-                    "Write a new, materially different narrative now. "
-                    "Return ONLY the required JSON object."
+                    "REPAIR REQUIRED.\n"
+                    f"Previous validation failure: {first_error}\n"
+                    "Write the complete narrative again. "
+                    "Return ONLY the story prose. "
+                    "Do not output JSON or commentary."
                 )
 
-                story_plan = self._chat_json(
-                    self._story_text_system(
-                        mode
-                    ),
-                    retry_user,
-                    minimum_completion=500,
-                    temperature=min(
-                        0.85,
-                        max(
-                            0.65,
-                            temperature + 0.10,
+                story = (
+                    self._chat_text(
+                        story_system,
+                        retry_user,
+                        minimum_completion=350,
+                        temperature=min(
+                            0.85,
+                            max(
+                                0.70,
+                                temperature + 0.10,
+                            ),
                         ),
-                    ),
-                    top_p=0.92,
-                    call_name=(
-                        "ai_story_text_retry"
-                        if mode == AI_STORY_MODE
-                        else "expand_story_text_retry"
-                    ),
-                    max_completion=1800,
-                )
-
-                story = str(
-                    story_plan.get(
-                        "story",
-                        "",
+                        top_p=0.92,
+                        call_name=(
+                            "ai_story_text_retry"
+                            if mode == AI_STORY_MODE
+                            else "expand_story_text_retry"
+                        ),
+                        max_completion=1600,
                     )
-                    or ""
-                ).strip()
+                )
 
                 self._validate_mode_output(
                     mode,
@@ -3303,41 +3447,60 @@ Return JSON only:
                     story,
                 )
 
-            metadata_plan = self._chat_json(
-                self._metadata_director_system(
-                    mode
-                ),
-                self._metadata_director_user(
-                    mode,
+            story_plan = {
+                "story":
                     story,
-                ),
-                minimum_completion=700,
-                temperature=temperature,
-                top_p=top_p,
-                call_name=(
+            }
+
+        # ----------------------------------------------------
+        # PASS 1B: production metadata
+        # ----------------------------------------------------
+
+        metadata_response = self._chat_json(
+            self._metadata_director_system(
+                mode
+            ),
+            self._metadata_director_user(
+                mode,
+                story,
+            ),
+            minimum_completion=600,
+            temperature=(
+                0.20
+                if mode == PRESERVE_USER_STORY_MODE
+                else temperature
+            ),
+            top_p=(
+                0.82
+                if mode == PRESERVE_USER_STORY_MODE
+                else top_p
+            ),
+            call_name=(
+                "preserve_metadata_pass"
+                if mode == PRESERVE_USER_STORY_MODE
+                else (
                     "ai_story_metadata_pass"
                     if mode == AI_STORY_MODE
                     else "expand_story_metadata_pass"
-                ),
-                max_completion=3200,
+                )
+            ),
+            max_completion=2600,
+            json_mode=True,
+        )
+
+        story_plan.update(
+            metadata_response
+        )
+
+        story = (
+            self._normalize_story(
+                story_plan.get(
+                    "story",
+                    story,
+                )
+                or story
             )
-
-            # Keep the narrative generated above and use the metadata
-            # completion only for production structure.
-            metadata_plan["story"] = story
-            story_plan = metadata_plan
-
-        # ----------------------------------------------------
-        # Normalize PASS 1 output for PASS 2
-        # ----------------------------------------------------
-
-        story = str(
-            story_plan.get(
-                "story",
-                story,
-            )
-            or story
-        ).strip()
+        )
 
         director_notes = str(
             story_plan.get(
@@ -3362,6 +3525,10 @@ Return JSON only:
             )
         )
 
+        # ----------------------------------------------------
+        # CHARACTERS
+        # ----------------------------------------------------
+
         characters = (
             self._sanitize_characters(
                 story_plan.get(
@@ -3372,12 +3539,17 @@ Return JSON only:
         )
 
         if not characters:
+
             characters = (
                 self._recover_characters(
                     mode,
                     story,
                 )
             )
+
+        # ----------------------------------------------------
+        # SCENES
+        # ----------------------------------------------------
 
         character_names = {
             str(
@@ -3407,6 +3579,7 @@ Return JSON only:
         )
 
         if not scenes:
+
             scenes = (
                 self._recover_scenes(
                     mode,
@@ -3417,32 +3590,80 @@ Return JSON only:
             )
 
         if not scenes:
+
+            fallback_characters, fallback_scenes = (
+                self._build_deterministic_fallback(
+                    story
+                )
+            )
+
+            if not characters:
+
+                characters = (
+                    self._sanitize_characters(
+                        fallback_characters
+                    )
+                )
+
+                character_names = {
+                    str(
+                        character.get(
+                            "name",
+                            "",
+                        )
+                    ).strip().lower()
+                    for character
+                    in characters
+                    if str(
+                        character.get(
+                            "name",
+                            "",
+                        )
+                    ).strip()
+                }
+
+            scenes = (
+                self._sanitize_scenes(
+                    fallback_scenes,
+                    character_names,
+                )
+            )
+
+        if not scenes:
+
             raise RuntimeError(
                 "Qwen director produced no usable scenes."
             )
 
         # ----------------------------------------------------
-        # PASS 2
+        # PASS 2: cinematography
         # ----------------------------------------------------
 
         all_shots: list[dict] = []
 
         for scene in scenes:
 
-            try:
-                shot_temperature, shot_top_p = (
-                    self._shot_sampling()
+            shot_temperature, shot_top_p = (
+                self._shot_sampling()
+            )
+
+            scene_shots: list[dict] = []
+
+            shot_user = (
+                self._shot_director_user(
+                    story,
+                    characters,
+                    scene,
+                    visual_language,
                 )
+            )
+
+            try:
 
                 shot_plan = self._chat_json(
                     self._shot_director_system(),
-                    self._shot_director_user(
-                        story,
-                        characters,
-                        scene,
-                        visual_language,
-                    ),
-                    minimum_completion=450,
+                    shot_user,
+                    minimum_completion=250,
                     temperature=shot_temperature,
                     top_p=shot_top_p,
                     call_name=(
@@ -3454,7 +3675,8 @@ Return JSON only:
                             )
                         )
                     ),
-                    max_completion=1800,
+                    max_completion=1000,
+                    json_mode=False,
                 )
 
                 scene_shots = (
@@ -3468,13 +3690,75 @@ Return JSON only:
                     )
                 )
 
-            except Exception:
+            except Exception as first_shot_error:
 
-                scene_shots = []
+                print(
+                    "[QWEN]",
+                    "shot_retry",
+                    scene.get(
+                        "scene_id",
+                        "unknown",
+                    ),
+                    str(
+                        first_shot_error
+                    ),
+                    flush=True,
+                )
 
-            if len(
-                scene_shots
-            ) < 2:
+                retry_user = (
+                    shot_user
+                    + "\n\n"
+                    "RETRY. Return exactly 2 shots. "
+                    "Keep each field concise. "
+                    "Return JSON only with the required keys."
+                )
+
+                try:
+
+                    shot_plan = self._chat_json(
+                        self._shot_director_system(),
+                        retry_user,
+                        minimum_completion=250,
+                        temperature=0.72,
+                        top_p=0.94,
+                        call_name=(
+                            "shot_retry:"
+                            + str(
+                                scene.get(
+                                    "scene_id",
+                                    "unknown",
+                                )
+                            )
+                        ),
+                        max_completion=900,
+                        json_mode=False,
+                    )
+
+                    scene_shots = (
+                        self._sanitize_shots(
+                            shot_plan.get(
+                                "shots",
+                                [],
+                            ),
+                            scene,
+                            character_names,
+                        )
+                    )
+
+                except Exception:
+                    scene_shots = []
+
+            if len(scene_shots) < 2:
+
+                print(
+                    "[QWEN]",
+                    "shot_fallback",
+                    scene.get(
+                        "scene_id",
+                        "unknown",
+                    ),
+                    flush=True,
+                )
 
                 scene_shots = (
                     self._fallback_shots_for_scene(
@@ -3500,7 +3784,6 @@ Return JSON only:
             all_shots,
         )
 
-        # Rebuild scene shot IDs.
         for scene in scenes:
 
             scene[
@@ -3519,12 +3802,10 @@ Return JSON only:
                 )
             ]
 
-        if characters:
-
-            self._validate_shot_character_contract(
-                all_shots,
-                characters,
-            )
+        self._validate_shot_character_contract(
+            all_shots,
+            characters,
+        )
 
         return {
             "enabled": True,
