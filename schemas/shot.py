@@ -23,7 +23,11 @@ class Shot:
     camera_shot: str = ""
     camera_movement: str = ""
 
+    lens_and_depth_of_field: str = ""
+    composition_notes: str = ""
+
     lighting: str = ""
+    color_temperature: str = ""
     mood: str = ""
 
     visual_prompt: str = ""
@@ -76,7 +80,6 @@ class Shot:
         default_factory=list
     )
 
-    # Production workflow controls.
     workflow_mode: str = "auto"
 
     keyframe_images: list = field(
@@ -143,6 +146,16 @@ class Shot:
             or self.action.strip()
         )
 
+        cinematography = (
+            f"Shot: {self.camera_shot}; "
+            f"Movement: {self.camera_movement}; "
+            f"Lens/DOF: {self.lens_and_depth_of_field}; "
+            f"Composition: {self.composition_notes}; "
+            f"Lighting: {self.lighting}; "
+            f"Color temperature: {self.color_temperature}; "
+            f"Mood: {self.mood}"
+        )
+
         return (
             "subject_definitions:\n"
             f"{subjects}\n\n"
@@ -159,10 +172,7 @@ class Shot:
             "detailed_description:\n"
             f"{description}\n"
             f"Location: {self.location}\n"
-            f"Camera: {self.camera_shot}; "
-            f"{self.camera_movement}\n"
-            f"Lighting: {self.lighting}\n"
-            f"Mood: {self.mood}\n"
+            f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n\n"
 
             "overall_soundscape:\n"
@@ -189,7 +199,18 @@ class Shot:
             "camera_shot": self.camera_shot,
             "camera_movement": self.camera_movement,
 
+            "lens_and_depth_of_field": (
+                self.lens_and_depth_of_field
+            ),
+
+            "composition_notes": (
+                self.composition_notes
+            ),
+
             "lighting": self.lighting,
+            "color_temperature": (
+                self.color_temperature
+            ),
             "mood": self.mood,
 
             "visual_prompt": self.visual_prompt,
@@ -238,10 +259,6 @@ class Shot:
 
             "reference_audio_by_character": (
                 self.reference_audio_by_character
-            ),
-
-            "reference_video_by_character": (
-                self.reference_video_by_character
             ),
 
             "speaking_characters": (
