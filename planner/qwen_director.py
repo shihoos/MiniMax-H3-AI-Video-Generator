@@ -3328,6 +3328,100 @@ Return JSON only:
             story_plan = metadata_plan
 
         # ----------------------------------------------------
+        # Normalize PASS 1 output for PASS 2
+        # ----------------------------------------------------
+
+        story = str(
+            story_plan.get(
+                "story",
+                story,
+            )
+            or story
+        ).strip()
+
+        director_notes = str(
+            story_plan.get(
+                "director_notes",
+                "",
+            )
+            or ""
+        ).strip()
+
+        visual_language = (
+            self._sanitize_visual_language(
+                story_plan.get(
+                    "visual_language",
+                    {},
+                )
+            )
+        )
+
+        self._current_visual_language = (
+            dict(
+                visual_language
+            )
+        )
+
+        characters = (
+            self._sanitize_characters(
+                story_plan.get(
+                    "characters",
+                    [],
+                )
+            )
+        )
+
+        if not characters:
+            characters = (
+                self._recover_characters(
+                    mode,
+                    story,
+                )
+            )
+
+        character_names = {
+            str(
+                character.get(
+                    "name",
+                    "",
+                )
+            ).strip().lower()
+            for character
+            in characters
+            if str(
+                character.get(
+                    "name",
+                    "",
+                )
+            ).strip()
+        }
+
+        scenes = (
+            self._sanitize_scenes(
+                story_plan.get(
+                    "scenes",
+                    [],
+                ),
+                character_names,
+            )
+        )
+
+        if not scenes:
+            scenes = (
+                self._recover_scenes(
+                    mode,
+                    story,
+                    characters,
+                    character_names,
+                )
+            )
+
+        if not scenes:
+            raise RuntimeError(
+                "Qwen director produced no usable scenes."
+            )
+
+        # ----------------------------------------------------
         # PASS 2
         # ----------------------------------------------------
 
