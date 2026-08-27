@@ -1367,7 +1367,7 @@ def serve_storyboard_gradio(
     demo.launch(
         server_name="0.0.0.0",
         server_port=8765,
-        share=False,
+        share=True,
         show_error=True,
     )
 
