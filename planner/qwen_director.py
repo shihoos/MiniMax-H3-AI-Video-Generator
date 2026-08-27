@@ -2667,6 +2667,15 @@ Return JSON only:
             )
         )
 
+        story_system = self._story_director_system(
+            mode
+        )
+
+        story_user = self._story_director_user(
+            mode,
+            user_input,
+        )
+
         story_plan = self._chat_json(
             story_system,
             story_user,
