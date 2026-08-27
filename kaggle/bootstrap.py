@@ -42,7 +42,11 @@ RUNTIME_MANIFEST = (
 )
 
 
-def run(*args) -> None:
+def run(
+    *args,
+    env=None,
+) -> None:
+
     print(
         "+",
         " ".join(
@@ -57,6 +61,7 @@ def run(*args) -> None:
             for value in args
         ],
         check=True,
+        env=env,
     )
 
 
@@ -90,6 +95,7 @@ def find_kaggle_file(
     for path in KAGGLE_INPUT.rglob(
         "*"
     ):
+
         if (
             path.is_file()
             and path.name.lower()
@@ -100,11 +106,14 @@ def find_kaggle_file(
             )
 
     if not matches:
+
         raise FileNotFoundError(
-            f"Required Kaggle asset not found: {filename}"
+            "Required Kaggle asset not found: "
+            f"{filename}"
         )
 
     if len(matches) > 1:
+
         raise RuntimeError(
             f"Multiple copies found for {filename}:\n"
             + "\n".join(
@@ -281,17 +290,14 @@ def install_director_runtime(
     print(
         "=" * 80
     )
+
     print(
         "INSTALLING QWEN DIRECTOR RUNTIME"
     )
+
     print(
         "=" * 80
     )
-
-    # --------------------------------------------------------
-    # CUDA runtime libraries required by the CUDA-enabled
-    # llama.cpp wheel.
-    # --------------------------------------------------------
 
     run(
         sys.executable,
@@ -309,6 +315,7 @@ def install_director_runtime(
     )
 
     if not library_dirs:
+
         raise RuntimeError(
             "NVIDIA CUDA runtime packages installed, "
             "but no native CUDA library directories were found."
@@ -337,11 +344,13 @@ def install_director_runtime(
     )
 
     if not has_cudart:
+
         raise RuntimeError(
             "libcudart.so.13 was not found."
         )
 
     if not has_cublas:
+
         raise RuntimeError(
             "libcublas.so.13 was not found."
         )
@@ -357,14 +366,11 @@ def install_director_runtime(
     )
 
     for directory in library_dirs:
+
         print(
             " ",
             directory,
         )
-
-    # --------------------------------------------------------
-    # CUDA-enabled llama.cpp wheel.
-    # --------------------------------------------------------
 
     run(
         sys.executable,
@@ -378,10 +384,6 @@ def install_director_runtime(
         "--extra-index-url",
         cuda_index,
     )
-
-    # --------------------------------------------------------
-    # Verify the native shared library can actually load.
-    # --------------------------------------------------------
 
     verification = subprocess.run(
         [
@@ -409,9 +411,11 @@ def install_director_runtime(
         )
 
     if verification.returncode != 0:
+
         raise RuntimeError(
             "llama-cpp-python CUDA import failed."
         )
+
 
 def install_storyboard_runtime(
     runtime: dict,
@@ -432,6 +436,7 @@ def install_storyboard_runtime(
         "--disable-pip-version-check",
         f"gradio=={version}",
     )
+
 
 def install_nodes() -> None:
 
@@ -552,10 +557,15 @@ def verify_inventory() -> None:
     )
 
     expected = {
-        value[
-            "filename"
-        ].lower()
-        for value
+        (
+            model[
+                "directory"
+            ],
+            model[
+                "filename"
+            ].lower(),
+        )
+        for model
         in manifest[
             "models"
         ].values()
@@ -563,28 +573,37 @@ def verify_inventory() -> None:
 
     actual = set()
 
-    for directory in (
+    production_directories = {
         "diffusion_models",
         "text_encoders",
         "loras",
         "vae",
         "latent_upscale_models",
+    }
+
+    for directory_name in (
+        production_directories
     ):
 
-        path = (
+        directory = (
             MODELS
-            / directory
+            / directory_name
         )
 
-        if not path.is_dir():
+        if not directory.is_dir():
             continue
 
-        for item in path.iterdir():
+        for item in directory.iterdir():
 
-            if item.is_file():
-                actual.add(
-                    item.name.lower()
+            if not item.is_file():
+                continue
+
+            actual.add(
+                (
+                    directory_name,
+                    item.name.lower(),
                 )
+            )
 
     missing = (
         expected
@@ -597,20 +616,26 @@ def verify_inventory() -> None:
     )
 
     if missing:
+
         raise RuntimeError(
             "Missing H3 models:\n"
             + "\n".join(
-                sorted(
+                f"{directory}/{filename}"
+                for directory, filename
+                in sorted(
                     missing
                 )
             )
         )
 
     if unexpected:
+
         raise RuntimeError(
             "Unexpected H3 production models:\n"
             + "\n".join(
-                sorted(
+                f"{directory}/{filename}"
+                for directory, filename
+                in sorted(
                     unexpected
                 )
             )
@@ -642,11 +667,18 @@ def main():
         director_model,
     )
 
-    install_director_runtime(runtime)
-    install_storyboard_runtime(runtime)
+    install_director_runtime(
+        runtime
+    )
+
+    install_storyboard_runtime(
+        runtime
+    )
 
     install_nodes()
+
     install_models()
+
     verify_inventory()
 
     print(
