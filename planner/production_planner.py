@@ -327,14 +327,14 @@ class ProductionPlanner:
         self,
         story: str,
     ) -> list[StoryUnit]:
-    
+
         story = self._clean_text(
             story
         )
-    
+
         if not story:
             return []
-    
+
         paragraphs = [
             self._clean_text(
                 paragraph
@@ -348,11 +348,14 @@ class ProductionPlanner:
                 paragraph
             )
         ]
-    
+
+        if not paragraphs:
+            paragraphs = [story]
+
         units: list[str] = []
-    
+
         for paragraph in paragraphs:
-    
+
             sentences = [
                 self._clean_text(
                     sentence
@@ -366,70 +369,56 @@ class ProductionPlanner:
                     sentence
                 )
             ]
-    
-            # Short paragraphs are kept intact.
+
             if len(sentences) <= 2:
-    
-                units.append(
-                    paragraph
-                )
-    
+                units.append(paragraph)
                 continue
-    
-            # Longer paragraphs are grouped into meaningful
-            # narrative beats instead of becoming one giant scene.
+
+            # A long single paragraph is divided into small
+            # narrative beats. Two sentences per beat gives the
+            # deterministic fallback useful scene granularity
+            # without pretending to be the creative director.
             current: list[str] = []
-    
+
             for sentence in sentences:
-    
-                current.append(
-                    sentence
+
+                current.append(sentence)
+
+                transition = re.search(
+                    r"\b(?:"
+                    r"then|suddenly|meanwhile|later|"
+                    r"after|before|when|but|however|"
+                    r"finally|eventually|soon|"
+                    r"moments later|as soon as"
+                    r")\b",
+                    sentence,
+                    flags=re.IGNORECASE,
                 )
-    
-                joined = " ".join(
-                    current
-                )
-    
-                has_transition = bool(
-                    re.search(
-                        r"\b("
-                        r"then|suddenly|meanwhile|"
-                        r"later|after|before|"
-                        r"when|but|however|"
-                        r"finally|"
-                        r"as\s+soon\s+as"
-                        r")\b",
-                        sentence,
-                        flags=re.IGNORECASE,
-                    )
-                )
-    
+
                 if (
                     len(current) >= 2
-                    and (
-                        has_transition
-                        or len(joined) >= 280
-                    )
+                    and transition is not None
                 ):
-    
                     units.append(
-                        joined
+                        " ".join(current)
                     )
-    
                     current = []
-    
-            if current:
-    
-                units.append(
-                    " ".join(
-                        current
+                    continue
+
+                if len(current) >= 2:
+                    units.append(
+                        " ".join(current)
                     )
+                    current = []
+
+            if current:
+                units.append(
+                    " ".join(current)
                 )
-    
+
         if not units:
-    
             units = [story]
-    
+
         return [
             StoryUnit(
                 order=index,
@@ -536,16 +525,14 @@ class ProductionPlanner:
         self,
         story: str,
     ) -> list[str]:
-    
+
         story = self._clean_text(
             story
         )
-    
+
         if not story:
             return []
-    
-        candidates: list[str] = []
-    
+
         role_names = {
             "woman",
             "man",
@@ -566,56 +553,44 @@ class ProductionPlanner:
             "android",
             "pilot",
         }
-    
-        # --------------------------------------------------------
-        # First collect explicit character names.
-        #
-        # Examples:
-        #   a young man named Eli
-        #   a woman called Sara
-        #
-        # A generic descriptor that belongs to the same phrase
-        # must NOT become a second character.
-        # --------------------------------------------------------
-    
+
+        # Explicit names are authoritative. A phrase such as
+        # "a young man named Eli" represents ONE character:
+        # Eli. The generic role "man" is metadata for Eli.
         explicit_names: list[str] = []
-    
-        for match in re.finditer(
+
+        named_pattern = re.compile(
             r"\b(?:named|called)\s+"
             r"([A-Z][A-Za-z0-9'_-]+"
-            r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
-            story,
+            r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b"
+        )
+
+        for match in named_pattern.finditer(
+            story
         ):
-    
+
             name = match.group(
                 1
             ).strip()
-    
+
             if not name:
                 continue
-    
+
             if name in self.COMMON_PROPER_WORDS:
                 continue
-    
+
             explicit_names.append(
                 name
             )
-    
+
         explicit_lower = {
             name.lower()
-            for name
-            in explicit_names
+            for name in explicit_names
         }
-    
-        # --------------------------------------------------------
-        # Generic character roles.
-        # --------------------------------------------------------
-    
+
         role_pattern = re.compile(
             r"\b(?:a|an|the)\s+"
-            r"(?:"
-            r"[a-z][a-z'-]*\s+"
-            r"){0,3}"
+            r"(?:[a-z][a-z'-]*\s+){0,3}"
             r"("
             + "|".join(
                 sorted(
@@ -627,117 +602,111 @@ class ProductionPlanner:
             + r")\b",
             flags=re.IGNORECASE,
         )
-    
+
+        candidates: list[str] = []
+
         for match in role_pattern.finditer(
             story
         ):
-    
+
             role = (
-                match.group(
-                    1
-                )
+                match.group(1)
                 .strip()
                 .lower()
             )
-    
+
             if role not in role_names:
                 continue
-    
-            # ----------------------------------------------------
-            # Check whether this role occurs in a "named/called"
-            # phrase whose explicit name has already been captured.
-            #
-            # Example:
-            #   "a young man named Eli"
-            #
-            # In that case "man" is metadata for Eli, not another
-            # character.
-            # ----------------------------------------------------
-    
+
+            # Look immediately after the role first. This catches
+            # the canonical forms "a man named Eli" and
+            # "a woman called Sara" without producing duplicates.
+            tail = story[
+                match.end():
+                min(
+                    len(story),
+                    match.end() + 48,
+                )
+            ]
+
+            nearby_name = re.match(
+                r"\s*,?\s*(?:named|called)\s+"
+                r"([A-Z][A-Za-z0-9'_-]+"
+                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
+                tail,
+            )
+
+            if (
+                nearby_name is not None
+                and nearby_name.group(1).strip().lower()
+                in explicit_lower
+            ):
+                continue
+
+            # Also check the surrounding phrase for a nearby
+            # explicit name. This handles adjective-heavy forms
+            # such as "the heavily wounded young man named Eli".
             start = max(
                 0,
                 match.start() - 80,
             )
-    
-            end = min(
-                len(story),
-                match.end() + 80,
-            )
-    
-            context = (
-                story[
-                    start:end
-                ]
-            )
-    
-            if re.search(
-                r"\b"
-                r"(?:named|called)"
-                r"\s+"
-                r"[A-Z][A-Za-z0-9'_-]+",
-                context,
-            ):
-    
-                nearby_name_match = re.search(
-                    r"\b(?:named|called)\s+"
-                    r"([A-Z][A-Za-z0-9'_-]+"
-                    r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
-                    context,
+
+            context = story[
+                start:
+                min(
+                    len(story),
+                    match.end() + 48,
                 )
-    
-                if nearby_name_match:
-    
-                    nearby_name = (
-                        nearby_name_match
-                        .group(1)
-                        .strip()
-                        .lower()
-                    )
-    
-                    if nearby_name in explicit_lower:
-                        continue
-    
+            ]
+
+            surrounding_name = re.search(
+                r"\b(?:named|called)\s+"
+                r"([A-Z][A-Za-z0-9'_-]+"
+                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
+                context,
+            )
+
+            if (
+                surrounding_name is not None
+                and surrounding_name.group(1).strip().lower()
+                in explicit_lower
+            ):
+                continue
+
             candidates.append(
                 role
             )
-    
-        # --------------------------------------------------------
-        # Explicit names are authoritative.
-        # --------------------------------------------------------
-    
+
+        # Explicit names always win over generic role descriptors.
+        # Keep the named identity and let _make_character infer its
+        # role from the surrounding story.
         candidates.extend(
             explicit_names
         )
-    
-        # --------------------------------------------------------
-        # Final de-duplication.
-        # --------------------------------------------------------
-    
+
         result: list[str] = []
         seen: set[str] = set()
-    
+
         for value in candidates:
-    
+
             value = str(
                 value
             ).strip()
-    
+
             if not value:
                 continue
-    
+
             key = value.lower()
-    
+
             if key in seen:
                 continue
-    
-            seen.add(
-                key
-            )
-    
+
+            seen.add(key)
+
             result.append(
                 value
             )
-    
+
         return result
 
     @staticmethod
