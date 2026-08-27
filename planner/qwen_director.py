@@ -1473,7 +1473,12 @@ blue-hour ambient, moonlight, practical neon,
 hard chiaroscuro, soft diffused overcast,
 firelight flicker, mixed practical and ambient.
 
-Return JSON only with this compact structure:
+Return JSON only.
+The top-level value MUST be an object with a "shots" array.
+NEVER return a bare shot object.
+The "shots" array MUST contain exactly 2 objects.
+
+Required structure:
 
 {
   "shots": [
@@ -2484,6 +2489,61 @@ Return JSON only with this compact structure:
     # ========================================================
     # SHOT SANITIZATION
     # ========================================================
+
+    @staticmethod
+    def _normalize_shot_response(
+        response: dict,
+    ) -> list[dict]:
+
+        if not isinstance(
+            response,
+            dict,
+        ):
+            return []
+
+        shots = response.get(
+            "shots"
+        )
+
+        if isinstance(
+            shots,
+            list,
+        ):
+            return [
+                item
+                for item
+                in shots
+                if isinstance(
+                    item,
+                    dict,
+                )
+            ]
+
+        # Qwen3 sometimes returns a single shot object even when the
+        # prompt requests {"shots": [...]}. That response is still useful.
+        shot_fields = {
+            "shot_id",
+            "camera_shot",
+            "camera_movement",
+            "lens_and_depth_of_field",
+            "composition_notes",
+            "lighting",
+            "color_temperature",
+            "mood",
+            "visual_prompt",
+        }
+
+        if (
+            shot_fields
+            & set(
+                response.keys()
+            )
+        ):
+            return [
+                response
+            ]
+
+        return []
 
     def _sanitize_shots(
         self,
@@ -3715,9 +3775,8 @@ Return JSON only with this compact structure:
 
                 scene_shots = (
                     self._sanitize_shots(
-                        shot_plan.get(
-                            "shots",
-                            [],
+                        self._normalize_shot_response(
+                            shot_plan
                         ),
                         scene,
                         character_names,
@@ -3770,9 +3829,8 @@ Return JSON only with this compact structure:
 
                     scene_shots = (
                         self._sanitize_shots(
-                            shot_plan.get(
-                                "shots",
-                                [],
+                            self._normalize_shot_response(
+                                shot_plan
                             ),
                             scene,
                             character_names,
@@ -3786,15 +3844,16 @@ Return JSON only with this compact structure:
 
                 print(
                     "[QWEN]",
-                    "shot_fallback",
+                    "shot_completion_fallback",
                     scene.get(
                         "scene_id",
                         "unknown",
                     ),
+                    f"usable_qwen_shots={len(scene_shots)}",
                     flush=True,
                 )
 
-                scene_shots = (
+                fallback_shots = (
                     self._fallback_shots_for_scene(
                         scene,
                         len(
@@ -3802,6 +3861,25 @@ Return JSON only with this compact structure:
                         ) + 1,
                     )
                 )
+
+                if scene_shots:
+
+                    # Preserve the valid Qwen shot and use only the missing
+                    # fallback shots. Never discard good model output.
+                    needed = 2 - len(
+                        scene_shots
+                    )
+
+                    for fallback in fallback_shots[:needed]:
+                        scene_shots.append(
+                            fallback
+                        )
+
+                else:
+
+                    scene_shots = (
+                        fallback_shots
+                    )
 
             all_shots.extend(
                 scene_shots
