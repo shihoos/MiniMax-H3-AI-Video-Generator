@@ -1100,7 +1100,6 @@ def build_app(
     initial_story: str | None = None,
     initial_mode: str = "ai_story",
 ):
-
     try:
 
         import gradio as gr
@@ -1115,6 +1114,135 @@ def build_app(
         controller
         or ProductionController()
     )
+
+    def dropdown_update(
+        selected_path: str | None = None,
+        selected_label: str | None = None,
+        preserve_value: str | None = None,
+    ):
+        choices = (
+            controller._draft_choices()
+        )
+
+        value = None
+
+        if selected_label:
+            if selected_label in choices:
+                value = selected_label
+
+        elif selected_path:
+
+            for label, path in (
+                controller._saved_drafts()
+            ):
+
+                if str(path) == str(
+                    selected_path
+                ):
+                    value = label
+                    break
+
+        elif preserve_value:
+
+            if preserve_value in choices:
+                value = preserve_value
+
+        return gr.update(
+            choices=choices,
+            value=value,
+        )
+
+    def generate_storyboard_ui(
+        story_value: str,
+        mode_value: str,
+    ):
+        result = (
+            controller.generate_storyboard(
+                story_value,
+                mode_value,
+            )
+        )
+
+        result = list(result)
+
+        stored_path = (
+            result[6]
+            if len(result) > 6
+            else ""
+        )
+
+        result[7] = (
+            dropdown_update(
+                selected_path=stored_path
+                if stored_path
+                else None,
+            )
+        )
+
+        return tuple(result)
+
+    def regenerate_storyboard_ui(
+        story_value: str,
+        mode_value: str,
+    ):
+        result = (
+            controller.generate_storyboard(
+                story_value,
+                mode_value,
+            )
+        )
+
+        result = list(result)
+
+        stored_path = (
+            result[6]
+            if len(result) > 6
+            else ""
+        )
+
+        result[7] = (
+            dropdown_update(
+                selected_path=stored_path
+                if stored_path
+                else None,
+            )
+        )
+
+        return tuple(result)
+
+    def preview_latest_ui(
+        mode_value: str,
+    ):
+        result = (
+            controller.preview_latest_for_mode(
+                mode_value
+            )
+        )
+
+        result = list(result)
+
+        selected_label = (
+            result[0]
+            if result
+            else None
+        )
+
+        result[0] = (
+            dropdown_update(
+                selected_label=selected_label
+            )
+        )
+
+        return tuple(result)
+
+    def refresh_saved_drafts_ui(
+        current_value: str | None,
+    ):
+        return (
+            dropdown_update(
+                preserve_value=current_value
+            )
+        )
 
     with gr.Blocks(
         title="MiniMax H3 AI Video Generator",
@@ -1165,7 +1293,8 @@ def build_app(
             info=(
                 "AI Story: create a new cinematic story from your premise. "
                 "Expand Story: enrich the existing story while preserving its core. "
-                "Preserve Story: keep the supplied story unchanged and only structure it for production."
+                "Preserve Story: keep the supplied story unchanged and only "
+                "structure it for production."
             ),
         )
 
@@ -1191,6 +1320,7 @@ def build_app(
             label="Saved Draft",
             value=None,
             interactive=True,
+            allow_custom_value=False,
         )
 
         with gr.Row():
@@ -1261,7 +1391,7 @@ def build_app(
         ]
 
         generate.click(
-            fn=controller.generate_storyboard,
+            fn=generate_storyboard_ui,
             inputs=[
                 story,
                 mode,
@@ -1270,7 +1400,7 @@ def build_app(
         )
 
         regenerate.click(
-            fn=controller.generate_storyboard,
+            fn=regenerate_storyboard_ui,
             inputs=[
                 story,
                 mode,
@@ -1295,7 +1425,7 @@ def build_app(
         )
 
         latest.click(
-            fn=controller.preview_latest_for_mode,
+            fn=preview_latest_ui,
             inputs=[
                 mode,
             ],
@@ -1312,14 +1442,10 @@ def build_app(
         )
 
         refresh.click(
-            fn=lambda: (
-                gr.Dropdown(
-                    choices=(
-                        controller._draft_choices()
-                    )
-                )
-            ),
-            inputs=[],
+            fn=refresh_saved_drafts_ui,
+            inputs=[
+                saved_draft,
+            ],
             outputs=[
                 saved_draft,
             ],
