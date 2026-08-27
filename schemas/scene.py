@@ -25,6 +25,8 @@ class Scene:
 
     lighting: str = ""
 
+    color_temperature: str = ""
+
     environment_details: list = field(
         default_factory=list
     )
@@ -76,6 +78,9 @@ class Scene:
 
             "lighting":
                 self.lighting,
+
+            "color_temperature":
+                self.color_temperature,
 
             "environment_details":
                 self.environment_details,
