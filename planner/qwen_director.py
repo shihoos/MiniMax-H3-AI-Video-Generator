@@ -840,6 +840,34 @@ Return:
 }}
 """.strip()
 
+    def _sampling_for_mode(
+        self,
+        mode: str,
+    ) -> tuple[float, float]:
+    
+        if mode == AI_STORY_MODE:
+            return (
+                0.78,
+                0.90,
+            )
+    
+        if mode == EXPAND_USER_STORY_MODE:
+            return (
+                0.62,
+                0.88,
+            )
+    
+        if mode == PRESERVE_USER_STORY_MODE:
+            return (
+                0.10,
+                0.80,
+            )
+    
+        return (
+            DIRECTOR_TEMPERATURE,
+            DIRECTOR_TOP_P,
+        )
+    
     def _story_director_user(
         self,
         mode: str,
@@ -1288,6 +1316,25 @@ Return JSON only:
             raise RuntimeError(
                 "Qwen director model is not loaded."
             )
+
+        temperature, top_p = (
+            self._sampling_for_mode(
+                mode
+            )
+        )
+        
+        story_plan = self._chat_json(
+            self._story_director_system(
+                mode
+            ),
+            self._story_director_user(
+                mode,
+                user_input,
+            ),
+            minimum_completion=600,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
         _, max_tokens = (
             self._available_output_tokens(
