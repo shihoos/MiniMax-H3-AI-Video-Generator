@@ -163,9 +163,24 @@ class ProductionRunner:
             exist_ok=True,
         )
 
-        self.continuity = None
+        # Production-scoped continuity state.
+        #
+        # The production ID is only known when run() starts,
+        # so these stores must be created here rather than left
+        # as the global instances created during __init__.
+        self.continuity = (
+            H3SceneContinuity(
+                self.project_root,
+                production_id=production_id,
+            )
+        )
 
-        self.identity_anchors = None
+        self.identity_anchors = (
+            IdentityAnchorStore(
+                self.project_root,
+                production_id=production_id,
+            )
+        )
 
     def _executor(
         self,
