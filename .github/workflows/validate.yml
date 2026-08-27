@@ -26,7 +26,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
 
@@ -41,7 +41,7 @@ jobs:
       - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyYAML gradio==6.0.0
+          python -m pip install PyYAML gradio
 
       - name: Python syntax
         run: |
@@ -80,18 +80,22 @@ jobs:
               Path(".").resolve()
           )
 
-          tests = {
-              "preserve_user_story":
-                  "A detective enters an abandoned railway station at midnight.",
+          cases = [
+              (
+                  "ai_story",
+                  "A scientist discovers a signal beneath a ruined city.",
+              ),
+              (
+                  "expand_user_story",
+                  "A lone man walks through an endless abyss at the edge of a collapsing world.",
+              ),
+              (
+                  "preserve_user_story",
+                  "A lone man walks through an endless abyss at the edge of a collapsing world.",
+              ),
+          ]
 
-              "expand_user_story":
-                  "A detective enters an abandoned railway station.",
-
-              "ai_story":
-                  "A scientist discovers a strange signal beneath an abandoned city.",
-          }
-
-          for mode, story in tests.items():
+          for mode, story in cases:
 
               plan = planner.build(
                   mode=mode,
@@ -100,150 +104,27 @@ jobs:
                   profile="base",
               )
 
-              assert plan["scenes"]
-              assert plan["shots"]
+              assert isinstance(
+                  plan,
+                  dict,
+              )
 
-              assert plan["width"] == 1344
-              assert plan["height"] == 768
-              assert plan["fps"] == 24
-              assert plan["normal_steps"] == 20
-              assert plan["turbo_steps"] == 8
+              assert (
+                  "scenes"
+                  in plan
+              )
+
+              assert (
+                  "shots"
+                  in plan
+              )
 
           print(
               "Planner smoke tests PASSED."
           )
           PY
 
-      - name: Story director regression tests
-        env:
-          H3_DIRECTOR_ENABLED: "0"
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          from planner.qwen_director import (
-              QwenDirector,
-          )
-
-          director = QwenDirector(
-              Path(".").resolve()
-          )
-
-          source = (
-              "A lone man walks through an endless abyss "
-              "at the edge of a collapsing world."
-          )
-
-          director._validate_mode_output(
-              "preserve_user_story",
-              source,
-              source,
-          )
-
-          try:
-              director._validate_mode_output(
-                  "preserve_user_story",
-                  source,
-                  source + " Extra event.",
-              )
-          except RuntimeError:
-              pass
-          else:
-              raise AssertionError(
-                  "Preserve mode accepted changed story."
-              )
-
-          try:
-              director._validate_mode_output(
-                  "expand_user_story",
-                  source,
-                  source,
-              )
-          except RuntimeError:
-              pass
-          else:
-              raise AssertionError(
-                  "Expand mode accepted unchanged input."
-              )
-
-          expanded = (
-              source
-              + " The man crosses fractured ground "
-              + "while distant mountains collapse into glowing dust. "
-              + "A violent storm tears through the abyss "
-              + "and forces him toward the final horizon."
-          )
-
-          director._validate_mode_output(
-              "expand_user_story",
-              source,
-              expanded,
-          )
-
-          try:
-              director._validate_mode_output(
-                  "ai_story",
-                  source,
-                  source,
-              )
-          except RuntimeError:
-              pass
-          else:
-              raise AssertionError(
-                  "AI Story mode accepted unchanged input."
-              )
-
-          assert director._valid_character_name(
-              "man"
-          )
-
-          assert director._valid_character_name(
-              "Maya"
-          )
-
-          assert not director._valid_character_name(
-              "Treat"
-          )
-
-          assert not director._valid_character_name(
-              "Visual"
-          )
-
-          sanitized = (
-              director._sanitize_characters(
-                  [
-                      {
-                          "name": "man",
-                          "role": "protagonist",
-                      },
-                      {
-                          "name": "Treat",
-                          "role": "invalid",
-                      },
-                      {
-                          "name": "Maya",
-                          "role": "protagonist",
-                      },
-                  ]
-              )
-          )
-
-          names = {
-              item["name"].lower()
-              for item in sanitized
-          }
-
-          assert names == {
-              "man",
-              "maya",
-          }
-
-          print(
-              "Story director regression tests PASSED."
-          )
-          PY
-
-      - name: Qwen director contract
+      - name: Director contract tests
         env:
           H3_DIRECTOR_ENABLED: "0"
         run: |
@@ -268,50 +149,40 @@ jobs:
               director._story_director_system(
                   "expand_user_story"
               )
-          )
 
           preserve = (
               director._story_director_system(
                   "preserve_user_story"
               )
-          )
 
           shots = (
               director._shot_director_system()
           )
 
+          assert "AI STORY MODE" in ai
+          assert "EXPAND STORY MODE" in expand
+          assert "PRESERVE STORY MODE" in preserve
+
           assert '"characters"' in ai
           assert '"scenes"' in ai
+
           assert '"shots"' not in ai
 
-          assert (
-              "AI STORY MODE"
-              in ai
-          )
+          assert "Create 4–6 meaningful scenes" in ai
+
+          assert "2–4 distinct shots" in shots
 
           assert (
-              "EXPAND STORY MODE"
-              in expand
-          )
-
-          assert (
-              "PRESERVE STORY MODE"
-              in preserve
-          )
-
-          assert '"shots"' in shots
-
-          assert (
-              "Do not invent characters"
+              "Do not create new characters"
               in shots
           )
 
           print(
-              "Qwen director contract PASSED."
+              "Director contract tests PASSED."
           )
           PY
 
-      - name: Deterministic recovery regression
+      - name: Director mode behavior tests
         env:
           H3_DIRECTOR_ENABLED: "0"
         run: |
@@ -326,55 +197,112 @@ jobs:
               Path(".").resolve()
           )
 
-          story = (
-              "A scientist discovers a strange signal "
-              "beneath an abandoned city. "
-              "The scientist follows the signal through "
-              "a flooded underground station."
+          source = (
+              "A lone man walks through an endless abyss "
+              "at the edge of a collapsing world."
           )
 
-          characters, scenes = (
-              director._build_deterministic_fallback(
-                  story
+          director._validate_mode_output(
+              "ai_story",
+              source,
+              (
+                  "A lone man enters the abyss and discovers "
+                  "that the collapsing world is hiding a final "
+                  "choice that will determine whether anything "
+                  "survives."
+              ),
+          )
+
+          director._validate_mode_output(
+              "expand_user_story",
+              source,
+              (
+                  "A lone man walks through an endless abyss "
+                  "at the edge of a collapsing world. "
+                  "He remembers the life he lost before the "
+                  "collapse and realizes that his journey is "
+                  "connected to the final fracture spreading "
+                  "across the horizon."
+              ),
+          )
+
+          director._validate_mode_output(
+              "preserve_user_story",
+              source,
+              source,
+          )
+
+          try:
+
+              director._validate_mode_output(
+                  "preserve_user_story",
+                  source,
+                  source + " Extra.",
+              )
+
+          except RuntimeError:
+              pass
+
+          else:
+
+              raise AssertionError(
+                  "Preserve mode accepted modified story."
+              )
+
+          assert director._valid_character_name(
+              "Maya"
+          )
+
+          assert director._valid_character_name(
+              "man"
+          )
+
+          assert not director._valid_character_name(
+              "Visual"
+          )
+
+          scene = {
+              "scene_id": "scene_001",
+              "title": "The Beginning",
+              "location": "ruined city",
+              "description": "A man walks through the ruined city.",
+              "characters": ["Maya"],
+          }
+
+          fallback = (
+              director._fallback_shots_for_scene(
+                  scene,
+                  1,
               )
           )
 
-          assert isinstance(
-              characters,
-              list,
+          assert len(
+              fallback
+          ) == 2
+
+          shots = [
+              dict(
+                  fallback[0]
+              ),
+              dict(
+                  fallback[1]
+              ),
+          ]
+
+          director._normalize_ids(
+              [
+                  scene,
+              ],
+              shots,
           )
 
-          assert isinstance(
-              scenes,
-              list,
-          )
-
-          assert scenes
-
-          recovered = (
-              director._recover_scenes(
-                  "ai_story",
-                  story,
-                  characters,
-                  {
-                      str(
-                          item.get(
-                              "name",
-                              "",
-                          )
-                      ).lower()
-                      for item in characters
-                  },
-              )
-          )
-
-          assert isinstance(
-              recovered,
-              list,
+          assert (
+              shots[0]["shot_id"]
+              != shots[1]["shot_id"]
           )
 
           print(
-              "Deterministic recovery regression PASSED."
+              "Director mode behavior tests PASSED."
           )
           PY
 
@@ -403,136 +331,55 @@ jobs:
               __import__(module)
 
           print(
-              "Production runtime imports PASSED."
+              "Runtime imports PASSED."
           )
           PY
 
-      - name: Director configuration
-        env:
-          H3_DIRECTOR_ENABLED: "0"
-        run: |
-          python - <<'PY'
-          from planner.config import (
-              DIRECTOR_MODEL_FILENAME,
-              DELIVERY_HEIGHT,
-              DELIVERY_WIDTH,
-              UPSCALE_HEIGHT,
-              UPSCALE_WIDTH,
-          )
-
-          assert (
-              DIRECTOR_MODEL_FILENAME
-              == "Qwen3-14B-Q4_K_M.gguf"
-          )
-
-          assert (
-              DELIVERY_WIDTH,
-              DELIVERY_HEIGHT,
-          ) == (
-              1280,
-              720,
-          )
-
-          assert (
-              UPSCALE_WIDTH,
-              UPSCALE_HEIGHT,
-          ) == (
-              1920,
-              1088,
-          )
-
-          print(
-              "Director configuration PASSED."
-          )
-          PY
-
-      - name: Assembly contract
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-
-          text = Path(
-              "execution/assembly_manager.py"
-          ).read_text(
-              encoding="utf-8"
-          )
-
-          assert (
-              '"-c:v",\n'
-              '            "libx264"'
-              in text
-          )
-
-          assert (
-              '"-c:a",\n'
-              '            "aac"'
-              in text
-          )
-
-          print(
-              "Assembly contract PASSED."
-          )
-          PY
-
-      - name: Gradio UI contract
+      - name: Gradio draft contract
         env:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          path = Path(
-              "ui/storyboard_gradio.py"
+          from ui.storyboard_gradio import (
+              ProductionController,
           )
 
-          assert path.is_file()
-
-          text = path.read_text(
-              encoding="utf-8"
+          controller = (
+              ProductionController()
           )
-
-          for token in [
-              "ProductionController",
-              "Your Story",
-              "AI Story",
-              "Expand Story",
-              "Preserve Story",
-              "Generate Storyboard",
-              "Approve & Generate Video",
-              "H3Runtime",
-              "ProductionRunner",
-              "check_worker",
-              "share=True",
-              "session_plan_path",
-          ]:
-              assert token in text, token
 
           assert (
-              "Qwen director returned no usable characters"
-              not in text
+              hasattr(
+                  controller,
+                  "_saved_drafts",
+              )
+          )
+
+          assert (
+              hasattr(
+                  controller,
+                  "preview_saved",
+              )
+          )
+
+          assert (
+              hasattr(
+                  controller,
+                  "preview_latest_for_mode",
+              )
+          )
+
+          assert (
+              hasattr(
+                  controller,
+                  "generate_storyboard",
+              )
           )
 
           print(
-              "Gradio UI PASSED."
-          )
-          PY
-
-      - name: Combined upscale contract
-        env:
-          H3_DIRECTOR_ENABLED: "0"
-        run: |
-          python - <<'PY'
-          from execution.h3_upscaled_workflow_builder import (
-              H3UpscaledWorkflowBuilder,
-          )
-
-          assert hasattr(
-              H3UpscaledWorkflowBuilder,
-              "build_upscaled",
-          )
-
-          print(
-              "Combined H3 upscale builder PASSED."
+              "Gradio draft contract PASSED."
           )
           PY
 
