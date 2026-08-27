@@ -201,14 +201,12 @@ def _find_cuda_libraries() -> tuple[
                 )
 
     if not cudart_candidates:
-
         raise RuntimeError(
             "libcudart.so.13 was not found in the "
             "installed NVIDIA Python packages."
         )
 
     if not cublas_candidates:
-
         raise RuntimeError(
             "libcublas.so.13 was not found in the "
             "installed NVIDIA Python packages."
@@ -255,7 +253,6 @@ def _prepare_cuda_environment() -> tuple[
     )
 
     try:
-
         ctypes.CDLL(
             str(cudart),
             mode=ctypes.RTLD_GLOBAL,
@@ -334,7 +331,6 @@ def find_director_model() -> Path:
     model = matches[0]
 
     if model.stat().st_size <= 0:
-
         raise RuntimeError(
             f"Qwen director model is empty: {model}"
         )
@@ -354,6 +350,7 @@ def check_director() -> None:
     )
 
     try:
+
         cudart, cublas = (
             _prepare_cuda_environment()
         )
@@ -585,6 +582,50 @@ def check_custom_nodes() -> None:
                 raise RuntimeError(
                     f"Missing custom node: {path}"
                 )
+
+            expected_revision = str(
+                node.get(
+                    "revision",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if expected_revision:
+
+                result = subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        str(path),
+                        "rev-parse",
+                        "HEAD",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+                if result.returncode != 0:
+
+                    raise RuntimeError(
+                        "Unable to determine custom-node "
+                        f"revision for {node['name']}:\n"
+                        f"{result.stderr.strip()}"
+                    )
+
+                actual_revision = (
+                    result.stdout.strip()
+                )
+
+                if actual_revision != expected_revision:
+
+                    raise RuntimeError(
+                        "Custom node revision mismatch:\n"
+                        f"Node: {node['name']}\n"
+                        f"Expected: {expected_revision}\n"
+                        f"Actual: {actual_revision}"
+                    )
 
             print(
                 "NODE OK:",
