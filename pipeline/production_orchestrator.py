@@ -264,16 +264,47 @@ class ProductionOrchestrator:
             start=1,
         ):
 
-            names = [
-                str(value)
-                for value in (
-                    raw.get(
-                        "characters",
-                        [],
-                    )
-                    or []
+            raw_characters = raw.get(
+                "characters",
+                [],
+            )
+
+            if not raw_characters:
+                raw_characters = plan.get(
+                    "scenes",
+                    [],
                 )
-            ]
+
+            names = []
+
+            for value in (
+                raw_characters
+                if isinstance(
+                    raw_characters,
+                    (list, tuple, set),
+                )
+                else [raw_characters]
+            ):
+
+                name = str(
+                    value
+                ).strip()
+
+                if (
+                    name
+                    and name.lower()
+                    in by_name
+                    and name.lower()
+                    not in {
+                        item.lower()
+                        for item in names
+                    }
+                ):
+                    names.append(
+                        by_name[
+                            name.lower()
+                        ].name
+                    )
 
             selected = [
                 by_name[name.lower()]
@@ -402,14 +433,12 @@ class ProductionOrchestrator:
                         WORKFLOW_REF2V
                     )
 
-            soundscape = (
-                str(
-                    raw.get(
-                        "overall_soundscape",
-                        "",
-                    )
-                    or ""
+            soundscape = str(
+                raw.get(
+                    "overall_soundscape",
+                    "",
                 )
+                or ""
             )
 
             negative = str(
@@ -438,92 +467,134 @@ class ProductionOrchestrator:
                         f"shot_{index:03d}",
                     )
                 ),
+
                 scene_id=str(
                     raw.get(
                         "scene_id",
                         "",
                     )
                 ),
+
                 order=int(
                     raw.get(
                         "order",
                         index,
                     )
                 ),
+
                 duration_seconds=float(
                     raw.get(
                         "duration_seconds",
                         5.2,
                     )
                 ),
+
                 characters=names,
+
                 location=str(
                     raw.get(
                         "location",
                         "",
                     )
                 ),
+
                 action=str(
                     raw.get(
                         "action",
                         "",
                     )
                 ),
+
                 camera_shot=str(
                     raw.get(
                         "camera_shot",
                         "",
                     )
                 ),
+
                 camera_movement=str(
                     raw.get(
                         "camera_movement",
                         "",
                     )
                 ),
+
+                lens_and_depth_of_field=str(
+                    raw.get(
+                        "lens_and_depth_of_field",
+                        "",
+                    )
+                    or ""
+                ),
+
+                composition_notes=str(
+                    raw.get(
+                        "composition_notes",
+                        "",
+                    )
+                    or ""
+                ),
+
                 lighting=str(
                     raw.get(
                         "lighting",
                         "",
                     )
                 ),
+
+                color_temperature=str(
+                    raw.get(
+                        "color_temperature",
+                        "",
+                    )
+                    or ""
+                ),
+
                 mood=str(
                     raw.get(
                         "mood",
                         "",
                     )
                 ),
+
                 visual_prompt=str(
                     raw.get(
                         "visual_prompt",
                         "",
                     )
                 ),
+
                 retention_analysis=str(
                     raw.get(
                         "retention_analysis",
                         "",
                     )
                 ),
+
                 detailed_description=description,
+
                 overall_soundscape=(
                     self._native_audio_policy(
                         soundscape
                     )
                 ),
+
                 non_diegetic_music=str(
                     raw.get(
                         "non_diegetic_music",
                         "",
                     )
                 ),
+
                 negative_prompt=negative,
+
                 continuity_notes=str(
                     raw.get(
                         "continuity_notes",
                         "",
                     )
                 ),
+
                 seed=(
                     int(
                         raw["seed"]
@@ -536,53 +607,79 @@ class ProductionOrchestrator:
                         + index
                     )
                 ),
+
                 reference_images=images,
                 reference_videos=videos,
+
                 reference_audio=(
                     audio[0]
                     if audio
                     else None
                 ),
+
                 reference_audio_paths=audio,
+
                 reference_audio_by_character={
                     name: (
-                        by_name[name.lower()]
+                        by_name[
+                            name.lower()
+                        ]
                         .normalized_audio_paths()
                     )
                     for name in names
                     if name.lower()
                     in by_name
                 },
+
                 reference_video_by_character={
                     name: (
-                        by_name[name.lower()]
+                        by_name[
+                            name.lower()
+                        ]
                         .normalized_video_paths()
                     )
                     for name in names
                     if name.lower()
                     in by_name
                 },
-                speaking_characters=list(
-                    raw.get(
-                        "speaking_characters",
-                        names,
+
+                speaking_characters=[
+                    str(value).strip()
+                    for value in (
+                        raw.get(
+                            "speaking_characters",
+                            names,
+                        )
+                        or []
                     )
-                    or []
-                ),
+                    if (
+                        str(value).strip().lower()
+                        in {
+                            item.lower()
+                            for item in names
+                        }
+                    )
+                ],
+
                 speech_text=str(
                     raw.get(
                         "speech_text",
                         "",
                     )
                 ),
+
                 reference_bindings=(
                     reference_bindings
                 ),
+
                 identity_locks=locks,
+
                 workflow_mode=workflow_mode,
+
                 keyframe_images=[],
                 keyframe_positions=[],
                 extend_take_source_video=None,
+
                 width=H3_WIDTH,
                 height=H3_HEIGHT,
                 fps=H3_FPS,
@@ -623,8 +720,10 @@ class ProductionOrchestrator:
             "characters"
         ] = [
             character.to_dict()
-            for character in characters
+            for character
+            in characters
         ]
+
 
     # ========================================================
     # PLAN
