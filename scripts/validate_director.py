@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
+# Keep the logic validator model-free when run directly.
+# QwenDirector otherwise performs model discovery during construction.
+os.environ.setdefault(
+    "H3_DIRECTOR_ENABLED",
+    "0",
+)
 
 ROOT = (
     Path(__file__)
@@ -15,9 +22,6 @@ if str(ROOT) not in sys.path:
         0,
         str(ROOT),
     )
-
-
-import re
 
 from planner.production_planner import (
     ProductionPlanner,
@@ -379,51 +383,155 @@ def test_director_prompt_contract() -> None:
     )
 
     check(
-        "Do not create new characters"
-        in shots,
+        "visual_language" in ai,
+        "Story prompt does not request the visual-language bible.",
+    )
+
+    check(
+        "time_of_day" in ai,
+        "Story prompt does not request time_of_day.",
+    )
+
+    check(
+        "environment_details" in ai,
+        "Story prompt does not request environment details.",
+    )
+
+    check(
+        "color_temperature" in ai,
+        "Story prompt does not request color temperature.",
+    )
+
+    check(
+        "lens_and_depth_of_field" in shots,
+        "Shot prompt does not request lens/depth-of-field direction.",
+    )
+
+    check(
+        "composition_notes" in shots,
+        "Shot prompt does not request composition direction.",
+    )
+
+    check(
+        "SHOT / FRAMING VOCABULARY" in shots,
+        "Shot prompt is missing framing vocabulary.",
+    )
+
+    check(
+        "CAMERA MOVEMENT VOCABULARY" in shots,
+        "Shot prompt is missing camera-movement vocabulary.",
+    )
+
+    check(
+        "LIGHTING VOCABULARY" in shots,
+        "Shot prompt is missing lighting vocabulary.",
+    )
+
+    check(
+        "Do not create new characters" in shots,
         "Shot director does not protect character identity.",
     )
 
 
-def test_config_contract() -> None:
+def test_shot_sampling_contract() -> None:
 
-    from planner.config import (
-        DIRECTOR_MAX_TOKENS,
-        DIRECTOR_N_BATCH,
-        DIRECTOR_N_CTX,
-        DIRECTOR_N_GPU_LAYERS,
-        DIRECTOR_TOP_P,
-        DIRECTOR_TEMPERATURE,
+    director = QwenDirector(
+        ROOT
+    )
+
+    temperature, top_p = (
+        director._shot_sampling()
     )
 
     check(
-        DIRECTOR_N_CTX == 8192,
-        f"Unexpected director context: {DIRECTOR_N_CTX}",
+        temperature == 0.68,
+        "Shot temperature is not 0.68.",
     )
 
     check(
-        DIRECTOR_MAX_TOKENS > 0,
-        "Director max tokens must be positive.",
+        top_p == 0.92,
+        "Shot top_p is not 0.92.",
+    )
+
+
+def test_visual_schema_sanitization() -> None:
+
+    director = QwenDirector(
+        ROOT
+    )
+
+    visual_language = (
+        director._sanitize_visual_language(
+            {
+                "genre_tone": "dark cinematic sci-fi",
+                "color_palette": "charcoal, amber, cold blue",
+                "lighting_philosophy": "low-key motivated practical light",
+                "camera_philosophy": "deliberate movement with deep spatial compositions",
+                "pacing": "slow build with sharp escalation",
+                "unexpected": "ignored",
+            }
+        )
     )
 
     check(
-        DIRECTOR_N_BATCH > 0,
-        "Director batch must be positive.",
+        set(visual_language) == {
+            "genre_tone",
+            "color_palette",
+            "lighting_philosophy",
+            "camera_philosophy",
+            "pacing",
+        },
+        "Visual-language sanitizer returned unexpected fields.",
+    )
+
+
+def test_shot_sanitization_cinematography_fields() -> None:
+
+    director = QwenDirector(
+        ROOT
+    )
+
+    values = director._sanitize_shots(
+        [
+            {
+                "shot_id": "shot_001",
+                "scene_id": "scene_001",
+                "characters": [],
+                "camera_shot": "close-up",
+                "camera_movement": "slow push-in",
+                "lens_and_depth_of_field": "telephoto compression with shallow depth of field",
+                "composition_notes": "rule of thirds with foreground framing",
+                "lighting": "cool moonlight",
+                "color_temperature": "cool 4300K",
+            }
+        ],
+        {
+            "scene_id": "scene_001",
+            "location": "ruins",
+        },
+        set(),
     )
 
     check(
-        DIRECTOR_N_GPU_LAYERS != 0,
-        "Director GPU layer setting is invalid.",
+        len(values) == 1,
+        "Shot sanitizer rejected a valid shot.",
+    )
+
+    shot = values[0]
+
+    check(
+        shot["lens_and_depth_of_field"].startswith("telephoto"),
+        "Shot lens/DOF field was not preserved.",
     )
 
     check(
-        0.0 < DIRECTOR_TEMPERATURE <= 2.0,
-        "Director temperature is outside valid range.",
+        "rule of thirds" in shot["composition_notes"],
+        "Shot composition field was not preserved.",
     )
 
     check(
-        0.0 < DIRECTOR_TOP_P <= 1.0,
-        "Director top_p is outside valid range.",
+        shot["color_temperature"] == "cool 4300K",
+        "Shot color temperature was not preserved.",
     )
 
 
@@ -436,7 +544,9 @@ def main() -> None:
         test_character_descriptor_deduplication,
         test_single_paragraph_segmentation,
         test_director_prompt_contract,
-        test_config_contract,
+        test_shot_sampling_contract,
+        test_visual_schema_sanitization,
+        test_shot_sanitization_cinematography_fields,
     ]
 
     for test in tests:
