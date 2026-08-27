@@ -2667,15 +2667,6 @@ Return JSON only:
             )
         )
 
-        story_system = self._story_director_system(
-            mode
-        )
-
-        story_user = self._story_director_user(
-            mode,
-            user_input,
-        )
-
         story_plan = self._chat_json(
             story_system,
             story_user,
@@ -2693,7 +2684,6 @@ Return JSON only:
         ).strip()
 
         try:
-
             self._validate_mode_output(
                 mode,
                 user_input,
@@ -2701,24 +2691,52 @@ Return JSON only:
             )
 
         except RuntimeError:
+            if mode == PRESERVE_USER_STORY_MODE:
+                # Preserve Story is intentionally strict. Any change,
+                # including a semantic or textual rewrite, must remain
+                # a hard validation failure.
+                raise
 
-            if mode != AI_STORY_MODE:
+            if mode == AI_STORY_MODE:
+                retry_instruction = (
+                    "IMPORTANT RETRY FOR AI STORY MODE: "
+                    "The previous response failed because the returned "
+                    "story was unchanged from the supplied premise. "
+                    "Do not copy, repeat, or merely paraphrase the premise. "
+                    "You MUST produce a genuinely developed cinematic story "
+                    "with additional substantive narrative events, a clear "
+                    "protagonist objective, meaningful conflict, escalating "
+                    "complications, character reactions, a climax, and a "
+                    "resolution. The returned 'story' field must be materially "
+                    "different from the input while remaining faithful to its "
+                    "premise. Return the complete required JSON structure."
+                )
+
+            elif mode == EXPAND_USER_STORY_MODE:
+                retry_instruction = (
+                    "IMPORTANT RETRY FOR EXPAND STORY MODE: "
+                    "The previous response failed because the returned story "
+                    "was unchanged from the supplied story. You MUST expand "
+                    "the supplied story rather than reproducing it. Preserve "
+                    "all important characters, events, chronology, setting, "
+                    "outcome, and explicit constraints, but add substantive "
+                    "narrative development: character motivation, emotional "
+                    "depth, cause and effect, transitions, intermediate "
+                    "events, stakes, tension, sensory detail, reactions, "
+                    "stronger escalation, and richer consequences. The "
+                    "returned 'story' field must be materially longer or "
+                    "meaningfully developed and must NOT be identical to the "
+                    "input. Do not merely add adjectives or camera directions. "
+                    "Return the complete required JSON structure."
+                )
+
+            else:
                 raise
 
             retry_user = (
                 story_user
                 + "\n\n"
-                "IMPORTANT RETRY: Your previous response "
-                "failed because it returned the premise "
-                "unchanged. You MUST transform this premise "
-                "into a developed cinematic narrative with "
-                "a protagonist objective, meaningful conflict, "
-                "escalation, character reactions, a climax, "
-                "and a resolution. Add substantive narrative "
-                "events rather than merely paraphrasing the "
-                "premise. Return the required JSON structure "
-                "and make the story materially different from "
-                "the input while remaining faithful to the premise."
+                + retry_instruction
             )
 
             story_plan = self._chat_json(
@@ -2729,7 +2747,7 @@ Return JSON only:
                 top_p=top_p,
             )
 
-            story = str(
+            retry_story = str(
                 story_plan.get(
                     "story",
                     user_input,
@@ -2737,99 +2755,67 @@ Return JSON only:
                 or user_input
             ).strip()
 
-        if mode == AI_STORY_MODE:
             try:
                 self._validate_mode_output(
                     mode,
                     user_input,
-                    story,
+                    retry_story,
                 )
+
+                story = retry_story
 
             except RuntimeError:
-                retry_user = (
-                    story_user
-                    + "\n\n"
-                    "IMPORTANT RETRY: The previous response "
-                    "failed because it returned the premise "
-                    "unchanged. You MUST transform this premise "
-                    "into a developed cinematic narrative with "
-                    "a protagonist objective, meaningful conflict, "
-                    "escalation, character reactions, a climax, "
-                    "and a resolution. Add substantive narrative "
-                    "events rather than merely paraphrasing the "
-                    "premise. Return the required JSON structure "
-                    "and make the story materially different from "
-                    "the input while remaining faithful to the premise."
-                )
-
-                story_plan = self._chat_json(
-                    story_system,
-                    retry_user,
-                    minimum_completion=600,
-                    temperature=temperature,
-                    top_p=top_p,
-                )
-
-                retry_story = str(
-                    story_plan.get(
-                        "story",
-                        user_input,
+                fallback_characters, fallback_scenes = (
+                    self._build_deterministic_fallback(
+                        user_input
                     )
-                    or user_input
+                )
+
+                # Do not invent a fake expansion. When Qwen cannot satisfy
+                # AI Story or Expand Story after the repair attempt, keep the
+                # user's original narrative as the authoritative story and
+                # allow the existing deterministic planner to build the
+                # production structure below.
+                story = user_input.strip()
+
+                existing_notes = str(
+                    story_plan.get(
+                        "director_notes",
+                        "",
+                    )
+                    or ""
                 ).strip()
 
-                try:
-                    self._validate_mode_output(
-                        mode,
-                        user_input,
-                        retry_story,
-                    )
-                    story = retry_story
-
-                except RuntimeError:
-                    # Qwen can occasionally return the source premise
-                    # unchanged even after the repair prompt. Do not
-                    # crash the storyboard pipeline. Keep the user's
-                    # premise as the story source and let the existing
-                    # deterministic planner create the production
-                    # structure below.
-                    story = user_input.strip()
-
-                    existing_notes = str(
-                        story_plan.get(
-                            "director_notes",
-                            "",
-                        )
-                        or ""
-                    ).strip()
-
+                if mode == AI_STORY_MODE:
                     fallback_note = (
                         "AI Story mode returned the premise unchanged "
                         "after one repair attempt; deterministic "
                         "production-structure fallback used."
                     )
-
-                    story_plan["director_notes"] = (
-                        (
-                            existing_notes
-                            + " "
-                            + fallback_note
-                        ).strip()
+                else:
+                    fallback_note = (
+                        "Expand Story mode returned the supplied story "
+                        "unchanged after one repair attempt; deterministic "
+                        "production-structure fallback used without "
+                        "inventing narrative changes."
                     )
 
-            else:
-                # Preserve the existing validation for AI Story mode
-                # when Qwen produced a valid developed narrative.
-                story = story
+                story_plan["director_notes"] = (
+                    (
+                        existing_notes
+                        + " "
+                        + fallback_note
+                    ).strip()
+                )
 
-        else:
-            # Expand Story and Preserve Story remain strict: any
-            # validation failure must still propagate.
-            self._validate_mode_output(
-                mode,
-                user_input,
-                story,
-            )
+                # Make the existing fallback data available to the normal
+                # character/scene recovery logic below.
+                story_plan["characters"] = (
+                    fallback_characters
+                )
+                story_plan["scenes"] = (
+                    fallback_scenes
+                )
 
         director_notes = str(
             story_plan.get(
