@@ -1,20 +1,29 @@
 from __future__ import annotations
 
-import re
+import sys
 from pathlib import Path
-
-from planner.production_planner import (
-    ProductionPlanner,
-)
-from planner.qwen_director import (
-    QwenDirector,
-)
 
 
 ROOT = (
     Path(__file__)
     .resolve()
     .parents[1]
+)
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(
+        0,
+        str(ROOT),
+    )
+
+
+import re
+
+from planner.production_planner import (
+    ProductionPlanner,
+)
+from planner.qwen_director import (
+    QwenDirector,
 )
 
 
@@ -226,7 +235,8 @@ def test_shot_id_normalization() -> None:
 
     ids = [
         shot["shot_id"]
-        for shot in shots
+        for shot
+        in shots
     ]
 
     check(
