@@ -2866,6 +2866,11 @@ Return JSON only:
         for scene in scenes:
 
             try:
+                shot_temperature, shot_top_p = (
+                    self._sampling_for_mode(
+                        mode
+                    )
+                )
 
                 shot_plan = self._chat_json(
                     self._shot_director_system(),
@@ -2875,6 +2880,8 @@ Return JSON only:
                         scene,
                     ),
                     minimum_completion=450,
+                    temperature=shot_temperature,
+                    top_p=shot_top_p,
                 )
 
                 scene_shots = (
