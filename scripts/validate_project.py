@@ -735,7 +735,7 @@ def validate_gradio_ui() -> None:
         "ProductionRunner",
         "H3Runtime",
         "check_worker",
-        "share=False",
+        "share=True",
     )
 
     for token in required_tokens:
