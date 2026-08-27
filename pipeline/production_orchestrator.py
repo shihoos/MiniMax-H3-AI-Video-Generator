@@ -250,6 +250,31 @@ class ProductionOrchestrator:
             for character in characters
         }
 
+        scenes_by_id = {
+            str(
+                scene.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip(): scene
+            for scene in plan.get(
+                "scenes",
+                [],
+            )
+            if isinstance(
+                scene,
+                dict,
+            )
+            and str(
+                scene.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+        }
+
         for scene in plan.get(
             "scenes",
             [],
@@ -264,14 +289,28 @@ class ProductionOrchestrator:
             start=1,
         ):
 
+            scene_id = str(
+                raw.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
             raw_characters = raw.get(
                 "characters",
                 [],
             )
 
             if not raw_characters:
-                raw_characters = plan.get(
-                    "scenes",
+
+                scene = scenes_by_id.get(
+                    scene_id,
+                    {},
+                )
+
+                raw_characters = scene.get(
+                    "characters",
                     [],
                 )
 
