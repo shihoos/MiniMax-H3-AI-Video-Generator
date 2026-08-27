@@ -1432,9 +1432,10 @@ Return JSON only:
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-Create exactly 2 or 3 distinct shots for ONE scene.
+Create exactly 2 distinct shots for ONE scene.
 
 Use ONLY characters supplied in the scene.
+Keep every string concise. Never write reasoning, analysis, or <think> text.
 
 Every shot must materially advance or visualize the scene.
 Use clear cinematic progression:
@@ -1753,11 +1754,6 @@ Return JSON only with this compact structure:
             },
         ]
 
-        # llama-cpp-python 0.3.35 does not expose
-        # chat_template_kwargs. The Qwen3 GGUF used by this
-        # project supports the hard non-thinking switch verified
-        # in the Kaggle diagnostic: an empty assistant thinking
-        # block immediately before generation.
         if disable_thinking:
             messages.append(
                 {
@@ -1848,8 +1844,7 @@ Return JSON only with this compact structure:
 
         if not parsed:
             raise RuntimeError(
-                f"Qwen returned an empty JSON object "
-                f"for {call_name}."
+                f"Qwen returned an empty JSON object for {call_name}."
             )
 
         return parsed
@@ -1891,22 +1886,34 @@ Return JSON only with this compact structure:
                 int(max_completion),
             )
 
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ]
+
+        if disable_thinking:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        "<think>\n\n</think>\n\n"
+                    ),
+                }
+            )
+
         started = time.perf_counter()
         response = None
 
         try:
             response = (
                 self._llama.create_chat_completion(
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": system_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_prompt,
-                        },
-                    ],
+                    messages=messages,
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
@@ -3511,7 +3518,7 @@ Return JSON only with this compact structure:
                     else "expand_story_metadata_pass"
                 )
             ),
-            max_completion=2200,
+            max_completion=2600,
             json_mode=True,
         )
 
@@ -3702,7 +3709,7 @@ Return JSON only with this compact structure:
                             )
                         )
                     ),
-                    max_completion=700,
+                    max_completion=1000,
                     json_mode=False,
                 )
 
@@ -3757,7 +3764,7 @@ Return JSON only with this compact structure:
                                 )
                             )
                         ),
-                        max_completion=600,
+                        max_completion=900,
                         json_mode=False,
                     )
 
