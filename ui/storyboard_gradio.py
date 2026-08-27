@@ -1162,6 +1162,11 @@ def build_app(
                 else "ai_story"
             ),
             label="Story Mode",
+            info=(
+                "AI Story: create a new cinematic story from your premise. "
+                "Expand Story: enrich the existing story while preserving its core. "
+                "Preserve Story: keep the supplied story unchanged and only structure it for production."
+            ),
         )
 
         with gr.Row():
@@ -1362,28 +1367,9 @@ def serve_storyboard_gradio(
     demo.launch(
         server_name="0.0.0.0",
         server_port=8765,
-        share = (
-            os.getenv(
-                "H3_GRADIO_SHARE",
-                "0",
-            ).strip().lower()
-            in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-        )
-        
-        demo.launch(
-            server_name="0.0.0.0",
-            server_port=8765,
-            share=share,
-            show_error=True,
-        )
+        share=False,
         show_error=True,
     )
-
 
 def main():
     serve_storyboard_gradio()
