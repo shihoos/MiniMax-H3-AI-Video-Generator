@@ -2667,14 +2667,18 @@ Return JSON only:
             )
         )
 
+        story_system = self._story_director_system(
+            mode
+        )
+
+        story_user = self._story_director_user(
+            mode,
+            user_input,
+        )
+
         story_plan = self._chat_json(
-            self._story_director_system(
-                mode
-            ),
-            self._story_director_user(
-                mode,
-                user_input,
-            ),
+            story_system,
+            story_user,
             minimum_completion=600,
             temperature=temperature,
             top_p=top_p,
@@ -2688,11 +2692,56 @@ Return JSON only:
             or user_input
         ).strip()
 
-        self._validate_mode_output(
-            mode,
-            user_input,
-            story,
-        )
+        try:
+
+            self._validate_mode_output(
+                mode,
+                user_input,
+                story,
+            )
+
+        except RuntimeError:
+
+            if mode != AI_STORY_MODE:
+                raise
+
+            retry_user = (
+                story_user
+                + "\n\n"
+                "IMPORTANT RETRY: Your previous response "
+                "failed because it returned the premise "
+                "unchanged. You MUST transform this premise "
+                "into a developed cinematic narrative with "
+                "a protagonist objective, meaningful conflict, "
+                "escalation, character reactions, a climax, "
+                "and a resolution. Add substantive narrative "
+                "events rather than merely paraphrasing the "
+                "premise. Return the required JSON structure "
+                "and make the story materially different from "
+                "the input while remaining faithful to the premise."
+            )
+
+            story_plan = self._chat_json(
+                story_system,
+                retry_user,
+                minimum_completion=600,
+                temperature=temperature,
+                top_p=top_p,
+            )
+
+            story = str(
+                story_plan.get(
+                    "story",
+                    user_input,
+                )
+                or user_input
+            ).strip()
+
+            self._validate_mode_output(
+                mode,
+                user_input,
+                story,
+            )
 
         director_notes = str(
             story_plan.get(
