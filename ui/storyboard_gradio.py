@@ -1147,9 +1147,11 @@ def build_app(
             if preserve_value in choices:
                 value = preserve_value
 
-        return gr.update(
-            choices=choices,
-            value=value,
+        return gr.Dropdown(
+        choices=choices,
+        value=value,
+        interactive=True,
+        allow_custom_value=False,
         )
 
     def generate_storyboard_ui(
