@@ -1449,13 +1449,13 @@ Vary framing, movement, lens/DOF, composition, and lighting
 when the scene supports it. Do not repeat the same camera
 combination by default.
 
-FRAMING:
+SHOT / FRAMING VOCABULARY:
 extreme wide, wide, full shot, medium wide, medium,
 medium close-up, close-up, extreme close-up,
 over-the-shoulder, two-shot, POV, insert,
 low angle, high angle, dutch angle.
 
-MOVEMENT:
+CAMERA MOVEMENT VOCABULARY:
 static, slow pan, tilt, dolly in, dolly out, truck,
 pedestal, crane, handheld, steadicam glide,
 whip pan, push-in, pull-out, orbit, tracking shot.
@@ -1469,7 +1469,7 @@ rule of thirds, centered symmetry, leading lines,
 foreground framing, negative space, silhouette,
 depth layering, diagonal composition, subject isolation.
 
-LIGHTING:
+LIGHTING VOCABULARY:
 warm tungsten, cool daylight, golden-hour backlight,
 blue-hour ambient, moonlight, practical neon,
 hard chiaroscuro, soft diffused overcast,
@@ -3833,7 +3833,6 @@ Required structure:
             ).compile_all(
                 scenes,
                 all_shots,
-                min_shots_per_scene=2,
             )
         )
 
