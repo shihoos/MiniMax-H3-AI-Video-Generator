@@ -1742,23 +1742,34 @@ Return JSON only with this compact structure:
                 int(max_completion),
             )
 
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            },
+            {
+                "role": "user",
+                "content": user_prompt,
+            },
+        ]
+
+        # llama-cpp-python 0.3.35 does not expose
+        # chat_template_kwargs. The Qwen3 GGUF used by this
+        # project supports the hard non-thinking switch verified
+        # in the Kaggle diagnostic: an empty assistant thinking
+        # block immediately before generation.
         if disable_thinking:
-            system_prompt = (
-                "/no_think\n"
-                + str(system_prompt).lstrip()
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": (
+                        "<think>\n\n</think>\n\n"
+                    ),
+                }
             )
 
         kwargs = {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                },
-            ],
+            "messages": messages,
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
@@ -1878,12 +1889,6 @@ Return JSON only with this compact structure:
             max_tokens = min(
                 max_tokens,
                 int(max_completion),
-            )
-
-        if disable_thinking:
-            system_prompt = (
-                "/no_think\n"
-                + str(system_prompt).lstrip()
             )
 
         started = time.perf_counter()
