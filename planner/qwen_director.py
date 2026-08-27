@@ -787,6 +787,13 @@ story
 director_notes
 characters
 scenes
+visual_language
+
+VISUAL LANGUAGE BIBLE:
+
+Create one coherent visual language for the whole production.
+The visual_language object contains genre_tone, color_palette,
+lighting_philosophy, camera_philosophy, and pacing.
 
 Do NOT create shots in this pass.
 
@@ -821,12 +828,20 @@ scene_id
 title
 order
 location
+time_of_day
+weather
+atmosphere
 description
 mood
 lighting
+color_temperature
+environment_details
+key_props
 characters
 scene_objective
 continuity_notes
+
+Use concrete, filmable environment details and a concrete lighting/color-temperature description.
 
 A scene description must describe an actual narrative event.
 
@@ -835,6 +850,13 @@ Return:
 {{
   "story": "string",
   "director_notes": "string",
+  "visual_language": {
+    "genre_tone": "string",
+    "color_palette": "string",
+    "lighting_philosophy": "string",
+    "camera_philosophy": "string",
+    "pacing": "string"
+  },
   "characters": [],
   "scenes": []
 }}
@@ -868,6 +890,15 @@ Return:
             DIRECTOR_TOP_P,
         )
     
+    def _shot_sampling(
+        self,
+    ) -> tuple[float, float]:
+
+        return (
+            0.68,
+            0.92,
+        )
+
     def _story_director_user(
         self,
         mode: str,
@@ -960,7 +991,12 @@ Return JSON only:
                     mode
                 ),
                 self._character_recovery_user(
-                    story
+                    story,
+                    getattr(
+                        self,
+                        "_current_visual_language",
+                        {},
+                    ),
                 ),
                 minimum_completion=400,
                 temperature=temperature,
@@ -1005,9 +1041,15 @@ Return JSON only:
       "title": "narrative beat title",
       "order": 1,
       "location": "string",
+      "time_of_day": "string",
+      "weather": "string",
+      "atmosphere": "string",
       "description": "real narrative event",
       "mood": "string",
       "lighting": "string",
+      "color_temperature": "string",
+      "environment_details": [],
+      "key_props": [],
       "characters": [],
       "scene_objective": "string",
       "continuity_notes": "string"
@@ -1020,6 +1062,7 @@ Return JSON only:
         self,
         story: str,
         characters: list[dict],
+        visual_language: dict | None = None,
     ) -> str:
 
         return json.dumps(
@@ -1042,6 +1085,14 @@ Return JSON only:
                     for item
                     in characters
                 ],
+                "visual_language": dict(
+                    visual_language
+                    if isinstance(
+                        visual_language,
+                        dict,
+                    )
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(
@@ -1073,6 +1124,11 @@ Return JSON only:
                 self._scene_recovery_user(
                     story,
                     characters,
+                    getattr(
+                        self,
+                        "_current_visual_language",
+                        {},
+                    ),
                 ),
                 minimum_completion=450,
                 temperature=temperature,
@@ -1102,23 +1158,52 @@ Return JSON only:
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-You are given ONE scene.
+You are given ONE scene and the production visual language bible.
 
 Create 2–4 distinct shots for that scene.
 
 Do not create new characters.
-
 Use only the supplied character names.
 
-Do not repeat the same composition for every shot.
+SHOT / FRAMING VOCABULARY:
+extreme wide, wide, full shot, medium wide, medium, medium close-up,
+close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert,
+low angle, high angle, dutch angle, bird's eye, worm's eye.
 
-Use useful cinematic progression:
-1. establishing or orientation
+CAMERA MOVEMENT VOCABULARY:
+static/locked-off, slow pan, tilt, dolly in, dolly out, truck left,
+truck right, pedestal, crane, handheld, steadicam glide, whip pan,
+slow push-in, slow pull-out, orbit, tracking shot.
+
+LIGHTING VOCABULARY:
+warm tungsten (~3200K), cool daylight (~5600K), golden-hour backlight,
+blue-hour ambient, cool moonlight, practical neon, hard chiaroscuro,
+soft diffused overcast, firelight flicker, harsh overhead fluorescent,
+mixed practical and ambient light.
+
+LENS / DEPTH OF FIELD:
+wide-angle immersive perspective, normal perspective, telephoto compression,
+shallow depth of field with subject isolation and soft bokeh,
+deep focus with foreground/midground/background clarity.
+
+COMPOSITION:
+rule of thirds, centered symmetry, leading lines, foreground framing,
+negative space, silhouette, depth layering, visual obstruction, diagonal
+composition, subject isolation.
+
+Use the visual language bible as the consistency anchor.
+Do not randomly change the established palette or camera philosophy.
+
+Use cinematic progression across the shot list:
+1. establishing/orientation
 2. subject/action
 3. detail/reaction/escalation
 4. payoff/reveal when justified
 
 Every shot must materially advance or visualize the scene.
+Vary shot type, movement, composition, lens/depth of field, and lighting
+quality when the scene supports that variation. Do not default to the
+same medium shot and controlled movement combination.
 
 Return JSON only:
 
@@ -1131,9 +1216,12 @@ Return JSON only:
       "characters": [],
       "location": "string",
       "action": "string",
-      "camera_shot": "string",
-      "camera_movement": "string",
-      "lighting": "string",
+      "camera_shot": "string from the framing vocabulary",
+      "camera_movement": "string from the movement vocabulary",
+      "lens_and_depth_of_field": "string",
+      "lighting": "string with quality and temperature",
+      "color_temperature": "string",
+      "composition_notes": "string",
       "mood": "string",
       "visual_prompt": "string",
       "retention_analysis": "string",
@@ -1154,6 +1242,7 @@ Return JSON only:
         story: str,
         characters: list[dict],
         scene: dict,
+        visual_language: dict | None = None,
     ) -> str:
 
         return json.dumps(
@@ -1184,6 +1273,14 @@ Return JSON only:
                     for item
                     in characters
                 ],
+                "visual_language": dict(
+                    visual_language
+                    if isinstance(
+                        visual_language,
+                        dict,
+                    )
+                    else {}
+                ),
                 "scene": {
                     "scene_id": scene.get(
                         "scene_id",
@@ -1211,6 +1308,30 @@ Return JSON only:
                     "lighting": scene.get(
                         "lighting",
                         "",
+                    ),
+                    "color_temperature": scene.get(
+                        "color_temperature",
+                        "",
+                    ),
+                    "time_of_day": scene.get(
+                        "time_of_day",
+                        "",
+                    ),
+                    "weather": scene.get(
+                        "weather",
+                        "",
+                    ),
+                    "atmosphere": scene.get(
+                        "atmosphere",
+                        "",
+                    ),
+                    "environment_details": scene.get(
+                        "environment_details",
+                        [],
+                    ),
+                    "key_props": scene.get(
+                        "key_props",
+                        [],
                     ),
                     "characters": scene.get(
                         "characters",
@@ -1786,6 +1907,15 @@ Return JSON only:
                             or ""
                         ),
 
+                    "color_temperature":
+                        str(
+                            value.get(
+                                "color_temperature",
+                                "",
+                            )
+                            or ""
+                        ),
+
                     "environment_details":
                         list(
                             value.get(
@@ -2021,6 +2151,39 @@ Return JSON only:
                             or "controlled cinematic movement"
                         ),
 
+                    "lens_and_depth_of_field":
+                        str(
+                            value.get(
+                                "lens_and_depth_of_field",
+                                "normal perspective with moderate depth of field",
+                            )
+                            or "normal perspective with moderate depth of field"
+                        ),
+
+                    "composition_notes":
+                        str(
+                            value.get(
+                                "composition_notes",
+                                "clear subject separation and readable depth",
+                            )
+                            or "clear subject separation and readable depth"
+                        ),
+
+                    "color_temperature":
+                        str(
+                            value.get(
+                                "color_temperature",
+                                scene.get(
+                                    "color_temperature",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
+                                "color_temperature",
+                                "",
+                            )
+                        ),
+
                     "lighting":
                         str(
                             value.get(
@@ -2208,6 +2371,15 @@ Return JSON only:
                 "wide cinematic establishing shot",
             "camera_movement":
                 "slow controlled tracking movement",
+            "lens_and_depth_of_field":
+                "wide-angle immersive perspective with deep focus",
+            "composition_notes":
+                "rule of thirds with strong leading lines and environmental depth",
+            "color_temperature":
+                str(scene.get(
+                    "color_temperature",
+                    "",
+                ) or ""),
             "visual_prompt":
                 description,
             "retention_analysis":
@@ -2243,9 +2415,18 @@ Return JSON only:
                     or description
                 ),
             "camera_shot":
-                "medium cinematic subject shot",
+                "medium close-up",
             "camera_movement":
-                "slow deliberate push-in",
+                "slow push-in",
+            "lens_and_depth_of_field":
+                "telephoto compression with shallow depth of field and soft background bokeh",
+            "composition_notes":
+                "subject isolation with negative space and layered foreground framing",
+            "color_temperature":
+                str(scene.get(
+                    "color_temperature",
+                    "",
+                ) or ""),
             "visual_prompt":
                 description,
             "retention_analysis":
@@ -2619,6 +2800,33 @@ Return JSON only:
                             f"'{name}'."
                         )
 
+    @staticmethod
+    def _sanitize_visual_language(
+        value,
+    ) -> dict:
+
+        if not isinstance(value, dict):
+            return {}
+
+        fields = (
+            "genre_tone",
+            "color_palette",
+            "lighting_philosophy",
+            "camera_philosophy",
+            "pacing",
+        )
+
+        return {
+            field: str(
+                value.get(
+                    field,
+                    "",
+                )
+                or ""
+            ).strip()
+            for field in fields
+        }
+
     # ========================================================
     # GENERATE
     # ========================================================
@@ -2834,6 +3042,15 @@ Return JSON only:
             or ""
         ).strip()
 
+        visual_language = self._sanitize_visual_language(
+            story_plan.get(
+                "visual_language",
+                {},
+            )
+        )
+
+        self._current_visual_language = visual_language
+
         # ----------------------------------------------------
         # CHARACTERS
         # ----------------------------------------------------
@@ -2999,9 +3216,7 @@ Return JSON only:
 
             try:
                 shot_temperature, shot_top_p = (
-                    self._sampling_for_mode(
-                        mode
-                    )
+                    self._shot_sampling()
                 )
 
                 shot_plan = self._chat_json(
@@ -3010,6 +3225,7 @@ Return JSON only:
                         story,
                         characters,
                         scene,
+                        visual_language,
                     ),
                     minimum_completion=450,
                     temperature=shot_temperature,
@@ -3096,6 +3312,9 @@ Return JSON only:
 
                 "director_notes":
                     director_notes,
+
+                "visual_language":
+                    visual_language,
 
                 "characters":
                     characters,
@@ -3186,6 +3405,22 @@ Return JSON only:
             )
             or ""
         )
+
+        creative_visual_language = (
+            creative.get(
+                "visual_language",
+                {},
+            )
+            or {}
+        )
+
+        if creative_visual_language:
+
+            merged[
+                "visual_language"
+            ] = deepcopy(
+                creative_visual_language
+            )
 
         creative_characters = (
             creative.get(
