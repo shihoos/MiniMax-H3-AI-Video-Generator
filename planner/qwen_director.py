@@ -1432,29 +1432,33 @@ Return JSON only:
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-You are given multiple scenes from ONE production.
+Create exactly 2 distinct shots for ONE scene.
 
-Create exactly 2 distinct shots for EVERY supplied scene.
+Use ONLY characters supplied in the scene.
+Keep every string concise. Never write reasoning, analysis, or <think> text.
 
-Do not create new characters. Use only the supplied character names.
-
-Every shot must materially advance or visualize its scene.
-Use a clear progression:
+Every shot must materially advance or visualize the scene.
+Use clear cinematic progression:
 1. orientation / establishing
-2. action / reaction / detail / escalation
+2. action / subject
+3. detail, reaction, escalation, or reveal when justified
 
-SHOT / FRAMING VOCABULARY:
+Vary framing, movement, lens/DOF, composition, and lighting
+when the scene supports it. Do not repeat the same camera
+combination by default.
+
+FRAMING:
 extreme wide, wide, full shot, medium wide, medium,
 medium close-up, close-up, extreme close-up,
 over-the-shoulder, two-shot, POV, insert,
 low angle, high angle, dutch angle.
 
-CAMERA MOVEMENT VOCABULARY:
+MOVEMENT:
 static, slow pan, tilt, dolly in, dolly out, truck,
 pedestal, crane, handheld, steadicam glide,
 whip pan, push-in, pull-out, orbit, tracking shot.
 
-LENS / DEPTH OF FIELD:
+LENS / DOF:
 wide-angle, normal perspective, telephoto compression,
 shallow depth of field, deep focus, selective focus.
 
@@ -1463,42 +1467,19 @@ rule of thirds, centered symmetry, leading lines,
 foreground framing, negative space, silhouette,
 depth layering, diagonal composition, subject isolation.
 
-LIGHTING VOCABULARY:
+LIGHTING:
 warm tungsten, cool daylight, golden-hour backlight,
 blue-hour ambient, moonlight, practical neon,
 hard chiaroscuro, soft diffused overcast,
 firelight flicker, mixed practical and ambient.
 
-Keep every generated field concise.
-Do not write reasoning, analysis, commentary, markdown, or <think> text.
-
 Return JSON only.
-
 The top-level value MUST be an object with a "shots" array.
 NEVER return a bare shot object.
-The "shots" array MUST contain exactly 2 shots for EACH scene.
+The "shots" array MUST contain exactly 2 objects.
 
-Required fields for each shot:
-shot_id
-scene_id
-duration_seconds
-characters
-location
-action
-camera_shot
-camera_movement
-lens_and_depth_of_field
-composition_notes
-lighting
-color_temperature
-mood
-visual_prompt
-continuity_notes
+Required structure:
 
-Use the supplied scene's visual language.
-Maintain visual consistency across scenes while varying shot design.
-
-Example shape:
 {
   "shots": [
     {
@@ -1516,144 +1497,14 @@ Example shape:
       "color_temperature": "string",
       "mood": "string",
       "visual_prompt": "string",
-      "continuity_notes": "string"
+      "detailed_description": "string",
+      "continuity_notes": "string",
+      "speaking_characters": [],
+      "speech_text": ""
     }
   ]
 }
 """.strip()
-
-    def _shot_director_batch_user(
-        self,
-        characters: list[dict],
-        scenes: list[dict],
-        visual_language: dict | None = None,
-    ) -> str:
-
-        compact_characters = [
-            {
-                "name": item.get(
-                    "name",
-                    "",
-                ),
-                "role": item.get(
-                    "role",
-                    "",
-                ),
-            }
-            for item in characters
-            if isinstance(
-                item,
-                dict,
-            )
-        ]
-
-        compact_scenes = []
-
-        for scene in scenes:
-
-            compact_scenes.append(
-                {
-                    "scene_id": scene.get(
-                        "scene_id",
-                        "",
-                    ),
-                    "title": scene.get(
-                        "title",
-                        "",
-                    ),
-                    "location": scene.get(
-                        "location",
-                        "",
-                    ),
-                    "description": self._limit_text(
-                        scene.get(
-                            "description",
-                            "",
-                        ),
-                        900,
-                    ),
-                    "time_of_day": scene.get(
-                        "time_of_day",
-                        "",
-                    ),
-                    "weather": scene.get(
-                        "weather",
-                        "",
-                    ),
-                    "atmosphere": self._limit_text(
-                        scene.get(
-                            "atmosphere",
-                            "",
-                        ),
-                        300,
-                    ),
-                    "mood": scene.get(
-                        "mood",
-                        "",
-                    ),
-                    "lighting": self._limit_text(
-                        scene.get(
-                            "lighting",
-                            "",
-                        ),
-                        300,
-                    ),
-                    "color_temperature": scene.get(
-                        "color_temperature",
-                        "",
-                    ),
-                    "characters": scene.get(
-                        "characters",
-                        [],
-                    ),
-                    "scene_objective": self._limit_text(
-                        scene.get(
-                            "scene_objective",
-                            "",
-                        ),
-                        350,
-                    ),
-                    "key_props": self._clean_list(
-                        scene.get(
-                            "key_props",
-                            [],
-                        ),
-                        limit=6,
-                    ),
-                    "continuity_notes": self._limit_text(
-                        scene.get(
-                            "continuity_notes",
-                            "",
-                        ),
-                        300,
-                    ),
-                }
-            )
-
-        return json.dumps(
-            {
-                "characters":
-                    compact_characters,
-
-                "visual_language":
-                    dict(
-                        visual_language
-                        if isinstance(
-                            visual_language,
-                            dict,
-                        )
-                        else {}
-                    ),
-
-                "scenes":
-                    compact_scenes,
-            },
-            ensure_ascii=False,
-            separators=(
-                ",",
-                ":",
-            ),
-        )
 
     def _shot_director_user(
         self,
@@ -1764,6 +1615,205 @@ Example shape:
                         "",
                     ),
                 },
+            },
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+    @staticmethod
+    def _scene_batches(
+        scenes: list[dict],
+        batch_size: int = 2,
+    ) -> list[list[dict]]:
+
+        if batch_size <= 0:
+            raise ValueError(
+                "batch_size must be greater than zero."
+            )
+
+        return [
+            scenes[index:index + batch_size]
+            for index in range(
+                0,
+                len(scenes),
+                batch_size,
+            )
+        ]
+
+    def _shot_director_batch_user(
+        self,
+        characters: list[dict],
+        scenes: list[dict],
+        visual_language: dict | None = None,
+    ) -> str:
+
+        compact_characters = [
+            {
+                "name": str(
+                    item.get(
+                        "name",
+                        "",
+                    )
+                    or ""
+                ).strip(),
+                "role": str(
+                    item.get(
+                        "role",
+                        "",
+                    )
+                    or ""
+                ).strip(),
+            }
+            for item in characters
+            if isinstance(
+                item,
+                dict,
+            )
+        ]
+
+        compact_scenes = []
+
+        for scene in scenes:
+
+            compact_scenes.append(
+                {
+                    "scene_id": str(
+                        scene.get(
+                            "scene_id",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "title": str(
+                        scene.get(
+                            "title",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "location": str(
+                        scene.get(
+                            "location",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "description": self._limit_text(
+                        scene.get(
+                            "description",
+                            "",
+                        ),
+                        800,
+                    ),
+                    "time_of_day": str(
+                        scene.get(
+                            "time_of_day",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "weather": str(
+                        scene.get(
+                            "weather",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "atmosphere": self._limit_text(
+                        scene.get(
+                            "atmosphere",
+                            "",
+                        ),
+                        180,
+                    ),
+                    "mood": str(
+                        scene.get(
+                            "mood",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "lighting": self._limit_text(
+                        scene.get(
+                            "lighting",
+                            "",
+                        ),
+                        180,
+                    ),
+                    "color_temperature": str(
+                        scene.get(
+                            "color_temperature",
+                            "",
+                        )
+                        or ""
+                    ).strip(),
+                    "characters": self._clean_list(
+                        scene.get(
+                            "characters",
+                            [],
+                        ),
+                        limit=6,
+                    ),
+                    "scene_objective": self._limit_text(
+                        scene.get(
+                            "scene_objective",
+                            "",
+                        ),
+                        220,
+                    ),
+                    "key_props": self._clean_list(
+                        scene.get(
+                            "key_props",
+                            [],
+                        ),
+                        limit=5,
+                    ),
+                    "continuity_notes": self._limit_text(
+                        scene.get(
+                            "continuity_notes",
+                            "",
+                        ),
+                        180,
+                    ),
+                }
+            )
+
+        return json.dumps(
+            {
+                "characters":
+                    compact_characters,
+
+                "visual_language":
+                    {
+                        key: str(
+                            value
+                            or ""
+                        ).strip()
+                        for key, value
+                        in (
+                            dict(
+                                visual_language
+                                if isinstance(
+                                    visual_language,
+                                    dict,
+                                )
+                                else {}
+                            ).items()
+                        )
+                        if key in {
+                            "genre_tone",
+                            "color_palette",
+                            "lighting_philosophy",
+                            "camera_philosophy",
+                            "pacing",
+                        }
+                    },
+
+                "scenes":
+                    compact_scenes,
             },
             ensure_ascii=False,
             separators=(
@@ -3888,67 +3938,41 @@ Example shape:
             self._shot_sampling()
         )
 
-        batch_user = (
-            self._shot_director_batch_user(
-                characters,
+        # Quality/speed balance:
+        # two scenes per Qwen call keeps enough production context
+        # for visual continuity without forcing one huge all-scenes
+        # completion. Each shot remains a concise creative decision.
+        for batch_index, scene_batch in enumerate(
+            self._scene_batches(
                 scenes,
-                visual_language,
-            )
-        )
+                batch_size=2,
+            ),
+            start=1,
+        ):
 
-        batch_shots: list[dict] = []
-
-        try:
-
-            shot_plan = self._chat_json(
-                self._shot_director_system(),
-                batch_user,
-                minimum_completion=250,
-                temperature=shot_temperature,
-                top_p=shot_top_p,
-                call_name="shot_batch_pass",
-                max_completion=1400,
-                json_mode=True,
-                disable_thinking=True,
-            )
-
-            batch_shots = (
-                self._normalize_shot_response(
-                    shot_plan
+            batch_user = (
+                self._shot_director_batch_user(
+                    characters,
+                    scene_batch,
+                    visual_language,
                 )
             )
 
-        except Exception as first_shot_error:
-
-            print(
-                "[QWEN]",
-                "shot_batch_retry",
-                str(
-                    first_shot_error
-                ),
-                flush=True,
-            )
-
-            retry_user = (
-                batch_user
-                + "\n\n"
-                "RETRY REQUIREMENTS:\n"
-                "Return the complete JSON object now. "
-                "Include exactly 2 shots for every scene_id. "
-                "Keep every field concise. "
-                "No reasoning. No markdown. No <think>."
-            )
+            batch_shots: list[dict] = []
 
             try:
 
                 shot_plan = self._chat_json(
                     self._shot_director_system(),
-                    retry_user,
-                    minimum_completion=250,
-                    temperature=0.70,
-                    top_p=0.94,
-                    call_name="shot_batch_retry",
-                    max_completion=1200,
+                    batch_user,
+                    minimum_completion=180,
+                    temperature=shot_temperature,
+                    top_p=shot_top_p,
+                    call_name=(
+                        "shot_batch_pass:"
+                        + str(batch_index)
+                    ),
+                    max_completion=800,
                     json_mode=True,
                     disable_thinking=True,
                 )
@@ -3959,164 +3983,261 @@ Example shape:
                     )
                 )
 
-            except Exception as retry_error:
+            except Exception as first_error:
 
                 print(
                     "[QWEN]",
-                    "shot_batch_retry_failed",
+                    "shot_batch_retry",
+                    batch_index,
                     str(
-                        retry_error
+                        first_error
                     ),
                     flush=True,
                 )
 
-                batch_shots = []
-
-        by_scene: dict[str, list[dict]] = {}
-
-        for shot in batch_shots:
-
-            scene_key = str(
-                shot.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
-            ).strip()
-
-            if scene_key:
-
-                by_scene.setdefault(
-                    scene_key,
-                    [],
-                ).append(
-                    shot
-                )
-
-        # Sanitize the batch output scene-by-scene.
-        for scene in scenes:
-
-            scene_id = str(
-                scene.get(
-                    "scene_id",
-                    "",
-                )
-            )
-
-            scene_shots = (
-                self._sanitize_shots(
-                    by_scene.get(
-                        scene_id,
-                        [],
-                    ),
-                    scene,
-                    character_names,
-                )
-            )
-
-            # If the batched call missed or under-produced a scene, perform
-            # one compact targeted call only for that scene.
-            if len(scene_shots) < 2:
-
-                print(
-                    "[QWEN]",
-                    "shot_scene_recovery",
-                    scene_id,
-                    f"usable_qwen_shots={len(scene_shots)}",
-                    flush=True,
-                )
-
-                targeted_user = (
-                    self._shot_director_user(
-                        story,
-                        characters,
-                        scene,
-                        visual_language,
-                    )
-                )
-
-                targeted_system = (
-                    self._shot_director_system()
+                retry_user = (
+                    batch_user
                     + "\n\n"
-                    "IMPORTANT: You are recovering ONLY this one "
-                    "scene. Return exactly 2 shots for that scene."
+                    "RETRY: Return ONLY valid JSON. "
+                    "For every supplied scene, return exactly 2 shots. "
+                    "Keep every field concise. "
+                    "No reasoning, markdown, or <think>."
                 )
 
                 try:
 
-                    targeted_plan = self._chat_json(
-                        targeted_system,
-                        targeted_user,
+                    shot_plan = self._chat_json(
+                        self._shot_director_system(),
+                        retry_user,
                         minimum_completion=180,
-                        temperature=shot_temperature,
-                        top_p=shot_top_p,
+                        temperature=0.70,
+                        top_p=0.94,
                         call_name=(
-                            "shot_scene_recovery:"
-                            + scene_id
+                            "shot_batch_retry:"
+                            + str(batch_index)
                         ),
-                        max_completion=500,
+                        max_completion=700,
                         json_mode=True,
                         disable_thinking=True,
                     )
 
-                    recovered = (
-                        self._sanitize_shots(
-                            self._normalize_shot_response(
-                                targeted_plan
-                            ),
-                            scene,
-                            character_names,
+                    batch_shots = (
+                        self._normalize_shot_response(
+                            shot_plan
                         )
                     )
 
-                    if recovered:
-
-                        scene_shots = recovered
-
-                except Exception as recovery_error:
+                except Exception as retry_error:
 
                     print(
                         "[QWEN]",
-                        "shot_scene_recovery_failed",
-                        scene_id,
+                        "shot_batch_retry_failed",
+                        batch_index,
                         str(
-                            recovery_error
+                            retry_error
                         ),
                         flush=True,
                     )
 
-            if len(scene_shots) < 2:
+                    batch_shots = []
 
-                fallback_shots = (
-                    self._fallback_shots_for_scene(
+            by_scene: dict[
+                str,
+                list[dict],
+            ] = {}
+
+            for shot in batch_shots:
+
+                scene_id = str(
+                    shot.get(
+                        "scene_id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                if scene_id:
+                    by_scene.setdefault(
+                        scene_id,
+                        [],
+                    ).append(
+                        shot
+                    )
+
+            for scene in scene_batch:
+
+                scene_id = str(
+                    scene.get(
+                        "scene_id",
+                        "",
+                    )
+                ).strip()
+
+                scene_shots = (
+                    self._sanitize_shots(
+                        by_scene.get(
+                            scene_id,
+                            [],
+                        ),
                         scene,
-                        len(
-                            all_shots
-                        ) + 1,
+                        character_names,
                     )
                 )
 
-                if scene_shots:
+                # Fully successful scene: keep the Qwen result.
+                if len(scene_shots) >= 2:
 
-                    needed = 2 - len(
-                        scene_shots
+                    all_shots.extend(
+                        scene_shots[:2]
+                    )
+                    continue
+
+                # One valid Qwen shot: ask only for its missing companion.
+                if len(scene_shots) == 1:
+
+                    existing = scene_shots[0]
+
+                    targeted_user = (
+                        self._shot_director_user(
+                            story,
+                            characters,
+                            scene,
+                            visual_language,
+                        )
+                        + "\n\n"
+                        + json.dumps(
+                            {
+                                "existing_shot": {
+                                    "camera_shot":
+                                        existing.get(
+                                            "camera_shot",
+                                            "",
+                                        ),
+                                    "camera_movement":
+                                        existing.get(
+                                            "camera_movement",
+                                            "",
+                                        ),
+                                    "lens_and_depth_of_field":
+                                        existing.get(
+                                            "lens_and_depth_of_field",
+                                            "",
+                                        ),
+                                    "composition_notes":
+                                        existing.get(
+                                            "composition_notes",
+                                            "",
+                                        ),
+                                }
+                            },
+                            ensure_ascii=False,
+                            separators=(
+                                ",",
+                                ":",
+                            ),
+                        )
                     )
 
-                    scene_shots.extend(
-                        fallback_shots[
-                            :needed
-                        ]
+                    targeted_system = (
+                        self._shot_director_system()
+                        + "\n\n"
+                        "RECOVERY: Return exactly ONE additional "
+                        "shot for this scene. Do not duplicate the "
+                        "existing shot's framing, movement, lens, "
+                        "or composition."
                     )
 
-                else:
+                    try:
 
-                    scene_shots = (
-                        fallback_shots
+                        recovery_plan = self._chat_json(
+                            targeted_system,
+                            targeted_user,
+                            minimum_completion=100,
+                            temperature=shot_temperature,
+                            top_p=shot_top_p,
+                            call_name=(
+                                "shot_missing_one:"
+                                + scene_id
+                            ),
+                            max_completion=320,
+                            json_mode=True,
+                            disable_thinking=True,
+                        )
+
+                        recovered = (
+                            self._sanitize_shots(
+                                self._normalize_shot_response(
+                                    recovery_plan
+                                ),
+                                scene,
+                                character_names,
+                            )
+                        )
+
+                        for shot in recovered:
+
+                            if (
+                                len(
+                                    scene_shots
+                                )
+                                >= 2
+                            ):
+                                break
+
+                            scene_shots.append(
+                                shot
+                            )
+
+                    except Exception as recovery_error:
+
+                        print(
+                            "[QWEN]",
+                            "shot_missing_one_failed",
+                            scene_id,
+                            str(
+                                recovery_error
+                            ),
+                            flush=True,
+                        )
+
+                # If Qwen produced zero shots or the missing-shot recovery
+                # failed, use the existing deterministic fallback only for
+                # the missing structural positions.
+                if len(scene_shots) < 2:
+
+                    fallback_shots = (
+                        self._fallback_shots_for_scene(
+                            scene,
+                            len(
+                                all_shots
+                            ) + 1,
+                        )
                     )
 
-            all_shots.extend(
-                scene_shots
-            )
+                    if scene_shots:
+
+                        needed = (
+                            2
+                            - len(
+                                scene_shots
+                            )
+                        )
+
+                        scene_shots.extend(
+                            fallback_shots[
+                                :needed
+                            ]
+                        )
+
+                    else:
+
+                        scene_shots = (
+                            fallback_shots
+                        )
+
+                all_shots.extend(
+                    scene_shots[:2]
+                )
 
         if not all_shots:
 
@@ -4137,8 +4258,7 @@ Example shape:
                 shot[
                     "shot_id"
                 ]
-                for shot
-                in all_shots
+                for shot in all_shots
                 if shot.get(
                     "scene_id"
                 )
