@@ -9,6 +9,8 @@ import time
 from copy import deepcopy
 from pathlib import Path
 
+from planner.cinematic_compiler import CinematicCompiler
+
 from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_KAGGLE_INPUT_ROOT,
@@ -2751,24 +2753,19 @@ Required structure:
         character_names: set[str],
     ) -> list[dict]:
 
-        result: list[dict] = []
-
         scene_id = str(
             scene.get(
                 "scene_id",
                 "",
             )
-        )
+            or ""
+        ).strip()
 
-        allowed = {
-            name.lower(): name
-            for name
-            in character_names
-        }
+        result: list[dict] = []
 
-        for index, value in enumerate(
-            shots or [],
-            start=1,
+        for value in (
+            shots
+            or []
         ):
 
             if not isinstance(
@@ -2777,8 +2774,12 @@ Required structure:
             ):
                 continue
 
+            candidate = dict(
+                value
+            )
+
             candidate_scene_id = str(
-                value.get(
+                candidate.get(
                     "scene_id",
                     scene_id,
                 )
@@ -2788,441 +2789,17 @@ Required structure:
             if candidate_scene_id != scene_id:
                 continue
 
-            selected: list[str] = []
-
-            for name in (
-                value.get(
-                    "characters",
-                    scene.get(
-                        "characters",
-                        [],
-                    ),
-                )
-                or []
-            ):
-
-                canonical = allowed.get(
-                    str(
-                        name
-                    ).strip().lower()
-                )
-
-                if canonical is not None:
-                    selected.append(
-                        canonical
-                    )
-
-            speaking: list[str] = []
-
-            for name in (
-                value.get(
-                    "speaking_characters",
-                    [],
-                )
-                or []
-            ):
-
-                canonical = allowed.get(
-                    str(
-                        name
-                    ).strip().lower()
-                )
-
-                if canonical is not None:
-                    speaking.append(
-                        canonical
-                    )
-
-            try:
-
-                duration = float(
-                    value.get(
-                        "duration_seconds",
-                        5.2,
-                    )
-                    or 5.2
-                )
-
-            except (
-                TypeError,
-                ValueError,
-            ):
-
-                duration = 5.2
+            candidate[
+                "scene_id"
+            ] = scene_id
 
             result.append(
-                {
-                    "shot_id": str(
-                        value.get(
-                            "shot_id",
-                            "",
-                        )
-                        or ""
-                    ).strip(),
-
-                    "scene_id":
-                        scene_id,
-
-                    "order":
-                        len(result) + 1,
-
-                    "duration_seconds":
-                        duration,
-
-                    "characters":
-                        selected,
-
-                    "location":
-                        str(
-                            value.get(
-                                "location",
-                                scene.get(
-                                    "location",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "location",
-                                "",
-                            )
-                        ),
-
-                    "action":
-                        str(
-                            value.get(
-                                "action",
-                                scene.get(
-                                    "scene_objective",
-                                    scene.get(
-                                        "description",
-                                        "",
-                                    ),
-                                ),
-                            )
-                            or ""
-                        ),
-
-                    "camera_shot":
-                        str(
-                            value.get(
-                                "camera_shot",
-                                "cinematic medium shot",
-                            )
-                            or "cinematic medium shot"
-                        ),
-
-                    "camera_movement":
-                        str(
-                            value.get(
-                                "camera_movement",
-                                "controlled cinematic movement",
-                            )
-                            or "controlled cinematic movement"
-                        ),
-
-                    "lens_and_depth_of_field":
-                        str(
-                            value.get(
-                                "lens_and_depth_of_field",
-                                "normal perspective with moderate depth of field",
-                            )
-                            or "normal perspective with moderate depth of field"
-                        ),
-
-                    "composition_notes":
-                        str(
-                            value.get(
-                                "composition_notes",
-                                "clear subject separation and readable depth",
-                            )
-                            or "clear subject separation and readable depth"
-                        ),
-
-                    "color_temperature":
-                        str(
-                            value.get(
-                                "color_temperature",
-                                scene.get(
-                                    "color_temperature",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "color_temperature",
-                                "",
-                            )
-                        ),
-
-                    "lighting":
-                        str(
-                            value.get(
-                                "lighting",
-                                scene.get(
-                                    "lighting",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "lighting",
-                                "",
-                            )
-                        ),
-
-                    "mood":
-                        str(
-                            value.get(
-                                "mood",
-                                scene.get(
-                                    "mood",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "mood",
-                                "",
-                            )
-                        ),
-
-                    "visual_prompt":
-                        str(
-                            value.get(
-                                "visual_prompt",
-                                scene.get(
-                                    "description",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "description",
-                                "",
-                            )
-                        ),
-
-                    "retention_analysis":
-                        str(
-                            value.get(
-                                "retention_analysis",
-                                "Maintain narrative and visual continuity.",
-                            )
-                            or "Maintain narrative and visual continuity."
-                        ),
-
-                    "detailed_description":
-                        str(
-                            value.get(
-                                "detailed_description",
-                                scene.get(
-                                    "description",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "description",
-                                "",
-                            )
-                        ),
-
-                    "overall_soundscape":
-                        str(
-                            value.get(
-                                "overall_soundscape",
-                                "Natural cinematic environmental sound.",
-                            )
-                            or "Natural cinematic environmental sound."
-                        ),
-
-                    "non_diegetic_music":
-                        str(
-                            value.get(
-                                "non_diegetic_music",
-                                "Subtle cinematic score when appropriate.",
-                            )
-                            or "Subtle cinematic score when appropriate."
-                        ),
-
-                    "negative_prompt":
-                        str(
-                            value.get(
-                                "negative_prompt",
-                                "identity drift, face deformation, inconsistent clothing",
-                            )
-                            or "identity drift, face deformation, inconsistent clothing"
-                        ),
-
-                    "continuity_notes":
-                        str(
-                            value.get(
-                                "continuity_notes",
-                                scene.get(
-                                    "continuity_notes",
-                                    "",
-                                ),
-                            )
-                            or scene.get(
-                                "continuity_notes",
-                                "",
-                            )
-                        ),
-
-                    "speaking_characters":
-                        speaking,
-
-                    "speech_text":
-                        str(
-                            value.get(
-                                "speech_text",
-                                "",
-                            )
-                            or ""
-                        ),
-                }
+                candidate
             )
 
         return result
 
     @staticmethod
-    def _fallback_shots_for_scene(
-        scene: dict,
-        start_index: int,
-    ) -> list[dict]:
-
-        description = str(
-            scene.get(
-                "description",
-                "",
-            )
-            or ""
-        )
-
-        characters = list(
-            scene.get(
-                "characters",
-                [],
-            )
-            or []
-        )
-
-        base = {
-            "scene_id": scene.get(
-                "scene_id",
-                "",
-            ),
-            "characters": characters,
-            "location": scene.get(
-                "location",
-                "",
-            ),
-            "lighting": scene.get(
-                "lighting",
-                "",
-            ),
-            "mood": scene.get(
-                "mood",
-                "",
-            ),
-            "continuity_notes": scene.get(
-                "continuity_notes",
-                "",
-            ),
-        }
-
-        shot_a = {
-            **base,
-            "shot_id":
-                "",
-            "order":
-                1,
-            "duration_seconds":
-                5.2,
-            "action":
-                description,
-            "camera_shot":
-                "wide cinematic establishing shot",
-            "camera_movement":
-                "slow controlled tracking movement",
-            "lens_and_depth_of_field":
-                "wide-angle immersive perspective with deep focus",
-            "composition_notes":
-                "rule of thirds with strong leading lines and environmental depth",
-            "color_temperature":
-                str(scene.get(
-                    "color_temperature",
-                    "",
-                ) or ""),
-            "visual_prompt":
-                description,
-            "retention_analysis":
-                "Establish the environment and narrative situation.",
-            "detailed_description":
-                description,
-            "overall_soundscape":
-                "Natural cinematic environmental sound.",
-            "non_diegetic_music":
-                "Subtle cinematic score.",
-            "negative_prompt":
-                "identity drift, duplicate character, face deformation, inconsistent clothing",
-            "speaking_characters":
-                [],
-            "speech_text":
-                "",
-        }
-
-        shot_b = {
-            **base,
-            "shot_id":
-                "",
-            "order":
-                2,
-            "duration_seconds":
-                5.2,
-            "action":
-                (
-                    scene.get(
-                        "scene_objective",
-                        "",
-                    )
-                    or description
-                ),
-            "camera_shot":
-                "medium close-up",
-            "camera_movement":
-                "slow push-in",
-            "lens_and_depth_of_field":
-                "telephoto compression with shallow depth of field and soft background bokeh",
-            "composition_notes":
-                "subject isolation with negative space and layered foreground framing",
-            "color_temperature":
-                str(scene.get(
-                    "color_temperature",
-                    "",
-                ) or ""),
-            "visual_prompt":
-                description,
-            "retention_analysis":
-                "Move from environment into the primary narrative beat.",
-            "detailed_description":
-                description,
-            "overall_soundscape":
-                "Natural cinematic environmental sound.",
-            "non_diegetic_music":
-                "Cinematic score building with the scene.",
-            "negative_prompt":
-                "identity drift, duplicate character, face deformation, inconsistent clothing",
-            "speaking_characters":
-                [],
-            "speech_text":
-                "",
-        }
-
-        return [
-            shot_a,
-            shot_b,
-        ]
-
-    # ========================================================
-    # FINAL ID NORMALIZATION
-    # ========================================================
-
     @staticmethod
     def _normalize_ids(
         scenes: list[dict],
@@ -4248,6 +3825,16 @@ Required structure:
         self._normalize_ids(
             scenes,
             all_shots,
+        )
+
+        all_shots = (
+            CinematicCompiler(
+                character_names=character_names,
+            ).compile_all(
+                scenes,
+                all_shots,
+                min_shots_per_scene=2,
+            )
         )
 
         for scene in scenes:
