@@ -497,6 +497,154 @@ class CinematicCompiler:
     # SHOT COMPILATION
     # ============================================================
 
+    def _fallback_shots_for_scene(
+        self,
+        scene: dict,
+        count: int,
+    ) -> list[dict]:
+
+        scene_id = self._string(
+            scene.get(
+                "scene_id",
+            )
+        )
+
+        if not scene_id:
+            return []
+
+        description = self._string(
+            scene.get(
+                "description",
+            )
+            or scene.get(
+                "scene_objective",
+            ),
+            "Cinematic scene.",
+        )
+
+        location = self._string(
+            scene.get(
+                "location",
+            ),
+            "cinematic environment",
+        )
+
+        lighting = self._string(
+            scene.get(
+                "lighting",
+            ),
+            "cinematic naturalistic lighting",
+        )
+
+        color_temperature = self._string(
+            scene.get(
+                "color_temperature",
+            ),
+            "natural cinematic color temperature",
+        )
+
+        mood = self._string(
+            scene.get(
+                "mood",
+            ),
+            "cinematic",
+        )
+
+        templates = (
+            {
+                "camera_shot": "wide establishing shot",
+                "camera_movement": "slow controlled push-in",
+                "lens_and_depth_of_field": (
+                    "wide-angle perspective with deep focus"
+                ),
+                "composition_notes": (
+                    "rule of thirds with leading lines and layered depth"
+                ),
+                "retention_analysis": (
+                    "Establish the location, scale, and immediate narrative situation."
+                ),
+            },
+            {
+                "camera_shot": "medium close-up",
+                "camera_movement": "slow push-in",
+                "lens_and_depth_of_field": (
+                    "normal perspective with shallow depth of field"
+                ),
+                "composition_notes": (
+                    "subject isolation with environmental context"
+                ),
+                "retention_analysis": (
+                    "Move attention to the primary action or emotional beat."
+                ),
+            },
+        )
+
+        result: list[dict] = []
+
+        for index in range(
+            min(
+                max(
+                    0,
+                    int(count),
+                ),
+                len(templates),
+            )
+        ):
+
+            template = templates[index]
+
+            result.append(
+                {
+                    "shot_id": (
+                        f"{scene_id}"
+                        f"_shot_fallback_{index + 1:03d}"
+                    ),
+                    "scene_id": scene_id,
+                    "duration_seconds": 5.2,
+                    "characters": self._list(
+                        scene.get(
+                            "characters",
+                            [],
+                        )
+                    ),
+                    "location": location,
+                    "action": description,
+                    "camera_shot": template[
+                        "camera_shot"
+                    ],
+                    "camera_movement": template[
+                        "camera_movement"
+                    ],
+                    "lens_and_depth_of_field": template[
+                        "lens_and_depth_of_field"
+                    ],
+                    "composition_notes": template[
+                        "composition_notes"
+                    ],
+                    "lighting": lighting,
+                    "color_temperature": color_temperature,
+                    "mood": mood,
+                    "visual_prompt": description,
+                    "retention_analysis": template[
+                        "retention_analysis"
+                    ],
+                    "detailed_description": description,
+                    "overall_soundscape": "",
+                    "non_diegetic_music": "",
+                    "negative_prompt": "",
+                    "continuity_notes": self._string(
+                        scene.get(
+                            "continuity_notes",
+                        ),
+                        "Maintain scene and character continuity.",
+                    ),
+                    "speaking_characters": [],
+                    "speech_text": "",
+                }
+            )
+
+        return result
+
     def compile_shot(
         self,
         scene: dict,
@@ -792,7 +940,6 @@ class CinematicCompiler:
             scenes,
             list,
         ):
-
             raise TypeError(
                 "scenes must be a list."
             )
@@ -801,26 +948,9 @@ class CinematicCompiler:
             qwen_shots,
             list,
         ):
-
             raise TypeError(
                 "qwen_shots must be a list."
             )
-
-        scene_map = {
-            str(
-                scene.get(
-                    "scene_id",
-                    "",
-                )
-            ).strip():
-                scene
-            for scene
-            in scenes
-            if isinstance(
-                scene,
-                dict,
-            )
-        }
 
         grouped: dict[
             str,
@@ -854,26 +984,60 @@ class CinematicCompiler:
 
         for scene in scenes:
 
+            if not isinstance(
+                scene,
+                dict,
+            ):
+                continue
+
             scene_id = self._string(
                 scene.get(
                     "scene_id"
                 )
             )
 
-            scene_shots = grouped.get(
-                scene_id,
-                [],
+            if not scene_id:
+                continue
+
+            scene_shots = list(
+                grouped.get(
+                    scene_id,
+                    [],
+                )[:2]
             )
 
-            if not scene_shots:
+            missing = (
+                2
+                - len(scene_shots)
+            )
 
-                continue
+            if missing > 0:
+
+                scene_shots.extend(
+                    self._fallback_shots_for_scene(
+                        scene,
+                        missing,
+                    )
+                )
+
+            if len(scene_shots) < 2:
+
+                raise RuntimeError(
+                    "CinematicCompiler could not produce "
+                    f"two shots for scene {scene_id}."
+                )
 
             compiled.extend(
                 self.compile_scene(
                     scene,
-                    scene_shots,
+                    scene_shots[:2],
                 )
+            )
+
+        if not compiled:
+
+            raise RuntimeError(
+                "CinematicCompiler produced no usable shots."
             )
 
         return compiled
