@@ -850,13 +850,13 @@ Return:
 {{
   "story": "string",
   "director_notes": "string",
-  "visual_language": {
+  "visual_language": {{
     "genre_tone": "string",
     "color_palette": "string",
     "lighting_philosophy": "string",
     "camera_philosophy": "string",
     "pacing": "string"
-  },
+  }},
   "characters": [],
   "scenes": []
 }}
