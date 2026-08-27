@@ -5,6 +5,7 @@ import gc
 import json
 import os
 import re
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -140,6 +141,7 @@ class QwenDirector:
         )
 
         self._fallback_planner = None
+        self._current_visual_language: dict = {}
 
     # ========================================================
     # MODEL DISCOVERY
@@ -769,6 +771,202 @@ structure needed to visualize it.
             f"Unsupported story mode: {mode}"
         )
 
+    def _story_text_system(
+        self,
+        mode: str,
+    ) -> str:
+
+        if mode == PRESERVE_USER_STORY_MODE:
+            raise ValueError(
+                "Preserve Story does not regenerate story text."
+            )
+
+        if mode == AI_STORY_MODE:
+
+            instruction = """
+You are the narrative writer for MiniMax H3.
+
+The user provides a PREMISE.
+
+Write a genuinely developed cinematic short-film story.
+
+Create:
+- a clear protagonist objective;
+- meaningful conflict;
+- escalating complications;
+- character reactions;
+- a strong climax;
+- a satisfying resolution.
+
+Add substantive events and cause-and-effect.
+Do not merely paraphrase the premise.
+Do not discuss the task.
+Do not output notes, camera directions, metadata, or JSON wrappers around the story.
+The story itself must be materially different from the premise.
+
+Return JSON only:
+{
+  "story": "complete cinematic narrative"
+}
+""".strip()
+
+        else:
+
+            instruction = """
+You are the narrative expansion writer for MiniMax H3.
+
+The user provides an existing story.
+
+Expand that story substantially while preserving:
+- important characters;
+- important events;
+- chronology;
+- setting;
+- outcome;
+- explicit constraints.
+
+Add:
+- motivation;
+- emotional depth;
+- cause and effect;
+- transitions;
+- intermediate events;
+- stakes;
+- tension;
+- sensory detail;
+- character reactions;
+- stronger escalation;
+- richer consequences.
+
+Do not merely add adjectives.
+Do not convert the story into camera directions.
+Do not replace the original plot.
+The result must be recognizably the same story but materially more developed.
+
+Return JSON only:
+{
+  "story": "complete expanded narrative"
+}
+""".strip()
+
+        return instruction
+
+    def _story_text_user(
+        self,
+        mode: str,
+        story: str,
+    ) -> str:
+
+        return json.dumps(
+            {
+                "mode": mode,
+                "source_story": self._limit_text(
+                    story,
+                    6500,
+                ),
+            },
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
+    def _metadata_director_system(
+        self,
+        mode: str,
+    ) -> str:
+
+        return f"""
+You are the STORYBOARD PRODUCTION DIRECTOR for MiniMax H3.
+
+{self._mode_instruction(mode)}
+
+The story text supplied by the user is authoritative.
+Do not rewrite narrative prose in this pass.
+
+Create only:
+- director_notes
+- visual_language
+- characters
+- scenes
+
+Do NOT create shots in this pass.
+
+Create 4–6 meaningful narrative scenes.
+Every scene must represent a real dramatic beat, not a camera instruction.
+
+Avoid scene titles such as:
+"distance"
+"wind"
+"atmosphere"
+"cinematic environment"
+"a wide cinematic shot"
+"camera"
+
+Use concise narrative-beat titles instead.
+
+Every scene must include:
+scene_id
+title
+order
+location
+time_of_day
+weather
+atmosphere
+description
+mood
+lighting
+color_temperature
+environment_details
+key_props
+characters
+scene_objective
+continuity_notes
+
+Create one coherent visual_language bible:
+genre_tone
+color_palette
+lighting_philosophy
+camera_philosophy
+pacing
+
+Return JSON only:
+{{
+  "director_notes": "string",
+  "visual_language": {{
+    "genre_tone": "string",
+    "color_palette": "string",
+    "lighting_philosophy": "string",
+    "camera_philosophy": "string",
+    "pacing": "string"
+  }},
+  "characters": [],
+  "scenes": []
+}}
+""".strip()
+
+    def _metadata_director_user(
+        self,
+        mode: str,
+        story: str,
+    ) -> str:
+
+        return json.dumps(
+            {
+                "mode": mode,
+                "story": self._limit_text(
+                    story,
+                    6000,
+                ),
+            },
+            ensure_ascii=False,
+            separators=(
+                ",",
+                ":",
+            ),
+        )
+
     def _story_director_system(
         self,
         mode: str,
@@ -956,6 +1154,7 @@ Return JSON only:
     def _character_recovery_user(
         self,
         story: str,
+        visual_language: dict | None = None,
     ) -> str:
 
         return json.dumps(
@@ -963,7 +1162,15 @@ Return JSON only:
                 "story": self._limit_text(
                     story,
                     5500,
-                )
+                ),
+                "visual_language": dict(
+                    visual_language
+                    if isinstance(
+                        visual_language,
+                        dict,
+                    )
+                    else {}
+                ),
             },
             ensure_ascii=False,
             separators=(
@@ -1001,6 +1208,8 @@ Return JSON only:
                 minimum_completion=400,
                 temperature=temperature,
                 top_p=top_p,
+                call_name="character_recovery",
+                max_completion=1000,
             )
 
         except Exception:
@@ -1133,6 +1342,8 @@ Return JSON only:
                 minimum_completion=450,
                 temperature=temperature,
                 top_p=top_p,
+                call_name="scene_recovery",
+                max_completion=1600,
             )
 
         except Exception:
@@ -1448,6 +1659,8 @@ Return JSON only:
         minimum_completion: int = 512,
         temperature: float | None = None,
         top_p: float | None = None,
+        call_name: str = "unknown",
+        max_completion: int | None = None,
     ) -> dict:
 
         if self._llama is None:
@@ -1470,26 +1683,67 @@ Return JSON only:
             )
         )
 
-        response = (
-            self._llama.create_chat_completion(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt,
-                    },
-                ],
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                response_format={
-                    "type": "json_object",
-                },
+        if max_completion is not None:
+            max_tokens = min(
+                max_tokens,
+                int(max_completion),
             )
-        )
+
+        started = time.perf_counter()
+
+        try:
+
+            response = (
+                self._llama.create_chat_completion(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": system_prompt,
+                        },
+                        {
+                            "role": "user",
+                            "content": user_prompt,
+                        },
+                    ],
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    response_format={
+                        "type": "json_object",
+                    },
+                )
+            )
+
+        finally:
+
+            elapsed = (
+                time.perf_counter()
+                - started
+            )
+
+            try:
+
+                usage = (
+                    response.get(
+                        "usage",
+                        {},
+                    )
+                    if "response" in locals()
+                    else {}
+                )
+
+                print(
+                    "[QWEN]",
+                    call_name,
+                    f"elapsed={elapsed:.2f}s",
+                    f"prompt_tokens={usage.get('prompt_tokens', 0)}",
+                    f"completion_tokens={usage.get('completion_tokens', 0)}",
+                    f"max_tokens={max_tokens}",
+                    flush=True,
+                )
+
+            except Exception:
+                pass
 
         try:
 
@@ -1729,6 +1983,60 @@ Return JSON only:
 
         return result
 
+    @staticmethod
+    def _clean_list(
+        value,
+        limit: int | None = None,
+    ) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(
+            value,
+            str,
+        ):
+            items = [
+                item.strip()
+                for item in re.split(
+                    r"[\n,;]+",
+                    value,
+                )
+                if item.strip()
+            ]
+        elif isinstance(
+            value,
+            (list, tuple, set),
+        ):
+            items = [
+                str(item).strip()
+                for item in value
+                if str(item).strip()
+            ]
+        else:
+            items = [
+                str(value).strip()
+            ] if str(value).strip() else []
+
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for item in items:
+            key = item.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            result.append(item)
+
+            if (
+                limit is not None
+                and len(result) >= limit
+            ):
+                break
+
+        return result
+
     # ========================================================
     # SCENE SANITIZATION
     # ========================================================
@@ -1917,22 +2225,22 @@ Return JSON only:
                         ),
 
                     "environment_details":
-                        list(
+                        self._clean_list(
                             value.get(
                                 "environment_details",
                                 [],
-                            )
-                            or []
-                        )[:12],
+                            ),
+                            limit=12,
+                        ),
 
                     "key_props":
-                        list(
+                        self._clean_list(
                             value.get(
                                 "key_props",
                                 [],
-                            )
-                            or []
-                        )[:8],
+                            ),
+                            limit=8,
+                        ),
 
                     "scene_objective":
                         str(
@@ -1944,7 +2252,9 @@ Return JSON only:
                         ),
 
                     "characters":
+                        self._clean_list(
                         selected,
+                    ),
 
                     "story_summary":
                         str(
@@ -2875,336 +3185,147 @@ Return JSON only:
             )
         )
 
-        story_system = self._story_director_system(
-            mode
-        )
+        # Preserve Story never asks Qwen to regenerate the immutable
+        # narrative. This removes the largest unnecessary completion
+        # cost from Preserve mode.
+        if mode == PRESERVE_USER_STORY_MODE:
 
-        story_user = self._story_director_user(
-            mode,
-            user_input,
-        )
-
-        story_plan = self._chat_json(
-            story_system,
-            story_user,
-            minimum_completion=600,
-            temperature=temperature,
-            top_p=top_p,
-        )
-
-        story = str(
-            story_plan.get(
-                "story",
-                user_input,
-            )
-            or user_input
-        ).strip()
-
-        try:
-            self._validate_mode_output(
-                mode,
-                user_input,
-                story,
-            )
-
-        except RuntimeError:
-            if mode == PRESERVE_USER_STORY_MODE:
-                # Preserve Story is intentionally strict. Any change,
-                # including a semantic or textual rewrite, must remain
-                # a hard validation failure.
-                raise
-
-            if mode == AI_STORY_MODE:
-                retry_instruction = (
-                    "IMPORTANT RETRY FOR AI STORY MODE: "
-                    "The previous response failed because the returned "
-                    "story was unchanged from the supplied premise. "
-                    "Do not copy, repeat, or merely paraphrase the premise. "
-                    "You MUST produce a genuinely developed cinematic story "
-                    "with additional substantive narrative events, a clear "
-                    "protagonist objective, meaningful conflict, escalating "
-                    "complications, character reactions, a climax, and a "
-                    "resolution. The returned 'story' field must be materially "
-                    "different from the input while remaining faithful to its "
-                    "premise. Return the complete required JSON structure."
+            story = (
+                self._normalize_story(
+                    user_input
                 )
-
-            elif mode == EXPAND_USER_STORY_MODE:
-                retry_instruction = (
-                    "IMPORTANT RETRY FOR EXPAND STORY MODE: "
-                    "The previous response failed because the returned story "
-                    "was unchanged from the supplied story. You MUST expand "
-                    "the supplied story rather than reproducing it. Preserve "
-                    "all important characters, events, chronology, setting, "
-                    "outcome, and explicit constraints, but add substantive "
-                    "narrative development: character motivation, emotional "
-                    "depth, cause and effect, transitions, intermediate "
-                    "events, stakes, tension, sensory detail, reactions, "
-                    "stronger escalation, and richer consequences. The "
-                    "returned 'story' field must be materially longer or "
-                    "meaningfully developed and must NOT be identical to the "
-                    "input. Do not merely add adjectives or camera directions. "
-                    "Return the complete required JSON structure."
-                )
-
-            else:
-                raise
-
-            retry_user = (
-                story_user
-                + "\n\n"
-                + retry_instruction
             )
 
             story_plan = self._chat_json(
-                story_system,
-                retry_user,
-                minimum_completion=600,
-                temperature=temperature,
-                top_p=top_p,
+                self._metadata_director_system(
+                    mode
+                ),
+                self._metadata_director_user(
+                    mode,
+                    story,
+                ),
+                minimum_completion=700,
+                temperature=0.20,
+                top_p=0.82,
+                call_name="preserve_metadata_pass",
+                max_completion=3200,
             )
 
-            retry_story = str(
+        else:
+
+            # AI Story / Expand Story first generate ONLY the narrative.
+            # This prevents a single large JSON completion from mixing
+            # narrative writing with characters/scenes metadata and then
+            # echoing the source story unchanged.
+            story_plan = self._chat_json(
+                self._story_text_system(
+                    mode
+                ),
+                self._story_text_user(
+                    mode,
+                    user_input,
+                ),
+                minimum_completion=500,
+                temperature=temperature,
+                top_p=top_p,
+                call_name=(
+                    "ai_story_text_pass"
+                    if mode == AI_STORY_MODE
+                    else "expand_story_text_pass"
+                ),
+                max_completion=1800,
+            )
+
+            story = str(
                 story_plan.get(
                     "story",
-                    user_input,
+                    "",
                 )
-                or user_input
+                or ""
             ).strip()
 
             try:
+
                 self._validate_mode_output(
                     mode,
                     user_input,
-                    retry_story,
+                    story,
                 )
 
-                story = retry_story
+            except RuntimeError as first_error:
 
-            except RuntimeError:
-                fallback_characters, fallback_scenes = (
-                    self._build_deterministic_fallback(
-                        user_input
+                retry_user = (
+                    self._story_text_user(
+                        mode,
+                        user_input,
                     )
+                    + "\n\n"
+                    "REPAIR REQUIRED. The previous narrative failed validation: "
+                    + str(first_error)
+                    + "\n"
+                    "Write a new, materially different narrative now. "
+                    "Return ONLY the required JSON object."
                 )
 
-                # Do not invent a fake expansion. When Qwen cannot satisfy
-                # AI Story or Expand Story after the repair attempt, keep the
-                # user's original narrative as the authoritative story and
-                # allow the existing deterministic planner to build the
-                # production structure below.
-                story = user_input.strip()
+                story_plan = self._chat_json(
+                    self._story_text_system(
+                        mode
+                    ),
+                    retry_user,
+                    minimum_completion=500,
+                    temperature=min(
+                        0.85,
+                        max(
+                            0.65,
+                            temperature + 0.10,
+                        ),
+                    ),
+                    top_p=0.92,
+                    call_name=(
+                        "ai_story_text_retry"
+                        if mode == AI_STORY_MODE
+                        else "expand_story_text_retry"
+                    ),
+                    max_completion=1800,
+                )
 
-                existing_notes = str(
+                story = str(
                     story_plan.get(
-                        "director_notes",
+                        "story",
                         "",
                     )
                     or ""
                 ).strip()
 
-                if mode == AI_STORY_MODE:
-                    fallback_note = (
-                        "AI Story mode returned the premise unchanged "
-                        "after one repair attempt; deterministic "
-                        "production-structure fallback used."
-                    )
-                else:
-                    fallback_note = (
-                        "Expand Story mode returned the supplied story "
-                        "unchanged after one repair attempt; deterministic "
-                        "production-structure fallback used without "
-                        "inventing narrative changes."
-                    )
-
-                story_plan["director_notes"] = (
-                    (
-                        existing_notes
-                        + " "
-                        + fallback_note
-                    ).strip()
-                )
-
-                # Make the existing fallback data available to the normal
-                # character/scene recovery logic below.
-                story_plan["characters"] = (
-                    fallback_characters
-                )
-                story_plan["scenes"] = (
-                    fallback_scenes
-                )
-
-        director_notes = str(
-            story_plan.get(
-                "director_notes",
-                "",
-            )
-            or ""
-        ).strip()
-
-        visual_language = self._sanitize_visual_language(
-            story_plan.get(
-                "visual_language",
-                {},
-            )
-        )
-
-        self._current_visual_language = visual_language
-
-        # ----------------------------------------------------
-        # CHARACTERS
-        # ----------------------------------------------------
-
-        characters = (
-            self._sanitize_characters(
-                story_plan.get(
-                    "characters",
-                    [],
-                )
-            )
-        )
-
-        if not characters:
-
-            characters = (
-                self._recover_characters(
+                self._validate_mode_output(
                     mode,
+                    user_input,
                     story,
                 )
-            )
 
-        fallback_characters = []
-        fallback_scenes = []
-
-        if (
-            not characters
-            or not story_plan.get(
-                "scenes",
-                [],
-            )
-        ):
-
-            (
-                fallback_characters,
-                fallback_scenes,
-            ) = (
-                self._build_deterministic_fallback(
-                    story
-                )
-            )
-
-        if not characters:
-
-            characters = (
-                self._sanitize_characters(
-                    fallback_characters
-                )
-            )
-
-        character_names = {
-            character[
-                "name"
-            ].lower()
-            for character
-            in characters
-        }
-
-        # ----------------------------------------------------
-        # SCENES
-        # ----------------------------------------------------
-
-        scenes = (
-            self._sanitize_scenes(
-                story_plan.get(
-                    "scenes",
-                    [],
+            metadata_plan = self._chat_json(
+                self._metadata_director_system(
+                    mode
                 ),
-                character_names,
-            )
-        )
-
-        if not scenes:
-
-            scenes = (
-                self._sanitize_scenes(
-                    fallback_scenes,
-                    character_names,
-                )
-            )
-
-        if not scenes:
-
-            scenes = (
-                self._recover_scenes(
+                self._metadata_director_user(
                     mode,
                     story,
-                    characters,
-                    character_names,
-                )
+                ),
+                minimum_completion=700,
+                temperature=temperature,
+                top_p=top_p,
+                call_name=(
+                    "ai_story_metadata_pass"
+                    if mode == AI_STORY_MODE
+                    else "expand_story_metadata_pass"
+                ),
+                max_completion=3200,
             )
 
-        if not scenes:
-
-            scenes = [
-                {
-                    "scene_id":
-                        "scene_001",
-
-                    "title":
-                        "The Beginning",
-
-                    "order":
-                        1,
-
-                    "location":
-                        "cinematic environment",
-
-                    "time_of_day":
-                        "unspecified",
-
-                    "weather":
-                        "",
-
-                    "atmosphere":
-                        "cinematic",
-
-                    "description":
-                        story,
-
-                    "mood":
-                        "cinematic",
-
-                    "lighting":
-                        "cinematic naturalistic lighting",
-
-                    "environment_details":
-                        [],
-
-                    "key_props":
-                        [],
-
-                    "scene_objective":
-                        story,
-
-                    "characters":
-                        list(
-                            character[
-                                "name"
-                            ]
-                            for character
-                            in characters
-                        ),
-
-                    "story_summary":
-                        story,
-
-                    "continuity_notes":
-                        "",
-
-                    "shot_ids":
-                        [],
-                }
-            ]
+            # Keep the narrative generated above and use the metadata
+            # completion only for production structure.
+            metadata_plan["story"] = story
+            story_plan = metadata_plan
 
         # ----------------------------------------------------
         # PASS 2
@@ -3230,6 +3351,16 @@ Return JSON only:
                     minimum_completion=450,
                     temperature=shot_temperature,
                     top_p=shot_top_p,
+                    call_name=(
+                        "shot_pass:"
+                        + str(
+                            scene.get(
+                                "scene_id",
+                                "unknown",
+                            )
+                        )
+                    ),
+                    max_completion=1800,
                 )
 
                 scene_shots = (
