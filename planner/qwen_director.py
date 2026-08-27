@@ -1714,6 +1714,7 @@ Return JSON only with this compact structure:
         call_name: str = "unknown",
         max_completion: int | None = None,
         json_mode: bool = True,
+        disable_thinking: bool = True,
     ) -> dict:
 
         if self._llama is None:
@@ -1739,6 +1740,12 @@ Return JSON only with this compact structure:
             max_tokens = min(
                 max_tokens,
                 int(max_completion),
+            )
+
+        if disable_thinking:
+            system_prompt = (
+                "/no_think\n"
+                + str(system_prompt).lstrip()
             )
 
         kwargs = {
@@ -1824,9 +1831,17 @@ Return JSON only with this compact structure:
                 "Qwen returned an empty response."
             )
 
-        return self._extract_json(
+        parsed = self._extract_json(
             content
         )
+
+        if not parsed:
+            raise RuntimeError(
+                f"Qwen returned an empty JSON object "
+                f"for {call_name}."
+            )
+
+        return parsed
 
     def _chat_text(
         self,
@@ -1837,6 +1852,7 @@ Return JSON only with this compact structure:
         top_p: float | None = None,
         call_name: str = "unknown",
         max_completion: int | None = None,
+        disable_thinking: bool = False,
     ) -> str:
 
         if self._llama is None:
@@ -1862,6 +1878,12 @@ Return JSON only with this compact structure:
             max_tokens = min(
                 max_tokens,
                 int(max_completion),
+            )
+
+        if disable_thinking:
+            system_prompt = (
+                "/no_think\n"
+                + str(system_prompt).lstrip()
             )
 
         started = time.perf_counter()
@@ -3484,7 +3506,7 @@ Return JSON only with this compact structure:
                     else "expand_story_metadata_pass"
                 )
             ),
-            max_completion=2600,
+            max_completion=2200,
             json_mode=True,
         )
 
@@ -3675,7 +3697,7 @@ Return JSON only with this compact structure:
                             )
                         )
                     ),
-                    max_completion=1000,
+                    max_completion=700,
                     json_mode=False,
                 )
 
@@ -3730,7 +3752,7 @@ Return JSON only with this compact structure:
                                 )
                             )
                         ),
-                        max_completion=900,
+                        max_completion=600,
                         json_mode=False,
                     )
 
