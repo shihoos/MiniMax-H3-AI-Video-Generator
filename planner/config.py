@@ -244,7 +244,6 @@ DIRECTOR_THREADS = int(
     )
 )
 
-DIRECTOR_MAX_PLAN_CHARS = 50000
 
 DIRECTOR_KAGGLE_INPUT_ROOT = Path(
     "/kaggle/input"
