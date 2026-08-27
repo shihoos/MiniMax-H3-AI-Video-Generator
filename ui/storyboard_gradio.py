@@ -23,10 +23,21 @@ if str(ROOT) not in sys.path:
     )
 
 
+SESSIONS_ROOT = (
+    ROOT
+    / "data"
+    / "production"
+    / "sessions"
+)
+
+
 class ProductionController:
 
     def __init__(self):
-        self._lock = threading.Lock()
+
+        self._lock = (
+            threading.Lock()
+        )
 
     @staticmethod
     def _production_id() -> str:
@@ -46,10 +57,7 @@ class ProductionController:
     ) -> Path:
 
         path = (
-            ROOT
-            / "data"
-            / "production"
-            / "sessions"
+            SESSIONS_ROOT
             / production_id
         )
 
@@ -110,53 +118,191 @@ class ProductionController:
             plan_path,
         )
 
+    # ========================================================
+    # SAVED DRAFTS
+    # ========================================================
+
     @staticmethod
-    def _load_state_plan(
-        plan_path_value: str | None,
+    def _draft_label(
+        plan: dict,
+        path: Path,
+    ) -> str:
+
+        mode = str(
+            plan.get(
+                "story_mode",
+                "",
+            )
+            or ""
+        )
+
+        mode_labels = {
+            "ai_story":
+                "AI Story",
+
+            "expand_user_story":
+                "Expand Story",
+
+            "preserve_user_story":
+                "Preserve Story",
+        }
+
+        label = mode_labels.get(
+            mode,
+            mode,
+        )
+
+        production_id = str(
+            plan.get(
+                "production_id",
+                path.parent.name,
+            )
+        )
+
+        return (
+            f"{label} — "
+            f"{production_id}"
+        )
+
+    @classmethod
+    def _saved_drafts(
+        cls,
+    ) -> list[tuple[str, str]]:
+
+        if not SESSIONS_ROOT.exists():
+            return []
+
+        drafts: list[tuple[str, str]] = []
+
+        for session_dir in (
+            SESSIONS_ROOT.iterdir()
+        ):
+
+            if not session_dir.is_dir():
+                continue
+
+            plan_path = (
+                session_dir
+                / "story_preview.json"
+            )
+
+            if not plan_path.is_file():
+                continue
+
+            try:
+
+                plan = json.loads(
+                    plan_path.read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ):
+
+                continue
+
+            if not isinstance(
+                plan,
+                dict,
+            ):
+
+                continue
+
+            drafts.append(
+                (
+                    cls._draft_label(
+                        plan,
+                        plan_path,
+                    ),
+                    str(
+                        plan_path
+                    ),
+                )
+            )
+
+        drafts.sort(
+            key=lambda item: (
+                Path(
+                    item[1]
+                ).stat().st_mtime
+            ),
+            reverse=True,
+        )
+
+        return drafts
+
+    @classmethod
+    def _draft_choices(
+        cls,
+    ) -> list[str]:
+
+        return [
+            label
+            for label, _ in cls._saved_drafts()
+        ]
+
+    @classmethod
+    def _draft_path_from_label(
+        cls,
+        label: str | None,
+    ) -> str:
+
+        wanted = str(
+            label or ""
+        ).strip()
+
+        if not wanted:
+            return ""
+
+        for current_label, path in (
+            cls._saved_drafts()
+        ):
+
+            if current_label == wanted:
+                return path
+
+        return ""
+
+    @staticmethod
+    def _load_plan(
+        plan_path_value: str,
     ) -> tuple[dict, Path]:
 
-        plan_path_value = str(
+        value = str(
             plan_path_value or ""
         ).strip()
 
-        if not plan_path_value:
+        if not value:
 
             raise RuntimeError(
-                "Generate a valid storyboard first."
+                "No saved storyboard was selected."
             )
 
         plan_path = (
-            Path(
-                plan_path_value
-            )
+            Path(value)
             .resolve()
         )
-
-        sessions_root = (
-            ROOT
-            / "data"
-            / "production"
-            / "sessions"
-        ).resolve()
 
         try:
 
             plan_path.relative_to(
-                sessions_root
+                SESSIONS_ROOT.resolve()
             )
 
         except ValueError as exc:
 
             raise RuntimeError(
-                "Storyboard plan is outside the "
-                "managed session directory."
+                "Selected storyboard is outside "
+                "the managed session directory."
             ) from exc
 
         if not plan_path.is_file():
 
             raise FileNotFoundError(
-                "Storyboard plan does not exist:\n"
-                f"{plan_path}"
+                plan_path
             )
 
         try:
@@ -170,9 +316,7 @@ class ProductionController:
         except json.JSONDecodeError as exc:
 
             raise RuntimeError(
-                "Storyboard plan is invalid JSON:\n"
-                f"{plan_path}\n"
-                f"{exc}"
+                "Saved storyboard is invalid JSON."
             ) from exc
 
         if not isinstance(
@@ -181,13 +325,185 @@ class ProductionController:
         ):
 
             raise RuntimeError(
-                "Storyboard plan must be a JSON object."
+                "Saved storyboard must be a JSON object."
             )
 
         return (
             plan,
             plan_path,
         )
+
+    @staticmethod
+    def _render_plan(
+        plan: dict,
+        plan_path: Path,
+    ):
+
+        characters = (
+            plan.get(
+                "characters",
+                [],
+            )
+            or []
+        )
+
+        scenes = (
+            plan.get(
+                "scenes",
+                [],
+            )
+            or []
+        )
+
+        shots = (
+            plan.get(
+                "shots",
+                [],
+            )
+            or []
+        )
+
+        mode = str(
+            plan.get(
+                "story_mode",
+                "",
+            )
+            or ""
+        )
+
+        production_id = str(
+            plan.get(
+                "production_id",
+                plan_path.parent.name,
+            )
+        )
+
+        character_text = "\n\n".join(
+            (
+                f"### {character.get('name', '')}\n"
+                f"**Role:** {character.get('role', '')}\n\n"
+                f"{character.get('description', '')}\n\n"
+                f"**Personality:** "
+                f"{character.get('personality', '')}\n\n"
+                f"**Appearance:** "
+                f"{json.dumps(character.get('appearance', {}), ensure_ascii=False)}\n\n"
+                f"**Continuity:** "
+                f"{', '.join(character.get('continuity_rules', []) or [])}"
+            )
+            for character
+            in characters
+        )
+
+        if not character_text:
+
+            character_text = (
+                "No named characters are required "
+                "for this story."
+            )
+
+        scene_text = "\n\n".join(
+            (
+                f"### {scene.get('scene_id', '')} — "
+                f"{scene.get('title', '') or scene.get('location', '')}\n\n"
+                f"{scene.get('description', '')}\n\n"
+                f"**Location:** {scene.get('location', '')}\n"
+                f"**Time:** {scene.get('time_of_day', '')}\n"
+                f"**Mood:** {scene.get('mood', '')}\n"
+                f"**Lighting:** {scene.get('lighting', '')}\n"
+                f"**Characters:** "
+                f"{', '.join(scene.get('characters', []) or [])}\n\n"
+                f"**Continuity:** "
+                f"{scene.get('continuity_notes', '')}"
+            )
+            for scene
+            in scenes
+        )
+
+        shot_text = "\n\n".join(
+            (
+                f"### {shot.get('shot_id', '')}\n"
+                f"**Scene:** {shot.get('scene_id', '')}\n"
+                f"**Duration:** "
+                f"{shot.get('duration_seconds', '')} sec\n"
+                f"**Characters:** "
+                f"{', '.join(shot.get('characters', []) or [])}\n"
+                f"**Camera:** "
+                f"{shot.get('camera_shot', '')}\n"
+                f"**Movement:** "
+                f"{shot.get('camera_movement', '')}\n"
+                f"**Lighting:** "
+                f"{shot.get('lighting', '')}\n"
+                f"**Action:** "
+                f"{shot.get('action', '')}\n\n"
+                f"**Visual Direction:** "
+                f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
+                f"**Soundscape:** "
+                f"{shot.get('overall_soundscape', '')}\n"
+                f"**Music:** "
+                f"{shot.get('non_diegetic_music', '')}\n"
+                f"**Dialogue:** "
+                f"{shot.get('speech_text', '')}\n"
+                f"**Continuity:** "
+                f"{shot.get('continuity_notes', '')}"
+            )
+            for shot
+            in shots
+        )
+
+        summary = (
+            "### STORYBOARD READY\n\n"
+            f"**Production ID:** `{production_id}`\n\n"
+            f"**Mode:** `{mode}`\n\n"
+            f"**Characters:** {len(characters)}\n\n"
+            f"**Scenes:** {len(scenes)}\n\n"
+            f"**Shots:** {len(shots)}\n\n"
+            "**Production:** H3 Turbo 8-step + "
+            "3D latent upscale + Ultimate Upscale\n\n"
+            "**Delivery:** 1280×720"
+        )
+
+        approval = (
+            plan.get(
+                "approval",
+                {},
+            )
+            or {}
+        )
+
+        status = (
+            "READY — review the storyboard, "
+            "then approve it."
+        )
+
+        if (
+            approval.get(
+                "status"
+            )
+            == "completed"
+        ):
+
+            status = (
+                "### COMPLETE\n"
+                "This production has already completed."
+            )
+
+        return (
+            summary,
+            character_text,
+            scene_text,
+            shot_text,
+            status,
+            plan.get(
+                "final_video"
+            ),
+            str(
+                plan_path
+            ),
+        )
+
+    # ========================================================
+    # GENERATION
+    # ========================================================
 
     def generate_storyboard(
         self,
@@ -209,24 +525,7 @@ class ProductionController:
                 "",
                 None,
                 "",
-            )
-
-        valid_modes = {
-            "ai_story",
-            "expand_user_story",
-            "preserve_user_story",
-        }
-
-        if mode not in valid_modes:
-
-            return (
-                "### ERROR\nInvalid story mode.",
-                "",
-                "",
-                "",
-                "",
-                None,
-                "",
+                self._draft_choices(),
             )
 
         if not self._lock.acquire(
@@ -241,6 +540,7 @@ class ProductionController:
                 "",
                 None,
                 "",
+                self._draft_choices(),
             )
 
         try:
@@ -256,9 +556,7 @@ class ProductionController:
             if not director_enabled():
 
                 raise RuntimeError(
-                    "Qwen director is disabled. "
-                    "Production Gradio requires the local "
-                    "Qwen3-14B director."
+                    "Qwen director is disabled."
                 )
 
             from pipeline.production_orchestrator import (
@@ -279,14 +577,6 @@ class ProductionController:
                 )
             )
 
-            characters = (
-                plan.get(
-                    "characters",
-                    [],
-                )
-                or []
-            )
-
             scenes = (
                 plan.get(
                     "scenes",
@@ -303,19 +593,16 @@ class ProductionController:
                 or []
             )
 
-            # Characters are optional.
-            # Scenes and shots are required for production.
-
             if not scenes:
 
                 raise RuntimeError(
-                    "Production planner produced no usable scenes."
+                    "Production planner produced no scenes."
                 )
 
             if not shots:
 
                 raise RuntimeError(
-                    "Production planner produced no usable shots."
+                    "Production planner produced no shots."
                 )
 
             plan[
@@ -329,112 +616,41 @@ class ProductionController:
             plan[
                 "approval"
             ] = {
-                "status": "draft",
-                "approved_at": None,
-            }
+                "status":
+                    "draft",
 
-            production_id = (
-                self._production_id()
-            )
+                "approved_at":
+                    None,
+            }
 
             plan[
                 "production_id"
-            ] = production_id
+            ] = (
+                self._production_id()
+            )
 
             (
-                production_id,
+                _,
                 plan_path,
             ) = self._save_session_plan(
                 plan
             )
 
-            character_text = (
-                "\n\n".join(
-                    (
-                        f"### {character.get('name', '')}\n"
-                        f"**Role:** {character.get('role', '')}\n\n"
-                        f"{character.get('description', '')}\n\n"
-                        f"**Personality:** "
-                        f"{character.get('personality', '')}\n\n"
-                        f"**Appearance:** "
-                        f"{json.dumps(character.get('appearance', {}), ensure_ascii=False)}\n\n"
-                        f"**Continuity:** "
-                        f"{', '.join(character.get('continuity_rules', []) or [])}"
-                    )
-                    for character
-                    in characters
-                )
+            (
+                summary,
+                character_text,
+                scene_text,
+                shot_text,
+                status,
+                final_video,
+                stored_path,
+            ) = self._render_plan(
+                plan,
+                plan_path,
             )
 
-            if not character_text:
-
-                character_text = (
-                    "No named characters were "
-                    "required for this story."
-                )
-
-            scene_text = (
-                "\n\n".join(
-                    (
-                        f"### {scene.get('scene_id', '')} — "
-                        f"{scene.get('location', '')}\n\n"
-                        f"{scene.get('description', '')}\n\n"
-                        f"**Time:** {scene.get('time_of_day', '')}\n"
-                        f"**Mood:** {scene.get('mood', '')}\n"
-                        f"**Lighting:** {scene.get('lighting', '')}\n"
-                        f"**Characters:** "
-                        f"{', '.join(scene.get('characters', []) or [])}\n\n"
-                        f"**Continuity:** "
-                        f"{scene.get('continuity_notes', '')}"
-                    )
-                    for scene
-                    in scenes
-                )
-            )
-
-            shot_text = (
-                "\n\n".join(
-                    (
-                        f"### {shot.get('shot_id', '')}\n"
-                        f"**Scene:** {shot.get('scene_id', '')}\n"
-                        f"**Duration:** "
-                        f"{shot.get('duration_seconds', '')} sec\n"
-                        f"**Characters:** "
-                        f"{', '.join(shot.get('characters', []) or [])}\n"
-                        f"**Camera:** "
-                        f"{shot.get('camera_shot', '')}\n"
-                        f"**Movement:** "
-                        f"{shot.get('camera_movement', '')}\n"
-                        f"**Lighting:** "
-                        f"{shot.get('lighting', '')}\n"
-                        f"**Action:** "
-                        f"{shot.get('action', '')}\n\n"
-                        f"**Visual Direction:** "
-                        f"{shot.get('detailed_description', '') or shot.get('visual_prompt', '')}\n\n"
-                        f"**Soundscape:** "
-                        f"{shot.get('overall_soundscape', '')}\n"
-                        f"**Music:** "
-                        f"{shot.get('non_diegetic_music', '')}\n"
-                        f"**Dialogue:** "
-                        f"{shot.get('speech_text', '')}\n"
-                        f"**Continuity:** "
-                        f"{shot.get('continuity_notes', '')}"
-                    )
-                    for shot
-                    in shots
-                )
-            )
-
-            summary = (
-                "### STORYBOARD READY\n\n"
-                f"**Production ID:** `{production_id}`\n\n"
-                f"**Mode:** `{mode}`\n\n"
-                f"**Characters:** {len(characters)}\n\n"
-                f"**Scenes:** {len(scenes)}\n\n"
-                f"**Shots:** {len(shots)}\n\n"
-                "**Production:** H3 Turbo 8-step + "
-                "3D latent upscale + Ultimate Upscale\n\n"
-                "**Delivery:** 1280×720"
+            choices = (
+                self._draft_choices()
             )
 
             return (
@@ -442,9 +658,10 @@ class ProductionController:
                 character_text,
                 scene_text,
                 shot_text,
-                "READY — review the storyboard, then approve it.",
-                None,
-                str(plan_path),
+                status,
+                final_video,
+                stored_path,
+                choices,
             )
 
         except Exception as exc:
@@ -466,11 +683,118 @@ class ProductionController:
                 + "\n```",
                 None,
                 "",
+                self._draft_choices(),
             )
 
         finally:
 
             self._lock.release()
+
+    # ========================================================
+    # PREVIEW
+    # ========================================================
+
+    def preview_saved(
+        self,
+        selected_label: str | None,
+    ):
+
+        try:
+
+            path = (
+                self._draft_path_from_label(
+                    selected_label
+                )
+            )
+
+            if not path:
+
+                raise RuntimeError(
+                    "Select a saved storyboard first."
+                )
+
+            (
+                plan,
+                plan_path,
+            ) = self._load_plan(
+                path
+            )
+
+            return self._render_plan(
+                plan,
+                plan_path,
+            )
+
+        except Exception as exc:
+
+            return (
+                "### PREVIEW FAILED\n"
+                + str(exc),
+                "",
+                "",
+                "",
+                "",
+                None,
+                "",
+            )
+
+    def preview_latest_for_mode(
+        self,
+        mode: str,
+    ):
+
+        drafts = (
+            self._saved_drafts()
+        )
+
+        for label, path in drafts:
+
+            try:
+
+                plan = json.loads(
+                    Path(
+                        path
+                    ).read_text(
+                        encoding="utf-8"
+                    )
+                )
+
+            except (
+                OSError,
+                json.JSONDecodeError,
+            ):
+
+                continue
+
+            if (
+                plan.get(
+                    "story_mode"
+                )
+                == mode
+            ):
+
+                return (
+                    label,
+                    *self._render_plan(
+                        plan,
+                        Path(path),
+                    )
+                )
+
+        return (
+            None,
+            "No saved storyboard exists for this mode.",
+            "",
+            "",
+            "",
+            "",
+            None,
+            "",
+        )
+
+    # ========================================================
+    # APPROVAL / VIDEO
+    # ========================================================
 
     def approve_and_generate(
         self,
@@ -479,11 +803,10 @@ class ProductionController:
 
         try:
 
-            (
-                plan,
-                plan_path,
-            ) = self._load_state_plan(
-                plan_path_value
+            plan, plan_path = (
+                self._load_plan(
+                    plan_path_value
+                )
             )
 
         except Exception as exc:
@@ -492,7 +815,7 @@ class ProductionController:
                 "### ERROR\n"
                 + str(exc),
                 None,
-                "",
+                plan_path_value,
             )
 
         if not self._lock.acquire(
@@ -558,10 +881,11 @@ class ProductionController:
             plan[
                 "approval"
             ] = {
-                "status": "approved",
-                "approved_at": (
-                    datetime.now().isoformat()
-                ),
+                "status":
+                    "approved",
+
+                "approved_at":
+                    datetime.now().isoformat(),
             }
 
             plan_path.write_text(
@@ -638,22 +962,14 @@ class ProductionController:
                 )
 
                 check_worker(
-                    worker["port"]
+                    worker[
+                        "port"
+                    ]
                 )
 
                 clients[
                     gpu_id
                 ] = client
-
-            plan[
-                "production_id"
-            ] = str(
-                plan.get(
-                    "production_id",
-                    "",
-                )
-                or self._production_id()
-            )
 
             result = (
                 ProductionRunner(
@@ -705,15 +1021,16 @@ class ProductionController:
             plan[
                 "approval"
             ] = {
-                "status": "completed",
-                "approved_at": (
+                "status":
+                    "completed",
+
+                "approved_at":
                     approval.get(
                         "approved_at"
-                    )
-                ),
-                "completed_at": (
-                    datetime.now().isoformat()
-                ),
+                    ),
+
+                "completed_at":
+                    datetime.now().isoformat(),
             }
 
             plan_path.write_text(
@@ -791,8 +1108,7 @@ def build_app(
     except ImportError as exc:
 
         raise RuntimeError(
-            "Gradio is not installed. "
-            "Run kaggle/bootstrap.py first."
+            "Gradio is not installed."
         ) from exc
 
     controller = (
@@ -806,9 +1122,9 @@ def build_app(
 
         gr.Markdown(
             "# MiniMax H3 AI Video Generator\n\n"
-            "Write your story naturally. "
-            "Qwen3-14B develops the story, characters, "
-            "scenes and cinematic shots."
+            "Create a cinematic storyboard with Qwen3-14B, "
+            "review saved drafts, and approve the version "
+            "you want to render."
         )
 
         story = gr.Textbox(
@@ -848,19 +1164,46 @@ def build_app(
             label="Story Mode",
         )
 
-        session_plan_path = gr.Textbox(
-            value="",
-            visible=False,
-            interactive=False,
+        with gr.Row():
+
+            generate = gr.Button(
+                "Generate Storyboard",
+                variant="primary",
+            )
+
+            regenerate = gr.Button(
+                "Regenerate",
+            )
+
+        gr.Markdown(
+            "### Saved Storyboards"
         )
 
-        generate = gr.Button(
-            "Generate Storyboard",
-            variant="primary",
+        saved_draft = gr.Dropdown(
+            choices=(
+                controller._draft_choices()
+            ),
+            label="Saved Draft",
+            value=None,
+            interactive=True,
         )
+
+        with gr.Row():
+
+            preview = gr.Button(
+                "Preview Selected"
+            )
+
+            latest = gr.Button(
+                "Preview Latest For Mode"
+            )
+
+            refresh = gr.Button(
+                "Refresh Saved Drafts"
+            )
 
         status = gr.Markdown(
-            "Write your story and press Generate Storyboard."
+            "Write your story and choose a mode."
         )
 
         with gr.Accordion(
@@ -895,7 +1238,13 @@ def build_app(
             label="Final Video",
         )
 
-        generate_outputs = [
+        session_plan_path = gr.Textbox(
+            value="",
+            visible=False,
+            interactive=False,
+        )
+
+        generation_outputs = [
             status,
             characters,
             scenes,
@@ -903,6 +1252,7 @@ def build_app(
             result_status,
             final_video,
             session_plan_path,
+            saved_draft,
         ]
 
         generate.click(
@@ -911,16 +1261,63 @@ def build_app(
                 story,
                 mode,
             ],
-            outputs=generate_outputs,
+            outputs=generation_outputs,
         )
 
-        story.submit(
+        regenerate.click(
             fn=controller.generate_storyboard,
             inputs=[
                 story,
                 mode,
             ],
-            outputs=generate_outputs,
+            outputs=generation_outputs,
+        )
+
+        preview.click(
+            fn=controller.preview_saved,
+            inputs=[
+                saved_draft,
+            ],
+            outputs=[
+                status,
+                characters,
+                scenes,
+                shots,
+                result_status,
+                final_video,
+                session_plan_path,
+            ],
+        )
+
+        latest.click(
+            fn=controller.preview_latest_for_mode,
+            inputs=[
+                mode,
+            ],
+            outputs=[
+                saved_draft,
+                status,
+                characters,
+                scenes,
+                shots,
+                result_status,
+                final_video,
+                session_plan_path,
+            ],
+        )
+
+        refresh.click(
+            fn=lambda: (
+                gr.Dropdown(
+                    choices=(
+                        controller._draft_choices()
+                    )
+                )
+            ),
+            inputs=[],
+            outputs=[
+                saved_draft,
+            ],
         )
 
         approve.click(
