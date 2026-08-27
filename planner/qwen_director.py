@@ -157,6 +157,7 @@ class QwenDirector:
         candidates: list[Path] = []
 
         if explicit:
+
             candidates.append(
                 Path(
                     explicit
@@ -191,12 +192,15 @@ class QwenDirector:
                 continue
 
             try:
+
                 candidates.extend(
                     root.rglob(
                         DIRECTOR_MODEL_FILENAME
                     )
                 )
+
             except OSError:
+
                 continue
 
         unique: list[Path] = []
@@ -209,10 +213,13 @@ class QwenDirector:
             )
 
             try:
+
                 key = str(
                     candidate.resolve()
                 )
+
             except OSError:
+
                 key = str(
                     candidate
                 )
@@ -220,8 +227,13 @@ class QwenDirector:
             if key in seen:
                 continue
 
-            seen.add(key)
-            unique.append(candidate)
+            seen.add(
+                key
+            )
+
+            unique.append(
+                candidate
+            )
 
         existing = [
             path
@@ -270,7 +282,7 @@ class QwenDirector:
         )
 
     # ========================================================
-    # DETERMINISTIC PLANNER
+    # DETERMINISTIC FALLBACK
     # ========================================================
 
     def _planner(
@@ -304,12 +316,16 @@ class QwenDirector:
         ).strip()
 
         if not story:
+
             return (
                 [],
                 [],
             )
 
         planner = self._planner()
+
+        characters = []
+        scenes = []
 
         try:
 
@@ -338,21 +354,19 @@ class QwenDirector:
 
             scenes = []
 
-        character_dicts = [
-            character.to_dict()
-            for character in characters
-            if character is not None
-        ]
-
-        scene_dicts = [
-            scene.to_dict()
-            for scene in scenes
-            if scene is not None
-        ]
-
         return (
-            character_dicts,
-            scene_dicts,
+            [
+                character.to_dict()
+                for character
+                in characters
+                if character is not None
+            ],
+            [
+                scene.to_dict()
+                for scene
+                in scenes
+                if scene is not None
+            ],
         )
 
     # ========================================================
@@ -367,11 +381,14 @@ class QwenDirector:
         site_roots: list[Path] = []
 
         try:
+
             site_roots.extend(
                 Path(path)
-                for path in site.getsitepackages()
+                for path
+                in site.getsitepackages()
                 if path
             )
+
         except Exception:
             pass
 
@@ -382,6 +399,7 @@ class QwenDirector:
             )
 
             if user_site:
+
                 site_roots.append(
                     Path(
                         user_site
@@ -444,7 +462,8 @@ class QwenDirector:
 
         matching_cublas = [
             path
-            for path in cublas
+            for path
+            in cublas
             if path.parent
             == cudart_lib.parent
         ]
@@ -470,6 +489,7 @@ class QwenDirector:
         )
 
         if old_ld:
+
             directories.append(
                 old_ld
             )
@@ -558,6 +578,7 @@ class QwenDirector:
         self._llama = None
 
         if model is not None:
+
             del model
 
         gc.collect()
@@ -571,7 +592,9 @@ class QwenDirector:
                 torch.cuda.empty_cache()
 
                 try:
+
                     torch.cuda.ipc_collect()
+
                 except Exception:
                     pass
 
@@ -663,17 +686,24 @@ class QwenDirector:
             return """
 AI STORY MODE.
 
-The user supplied a premise or idea.
+Treat the user input as a PREMISE, not a finished story.
 
-Develop it into an original, coherent cinematic
-story with a clear beginning, escalation, climax
-and ending.
+Create a genuinely developed cinematic narrative.
 
-You may invent protagonists, supporting characters,
-motivation, conflict, locations, events and resolution.
+Build:
+- a memorable protagonist;
+- meaningful supporting characters;
+- a clear desire or objective;
+- conflict;
+- escalating complications;
+- emotional or thematic progression;
+- a strong climax;
+- a satisfying resolution.
 
-Do not merely repeat the premise.
-Do not answer with planning commentary.
+The resulting story should feel like a real short-film
+story, not a paraphrase of the premise.
+
+You are allowed to invent details that improve the story.
 """.strip()
 
         if mode == EXPAND_USER_STORY_MODE:
@@ -681,21 +711,43 @@ Do not answer with planning commentary.
             return """
 EXPAND STORY MODE.
 
-The user's story is authoritative.
+The user supplied an existing story.
 
-Preserve its important characters, chronology,
-major events, setting, outcome and constraints.
+The supplied story is the source of truth for its core events,
+characters, chronology, setting and outcome.
 
-Expand it with useful:
+Your task is to make that story substantially more compelling
+without replacing it.
+
+Preserve:
+- important characters;
+- important events;
+- chronology;
+- setting;
+- outcome;
+- explicit constraints.
+
+Enrich it with:
 - motivation;
+- emotional depth;
+- cause and effect;
 - transitions;
-- emotional beats;
-- sensory detail;
+- intermediate events;
+- stakes;
 - tension;
-- causality;
-- dialogue where appropriate.
+- sensory detail;
+- character reactions;
+- meaningful dialogue where appropriate;
+- stronger escalation;
+- a clearer dramatic progression;
+- richer ending consequences.
 
-Do not replace it with an unrelated story.
+Do NOT merely add adjectives.
+
+Do NOT simply convert prose into camera directions.
+
+The result must feel like a professionally expanded short-film
+story while remaining recognizably the same story.
 """.strip()
 
         if mode == PRESERVE_USER_STORY_MODE:
@@ -703,13 +755,14 @@ Do not replace it with an unrelated story.
             return """
 PRESERVE STORY MODE.
 
-The user's story is immutable.
+The supplied story text is immutable.
 
-Return the supplied story unchanged
-after whitespace normalization.
+Do not rewrite it.
 
-Do not rewrite, shorten, expand or reinterpret
-the story text.
+Do not add narrative events.
+
+Use the supplied story as-is and create only the production
+structure needed to visualize it.
 """.strip()
 
         raise ValueError(
@@ -726,9 +779,9 @@ You are the STORY DIRECTOR for MiniMax H3.
 
 {self._mode_instruction(mode)}
 
-Produce a usable production story.
+Return JSON only.
 
-Return exactly these top-level JSON fields:
+Top-level fields:
 
 story
 director_notes
@@ -737,20 +790,35 @@ scenes
 
 Do NOT create shots in this pass.
 
-IMPORTANT:
+STORY QUALITY:
 
-The story must be a readable narrative.
-Do not return instructions about how to write it.
+The story must read as a coherent cinematic narrative,
+not as notes or instructions.
 
-Characters must be actual story entities.
+CHARACTERS:
 
-Scenes must be real narrative beats, not metadata.
+Only create actual story characters.
 
-Create approximately 3–6 scenes.
+SCENES:
 
-Every scene should contain:
+Create 4–6 meaningful story beats.
+
+Do not use scene titles such as:
+"distance"
+"wind"
+"camera"
+"cinematic environment"
+
+Instead use narrative beat titles such as:
+"The First Warning"
+"The Broken City"
+"The Descent"
+"The Last Beacon"
+
+Every scene must include:
 
 scene_id
+title
 order
 location
 description
@@ -760,7 +828,16 @@ characters
 scene_objective
 continuity_notes
 
-Return JSON only.
+A scene description must describe an actual narrative event.
+
+Return:
+
+{{
+  "story": "string",
+  "director_notes": "string",
+  "characters": [],
+  "scenes": []
+}}
 """.strip()
 
     def _story_director_user(
@@ -795,17 +872,8 @@ You are the CHARACTER DIRECTOR for MiniMax H3.
 
 {self._mode_instruction(mode)}
 
-The main director response did not contain
-usable characters.
-
-Read the story and identify the actual characters
-required by it.
-
-For AI Story mode, create only characters needed
+Extract or create ONLY the characters genuinely required
 by the story.
-
-For Expand and Preserve modes, preserve characters
-already present in the story.
 
 Return JSON only:
 
@@ -836,7 +904,7 @@ Return JSON only:
                 "story": self._limit_text(
                     story,
                     5500,
-                ),
+                )
             },
             ensure_ascii=False,
             separators=(
@@ -888,12 +956,9 @@ You are the SCENE DIRECTOR for MiniMax H3.
 
 {self._mode_instruction(mode)}
 
-Create 3–6 meaningful narrative scenes.
+Create 4–6 meaningful narrative scenes from the supplied story.
 
-Do NOT create shots.
-
-Every scene must describe a real event,
-action or dramatic beat.
+Each scene must be a real dramatic beat.
 
 Return JSON only:
 
@@ -901,6 +966,7 @@ Return JSON only:
   "scenes": [
     {{
       "scene_id": "scene_001",
+      "title": "narrative beat title",
       "order": 1,
       "location": "string",
       "description": "real narrative event",
@@ -924,7 +990,7 @@ Return JSON only:
             {
                 "story": self._limit_text(
                     story,
-                    4500,
+                    5000,
                 ),
                 "characters": [
                     {
@@ -992,18 +1058,30 @@ Return JSON only:
         return """
 You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
 
-Create shots for exactly ONE supplied scene.
+You are given ONE scene.
+
+Create 2–4 distinct shots for that scene.
 
 Do not create new characters.
 
 Use only the supplied character names.
+
+Do not repeat the same composition for every shot.
+
+Use useful cinematic progression:
+1. establishing or orientation
+2. subject/action
+3. detail/reaction/escalation
+4. payoff/reveal when justified
+
+Every shot must materially advance or visualize the scene.
 
 Return JSON only:
 
 {
   "shots": [
     {
-      "shot_id": "shot_001",
+      "shot_id": "scene_001_shot_001",
       "scene_id": "scene_001",
       "duration_seconds": 5.2,
       "characters": [],
@@ -1042,29 +1120,33 @@ Return JSON only:
                 ),
                 "characters": [
                     {
-                        "name": value.get(
+                        "name": item.get(
                             "name",
                             "",
                         ),
-                        "role": value.get(
+                        "role": item.get(
                             "role",
                             "",
                         ),
-                        "appearance": value.get(
+                        "appearance": item.get(
                             "appearance",
                             {},
                         ),
-                        "clothing": value.get(
+                        "clothing": item.get(
                             "clothing",
                             {},
                         ),
                     }
-                    for value
+                    for item
                     in characters
                 ],
                 "scene": {
                     "scene_id": scene.get(
                         "scene_id",
+                        "",
+                    ),
+                    "title": scene.get(
+                        "title",
                         "",
                     ),
                     "location": scene.get(
@@ -1108,7 +1190,7 @@ Return JSON only:
         )
 
     # ========================================================
-    # GENERIC HELPERS
+    # JSON / TEXT HELPERS
     # ========================================================
 
     @staticmethod
@@ -1127,7 +1209,8 @@ Return JSON only:
         return (
             value[
                 :max_chars
-            ].rstrip()
+            ]
+            .rstrip()
             + "…"
         )
 
@@ -1169,7 +1252,7 @@ Return JSON only:
 
         try:
 
-            parsed = json.loads(
+            result = json.loads(
                 value[
                     start:end + 1
                 ]
@@ -1183,7 +1266,7 @@ Return JSON only:
             ) from exc
 
         if not isinstance(
-            parsed,
+            result,
             dict,
         ):
 
@@ -1191,7 +1274,7 @@ Return JSON only:
                 "Qwen director output must be a JSON object."
             )
 
-        return parsed
+        return result
 
     def _chat_json(
         self,
@@ -1215,8 +1298,7 @@ Return JSON only:
         )
 
         response = (
-            self._llama
-            .create_chat_completion(
+            self._llama.create_chat_completion(
                 messages=[
                     {
                         "role": "system",
@@ -1322,6 +1404,24 @@ Return JSON only:
 
         return True
 
+    @staticmethod
+    def _slug(
+        value: str,
+    ) -> str:
+
+        cleaned = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(
+                value or ""
+            ).lower(),
+        ).strip("_")
+
+        return (
+            cleaned
+            or "character"
+        )
+
     def _sanitize_characters(
         self,
         characters,
@@ -1358,67 +1458,103 @@ Return JSON only:
             if key in seen:
                 continue
 
-            seen.add(key)
+            seen.add(
+                key
+            )
+
+            character_id = str(
+                value.get(
+                    "character_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not character_id:
+
+                character_id = (
+                    f"char_{self._slug(name)}"
+                )
 
             result.append(
                 {
-                    "name": name,
-                    "role": str(
-                        value.get(
-                            "role",
-                            "story character",
-                        )
-                        or "story character"
-                    ),
-                    "description": str(
-                        value.get(
-                            "description",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "personality": str(
-                        value.get(
-                            "personality",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "appearance": dict(
-                        value.get(
-                            "appearance",
-                            {},
-                        )
-                        or {}
-                    ),
-                    "clothing": dict(
-                        value.get(
-                            "clothing",
-                            {},
-                        )
-                        or {}
-                    ),
-                    "distinctive_features": list(
-                        value.get(
-                            "distinctive_features",
-                            [],
-                        )
-                        or []
-                    ),
-                    "character_state": dict(
-                        value.get(
-                            "character_state",
-                            {},
-                        )
-                        or {}
-                    ),
-                    "continuity_rules": list(
-                        value.get(
-                            "continuity_rules",
-                            [],
-                        )
-                        or []
-                    ),
+                    "character_id":
+                        character_id,
+
+                    "name":
+                        name,
+
+                    "role":
+                        str(
+                            value.get(
+                                "role",
+                                "story character",
+                            )
+                            or "story character"
+                        ),
+
+                    "description":
+                        str(
+                            value.get(
+                                "description",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "personality":
+                        str(
+                            value.get(
+                                "personality",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "appearance":
+                        dict(
+                            value.get(
+                                "appearance",
+                                {},
+                            )
+                            or {}
+                        ),
+
+                    "clothing":
+                        dict(
+                            value.get(
+                                "clothing",
+                                {},
+                            )
+                            or {}
+                        ),
+
+                    "distinctive_features":
+                        list(
+                            value.get(
+                                "distinctive_features",
+                                [],
+                            )
+                            or []
+                        ),
+
+                    "character_state":
+                        dict(
+                            value.get(
+                                "character_state",
+                                {},
+                            )
+                            or {}
+                        ),
+
+                    "continuity_rules":
+                        list(
+                            value.get(
+                                "continuity_rules",
+                                [],
+                            )
+                            or []
+                        ),
                 }
             )
 
@@ -1466,16 +1602,6 @@ Return JSON only:
                 ).strip()
 
             if not description:
-
-                description = str(
-                    value.get(
-                        "story_summary",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-            if not description:
                 continue
 
             lower = description.lower()
@@ -1503,108 +1629,165 @@ Return JSON only:
                 or []
             ):
 
-                name = str(
+                canonical = str(
                     name
                 ).strip()
 
                 if (
-                    name.lower()
+                    canonical.lower()
                     in character_names
                 ):
                     selected.append(
-                        name
+                        canonical
                     )
 
-            result.append(
-                {
-                    "scene_id": str(
-                        value.get(
-                            "scene_id",
-                            f"scene_{index:03d}",
-                        )
-                        or f"scene_{index:03d}"
-                    ).strip(),
-                    "order": len(result) + 1,
-                    "location": str(
+            scene_id = str(
+                value.get(
+                    "scene_id",
+                    f"scene_{index:03d}",
+                )
+                or f"scene_{index:03d}"
+            ).strip()
+
+            title = str(
+                value.get(
+                    "title",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not title:
+
+                title = (
+                    str(
                         value.get(
                             "location",
                             "",
                         )
                         or ""
-                    ),
-                    "time_of_day": str(
-                        value.get(
-                            "time_of_day",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "weather": str(
-                        value.get(
-                            "weather",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "atmosphere": str(
-                        value.get(
-                            "atmosphere",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "description": description,
-                    "mood": str(
-                        value.get(
-                            "mood",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "lighting": str(
-                        value.get(
-                            "lighting",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "environment_details": list(
-                        value.get(
-                            "environment_details",
-                            [],
-                        )
-                        or []
-                    )[:12],
-                    "key_props": list(
-                        value.get(
-                            "key_props",
-                            [],
-                        )
-                        or []
-                    )[:8],
-                    "scene_objective": str(
-                        value.get(
-                            "scene_objective",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "characters": selected,
-                    "story_summary": str(
-                        value.get(
-                            "story_summary",
-                            description,
-                        )
-                        or description
-                    ),
-                    "continuity_notes": str(
-                        value.get(
-                            "continuity_notes",
-                            "",
-                        )
-                        or ""
-                    ),
-                    "shot_ids": [],
+                    ).strip()
+                    or f"Scene {index}"
+                )
+
+            result.append(
+                {
+                    "scene_id":
+                        scene_id,
+
+                    "title":
+                        title,
+
+                    "order":
+                        len(result) + 1,
+
+                    "location":
+                        str(
+                            value.get(
+                                "location",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "time_of_day":
+                        str(
+                            value.get(
+                                "time_of_day",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "weather":
+                        str(
+                            value.get(
+                                "weather",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "atmosphere":
+                        str(
+                            value.get(
+                                "atmosphere",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "description":
+                        description,
+
+                    "mood":
+                        str(
+                            value.get(
+                                "mood",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "lighting":
+                        str(
+                            value.get(
+                                "lighting",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "environment_details":
+                        list(
+                            value.get(
+                                "environment_details",
+                                [],
+                            )
+                            or []
+                        )[:12],
+
+                    "key_props":
+                        list(
+                            value.get(
+                                "key_props",
+                                [],
+                            )
+                            or []
+                        )[:8],
+
+                    "scene_objective":
+                        str(
+                            value.get(
+                                "scene_objective",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "characters":
+                        selected,
+
+                    "story_summary":
+                        str(
+                            value.get(
+                                "story_summary",
+                                description,
+                            )
+                            or description
+                        ),
+
+                    "continuity_notes":
+                        str(
+                            value.get(
+                                "continuity_notes",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "shot_ids":
+                        [],
                 }
             )
 
@@ -1632,7 +1815,8 @@ Return JSON only:
 
         allowed = {
             name.lower(): name
-            for name in character_names
+            for name
+            in character_names
         }
 
         for index, value in enumerate(
@@ -1670,16 +1854,13 @@ Return JSON only:
                 or []
             ):
 
-                raw = str(
-                    name
-                ).strip()
-
                 canonical = allowed.get(
-                    raw.lower()
+                    str(
+                        name
+                    ).strip().lower()
                 )
 
                 if canonical is not None:
-
                     selected.append(
                         canonical
                     )
@@ -1694,16 +1875,13 @@ Return JSON only:
                 or []
             ):
 
-                raw = str(
-                    name
-                ).strip()
-
                 canonical = allowed.get(
-                    raw.lower()
+                    str(
+                        name
+                    ).strip().lower()
                 )
 
                 if canonical is not None:
-
                     speaking.append(
                         canonical
                     )
@@ -1730,165 +1908,203 @@ Return JSON only:
                     "shot_id": str(
                         value.get(
                             "shot_id",
-                            f"shot_{index:03d}",
-                        )
-                        or f"shot_{index:03d}"
-                    ).strip(),
-                    "scene_id": scene_id,
-                    "order": index,
-                    "duration_seconds": duration,
-                    "characters": selected,
-                    "location": str(
-                        value.get(
-                            "location",
-                            scene.get(
-                                "location",
-                                "",
-                            ),
-                        )
-                        or scene.get(
-                            "location",
                             "",
                         )
-                    ),
-                    "action": str(
-                        value.get(
-                            "action",
-                            scene.get(
-                                "scene_objective",
+                        or ""
+                    ).strip(),
+
+                    "scene_id":
+                        scene_id,
+
+                    "order":
+                        len(result) + 1,
+
+                    "duration_seconds":
+                        duration,
+
+                    "characters":
+                        selected,
+
+                    "location":
+                        str(
+                            value.get(
+                                "location",
+                                scene.get(
+                                    "location",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
+                                "location",
+                                "",
+                            )
+                        ),
+
+                    "action":
+                        str(
+                            value.get(
+                                "action",
+                                scene.get(
+                                    "scene_objective",
+                                    scene.get(
+                                        "description",
+                                        "",
+                                    ),
+                                ),
+                            )
+                            or ""
+                        ),
+
+                    "camera_shot":
+                        str(
+                            value.get(
+                                "camera_shot",
+                                "cinematic medium shot",
+                            )
+                            or "cinematic medium shot"
+                        ),
+
+                    "camera_movement":
+                        str(
+                            value.get(
+                                "camera_movement",
+                                "controlled cinematic movement",
+                            )
+                            or "controlled cinematic movement"
+                        ),
+
+                    "lighting":
+                        str(
+                            value.get(
+                                "lighting",
+                                scene.get(
+                                    "lighting",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
+                                "lighting",
+                                "",
+                            )
+                        ),
+
+                    "mood":
+                        str(
+                            value.get(
+                                "mood",
+                                scene.get(
+                                    "mood",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
+                                "mood",
+                                "",
+                            )
+                        ),
+
+                    "visual_prompt":
+                        str(
+                            value.get(
+                                "visual_prompt",
                                 scene.get(
                                     "description",
                                     "",
                                 ),
-                            ),
-                        )
-                        or ""
-                    ),
-                    "camera_shot": str(
-                        value.get(
-                            "camera_shot",
-                            "cinematic medium shot",
-                        )
-                        or "cinematic medium shot"
-                    ),
-                    "camera_movement": str(
-                        value.get(
-                            "camera_movement",
-                            "controlled cinematic movement",
-                        )
-                        or "controlled cinematic movement"
-                    ),
-                    "lighting": str(
-                        value.get(
-                            "lighting",
-                            scene.get(
-                                "lighting",
-                                "",
-                            ),
-                        )
-                        or scene.get(
-                            "lighting",
-                            "",
-                        )
-                    ),
-                    "mood": str(
-                        value.get(
-                            "mood",
-                            scene.get(
-                                "mood",
-                                "",
-                            ),
-                        )
-                        or scene.get(
-                            "mood",
-                            "",
-                        )
-                    ),
-                    "visual_prompt": str(
-                        value.get(
-                            "visual_prompt",
-                            scene.get(
+                            )
+                            or scene.get(
                                 "description",
                                 "",
-                            ),
-                        )
-                        or scene.get(
-                            "description",
-                            "",
-                        )
-                    ),
-                    "retention_analysis": str(
-                        value.get(
-                            "retention_analysis",
-                            "Maintain narrative and visual continuity.",
-                        )
-                        or "Maintain narrative and visual continuity."
-                    ),
-                    "detailed_description": str(
-                        value.get(
-                            "detailed_description",
-                            scene.get(
+                            )
+                        ),
+
+                    "retention_analysis":
+                        str(
+                            value.get(
+                                "retention_analysis",
+                                "Maintain narrative and visual continuity.",
+                            )
+                            or "Maintain narrative and visual continuity."
+                        ),
+
+                    "detailed_description":
+                        str(
+                            value.get(
+                                "detailed_description",
+                                scene.get(
+                                    "description",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
                                 "description",
                                 "",
-                            ),
-                        )
-                        or scene.get(
-                            "description",
-                            "",
-                        )
-                    ),
-                    "overall_soundscape": str(
-                        value.get(
-                            "overall_soundscape",
-                            "Natural cinematic environmental sound.",
-                        )
-                        or "Natural cinematic environmental sound."
-                    ),
-                    "non_diegetic_music": str(
-                        value.get(
-                            "non_diegetic_music",
-                            "Subtle cinematic score when appropriate.",
-                        )
-                        or "Subtle cinematic score when appropriate."
-                    ),
-                    "negative_prompt": str(
-                        value.get(
-                            "negative_prompt",
-                            "identity drift, face deformation, inconsistent clothing",
-                        )
-                        or "identity drift, face deformation, inconsistent clothing"
-                    ),
-                    "continuity_notes": str(
-                        value.get(
-                            "continuity_notes",
-                            scene.get(
+                            )
+                        ),
+
+                    "overall_soundscape":
+                        str(
+                            value.get(
+                                "overall_soundscape",
+                                "Natural cinematic environmental sound.",
+                            )
+                            or "Natural cinematic environmental sound."
+                        ),
+
+                    "non_diegetic_music":
+                        str(
+                            value.get(
+                                "non_diegetic_music",
+                                "Subtle cinematic score when appropriate.",
+                            )
+                            or "Subtle cinematic score when appropriate."
+                        ),
+
+                    "negative_prompt":
+                        str(
+                            value.get(
+                                "negative_prompt",
+                                "identity drift, face deformation, inconsistent clothing",
+                            )
+                            or "identity drift, face deformation, inconsistent clothing"
+                        ),
+
+                    "continuity_notes":
+                        str(
+                            value.get(
+                                "continuity_notes",
+                                scene.get(
+                                    "continuity_notes",
+                                    "",
+                                ),
+                            )
+                            or scene.get(
                                 "continuity_notes",
                                 "",
-                            ),
-                        )
-                        or scene.get(
-                            "continuity_notes",
-                            "",
-                        )
-                    ),
-                    "speaking_characters": speaking,
-                    "speech_text": str(
-                        value.get(
-                            "speech_text",
-                            "",
-                        )
-                        or ""
-                    ),
+                            )
+                        ),
+
+                    "speaking_characters":
+                        speaking,
+
+                    "speech_text":
+                        str(
+                            value.get(
+                                "speech_text",
+                                "",
+                            )
+                            or ""
+                        ),
                 }
             )
 
         return result
 
     @staticmethod
-    def _fallback_shot(
+    def _fallback_shots_for_scene(
         scene: dict,
-        index: int,
-    ) -> dict:
+        start_index: int,
+    ) -> list[dict]:
 
         description = str(
             scene.get(
@@ -1898,71 +2114,230 @@ Return JSON only:
             or ""
         )
 
-        return {
-            "shot_id":
-                f"shot_{index:03d}",
-            "scene_id":
-                scene.get(
-                    "scene_id",
-                    f"scene_{index:03d}",
-                ),
-            "order": index,
-            "duration_seconds": 5.2,
-            "characters": list(
-                scene.get(
-                    "characters",
-                    [],
-                )
-                or []
+        characters = list(
+            scene.get(
+                "characters",
+                [],
+            )
+            or []
+        )
+
+        base = {
+            "scene_id": scene.get(
+                "scene_id",
+                "",
             ),
-            "location":
-                scene.get(
-                    "location",
-                    "",
-                ),
+            "characters": characters,
+            "location": scene.get(
+                "location",
+                "",
+            ),
+            "lighting": scene.get(
+                "lighting",
+                "",
+            ),
+            "mood": scene.get(
+                "mood",
+                "",
+            ),
+            "continuity_notes": scene.get(
+                "continuity_notes",
+                "",
+            ),
+        }
+
+        shot_a = {
+            **base,
+            "shot_id":
+                "",
+            "order":
+                1,
+            "duration_seconds":
+                5.2,
             "action":
-                scene.get(
-                    "scene_objective",
-                    "",
-                )
-                or description,
+                description,
             "camera_shot":
                 "wide cinematic establishing shot",
             "camera_movement":
-                "slow controlled cinematic movement",
-            "lighting":
-                scene.get(
-                    "lighting",
-                    "",
-                ),
-            "mood":
-                scene.get(
-                    "mood",
-                    "",
-                ),
+                "slow controlled tracking movement",
             "visual_prompt":
                 description,
             "retention_analysis":
-                "Maintain narrative continuity and character identity.",
+                "Establish the environment and narrative situation.",
             "detailed_description":
                 description,
             "overall_soundscape":
                 "Natural cinematic environmental sound.",
             "non_diegetic_music":
-                "Subtle cinematic score when appropriate.",
+                "Subtle cinematic score.",
             "negative_prompt":
                 "identity drift, duplicate character, face deformation, inconsistent clothing",
-            "continuity_notes":
-                scene.get(
-                    "continuity_notes",
-                    "",
-                ),
-            "speaking_characters": [],
-            "speech_text": "",
+            "speaking_characters":
+                [],
+            "speech_text":
+                "",
         }
 
+        shot_b = {
+            **base,
+            "shot_id":
+                "",
+            "order":
+                2,
+            "duration_seconds":
+                5.2,
+            "action":
+                (
+                    scene.get(
+                        "scene_objective",
+                        "",
+                    )
+                    or description
+                ),
+            "camera_shot":
+                "medium cinematic subject shot",
+            "camera_movement":
+                "slow deliberate push-in",
+            "visual_prompt":
+                description,
+            "retention_analysis":
+                "Move from environment into the primary narrative beat.",
+            "detailed_description":
+                description,
+            "overall_soundscape":
+                "Natural cinematic environmental sound.",
+            "non_diegetic_music":
+                "Cinematic score building with the scene.",
+            "negative_prompt":
+                "identity drift, duplicate character, face deformation, inconsistent clothing",
+            "speaking_characters":
+                [],
+            "speech_text":
+                "",
+        }
+
+        return [
+            shot_a,
+            shot_b,
+        ]
+
     # ========================================================
-    # STORY VALIDATION
+    # FINAL ID NORMALIZATION
+    # ========================================================
+
+    @staticmethod
+    def _normalize_ids(
+        scenes: list[dict],
+        shots: list[dict],
+    ) -> None:
+
+        seen_scene_ids: set[str] = set()
+
+        for index, scene in enumerate(
+            scenes,
+            start=1,
+        ):
+
+            scene_id = str(
+                scene.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if (
+                not scene_id
+                or scene_id in seen_scene_ids
+            ):
+
+                scene_id = (
+                    f"scene_{index:03d}"
+                )
+
+            seen_scene_ids.add(
+                scene_id
+            )
+
+            scene[
+                "scene_id"
+            ] = scene_id
+
+            scene[
+                "order"
+            ] = index
+
+        used_shot_ids: set[str] = set()
+
+        scene_counters: dict[str, int] = {}
+
+        for global_index, shot in enumerate(
+            shots,
+            start=1,
+        ):
+
+            scene_id = str(
+                shot.get(
+                    "scene_id",
+                    "",
+                )
+            ).strip()
+
+            scene_counters[
+                scene_id
+            ] = (
+                scene_counters.get(
+                    scene_id,
+                    0,
+                )
+                + 1
+            )
+
+            shot_number = (
+                scene_counters[
+                    scene_id
+                ]
+            )
+
+            preferred = str(
+                shot.get(
+                    "shot_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            candidate = preferred
+
+            if (
+                not candidate
+                or candidate in used_shot_ids
+            ):
+
+                candidate = (
+                    f"{scene_id}"
+                    f"_shot_{shot_number:03d}"
+                )
+
+            while candidate in used_shot_ids:
+
+                candidate = (
+                    f"{scene_id}"
+                    f"_shot_{global_index:03d}"
+                )
+
+                global_index += 1
+
+            used_shot_ids.add(
+                candidate
+            )
+
+            shot[
+                "shot_id"
+            ] = candidate
+
+    # ========================================================
+    # MODE VALIDATION
     # ========================================================
 
     @staticmethod
@@ -1990,7 +2365,7 @@ Return JSON only:
             ).lower(),
         )
 
-        stop_words = {
+        stop = {
             "this",
             "that",
             "with",
@@ -2017,7 +2392,7 @@ Return JSON only:
         return {
             word
             for word in words
-            if word not in stop_words
+            if word not in stop
         }
 
     def _validate_mode_output(
@@ -2048,6 +2423,37 @@ Return JSON only:
                 raise RuntimeError(
                     "Preserve Story mode changed "
                     "the supplied story."
+                )
+
+            return
+
+        if mode == AI_STORY_MODE:
+
+            if source == result:
+
+                raise RuntimeError(
+                    "AI Story mode returned "
+                    "the premise unchanged."
+                )
+
+            # No arbitrary length multiplier.
+            # A concise but excellent story is valid.
+
+            sentences = [
+                value
+                for value
+                in re.split(
+                    r"[.!?]+",
+                    result,
+                )
+                if value.strip()
+            ]
+
+            if len(sentences) < 2:
+
+                raise RuntimeError(
+                    "AI Story mode did not produce "
+                    "a complete narrative."
                 )
 
             return
@@ -2093,19 +2499,21 @@ Return JSON only:
                         "too much of the supplied story."
                     )
 
-            return
+            sentences = [
+                value
+                for value
+                in re.split(
+                    r"[.!?]+",
+                    result,
+                )
+                if value.strip()
+            ]
 
-        if mode == AI_STORY_MODE:
-
-            # Do NOT impose an arbitrary character-count or
-            # percentage-growth requirement. A short premise
-            # can legitimately become a concise but complete
-            # cinematic story.
-
-            if not result:
+            if len(sentences) < 3:
 
                 raise RuntimeError(
-                    "AI Story mode produced no story."
+                    "Expand Story mode did not "
+                    "provide enough narrative development."
                 )
 
             return
@@ -2151,7 +2559,9 @@ Return JSON only:
                     if (
                         str(
                             name
-                        ).strip().lower()
+                        )
+                        .strip()
+                        .lower()
                         not in allowed
                     ):
 
@@ -2258,33 +2668,25 @@ Return JSON only:
                 )
             )
 
-        # Deterministic fallback MUST use the generated story,
-        # not merely the original user premise.
         fallback_characters = []
         fallback_scenes = []
 
         if (
             not characters
             or not story_plan.get(
-                "scenes"
+                "scenes",
+                [],
             )
         ):
 
-            try:
-
-                (
-                    fallback_characters,
-                    fallback_scenes,
-                ) = (
-                    self._build_deterministic_fallback(
-                        story
-                    )
+            (
+                fallback_characters,
+                fallback_scenes,
+            ) = (
+                self._build_deterministic_fallback(
+                    story
                 )
-
-            except Exception:
-
-                fallback_characters = []
-                fallback_scenes = []
+            )
 
         if not characters:
 
@@ -2342,41 +2744,65 @@ Return JSON only:
                 {
                     "scene_id":
                         "scene_001",
+
+                    "title":
+                        "The Beginning",
+
                     "order":
                         1,
+
                     "location":
                         "cinematic environment",
+
                     "time_of_day":
                         "unspecified",
+
                     "weather":
-                        "natural",
+                        "",
+
                     "atmosphere":
                         "cinematic",
+
                     "description":
                         story,
+
                     "mood":
                         "cinematic",
+
                     "lighting":
                         "cinematic naturalistic lighting",
+
                     "environment_details":
                         [],
+
                     "key_props":
                         [],
+
                     "scene_objective":
                         story,
+
                     "characters":
-                        [],
+                        list(
+                            character[
+                                "name"
+                            ]
+                            for character
+                            in characters
+                        ),
+
                     "story_summary":
                         story,
+
                     "continuity_notes":
                         "",
+
                     "shot_ids":
                         [],
                 }
             ]
 
         # ----------------------------------------------------
-        # PASS 2 — ONE SCENE AT A TIME
+        # PASS 2
         # ----------------------------------------------------
 
         all_shots: list[dict] = []
@@ -2392,7 +2818,7 @@ Return JSON only:
                         characters,
                         scene,
                     ),
-                    minimum_completion=400,
+                    minimum_completion=450,
                 )
 
                 scene_shots = (
@@ -2410,16 +2836,18 @@ Return JSON only:
 
                 scene_shots = []
 
-            if not scene_shots:
+            if len(
+                scene_shots
+            ) < 2:
 
-                scene_shots = [
-                    self._fallback_shot(
+                scene_shots = (
+                    self._fallback_shots_for_scene(
                         scene,
                         len(
                             all_shots
                         ) + 1,
                     )
-                ]
+                )
 
             all_shots.extend(
                 scene_shots
@@ -2431,37 +2859,29 @@ Return JSON only:
                 "No usable shots could be produced."
             )
 
-        # ----------------------------------------------------
-        # NORMALIZE ORDERS / IDS
-        # ----------------------------------------------------
-
-        for index, shot in enumerate(
-            all_shots,
-            start=1,
-        ):
-
-            shot[
-                "order"
-            ] = index
-
-            shot[
-                "shot_id"
-            ] = str(
-                shot.get(
-                    "shot_id",
-                    f"shot_{index:03d}",
-                )
-                or f"shot_{index:03d}"
-            )
-
-        for index, scene in enumerate(
+        self._normalize_ids(
             scenes,
-            start=1,
-        ):
+            all_shots,
+        )
+
+        # Rebuild scene shot IDs.
+        for scene in scenes:
 
             scene[
-                "order"
-            ] = index
+                "shot_ids"
+            ] = [
+                shot[
+                    "shot_id"
+                ]
+                for shot
+                in all_shots
+                if shot.get(
+                    "scene_id"
+                )
+                == scene.get(
+                    "scene_id"
+                )
+            ]
 
         if characters:
 
@@ -2473,18 +2893,30 @@ Return JSON only:
         return {
             "enabled": True,
             "plan": {
-                "story": story,
-                "story_mode": mode,
-                "director_notes": director_notes,
-                "characters": characters,
-                "scenes": scenes,
-                "shots": all_shots,
+                "story":
+                    story,
+
+                "story_mode":
+                    mode,
+
+                "director_notes":
+                    director_notes,
+
+                "characters":
+                    characters,
+
+                "scenes":
+                    scenes,
+
+                "shots":
+                    all_shots,
             },
-            "director_notes": director_notes,
+            "director_notes":
+                director_notes,
         }
 
     # ========================================================
-    # ENRICH PLAN
+    # MERGE
     # ========================================================
 
     def enrich_plan(
@@ -2521,10 +2953,6 @@ Return JSON only:
         merged = deepcopy(
             base_plan
         )
-
-        # ----------------------------------------------------
-        # STORY
-        # ----------------------------------------------------
 
         if mode == PRESERVE_USER_STORY_MODE:
 
@@ -2564,10 +2992,6 @@ Return JSON only:
             or ""
         )
 
-        # ----------------------------------------------------
-        # CHARACTERS
-        # ----------------------------------------------------
-
         creative_characters = (
             creative.get(
                 "characters",
@@ -2583,10 +3007,6 @@ Return JSON only:
             ] = deepcopy(
                 creative_characters
             )
-
-        # ----------------------------------------------------
-        # SCENES
-        # ----------------------------------------------------
 
         creative_scenes = (
             creative.get(
@@ -2604,10 +3024,6 @@ Return JSON only:
                 creative_scenes
             )
 
-        # ----------------------------------------------------
-        # SHOTS
-        # ----------------------------------------------------
-
         creative_shots = (
             creative.get(
                 "shots",
@@ -2623,49 +3039,5 @@ Return JSON only:
             ] = deepcopy(
                 creative_shots
             )
-
-        # ----------------------------------------------------
-        # FINAL STRUCTURAL GUARANTEE
-        # ----------------------------------------------------
-
-        if not merged.get(
-            "scenes"
-        ):
-
-            fallback_scenes = (
-                base_plan.get(
-                    "scenes",
-                    [],
-                )
-                or []
-            )
-
-            if fallback_scenes:
-
-                merged[
-                    "scenes"
-                ] = deepcopy(
-                    fallback_scenes
-                )
-
-        if not merged.get(
-            "shots"
-        ):
-
-            fallback_shots = (
-                base_plan.get(
-                    "shots",
-                    [],
-                )
-                or []
-            )
-
-            if fallback_shots:
-
-                merged[
-                    "shots"
-                ] = deepcopy(
-                    fallback_shots
-                )
 
         return merged
