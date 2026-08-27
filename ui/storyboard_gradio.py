@@ -1362,7 +1362,25 @@ def serve_storyboard_gradio(
     demo.launch(
         server_name="0.0.0.0",
         server_port=8765,
-        share=True,
+        share = (
+            os.getenv(
+                "H3_GRADIO_SHARE",
+                "0",
+            ).strip().lower()
+            in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+        )
+        
+        demo.launch(
+            server_name="0.0.0.0",
+            server_port=8765,
+            share=share,
+            show_error=True,
+        )
         show_error=True,
     )
 
