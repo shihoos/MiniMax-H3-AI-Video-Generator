@@ -949,6 +949,12 @@ Return JSON only:
 
         try:
 
+            temperature, top_p = (
+                self._sampling_for_mode(
+                    mode
+                )
+            )
+
             response = self._chat_json(
                 self._character_recovery_system(
                     mode
@@ -957,6 +963,8 @@ Return JSON only:
                     story
                 ),
                 minimum_completion=400,
+                temperature=temperature,
+                top_p=top_p,
             )
 
         except Exception:
@@ -1052,6 +1060,12 @@ Return JSON only:
 
         try:
 
+            temperature, top_p = (
+                self._sampling_for_mode(
+                    mode
+                )
+            )
+
             response = self._chat_json(
                 self._scene_recovery_system(
                     mode
@@ -1061,6 +1075,8 @@ Return JSON only:
                     characters,
                 ),
                 minimum_completion=450,
+                temperature=temperature,
+                top_p=top_p,
             )
 
         except Exception:
@@ -1312,19 +1328,19 @@ Return JSON only:
         temperature: float | None = None,
         top_p: float | None = None,
     ) -> dict:
-    
+
         if self._llama is None:
-    
+
             raise RuntimeError(
                 "Qwen director model is not loaded."
             )
-    
+
         if temperature is None:
             temperature = DIRECTOR_TEMPERATURE
-    
+
         if top_p is None:
             top_p = DIRECTOR_TOP_P
-    
+
         _, max_tokens = (
             self._available_output_tokens(
                 system_prompt,
@@ -1332,7 +1348,7 @@ Return JSON only:
                 minimum_completion=minimum_completion,
             )
         )
-    
+
         response = (
             self._llama.create_chat_completion(
                 messages=[
@@ -1353,9 +1369,9 @@ Return JSON only:
                 },
             )
         )
-    
+
         try:
-    
+
             content = (
                 response[
                     "choices"
@@ -1365,24 +1381,24 @@ Return JSON only:
                     "content"
                 ]
             )
-    
+
         except (
             KeyError,
             IndexError,
             TypeError,
         ) as exc:
-    
+
             raise RuntimeError(
                 "Qwen director returned an "
                 "unexpected completion structure."
             ) from exc
-    
+
         if not content:
-    
+
             raise RuntimeError(
                 "Qwen returned an empty response."
             )
-    
+
         return self._extract_json(
             content
         )
@@ -2645,6 +2661,12 @@ Return JSON only:
         # PASS 1
         # ----------------------------------------------------
 
+        temperature, top_p = (
+            self._sampling_for_mode(
+                mode
+            )
+        )
+
         story_plan = self._chat_json(
             self._story_director_system(
                 mode
@@ -2654,6 +2676,8 @@ Return JSON only:
                 user_input,
             ),
             minimum_completion=600,
+            temperature=temperature,
+            top_p=top_p,
         )
 
         story = str(
