@@ -5,76 +5,38 @@ from collections import deque
 
 
 class GPUScheduler:
+    """Run independent scene jobs across GPUs without feeding new jobs after failure."""
 
-    def __init__(
-        self,
-        gpu_ids=None,
-    ):
-        self.gpu_ids = [
-            int(gpu)
-            for gpu in (
-                gpu_ids
-                if gpu_ids is not None
-                else [0]
-            )
-        ]
-
+    def __init__(self, gpu_ids=None):
+        self.gpu_ids = sorted({
+            int(gpu) for gpu in (gpu_ids if gpu_ids is not None else [0])
+        })
         if not self.gpu_ids:
-            raise ValueError(
-                "At least one GPU is required."
-            )
+            raise ValueError("At least one GPU is required.")
 
-    def run_independent(
-        self,
-        jobs,
-        worker_function,
-    ):
-        """
-        One worker thread per physical GPU.
-
-        Each GPU owns at most one active scene at a time.
-        Shots inside a scene remain sequential in ProductionRunner.
-        """
-
-        queue = deque(jobs)
+    def run_independent(self, jobs, worker_function):
+        indexed_jobs = deque(enumerate(jobs))
         queue_lock = threading.Lock()
         result_lock = threading.Lock()
-
+        stop_event = threading.Event()
         results = []
         failures = []
 
-        def worker(
-            gpu_id,
-        ):
-            while True:
-
+        def worker(gpu_id):
+            while not stop_event.is_set():
                 with queue_lock:
-                    if not queue:
+                    if not indexed_jobs:
                         return
-
-                    job = queue.popleft()
-
+                    index, job = indexed_jobs.popleft()
                 try:
-                    result = worker_function(
-                        gpu_id,
-                        job,
-                    )
-
+                    result = worker_function(gpu_id, job)
                     with result_lock:
-                        results.append(
-                            result
-                        )
-
+                        results.append((index, result))
                 except Exception as error:
-
                     with result_lock:
-                        failures.append(
-                            (
-                                gpu_id,
-                                job,
-                                error,
-                            )
-                        )
+                        failures.append((gpu_id, index, job, error))
+                    stop_event.set()
+                    return
 
         threads = [
             threading.Thread(
@@ -85,23 +47,17 @@ class GPUScheduler:
             )
             for gpu_id in self.gpu_ids
         ]
-
         for thread in threads:
             thread.start()
-
         for thread in threads:
             thread.join()
 
         if failures:
             messages = "\n".join(
-                f"GPU {gpu}: {error}"
-                for gpu, _job, error
-                in failures
+                f"GPU {gpu}: job {job!r} failed: {error}"
+                for gpu, _index, job, error in failures
             )
+            raise RuntimeError("GPU jobs failed:\n" + messages)
 
-            raise RuntimeError(
-                "GPU jobs failed:\n"
-                + messages
-            )
-
-        return results
+        results.sort(key=lambda item: item[0])
+        return [result for _index, result in results]
