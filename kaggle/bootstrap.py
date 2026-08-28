@@ -437,6 +437,74 @@ def install_director_runtime(
         )
 
 
+
+
+def install_comfyui(runtime: dict) -> None:
+    """Install the exact ComfyUI revision required by the project."""
+    config = runtime.get("comfyui", {})
+    repository = str(config.get("repository", "") or "").strip()
+    revision = str(config.get("revision", "") or "").strip()
+    if not repository or not revision:
+        raise RuntimeError("runtime_versions.yaml must define comfyui.repository and comfyui.revision.")
+
+    print("=" * 80)
+    print("INSTALLING COMFYUI")
+    print("=" * 80)
+
+    if COMFY.exists() and not (COMFY / ".git").exists():
+        raise RuntimeError(
+            f"ComfyUI path exists but is not a git checkout: {COMFY}. "
+            "Move it away and rerun bootstrap."
+        )
+
+    if not COMFY.exists():
+        run("git", "clone", repository, COMFY)
+
+    run("git", "-C", COMFY, "fetch", "--tags", "--prune", "origin")
+    run("git", "-C", COMFY, "checkout", "--detach", revision)
+
+    requirements = COMFY / "requirements.txt"
+    if not requirements.is_file():
+        raise RuntimeError(f"ComfyUI requirements.txt is missing: {requirements}")
+
+    run(
+        sys.executable, "-m", "pip", "install", "-q",
+        "--disable-pip-version-check", "-r", requirements,
+    )
+
+    expected_version = str(config.get("expected_version", "") or "").strip()
+    version_check = subprocess.run(
+        [sys.executable, "-c", "import importlib.metadata as m; print(m.version('comfyui'))"],
+        cwd=str(COMFY),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    installed_version = (version_check.stdout or "").strip()
+    # The git checkout is the authority. If a package distribution is not
+    # installed under the same name, verify the git revision directly below.
+    rev = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    expected_rev = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if rev != expected_rev:
+        raise RuntimeError(
+            f"ComfyUI revision mismatch: checked out {rev}, expected {expected_rev}."
+        )
+    print(f"[COMFYUI] revision={rev}")
+    if expected_version:
+        print(f"[COMFYUI] expected release={expected_version}")
+    if installed_version:
+        print(f"[COMFYUI] package version={installed_version}")
+
 def install_storyboard_runtime(
     runtime: dict,
 ) -> None:
@@ -683,6 +751,39 @@ def verify_inventory() -> None:
         )
 
 
+
+
+def verify_runtime_files(runtime: dict) -> None:
+    if not (COMFY / "main.py").is_file():
+        raise RuntimeError(f"ComfyUI main.py is missing: {COMFY / 'main.py'}")
+    if not CUSTOM.is_dir():
+        raise RuntimeError(f"ComfyUI custom_nodes directory is missing: {CUSTOM}")
+    if not MODELS.is_dir():
+        raise RuntimeError(f"ComfyUI models directory is missing: {MODELS}")
+
+    expected_version = str(runtime.get("comfyui", {}).get("expected_version", "") or "").strip()
+    revision = str(runtime.get("comfyui", {}).get("revision", "") or "").strip()
+    head = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    tagged = subprocess.run(
+        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if revision:
+        expected_head = subprocess.run(
+            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if head != expected_head:
+            raise RuntimeError("ComfyUI checkout is not at the locked revision.")
+    if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
+        raise RuntimeError(
+            f"ComfyUI checkout is not the expected release tag. "
+            f"HEAD={tagged or 'untagged'}, expected={expected_version}."
+        )
+
 def main():
 
     runtime = load_yaml(
@@ -710,6 +811,8 @@ def main():
 
     install_base_requirements()
 
+    install_comfyui(runtime)
+
     install_director_runtime(
         runtime
     )
@@ -723,6 +826,7 @@ def main():
     install_models()
 
     verify_inventory()
+    verify_runtime_files(runtime)
 
     print(
         "=" * 80
