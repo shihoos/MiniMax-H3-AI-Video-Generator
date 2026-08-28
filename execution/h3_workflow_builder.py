@@ -866,6 +866,99 @@ class H3WorkflowBuilder:
 
         return link_id
 
+    def _clear_template_reference_inputs(
+        self,
+        workflow: dict,
+    ) -> None:
+        """Remove static reference-image placeholders from production templates.
+
+        Production reference media is attached at runtime. The checked-in
+        workflow templates may contain placeholder LoadImage nodes for visual
+        editing, but those nodes must never remain connected in an API graph
+        when no matching runtime files are supplied.
+        """
+        ref_node = self._one(
+            workflow,
+            "MiniMaxH3ReferenceToVideo",
+        )
+        ref_id = self._node_id(ref_node)
+
+        optional_prefixes = (
+            "ref_images.",
+            "ref_videos.",
+            "ref_video_audios.",
+            "ref_audios.",
+        )
+
+        placeholder_node_ids: set[int] = set()
+        placeholder_link_ids: set[int] = set()
+
+        for node in list(self._nodes(workflow)):
+            if node.get("type") != "LoadImage":
+                continue
+
+            widgets = node.get("widgets_values", [])
+            filename = widgets[0] if isinstance(widgets, list) and widgets else ""
+            if not (
+                isinstance(filename, str)
+                and filename.startswith("__H3_REF_IMAGE_")
+            ):
+                continue
+
+            node_id = self._node_id(node)
+            placeholder_node_ids.add(node_id)
+
+        if placeholder_node_ids:
+            for row in workflow.get("links", []):
+                if not isinstance(row, list) or len(row) < 6:
+                    continue
+                if int(row[1]) in placeholder_node_ids:
+                    placeholder_link_ids.add(int(row[0]))
+                if int(row[3]) == ref_id:
+                    input_name = None
+                    try:
+                        input_name = ref_node.get("inputs", [])[int(row[4])].get("name")
+                    except (IndexError, TypeError, ValueError, AttributeError):
+                        pass
+                    if isinstance(input_name, str) and input_name.startswith(optional_prefixes):
+                        placeholder_link_ids.add(int(row[0]))
+
+            workflow["nodes"] = [
+                node
+                for node in self._nodes(workflow)
+                if self._node_id(node) not in placeholder_node_ids
+            ]
+
+        if placeholder_link_ids:
+            workflow["links"] = [
+                row
+                for row in workflow.get("links", [])
+                if not (
+                    isinstance(row, list)
+                    and row
+                    and int(row[0]) in placeholder_link_ids
+                )
+            ]
+
+            for node in self._nodes(workflow):
+                for output in node.get("outputs", []) or []:
+                    links = output.get("links") if isinstance(output, dict) else None
+                    if isinstance(links, list):
+                        output["links"] = [
+                            int(link)
+                            for link in links
+                            if int(link) not in placeholder_link_ids
+                        ]
+
+        # Any runtime-optional inputs left in the template start unbound.
+        for node in self._nodes(workflow):
+            if self._node_id(node) != ref_id:
+                continue
+            for item in node.get("inputs", []) or []:
+                name = item.get("name") if isinstance(item, dict) else None
+                if isinstance(name, str) and name.startswith(optional_prefixes):
+                    item["link"] = None
+
     def _connect_media(
         self,
         workflow: dict,
@@ -873,6 +966,10 @@ class H3WorkflowBuilder:
         reference_videos: list[str],
         reference_audio: list[str],
     ):
+        self._clear_template_reference_inputs(
+            workflow
+        )
+
         if (
             len(reference_images)
             + len(reference_videos)
@@ -1269,7 +1366,7 @@ class H3WorkflowBuilder:
                 "REFERENCE INPUTS: "
                 + ", ".join(tags)
                 + ". Use each reference only for "
-                "the role described in the prompt.\\n\\n"
+                "the role described in the prompt.\n\n"
             )
 
             self._set_prompt(
