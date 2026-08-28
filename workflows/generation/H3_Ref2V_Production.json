@@ -836,14 +836,14 @@
           "name": "ref_images.ref_image_0",
           "shape": 7,
           "type": "IMAGE",
-          "link": 278
+          "link": null
         },
         {
           "label": "ref_image_1",
           "name": "ref_images.ref_image_1",
           "shape": 7,
           "type": "IMAGE",
-          "link": 282
+          "link": null
         },
         {
           "label": "ref_image_2",
@@ -943,49 +943,6 @@
       }
     },
     {
-      "id": 137,
-      "type": "LoadImage",
-      "pos": [
-        -1050,
-        5960
-      ],
-      "size": [
-        290,
-        330
-      ],
-      "flags": {},
-      "order": 10,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            278
-          ]
-        },
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.33.0",
-        "Node name for S&R": "LoadImage"
-      },
-      "widgets_values": [
-        "__H3_REF_IMAGE_0__.png",
-        "image"
-      ],
-      "widgets_values_named": {
-        "image": "red_superboy_on_city_roof.png",
-        "upload": "image"
-      }
-    },
-    {
       "id": 138,
       "type": "PrimitiveStringMultiline",
       "pos": [
@@ -1023,49 +980,6 @@
       },
       "color": "#322",
       "bgcolor": "#533"
-    },
-    {
-      "id": 139,
-      "type": "LoadImage",
-      "pos": [
-        -700,
-        5960
-      ],
-      "size": [
-        290,
-        330
-      ],
-      "flags": {},
-      "order": 12,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            282
-          ]
-        },
-        {
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.33.0",
-        "Node name for S&R": "LoadImage"
-      },
-      "widgets_values": [
-        "__H3_REF_IMAGE_1__.png",
-        "image"
-      ],
-      "widgets_values_named": {
-        "image": "mecha_dragon_lightning.png",
-        "upload": "image"
-      }
     },
     {
       "id": 140,
@@ -1288,14 +1202,6 @@
       "INT"
     ],
     [
-      278,
-      137,
-      0,
-      136,
-      3,
-      "IMAGE"
-    ],
-    [
       279,
       138,
       0,
@@ -1318,14 +1224,6 @@
       121,
       0,
       "LATENT"
-    ],
-    [
-      282,
-      139,
-      0,
-      136,
-      4,
-      "IMAGE"
     ],
     [
       284,
