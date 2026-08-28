@@ -162,9 +162,14 @@ class H3SceneContinuity:
         *,
         shot: dict,
         frame_path: Path,
+        character_map: dict[str, str] | None = None,
     ) -> list[str]:
 
-        character_ids = (
+        # character_ids remains the canonical identity-store key.
+        # When a caller only has production-level character names, it may
+        # provide an explicit name->character_id map. Never derive IDs
+        # heuristically from display names.
+        character_ids = list(
             shot.get(
                 "character_ids",
                 [],
@@ -172,9 +177,50 @@ class H3SceneContinuity:
             or []
         )
 
+        if (
+            not character_ids
+            and character_map
+        ):
+            for character_name in (
+                shot.get(
+                    "characters",
+                    [],
+                )
+                or []
+            ):
+                key = str(
+                    character_name or ""
+                ).strip().lower()
+
+                character_id = character_map.get(
+                    key
+                )
+
+                if character_id:
+                    character_ids.append(
+                        character_id
+                    )
+
         saved = []
+        seen = set()
 
         for character_id in character_ids:
+
+            character_id = str(
+                character_id or ""
+            ).strip()
+
+            if not character_id:
+                continue
+
+            key = character_id.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
 
             anchor = (
                 self.identity_store
