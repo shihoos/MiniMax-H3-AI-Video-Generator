@@ -1,0 +1,5 @@
+# Control-plane dependencies used by the repository.
+# GPU/model runtimes are installed separately because their wheels are
+# platform/CUDA-specific and are controlled by configs/runtime_versions.yaml.
+PyYAML==6.0.2
+gradio==6.0.0
