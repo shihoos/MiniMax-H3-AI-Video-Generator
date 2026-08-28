@@ -228,17 +228,53 @@ class ProductionRunner:
         scene_id: str,
     ):
 
+        from execution.metrics import MetricsRecorder
+        metrics_path = self.project_root / "data" / "production" / str(self.production_id) / "metrics.jsonl"
         return ShotExecutor(
-            comfy_client=self.clients[
-                gpu_id
-            ],
+            comfy_client=self.clients[gpu_id],
             project_root=self.project_root,
             comfy_input_dir=(
                 self.production_input_root
                 / f"gpu_{gpu_id}"
                 / self._safe_name(scene_id)
             ),
+            gpu_id=gpu_id,
+            metrics_path=metrics_path,
         )
+
+    @staticmethod
+    def _scene_batches(scene_jobs: list[tuple[str, list[dict]]]) -> list[list[tuple[str, list[dict]]]]:
+        """Create ordered batches where no two concurrent scenes share characters.
+
+        Scenes sharing a character are forced into later batches so identity-anchor
+        writes remain deterministic. Unrelated scenes can occupy the same batch and
+        therefore use both T4 GPUs even when the overall production is not globally
+        marked parallel-safe.
+        """
+        batches: list[list[tuple[str, list[dict]]]] = []
+        scene_characters: dict[str, set[str]] = {}
+        scene_batch: dict[str, int] = {}
+
+        for scene_id, scene_shots in scene_jobs:
+            chars = {
+                str(name).strip().lower()
+                for shot in scene_shots
+                for name in (shot.get("characters", []) or [])
+                if str(name).strip()
+            }
+            scene_characters[scene_id] = chars
+            earliest_batch = 0
+            for previous_id, previous_chars in scene_characters.items():
+                if previous_id == scene_id:
+                    continue
+                if chars and previous_chars and chars.intersection(previous_chars):
+                    earliest_batch = max(earliest_batch, scene_batch[previous_id] + 1)
+            while len(batches) <= earliest_batch:
+                batches.append([])
+            batches[earliest_batch].append((scene_id, scene_shots))
+            scene_batch[scene_id] = earliest_batch
+
+        return batches
 
     @staticmethod
     def _workflow_for_shot(
@@ -1055,26 +1091,15 @@ class ProductionRunner:
 
         try:
 
-            if (
-                not resume_active
-                and bool(
-                    production_plan.get(
-                        "parallel_safe",
-                        False,
-                    )
-                )
-                and len(self.clients) > 1
-            ):
+            scheduler = GPUScheduler(
+                gpu_ids=sorted(self.clients)
+            )
 
-                scheduler = GPUScheduler(
-                    gpu_ids=sorted(
-                        self.clients
-                    )
-                )
-
-                scene_results = (
-                    scheduler.run_independent(
-                        scene_jobs,
+            batches = self._scene_batches(scene_jobs)
+            for batch_index, batch in enumerate(batches):
+                if len(batch) > 1 and len(self.clients) > 1:
+                    batch_results = scheduler.run_independent(
+                        batch,
                         lambda gpu_id, job: (
                             job[0],
                             self._run_scene(
@@ -1089,18 +1114,10 @@ class ProductionRunner:
                             ),
                         ),
                     )
-                )
-
-            else:
-
-                gpu_id = sorted(
-                    self.clients
-                )[0]
-
-                for scene_id, scene_shots in (
-                    scene_jobs
-                ):
-
+                    scene_results.extend(batch_results)
+                else:
+                    gpu_id = sorted(self.clients)[batch_index % len(self.clients)]
+                    scene_id, scene_shots = batch[0]
                     scene_results.append(
                         (
                             scene_id,
@@ -1116,16 +1133,13 @@ class ProductionRunner:
                             ),
                         )
                     )
-
-                    self._update_render_checkpoint(
-                        production_id,
-                        status="rendering",
-                        stage="rendering",
-                        current_scene_id=scene_id,
-                        completed_shot_ids=list(
-                            completed_shots.keys()
-                        ),
-                    )
+                self._update_render_checkpoint(
+                    production_id,
+                    status="rendering",
+                    stage="rendering",
+                    current_scene_id="batch_%s" % batch_index,
+                    completed_shot_ids=list(completed_shots.keys()),
+                )
 
             # Re-read the checkpoint after all workers finish so the durable
             # merged state, rather than one worker's local dictionary, is
