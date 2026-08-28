@@ -32,6 +32,12 @@ from planner.config import (
 
 class QwenDirector:
 
+    # Production planning limits. Keep the narrative rich, but bound the
+    # production graph so an LLM cannot accidentally explode a short film
+    # into dozens of scenes and therefore dozens of expensive Qwen calls.
+    MAX_SCENES = 6
+    SHOTS_PER_SCENE = 2
+
     FORBIDDEN_CHARACTER_NAMES = {
         "treat",
         "develop",
@@ -860,8 +866,8 @@ Create only:
 
 Do NOT create shots in this pass.
 
-Create 4–6 meaningful narrative scenes.
-Every scene must represent a real dramatic beat, not a camera instruction.
+Create exactly 4–6 meaningful narrative scenes.
+Never output more than 6 scenes. Every scene must represent a real dramatic beat, not a camera instruction.
 
 Avoid scene titles such as:
 "distance"
@@ -973,7 +979,8 @@ Only create actual story characters.
 
 SCENES:
 
-Create 4–6 meaningful story beats.
+Create exactly 4–6 meaningful story beats.
+Never output more than 6 scenes.
 
 Do not use scene titles such as:
 "distance"
@@ -1204,7 +1211,8 @@ You are the SCENE DIRECTOR for MiniMax H3.
 
 {self._mode_instruction(mode)}
 
-Create 4–6 meaningful narrative scenes from the supplied story.
+Create exactly 4–6 meaningful narrative scenes from the supplied story.
+Never output more than 6 scenes.
 
 Each scene must be a real dramatic beat.
 
@@ -2387,6 +2395,35 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 }
             )
 
+        # The metadata contract asks for 4–6 meaningful scenes. Qwen can
+        # occasionally over-segment an expanded story into many tiny beats.
+        # That is a production-cost failure because every scene causes a
+        # separate cinematography inference and downstream H3 work. Keep the
+        # first/last/middle narrative beats while deterministically reducing
+        # an overlong plan to the configured production ceiling.
+        if len(result) > self.MAX_SCENES:
+
+            if self.MAX_SCENES <= 1:
+                result = result[:1]
+            else:
+                last_index = len(result) - 1
+                selected_indices = {
+                    round(
+                        index * last_index / (self.MAX_SCENES - 1)
+                    )
+                    for index in range(self.MAX_SCENES)
+                }
+                result = [
+                    result[index]
+                    for index in sorted(selected_indices)
+                ]
+
+            for order, scene in enumerate(
+                result,
+                start=1,
+            ):
+                scene["order"] = order
+
         return result
 
     # ========================================================
@@ -2513,6 +2550,49 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 for field in required
             ):
                 continue
+
+            # Character binding is production-critical. Qwen may omit the
+            # field or return an empty list even though the scene already
+            # has approved characters. In that case deterministically inherit
+            # the scene's character set. When Qwen does provide names, keep
+            # only names already present in the approved character roster.
+            scene_characters = self._clean_list(
+                scene.get(
+                    "characters",
+                    [],
+                ),
+                limit=6,
+            )
+
+            supplied_characters = self._clean_list(
+                candidate.get(
+                    "characters",
+                    [],
+                ),
+                limit=6,
+            )
+
+            selected_characters: list[str] = []
+
+            for name in supplied_characters:
+
+                lowered = name.lower()
+
+                if lowered in character_names:
+                    selected_characters.append(name)
+
+            if not selected_characters:
+
+                selected_characters = [
+                    name
+                    for name in scene_characters
+                    if name.lower() in character_names
+                ]
+
+            candidate["characters"] = self._clean_list(
+                selected_characters,
+                limit=6,
+            )
 
             result.append(
                 candidate
@@ -2837,6 +2917,18 @@ non_diegetic_music, negative_prompt, continuity_notes.
         }
 
         for shot in shots:
+
+            shot_characters = [
+                str(name).strip()
+                for name in (
+                    shot.get(
+                        "characters",
+                        [],
+                    )
+                    or []
+                )
+                if str(name).strip()
+            ]
 
             for field in (
                 "characters",
@@ -3457,7 +3549,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     in prior_by_scene.get(
                         scene_id,
                         [],
-                    )[:2]
+                    )[: self.SHOTS_PER_SCENE]
                     if isinstance(
                         item,
                         dict,
@@ -3465,7 +3557,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 ]
 
                 # A previously completed scene is never regenerated.
-                if len(existing_scene_shots) >= 2:
+                if len(existing_scene_shots) >= self.SHOTS_PER_SCENE:
 
                     all_shots.extend(
                         existing_scene_shots[:2]
@@ -3569,7 +3661,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
                             scene_shots = []
 
                 # Exactly one existing/generated shot: generate only the missing one.
-                if len(scene_shots) == 1:
+                if len(scene_shots) == self.SHOTS_PER_SCENE - 1:
 
                     existing = scene_shots[0]
 
@@ -3651,12 +3743,12 @@ non_diegetic_music, negative_prompt, continuity_notes.
                         )
 
                 # Never put a third Qwen shot into the plan.
-                scene_shots = scene_shots[:2]
+                scene_shots = scene_shots[: self.SHOTS_PER_SCENE]
                 all_shots.extend(
                     scene_shots
                 )
 
-                if len(scene_shots) >= 2:
+                if len(scene_shots) >= self.SHOTS_PER_SCENE:
                     if scene_id not in completed_scene_ids:
                         completed_scene_ids.append(
                             scene_id
