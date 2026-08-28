@@ -1009,11 +1009,49 @@ def validate_examples() -> None:
     print("PASS production example configuration")
 
 
-def validate_ui_security_defaults() -> None:
+def validate_ui_share_configuration() -> None:
     text = (ROOT / "planner" / "config.py").read_text(encoding="utf-8")
-    section = text[text.index("def storyboard_share_enabled"):text.index("# ============================================================\n# BASIC RUNTIME VALIDATION")]
-    require('        "0",' in section, "Gradio public sharing must be disabled by default.")
-    print("PASS UI security defaults")
+
+    require(
+        "GRADIO_SHARE_ENV = \"H3_GRADIO_SHARE\"" in text,
+        "Gradio share environment variable is missing.",
+    )
+
+    start = text.index("def storyboard_share_enabled")
+    end = text.index(
+        "# ============================================================\n# BASIC RUNTIME VALIDATION"
+    )
+    section = text[start:end]
+
+    require(
+        '        "1",' in section,
+        "Gradio public sharing must remain enabled by default for the configured remote-access workflow.",
+    )
+
+    import os
+
+    from planner.config import storyboard_share_enabled
+
+    previous = os.environ.get("H3_GRADIO_SHARE")
+    try:
+        os.environ["H3_GRADIO_SHARE"] = "1"
+        require(
+            storyboard_share_enabled() is True,
+            "H3_GRADIO_SHARE=1 must enable Gradio sharing.",
+        )
+
+        os.environ["H3_GRADIO_SHARE"] = "0"
+        require(
+            storyboard_share_enabled() is False,
+            "H3_GRADIO_SHARE=0 must disable Gradio sharing.",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("H3_GRADIO_SHARE", None)
+        else:
+            os.environ["H3_GRADIO_SHARE"] = previous
+
+    print("PASS Gradio share configuration")
 
 
 def main() -> None:
@@ -1030,7 +1068,7 @@ def main() -> None:
     validate_gradio_ui()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
-    validate_ui_security_defaults()
+    validate_ui_share_configuration()
 
     
     print(
