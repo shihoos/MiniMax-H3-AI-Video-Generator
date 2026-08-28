@@ -659,6 +659,204 @@ def test_shot_sanitization_cinematography_fields() -> None:
     )
 
 
+
+
+def _sample_scene(scene_id: str, characters=None, order: int = 1) -> dict:
+    return {
+        "scene_id": scene_id,
+        "title": f"Beat {scene_id}",
+        "order": order,
+        "location": "ruined city",
+        "time_of_day": "night",
+        "weather": "rain",
+        "atmosphere": "wet neon streets",
+        "description": f"A real narrative event unfolds in {scene_id}.",
+        "mood": "tense",
+        "lighting": "cool neon",
+        "color_temperature": "cool 4300K",
+        "environment_details": ["ruined buildings"],
+        "key_props": ["signal device"],
+        "characters": list(characters or []),
+        "scene_objective": "Advance the story.",
+        "continuity_notes": "",
+        "story_summary": f"Summary {scene_id}",
+        "shot_ids": [],
+    }
+
+
+def _sample_shot(scene_id: str, ordinal: int, characters=None) -> dict:
+    return {
+        "shot_id": f"{scene_id}_shot_{ordinal}",
+        "scene_id": scene_id,
+        "duration_seconds": 5.2,
+        "characters": list(characters or []),
+        "location": "ruined city",
+        "action": f"Action beat {ordinal}.",
+        "camera_shot": "wide" if ordinal == 1 else "close-up",
+        "camera_movement": "slow pan" if ordinal == 1 else "push-in",
+        "lens_and_depth_of_field": (
+            "normal perspective with deep focus"
+            if ordinal == 1
+            else "telephoto compression with shallow depth of field"
+        ),
+        "composition_notes": (
+            "leading lines and layered depth"
+            if ordinal == 1
+            else "subject isolation with foreground framing"
+        ),
+        "lighting": "cool neon",
+        "color_temperature": "cool 4300K",
+        "mood": "tense",
+        "visual_prompt": "A filmable cinematic shot.",
+        "speaking_characters": [],
+        "speech_text": "",
+    }
+
+
+def test_scene_budget_contract_and_fallback() -> None:
+    director = QwenDirector(ROOT)
+    scenes = [
+        _sample_scene(f"scene_{index:03d}", ["Elias"], index)
+        for index in range(1, 9)
+    ]
+
+    original_chat = director._chat_json
+    try:
+        def fail_compression(*args, **kwargs):
+            raise RuntimeError("forced validation fallback")
+
+        director._chat_json = fail_compression
+        reduced = director._compress_scenes_to_budget(
+            "ai_story",
+            "A story about Elias discovering a signal before the city collapses.",
+            [{"name": "Elias", "role": "protagonist"}],
+            scenes,
+            {"elias"},
+        )
+    finally:
+        director._chat_json = original_chat
+
+    check(len(reduced) == director.MAX_SCENES, "Scene budget fallback did not enforce MAX_SCENES.")
+    check(reduced[0]["scene_id"] == "scene_001", "Scene budget fallback lost the opening scene.")
+    check(reduced[-1]["scene_id"] == "scene_008", "Scene budget fallback lost the closing scene.")
+    check(
+        [scene["order"] for scene in reduced] == list(range(1, director.MAX_SCENES + 1)),
+        "Scene budget fallback did not normalize scene order.",
+    )
+
+
+def test_scene_budget_semantic_repair_contract() -> None:
+    director = QwenDirector(ROOT)
+    scenes = [
+        _sample_scene(f"scene_{index:03d}", ["Elias"], index)
+        for index in range(1, 8)
+    ]
+
+    def fake_chat(*args, **kwargs):
+        return {
+            "scenes": [
+                _sample_scene("scene_001", ["Elias"], 1),
+                _sample_scene("scene_002", ["Elias"], 2),
+                _sample_scene("scene_003", ["Elias"], 3),
+                _sample_scene("scene_004", ["Elias"], 4),
+                _sample_scene("scene_005", ["Elias"], 5),
+            ]
+        }
+
+    original_chat = director._chat_json
+    try:
+        director._chat_json = fake_chat
+        repaired = director._compress_scenes_to_budget(
+            "ai_story",
+            "Elias discovers the signal and reaches the final beacon.",
+            [{"name": "Elias", "role": "protagonist"}],
+            scenes,
+            {"elias"},
+        )
+    finally:
+        director._chat_json = original_chat
+
+    check(len(repaired) == 5, "Semantic scene compression did not accept a valid 5-scene repair.")
+    check(all(scene.get("description") for scene in repaired), "Compressed scenes contain an empty description.")
+    check([scene["order"] for scene in repaired] == [1, 2, 3, 4, 5], "Semantic repair returned non-contiguous orders.")
+
+
+def test_batch_planning_runtime_contract() -> None:
+    director = QwenDirector(ROOT)
+    import inspect
+    source = inspect.getsource(director.generate)
+
+    check(
+        director.MAX_SHOT_BATCH_SCENES == 2,
+        "Shot batch size must remain capped at 2 scenes.",
+    )
+    check(
+        "_shot_director_batch_system" in source
+        and "_normalize_batch_shot_response" in source,
+        "Generate path is missing the batched shot-planning path.",
+    )
+    check(
+        "_generate_scene_shots" in source,
+        "Generate path is missing the per-scene fallback path.",
+    )
+
+    normalized = director._normalize_batch_shot_response(
+        {
+            "scene_shots": [
+                {"scene_id": "scene_001", "shots": [_sample_shot("scene_001", 1), _sample_shot("scene_001", 2)]},
+                {"scene_id": "scene_002", "shots": [_sample_shot("scene_002", 1), _sample_shot("scene_002", 2)]},
+            ]
+        }
+    )
+    check(set(normalized) == {"scene_001", "scene_002"}, "Batch normalization lost a scene.")
+    check(all(len(value) == 2 for value in normalized.values()), "Batch normalization lost required shots.")
+
+
+def test_batch_prompt_is_compact() -> None:
+    director = QwenDirector(ROOT)
+    scenes = [
+        _sample_scene("scene_001", ["Elias"]),
+        _sample_scene("scene_002", ["Sara"]),
+    ]
+    huge_story = " ".join(["A detailed narrative event about Elias and Sara and the ruined city."] * 500)
+    payload = director._shot_director_batch_user(
+        huge_story,
+        [{"name": "Elias", "role": "protagonist"}, {"name": "Sara", "role": "supporting"}],
+        scenes,
+        {"genre_tone": "cinematic", "color_palette": "cold blue"},
+    )
+    check(len(payload) < 10000, "Batch shot prompt grew beyond the intended compact payload budget.")
+    check("visual_language" in payload and "scenes" in payload, "Compact batch prompt lost required context.")
+    check("personality" not in payload and "distinctive_features" not in payload, "Batch prompt included heavyweight character descriptors.")
+
+
+def test_shot_prompt_is_compact() -> None:
+    director = QwenDirector(ROOT)
+    huge_story = " ".join(["Elias crosses the ruined city and follows the signal."] * 500)
+    payload = director._shot_director_user(
+        huge_story,
+        [{"name": "Elias", "role": "protagonist"}],
+        _sample_scene("scene_001", ["Elias"]),
+        {"genre_tone": "cinematic", "pacing": "controlled"},
+    )
+    check(len(payload) < 12000, "Per-scene shot prompt is not compact enough.")
+    check('"story_context"' in payload, "Shot prompt lost compact narrative context.")
+
+
+def test_resume_does_not_rewrite_scene_ids() -> None:
+    director = QwenDirector(ROOT)
+    import inspect
+    source = inspect.getsource(director.generate)
+    check(
+        'prior_director_plan.get(' in source and 'scene_id' in source,
+        "Resume path does not retain prior director scene addressing.",
+    )
+    check(
+        'if len(existing_scene_shots) >= self.SHOTS_PER_SCENE' in source,
+        "Resume path does not preserve completed scene shots.",
+    )
+
+
 def main() -> None:
 
     tests = [
@@ -674,6 +872,12 @@ def main() -> None:
         test_shot_sampling_contract,
         test_visual_schema_sanitization,
         test_shot_sanitization_cinematography_fields,
+        test_scene_budget_contract_and_fallback,
+        test_scene_budget_semantic_repair_contract,
+        test_batch_planning_runtime_contract,
+        test_batch_prompt_is_compact,
+        test_shot_prompt_is_compact,
+        test_resume_does_not_rewrite_scene_ids,
     ]
 
     for test in tests:
