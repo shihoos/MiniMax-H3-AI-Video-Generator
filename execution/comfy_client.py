@@ -442,11 +442,46 @@ class ComfyClient:
 
         return result
 
+    def cancel_prompt(self, prompt_id: str, *, interrupt_running: bool = True) -> None:
+        """Best-effort cancellation for one prompt on this dedicated worker.
+
+        ProductionRunner provisions one ComfyUI process per GPU, so interrupting
+        the worker is scoped to the job currently owned by this client. Queued
+        work is removed through the supported /queue POST API.
+        """
+        prompt_id = str(prompt_id or "").strip()
+        if not prompt_id:
+            return
+        if interrupt_running:
+            try:
+                self._request(
+                    "POST",
+                    "/interrupt",
+                    payload={},
+                    retry=False,
+                    timeout=10,
+                )
+            except Exception as error:
+                LOGGER.warning("ComfyUI interrupt failed for %s: %s", prompt_id, error)
+        try:
+            self._request(
+                "POST",
+                "/queue",
+                payload={"delete": [prompt_id]},
+                retry=False,
+                timeout=10,
+            )
+        except Exception as error:
+            LOGGER.warning("ComfyUI queue deletion failed for %s: %s", prompt_id, error)
+
     def wait_for_prompt(
         self,
         prompt_id,
         poll_interval=2.0,
         timeout=14400.0,
+        *,
+        liveness_interval=15.0,
+        max_liveness_failures=3,
     ):
 
         prompt_id = str(
@@ -477,25 +512,57 @@ class ComfyClient:
             )
 
         started = time.monotonic()
+        last_liveness = started
+        liveness_failures = 0
 
-        while True:
+        try:
+            while True:
 
-            if (
-                time.monotonic()
-                - started
-                > timeout
-            ):
+                now = time.monotonic()
+                if now - started > timeout:
+                    self.cancel_prompt(prompt_id)
+                    raise TimeoutError(
+                        f"ComfyUI prompt {prompt_id} timed out after {timeout:.0f}s."
+                    )
 
-                raise TimeoutError(
-                    f"ComfyUI prompt {prompt_id} "
-                    "timed out."
-                )
+                if now - last_liveness >= max(1.0, float(liveness_interval)):
+                    last_liveness = now
+                    try:
+                        self._request(
+                            "GET",
+                            "/system_stats",
+                            retry=False,
+                            timeout=min(self.timeout, 10),
+                        )
+                        liveness_failures = 0
+                    except Exception as health_error:
+                        liveness_failures += 1
+                        LOGGER.warning(
+                            "ComfyUI liveness check failed for %s (%s/%s): %s",
+                            prompt_id,
+                            liveness_failures,
+                            max_liveness_failures,
+                            health_error,
+                        )
+                        if liveness_failures >= max(1, int(max_liveness_failures)):
+                            self.cancel_prompt(prompt_id)
+                            raise RuntimeError(
+                                f"ComfyUI worker became unreachable while prompt {prompt_id} was pending."
+                            ) from health_error
 
-            history = (
-                self.get_history(
-                    prompt_id
-                )
-            )
+                try:
+                    history = self.get_history(prompt_id)
+                except RuntimeError as history_error:
+                    # A transient history request failure is tolerated, but a
+                    # dead worker is detected immediately by the next liveness probe.
+                    LOGGER.warning(
+                        "ComfyUI history poll failed for %s: %s",
+                        prompt_id,
+                        history_error,
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * 1.5, 10.0)
+                    continue
 
             if prompt_id in history:
 
@@ -534,14 +601,17 @@ class ComfyClient:
                 if status.get("status_str") == "success":
                     return result
 
-            time.sleep(
-                delay
-            )
+                time.sleep(
+                    delay
+                )
 
-            delay = min(
-                delay * 1.5,
-                10.0,
-            )
+                delay = min(
+                    delay * 1.5,
+                    10.0,
+                )
+
+        except TimeoutError:
+            raise
 
     def download_file(
         self,
