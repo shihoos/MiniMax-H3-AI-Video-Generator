@@ -959,6 +959,78 @@ class H3WorkflowBuilder:
                 if isinstance(name, str) and name.startswith(optional_prefixes):
                     item["link"] = None
 
+    @staticmethod
+    def _remove_placeholder_references(
+        workflow: dict,
+    ) -> None:
+        """Remove template-only H3 reference LoadImage nodes and links."""
+        placeholder_ids: set[int] = set()
+
+        for node in workflow.get("nodes", []):
+            if node.get("type") != "LoadImage":
+                continue
+
+            widgets = node.get("widgets_values", [])
+            filename = (
+                widgets[0]
+                if isinstance(widgets, list) and widgets
+                else ""
+            )
+
+            if (
+                isinstance(filename, str)
+                and filename.startswith("__H3_REF_IMAGE_")
+            ):
+                placeholder_ids.add(int(node["id"]))
+
+        if not placeholder_ids:
+            return
+
+        link_ids: set[int] = set()
+
+        for row in workflow.get("links", []):
+            if (
+                isinstance(row, list)
+                and len(row) >= 6
+                and int(row[1]) in placeholder_ids
+            ):
+                link_ids.add(int(row[0]))
+
+        workflow["links"] = [
+            row
+            for row in workflow.get("links", [])
+            if not (
+                isinstance(row, list)
+                and len(row) >= 6
+                and (
+                    int(row[0]) in link_ids
+                    or int(row[1]) in placeholder_ids
+                    or int(row[3]) in placeholder_ids
+                )
+            )
+        ]
+
+        for node in workflow.get("nodes", []):
+            for item in node.get("inputs", []):
+                link = item.get("link")
+                if link is not None and int(link) in link_ids:
+                    item["link"] = None
+
+            for output in node.get("outputs", []):
+                links = output.get("links")
+                if isinstance(links, list):
+                    output["links"] = [
+                        link
+                        for link in links
+                        if int(link) not in link_ids
+                    ]
+
+        workflow["nodes"] = [
+            node
+            for node in workflow.get("nodes", [])
+            if int(node.get("id", -1)) not in placeholder_ids
+        ]
+
     def _connect_media(
         self,
         workflow: dict,
@@ -966,6 +1038,9 @@ class H3WorkflowBuilder:
         reference_videos: list[str],
         reference_audio: list[str],
     ):
+        self._remove_placeholder_references(
+            workflow
+        )
         self._clear_template_reference_inputs(
             workflow
         )
