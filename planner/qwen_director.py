@@ -2417,35 +2417,24 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 }
             )
 
-        # The metadata contract asks for 4–6 meaningful scenes. Qwen can
-        # occasionally over-segment an expanded story into many tiny beats.
-        # That is a production-cost failure because every scene causes a
-        # separate cinematography inference and downstream H3 work. Keep the
-        # first/last/middle narrative beats while deterministically reducing
-        # an overlong plan to the configured production ceiling.
-        if len(result) > self.MAX_SCENES:
+        # Normalize duplicate scene IDs deterministically. Never silently allow
+        # two scenes to share a checkpoint address. Fresh plans may be repaired;
+        # resume plans are returned before this path so their stored IDs remain stable.
+        used_ids: set[str] = set()
+        for scene in result:
+            base_id = str(scene.get("scene_id", "") or "").strip() or "scene"
+            candidate = base_id
+            suffix = 2
+            while candidate.lower() in used_ids:
+                candidate = f"{base_id}_{suffix:02d}"
+                suffix += 1
+            scene["scene_id"] = candidate
+            used_ids.add(candidate.lower())
 
-            if self.MAX_SCENES <= 1:
-                result = result[:1]
-            else:
-                last_index = len(result) - 1
-                selected_indices = {
-                    round(
-                        index * last_index / (self.MAX_SCENES - 1)
-                    )
-                    for index in range(self.MAX_SCENES)
-                }
-                result = [
-                    result[index]
-                    for index in sorted(selected_indices)
-                ]
-
-            for order, scene in enumerate(
-                result,
-                start=1,
-            ):
-                scene["order"] = order
-
+        # Budget enforcement intentionally happens after sanitization.
+        # Keeping the raw sanitized scene list here lets _compress_scenes_to_budget()
+        # see every narrative beat instead of silently discarding over-segmented
+        # scenes before the semantic compression pass can run.
         return result
 
     # ========================================================
@@ -2808,6 +2797,52 @@ non_diegetic_music, negative_prompt, continuity_notes.
         anchors.update(re.findall(r"\b\d+(?:[.,]\d+)?(?:%|[A-Za-z]+)?\b", value.lower()))
         return anchors
 
+    def _preservation_coverage(
+        self,
+        source: str,
+        result: str,
+        minimum_sentence_overlap: float = 0.28,
+    ) -> tuple[float, list[str]]:
+        """Measure conservative sentence-level lexical preservation.
+
+        This is deliberately lexical/structural rather than an LLM judge so
+        acceptance remains deterministic, cheap, and available in CI.
+        """
+        source_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[.!?]+", source)
+            if sentence.strip()
+        ]
+        result_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[.!?]+", result)
+            if sentence.strip()
+        ]
+        if not source_sentences:
+            return 1.0, []
+        result_tokens = [
+            self._meaningful_tokens(sentence)
+            for sentence in result_sentences
+        ]
+        covered = 0
+        missing: list[str] = []
+        for sentence in source_sentences:
+            tokens = self._meaningful_tokens(sentence)
+            if not tokens:
+                continue
+            best = 0.0
+            for candidate in result_tokens:
+                if not candidate:
+                    continue
+                overlap = len(tokens & candidate) / max(1, len(tokens))
+                best = max(best, overlap)
+            if best >= minimum_sentence_overlap:
+                covered += 1
+            else:
+                missing.append(sentence[:140])
+        coverage = covered / max(1, len(source_sentences))
+        return coverage, missing
+
     def _validate_mode_output(
         self,
         mode: str,
@@ -2925,6 +2960,19 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     + ", ".join(missing_anchors)
                 )
 
+            coverage, missing_sentences = self._preservation_coverage(
+                source,
+                result,
+                minimum_sentence_overlap=0.28,
+            )
+            if coverage < 0.60:
+                details = "; ".join(missing_sentences[:3])
+                raise RuntimeError(
+                    "Expand Story mode did not preserve enough source-event coverage "
+                    f"(coverage={coverage:.3f}; minimum=0.600). "
+                    f"Unmatched source events: {details}"
+                )
+
             sentences = [
                 value
                 for value
@@ -3035,6 +3083,66 @@ non_diegetic_music, negative_prompt, continuity_notes.
             ).strip()
             for field in fields
         }
+
+    def _validate_production_quality(
+        self,
+        *,
+        story: str,
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Deterministically reject structurally valid but production-poor plans."""
+        if not story.strip():
+            raise RuntimeError("Production plan has no story.")
+
+        if not 4 <= len(scenes) <= self.MAX_SCENES:
+            raise RuntimeError(
+                f"Production plan must contain 4–{self.MAX_SCENES} scenes; got {len(scenes)}."
+            )
+
+        scene_ids = [str(scene.get("scene_id", "")).strip() for scene in scenes]
+        if any(not scene_id for scene_id in scene_ids):
+            raise RuntimeError("Production plan contains an empty scene ID.")
+        if len(scene_ids) != len(set(scene_ids)):
+            raise RuntimeError("Production plan contains duplicate scene IDs.")
+
+        allowed = {
+            str(item.get("name", "")).strip().lower()
+            for item in characters
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        }
+
+        expected_shot_count = len(scenes) * self.SHOTS_PER_SCENE
+        if len(shots) != expected_shot_count:
+            raise RuntimeError(
+                f"Production plan must contain exactly {expected_shot_count} shots; got {len(shots)}."
+            )
+
+        seen_shot_ids: set[str] = set()
+        scene_counts = {scene_id: 0 for scene_id in scene_ids}
+        for shot in shots:
+            shot_id = str(shot.get("shot_id", "")).strip()
+            scene_id = str(shot.get("scene_id", "")).strip()
+            if not shot_id or shot_id in seen_shot_ids:
+                raise RuntimeError("Production plan contains duplicate or empty shot IDs.")
+            seen_shot_ids.add(shot_id)
+            if scene_id not in scene_counts:
+                raise RuntimeError(f"Shot {shot_id} references unknown scene {scene_id}.")
+            scene_counts[scene_id] += 1
+            if not str(shot.get("visual_prompt", "") or "").strip():
+                raise RuntimeError(f"Shot {shot_id} has no visual prompt.")
+            for field in ("camera_shot", "camera_movement", "lens_and_depth_of_field", "composition_notes"):
+                if not str(shot.get(field, "") or "").strip():
+                    raise RuntimeError(f"Shot {shot_id} is missing {field}.")
+            shot_characters = shot.get("characters", []) or []
+            speakers = shot.get("speaking_characters", []) or []
+            for name in [*shot_characters, *speakers]:
+                if allowed and str(name).strip().lower() not in allowed:
+                    raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
+
+        if any(count != self.SHOTS_PER_SCENE for count in scene_counts.values()):
+            raise RuntimeError("Every scene must contain exactly two production shots.")
 
     # ========================================================
     # CHECKPOINT / RESUME
@@ -3243,7 +3351,9 @@ Return JSON only:
                 character_names,
             )
 
-            if 1 <= len(compressed) <= self.MAX_SCENES:
+            if 4 <= len(compressed) <= self.MAX_SCENES:
+                for order, scene in enumerate(compressed, start=1):
+                    scene["order"] = order
                 return compressed
 
         except Exception as exc:
@@ -3254,27 +3364,22 @@ Return JSON only:
                 flush=True,
             )
 
-        # Deterministic safety fallback. This is intentionally only a
-        # last-resort path after the semantic Qwen merge attempt.
-        if self.MAX_SCENES <= 1:
-            reduced = scenes[:1]
+        # Deterministic safety fallback. Preserve at least four beats whenever
+        # the source contains four or more scenes; always retain the opening
+        # and closing beats and distribute the remaining selections across the
+        # interior timeline.
+        target_count = min(self.MAX_SCENES, max(4, len(scenes)))
+        if len(scenes) <= target_count:
+            reduced = list(scenes)
         else:
             last_index = len(scenes) - 1
             selected_indices = {
-                round(
-                    index * last_index / (self.MAX_SCENES - 1)
-                )
-                for index in range(self.MAX_SCENES)
+                round(index * last_index / (target_count - 1))
+                for index in range(target_count)
             }
-            reduced = [
-                scenes[index]
-                for index in sorted(selected_indices)
-            ]
+            reduced = [scenes[index] for index in sorted(selected_indices)]
 
-        for order, scene in enumerate(
-            reduced,
-            start=1,
-        ):
+        for order, scene in enumerate(reduced, start=1):
             scene["order"] = order
 
         return reduced
@@ -3355,6 +3460,37 @@ Do NOT add scenes.
 Do NOT omit scenes.
 Return JSON only.
 """.strip()
+
+    @staticmethod
+    def _compact_story_context(story: str, max_chars: int = 850) -> str:
+        """Return a compact narrative spine for repeated shot-planning prompts."""
+        value = str(story or "").strip()
+        if len(value) <= max_chars:
+            return value
+
+        sentences = [
+            part.strip()
+            for part in re.split(r"(?<=[.!?])\s+", value)
+            if part.strip()
+        ]
+        if not sentences:
+            return value[:max_chars].rstrip() + "…"
+
+        if len(sentences) == 1:
+            return value[:max_chars].rstrip() + "…"
+
+        first = sentences[0]
+        last = sentences[-1]
+        if len(first) + len(last) + 1 <= max_chars:
+            return f"{first} {last}"
+
+        first_budget = max(220, int(max_chars * 0.60))
+        last_budget = max_chars - first_budget - 1
+        return (
+            first[:first_budget].rstrip()
+            + " "
+            + last[:max(120, last_budget)].rstrip()
+        ).strip()[:max_chars].rstrip() + "…"
 
     def _shot_director_batch_user(
         self,
@@ -3465,10 +3601,7 @@ Return JSON only.
 
         return json.dumps(
             {
-                "story_context": self._limit_text(
-                    story,
-                    1800,
-                ),
+                "story_context": self._compact_story_context(story, 850),
                 "characters": compact_characters,
                 "visual_language": language,
                 "scenes": scene_payloads,
@@ -4116,6 +4249,35 @@ Return JSON only.
                 "Scene-budget enforcement produced no usable scenes."
             )
 
+        if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
+            # A second scene-recovery pass is preferable to silently inventing
+            # or deleting narrative beats at the final boundary.
+            recovered = self._recover_scenes(
+                mode,
+                story,
+                characters,
+                character_names,
+            )
+            recovered = self._sanitize_scenes(
+                recovered,
+                character_names,
+            )
+            if 4 <= len(recovered) <= self.MAX_SCENES:
+                scenes = recovered
+            elif len(scenes) > self.MAX_SCENES:
+                scenes = self._compress_scenes_to_budget(
+                    mode,
+                    story,
+                    characters,
+                    scenes,
+                    character_names,
+                )
+
+        if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
+            raise RuntimeError(
+                "Qwen director could not satisfy the required 4–6 scene budget."
+            )
+
         director_plan = {
             "story": story,
             "story_mode": mode,
@@ -4549,6 +4711,13 @@ Return JSON only.
         self._validate_shot_character_contract(
             all_shots,
             characters,
+        )
+
+        self._validate_production_quality(
+            story=story,
+            scenes=scenes,
+            shots=all_shots,
+            characters=characters,
         )
 
         final_director_plan = {
