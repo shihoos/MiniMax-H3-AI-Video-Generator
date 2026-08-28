@@ -13,6 +13,9 @@ from execution.shot_executor import (
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
+from pipeline.production_checkpoint import (
+    ProductionCheckpoint,
+)
 from pipeline.identity_anchor_store import (
     IdentityAnchorStore,
 )
@@ -384,6 +387,102 @@ class ProductionRunner:
                 source_frame=frame_path,
             )
 
+    # ========================================================
+    # RENDER CHECKPOINT / RESUME
+    # ========================================================
+
+    def _checkpoint_store(self) -> ProductionCheckpoint:
+        return ProductionCheckpoint(
+            self.project_root
+        )
+
+    def _load_render_checkpoint(
+        self,
+        production_id: str,
+    ) -> dict | None:
+        try:
+            store = self._checkpoint_store()
+            return store.load(
+                production_id
+            )
+        except (
+            FileNotFoundError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+        ):
+            return None
+
+    def _update_render_checkpoint(
+        self,
+        production_id: str,
+        *,
+        status: str,
+        stage: str,
+        current_scene_id: str = "",
+        completed_shot_ids: list[str] | None = None,
+        error: str = "",
+        final_video: str = "",
+        shot_outputs: list[str] | None = None,
+    ) -> None:
+        store = self._checkpoint_store()
+
+        state = store.load(
+            production_id
+        )
+
+        updates = {
+            "status": status,
+            "stage": stage,
+            "current_scene_id": current_scene_id,
+            "completed_shot_ids": list(
+                completed_shot_ids or []
+            ),
+            "error": str(error or ""),
+        }
+
+        if final_video:
+            updates[
+                "final_video"
+            ] = str(
+                final_video
+            )
+
+        if shot_outputs is not None:
+            updates[
+                "shot_outputs"
+            ] = [
+                str(path)
+                for path in shot_outputs
+            ]
+
+        state.update(
+            updates
+        )
+
+        store.save(
+            production_id,
+            state,
+        )
+
+    @staticmethod
+    def _existing_shot_output(
+        output_dir: Path,
+        shot_id: str,
+    ) -> Path | None:
+        path = (
+            output_dir
+            / f"{shot_id}.mp4"
+        )
+
+        if (
+            path.is_file()
+            and path.stat().st_size > 0
+        ):
+            return path
+
+        return None
+
     def _run_scene(
         self,
         gpu_id,
@@ -392,6 +491,8 @@ class ProductionRunner:
         profile,
         character_map,
         upscale_enabled,
+        production_id: str,
+        completed_shot_ids: set[str],
     ):
 
         executor = self._executor(
@@ -421,6 +522,68 @@ class ProductionRunner:
 
             shot = dict(
                 original
+            )
+
+            shot_id = str(
+                shot.get(
+                    "shot_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not shot_id:
+                raise RuntimeError(
+                    "Shot is missing shot_id."
+                )
+
+            # ------------------------------------------------
+            # RESUME:
+            # a completed shot is valid only when the expected
+            # MP4 is still present and non-empty.
+            # ------------------------------------------------
+            existing = None
+
+            if shot_id in completed_shot_ids:
+                existing = self._existing_shot_output(
+                    output_dir,
+                    shot_id,
+                )
+
+                if existing is None:
+                    completed_shot_ids.discard(
+                        shot_id
+                    )
+
+            if existing is not None:
+
+                result = Path(
+                    existing
+                )
+
+                results.append(
+                    result
+                )
+
+                previous_video = result
+                previous_shot = shot
+
+                print(
+                    "[H3 RESUME] skipping completed shot",
+                    shot_id,
+                    flush=True,
+                )
+
+                continue
+
+            self._update_render_checkpoint(
+                production_id,
+                status="rendering",
+                stage="rendering",
+                current_scene_id=scene_id,
+                completed_shot_ids=sorted(
+                    completed_shot_ids
+                ),
             )
 
             self._add_identity_anchors(
@@ -484,6 +647,15 @@ class ProductionRunner:
                 result
             )
 
+            if (
+                not result.is_file()
+                or result.stat().st_size <= 0
+            ):
+                raise RuntimeError(
+                    f"Shot execution returned an invalid output: "
+                    f"{result}"
+                )
+
             results.append(
                 result
             )
@@ -507,6 +679,20 @@ class ProductionRunner:
 
             previous_video = result
             previous_shot = shot
+
+            completed_shot_ids.add(
+                shot_id
+            )
+
+            self._update_render_checkpoint(
+                production_id,
+                status="rendering",
+                stage="rendering",
+                current_scene_id=scene_id,
+                completed_shot_ids=sorted(
+                    completed_shot_ids
+                ),
+            )
 
         return results
 
@@ -566,6 +752,73 @@ class ProductionRunner:
             )
         )
 
+        checkpoint_store = (
+            self._checkpoint_store()
+        )
+
+        checkpoint = (
+            self._load_render_checkpoint(
+                production_id
+            )
+        )
+
+        completed_shot_ids = set(
+            str(value).strip()
+            for value
+            in (
+                (checkpoint or {}).get(
+                    "completed_shot_ids",
+                    [],
+                )
+                or []
+            )
+            if str(value).strip()
+        )
+
+        # Existing plan checkpoints created before render support may not
+        # contain shot IDs. Populate resumable state from real files only
+        # when the corresponding file exists.
+        all_planned_shot_ids = {
+            str(
+                shot.get(
+                    "shot_id",
+                    "",
+                )
+            ).strip()
+            for shot in shots
+            if str(
+                shot.get(
+                    "shot_id",
+                    "",
+                )
+            ).strip()
+        }
+
+        completed_shot_ids.intersection_update(
+            all_planned_shot_ids
+        )
+
+        # Rendering is sequential whenever a checkpoint exists or resume is
+        # possible. This prevents concurrent workers from racing on the same
+        # durable checkpoint and preserves shot-to-shot continuity.
+        resume_active = checkpoint is not None
+
+        self._update_render_checkpoint(
+            production_id,
+            status="rendering",
+            stage="rendering",
+            current_scene_id=str(
+                (checkpoint or {}).get(
+                    "current_scene_id",
+                    "",
+                )
+                or ""
+            ),
+            completed_shot_ids=sorted(
+                completed_shot_ids
+            ),
+        )
+
         scenes: dict[
             str,
             list[dict],
@@ -603,139 +856,279 @@ class ProductionRunner:
             scenes.items()
         )
 
-        parallel_safe = bool(
-            production_plan.get(
-                "parallel_safe",
-                False,
-            )
-        )
+        scene_results = []
 
-        if (
-            parallel_safe
-            and len(self.clients) > 1
-        ):
+        try:
 
-            scheduler = GPUScheduler(
-                gpu_ids=sorted(
+            if (
+                not resume_active
+                and bool(
+                    production_plan.get(
+                        "parallel_safe",
+                        False,
+                    )
+                )
+                and len(self.clients) > 1
+            ):
+
+                scheduler = GPUScheduler(
+                    gpu_ids=sorted(
+                        self.clients
+                    )
+                )
+
+                scene_results = (
+                    scheduler.run_independent(
+                        scene_jobs,
+                        lambda gpu_id, job: (
+                            job[0],
+                            self._run_scene(
+                                gpu_id,
+                                job[0],
+                                job[1],
+                                profile,
+                                character_map,
+                                upscale_enabled,
+                                production_id,
+                                completed_shot_ids,
+                            ),
+                        ),
+                    )
+                )
+
+            else:
+
+                gpu_id = sorted(
                     self.clients
+                )[0]
+
+                for scene_id, scene_shots in (
+                    scene_jobs
+                ):
+
+                    scene_results.append(
+                        (
+                            scene_id,
+                            self._run_scene(
+                                gpu_id,
+                                scene_id,
+                                scene_shots,
+                                profile,
+                                character_map,
+                                upscale_enabled,
+                                production_id,
+                                completed_shot_ids,
+                            ),
+                        )
+                    )
+
+                    self._update_render_checkpoint(
+                        production_id,
+                        status="rendering",
+                        stage="rendering",
+                        current_scene_id=scene_id,
+                        completed_shot_ids=sorted(
+                            completed_shot_ids
+                        ),
+                    )
+
+            scene_results.sort(
+                key=lambda item: min(
+                    int(
+                        shot.get(
+                            "order",
+                            0,
+                        )
+                    )
+                    for shot
+                    in scenes[
+                        item[0]
+                    ]
                 )
             )
 
-            scene_results = (
-                scheduler.run_independent(
-                    scene_jobs,
-                    lambda gpu_id, job: (
-                        job[0],
-                        self._run_scene(
-                            gpu_id,
-                            job[0],
-                            job[1],
-                            profile,
-                            character_map,
-                            upscale_enabled,
-                        ),
+            videos = []
+
+            for _scene_id, scene_videos in (
+                scene_results
+            ):
+                videos.extend(
+                    scene_videos
+                )
+
+            # A complete resume may have skipped every scene. Reconstruct the
+            # ordered output list directly from expected files when necessary.
+            if len(videos) != len(shots):
+
+                videos = []
+
+                gpu_id = sorted(
+                    self.clients
+                )[0]
+
+                for _scene_id, scene_shots in scene_jobs:
+
+                    scene_output_dir = (
+                        self.output_root
+                        / f"gpu_{gpu_id}"
+                        / self._safe_name(
+                            _scene_id
+                        )
+                    )
+
+                    for shot in self._sort_shots(
+                        scene_shots
+                    ):
+
+                        shot_output = (
+                            self._existing_shot_output(
+                                scene_output_dir,
+                                str(
+                                    shot[
+                                        "shot_id"
+                                    ]
+                                ),
+                            )
+                        )
+
+                        if shot_output is None:
+                            raise RuntimeError(
+                                "A completed shot output is missing during "
+                                f"final assembly: "
+                                f"{shot.get('shot_id')}"
+                            )
+
+                        videos.append(
+                            shot_output
+                        )
+
+            if len(videos) != len(shots):
+
+                raise RuntimeError(
+                    "Rendered output count does not match planned shot count: "
+                    f"{len(videos)} != {len(shots)}"
+                )
+
+            assembly_dir = (
+                self.project_root
+                / "data"
+                / "production"
+                / production_id
+                / "final"
+            )
+
+            assembly_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+            assembler = AssemblyManager(
+                assembly_dir
+            )
+
+            final_video = (
+                assembler.assemble(
+                    videos,
+                    final_name=(
+                        "final.mp4"
+                    ),
+                    width=int(
+                        production_plan.get(
+                            "delivery_width",
+                            DELIVERY_WIDTH,
+                        )
+                    ),
+                    height=int(
+                        production_plan.get(
+                            "delivery_height",
+                            DELIVERY_HEIGHT,
+                        )
+                    ),
+                    fps=int(
+                        production_plan.get(
+                            "delivery_fps",
+                            DELIVERY_FPS,
+                        )
                     ),
                 )
             )
 
-        else:
+            final_video = Path(
+                final_video
+            ).resolve()
 
-            gpu_id = sorted(
-                self.clients
-            )[0]
-
-            scene_results = []
-
-            for scene_id, scene_shots in (
-                scene_jobs
+            if (
+                not final_video.is_file()
+                or final_video.stat().st_size <= 0
             ):
-
-                scene_results.append(
-                    (
-                        scene_id,
-                        self._run_scene(
-                            gpu_id,
-                            scene_id,
-                            scene_shots,
-                            profile,
-                            character_map,
-                            upscale_enabled,
-                        ),
-                    )
+                raise RuntimeError(
+                    "Final video assembly produced "
+                    "no valid file."
                 )
 
-        scene_results.sort(
-            key=lambda item: min(
-                int(
-                    shot.get(
-                        "order",
-                        0,
-                    )
+            # Mark every planned shot completed only after all shot files and
+            # the final assembled video exist.
+            completed_shot_ids.update(
+                all_planned_shot_ids
+            )
+
+            self._update_render_checkpoint(
+                production_id,
+                status="completed",
+                stage="render_complete",
+                current_scene_id="",
+                completed_shot_ids=sorted(
+                    completed_shot_ids
+                ),
+                final_video=str(
+                    final_video
+                ),
+                shot_outputs=[
+                    str(path)
+                    for path in videos
+                ],
+            )
+
+            return {
+                "production_id": production_id,
+                "shot_outputs": videos,
+                "final_video": final_video,
+                "profile": profile,
+                "upscale_enabled": upscale_enabled,
+            }
+
+        except Exception as exc:
+
+            try:
+
+                self._update_render_checkpoint(
+                    production_id,
+                    status="failed",
+                    stage="rendering",
+                    current_scene_id=str(
+                        (checkpoint or {}).get(
+                            "current_scene_id",
+                            "",
+                        )
+                        or ""
+                    ),
+                    completed_shot_ids=sorted(
+                        completed_shot_ids
+                    ),
+                    error=str(
+                        exc
+                    ),
                 )
-                for shot
-                in scenes[
-                    item[0]
-                ]
-            )
-        )
 
-        videos = []
+            except Exception as checkpoint_error:
 
-        for _scene_id, scene_videos in (
-            scene_results
-        ):
-            videos.extend(
-                scene_videos
-            )
+                print(
+                    "[CHECKPOINT] render failure checkpoint save failed:",
+                    str(
+                        checkpoint_error
+                    ),
+                    flush=True,
+                )
 
-        assembly_dir = (
-            self.project_root
-            / "data"
-            / "production"
-            / production_id
-            / "final"
-        )
+            raise
 
-        assembly_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        assembler = AssemblyManager(
-            assembly_dir
-        )
-
-        final_video = (
-            assembler.assemble(
-                videos,
-                final_name=(
-                    "final.mp4"
-                ),
-                width=int(
-                    production_plan.get(
-                        "delivery_width",
-                        DELIVERY_WIDTH,
-                    )
-                ),
-                height=int(
-                    production_plan.get(
-                        "delivery_height",
-                        DELIVERY_HEIGHT,
-                    )
-                ),
-                fps=int(
-                    production_plan.get(
-                        "delivery_fps",
-                        DELIVERY_FPS,
-                    )
-                ),
-            )
-        )
-
-        return {
-            "production_id": production_id,
-            "shot_outputs": videos,
-            "final_video": final_video,
-            "profile": profile,
-            "upscale_enabled": upscale_enabled,
-        }
