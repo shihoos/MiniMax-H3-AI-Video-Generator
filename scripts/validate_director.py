@@ -322,6 +322,19 @@ def test_character_sanitization() -> None:
     )
 
 
+def test_scene_id_sanitization_before_batching() -> None:
+    director = QwenDirector(ROOT)
+    scenes = director._sanitize_scenes(
+        [
+            {"scene_id": "scene_001", "description": "First event."},
+            {"scene_id": "scene_001", "description": "Second event."},
+        ],
+        set(),
+    )
+    ids = [str(scene.get("scene_id", "")) for scene in scenes]
+    check(ids == ["scene_001", "scene_001_2"], "Duplicate scene IDs must be repaired before batching/resume.")
+
+
 def test_shot_id_normalization() -> None:
 
     director = QwenDirector(
@@ -865,6 +878,7 @@ def main() -> None:
         test_shot_batch_contract,
         test_text_generation_disables_thinking_by_default,
         test_character_sanitization,
+        test_scene_id_sanitization_before_batching,
         test_shot_id_normalization,
         test_character_descriptor_deduplication,
         test_single_paragraph_segmentation,
