@@ -1351,6 +1351,7 @@ Use ONLY characters supplied in the scene.
 Do not create new characters. Do not invent character names.
 Never output reasoning, analysis, markdown, or <think> text.
 Keep every value concise but specific.
+Keep action/visual_prompt values under 70 words; keep all other string fields brief.
 
 Make genuinely creative film-direction choices that fit the scene:
 - framing and shot scale
@@ -1710,12 +1711,20 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 else {}
             )
 
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            decode_tps = (
+                completion_tokens / elapsed
+                if elapsed > 0 and completion_tokens > 0
+                else 0.0
+            )
             print(
                 "[QWEN]",
                 call_name,
                 f"elapsed={elapsed:.2f}s",
-                f"prompt_tokens={usage.get('prompt_tokens', 0)}",
-                f"completion_tokens={usage.get('completion_tokens', 0)}",
+                f"prompt_tokens={prompt_tokens}",
+                f"completion_tokens={completion_tokens}",
+                f"decode_tps={decode_tps:.2f}",
                 f"max_tokens={max_tokens}",
                 flush=True,
             )
@@ -1765,7 +1774,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
         top_p: float | None = None,
         call_name: str = "unknown",
         max_completion: int | None = None,
-        disable_thinking: bool = False,
+        disable_thinking: bool = True,
     ) -> str:
 
         if self._llama is None:
@@ -1844,12 +1853,20 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 else {}
             )
 
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            decode_tps = (
+                completion_tokens / elapsed
+                if elapsed > 0 and completion_tokens > 0
+                else 0.0
+            )
             print(
                 "[QWEN]",
                 call_name,
                 f"elapsed={elapsed:.2f}s",
-                f"prompt_tokens={usage.get('prompt_tokens', 0)}",
-                f"completion_tokens={usage.get('completion_tokens', 0)}",
+                f"prompt_tokens={prompt_tokens}",
+                f"completion_tokens={completion_tokens}",
+                f"decode_tps={decode_tps:.2f}",
                 f"max_tokens={max_tokens}",
                 flush=True,
             )
@@ -1887,6 +1904,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
             content,
             flags=re.IGNORECASE | re.DOTALL,
         ).strip()
+        if re.search(r"<think>", content, flags=re.IGNORECASE):
+            # A truncated reasoning block means the model spent its output
+            # budget on hidden reasoning and never produced usable narrative.
+            content = re.split(r"<think>", content, maxsplit=1, flags=re.IGNORECASE)[0].strip()
 
         if not content:
             raise RuntimeError(
@@ -2771,6 +2792,22 @@ non_diegetic_music, negative_prompt, continuity_notes.
             if word not in stop
         }
 
+    @staticmethod
+    def _preservation_anchors(text: str) -> set[str]:
+        value = str(text or "")
+        anchors: set[str] = set()
+
+        # Explicitly named/called characters are high-confidence anchors.
+        for match in re.finditer(
+            r"\b(?:named|called)\s+([A-Z][A-Za-z'-]{1,}(?:\s+[A-Z][A-Za-z'-]{1,})*)",
+            value,
+        ):
+            anchors.add(match.group(1).strip().lower())
+
+        # Preserve dates/counts/measurements that can materially change plot facts.
+        anchors.update(re.findall(r"\b\d+(?:[.,]\d+)?(?:%|[A-Za-z]+)?\b", value.lower()))
+        return anchors
+
     def _validate_mode_output(
         self,
         mode: str,
@@ -2868,12 +2905,25 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     )
                 )
 
-                if overlap < 0.20:
+                if overlap < 0.35:
 
                     raise RuntimeError(
-                        "Expand Story mode changed "
-                        "too much of the supplied story."
+                        "Expand Story mode changed too much of the supplied story "
+                        f"(meaningful-token overlap={overlap:.3f}; minimum=0.350)."
                     )
+
+            anchors = self._preservation_anchors(source)
+            result_lower = result.lower()
+            missing_anchors = [
+                anchor
+                for anchor in sorted(anchors)
+                if anchor not in result_lower
+            ]
+            if missing_anchors:
+                raise RuntimeError(
+                    "Expand Story mode dropped source anchors: "
+                    + ", ".join(missing_anchors)
+                )
 
             sentences = [
                 value
@@ -3237,7 +3287,8 @@ You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
 Create exactly TWO production-ready shots for EACH supplied scene.
 
-The scenes are part of one coherent film. Preserve:
+The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
+Preserve:
 - character identity;
 - chronology;
 - visual continuity;
@@ -3297,7 +3348,7 @@ Return JSON only in exactly this structure:
 }
 
 There must be exactly TWO shots inside every scene_shots entry and
-exactly one entry for every supplied scene.
+exactly one entry for every supplied scene. Do not add prose outside JSON.
 
 Do NOT output compiler-owned fields.
 Do NOT add scenes.
@@ -3491,7 +3542,7 @@ Return JSON only.
                 temperature=shot_temperature,
                 top_p=self._shot_sampling()[1],
                 call_name="shot_pass:" + scene_id,
-                max_completion=900,
+                max_completion=700,
                 json_mode=True,
                 disable_thinking=True,
             )
@@ -3529,7 +3580,7 @@ Return JSON only.
                     temperature=0.70,
                     top_p=0.94,
                     call_name="shot_retry:" + scene_id,
-                    max_completion=900,
+                    max_completion=700,
                     json_mode=True,
                     disable_thinking=True,
                 )
@@ -3815,6 +3866,7 @@ Return JSON only.
                         else "expand_story_text_pass"
                     ),
                     max_completion=1600,
+                    disable_thinking=True,
                 )
 
                 self._validate_mode_output(
@@ -3853,6 +3905,7 @@ Return JSON only.
                         else "expand_story_text_retry"
                     ),
                     max_completion=1600,
+                    disable_thinking=True,
                 )
 
                 self._validate_mode_output(
@@ -4255,7 +4308,7 @@ Return JSON only.
                                 "shot_batch:"
                                 + "_".join(batch_ids)
                             ),
-                            max_completion=1700,
+                            max_completion=2200,
                             json_mode=True,
                             disable_thinking=True,
                         )
