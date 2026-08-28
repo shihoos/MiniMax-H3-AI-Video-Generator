@@ -17,12 +17,11 @@ class GPUScheduler:
         indexed_jobs = deque(enumerate(jobs))
         queue_lock = threading.Lock()
         result_lock = threading.Lock()
-        stop_event = threading.Event()
         results = []
         failures = []
 
         def worker(gpu_id):
-            while not stop_event.is_set():
+            while True:
                 with queue_lock:
                     if not indexed_jobs:
                         return
@@ -35,7 +34,6 @@ class GPUScheduler:
                 except Exception as error:
                     with result_lock:
                         failures.append((gpu_id, index, job, error, time.monotonic() - started))
-                    stop_event.set()
                     return
 
         threads = [
