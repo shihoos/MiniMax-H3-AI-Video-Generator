@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -69,10 +70,76 @@ class AssemblyManager:
                 f"ffprobe failed for {path}: {result.stderr[-2000:]}"
             )
         try:
-            import json
             return json.loads(result.stdout)
         except Exception as exc:
             raise RuntimeError(f"Invalid ffprobe output for {path}.") from exc
+
+    @staticmethod
+    def _stream_signature(probe: dict) -> tuple | None:
+        video = next(
+            (s for s in probe.get("streams", []) if s.get("codec_type") == "video"),
+            None,
+        )
+        audio = next(
+            (s for s in probe.get("streams", []) if s.get("codec_type") == "audio"),
+            None,
+        )
+        if video is None:
+            return None
+        return (
+            video.get("codec_name"),
+            int(video.get("width") or 0),
+            int(video.get("height") or 0),
+            str(video.get("r_frame_rate") or ""),
+            str(video.get("pix_fmt") or ""),
+            video.get("profile"),
+            audio.get("codec_name") if audio else None,
+            audio.get("sample_rate") if audio else None,
+            int(audio.get("channels") or 0) if audio else 0,
+        )
+
+    @classmethod
+    def _can_stream_copy(
+        cls,
+        probes: list[dict],
+        width: int,
+        height: int,
+        fps: int,
+    ) -> bool:
+        if not probes:
+            return False
+        signatures = [cls._stream_signature(p) for p in probes]
+        if not signatures or any(sig is None for sig in signatures):
+            return False
+        if len(set(signatures)) != 1:
+            return False
+        video = next(
+            s for s in probes[0].get("streams", [])
+            if s.get("codec_type") == "video"
+        )
+        try:
+            source_width = int(video.get("width") or 0)
+            source_height = int(video.get("height") or 0)
+            num, den = (str(video.get("r_frame_rate") or "0/1").split("/", 1))
+            source_fps = float(num) / float(den) if float(den) else 0.0
+        except Exception:
+            return False
+        return (
+            source_width == int(width)
+            and source_height == int(height)
+            and abs(source_fps - float(fps)) < 0.01
+        )
+
+    @staticmethod
+    def _write_concat_file(inputs: list[Path], output_dir: Path) -> Path:
+        fd, name = tempfile.mkstemp(prefix="concat_", suffix=".txt", dir=output_dir)
+        os.close(fd)
+        path = Path(name)
+        lines = []
+        for item in inputs:
+            lines.append(f"file '{str(item).replace(chr(39), chr(39)+chr(92)+chr(39)+chr(39))}'")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
 
     def assemble(
         self,
@@ -93,6 +160,7 @@ class AssemblyManager:
         video_codec = str(video_codec or os.getenv("H3_FFMPEG_VIDEO_CODEC", "libx264"))
         audio_codec = str(audio_codec or os.getenv("H3_FFMPEG_AUDIO_CODEC", "aac"))
         audio_bitrate = str(audio_bitrate or os.getenv("H3_FFMPEG_AUDIO_BITRATE", "192k"))
+        nvenc_cq = int(os.getenv("H3_FFMPEG_NVENC_CQ", "19"))
         self.check_ffmpeg()
         inputs = self._validate_inputs(videos)
 
@@ -100,50 +168,57 @@ class AssemblyManager:
             raise ValueError("Invalid final delivery parameters.")
         if not 0 <= int(video_crf) <= 51:
             raise ValueError("video_crf must be between 0 and 51.")
+        if not 0 <= nvenc_cq <= 51:
+            raise ValueError("H3_FFMPEG_NVENC_CQ must be between 0 and 51.")
         if not str(final_name).lower().endswith(".mp4"):
             raise ValueError("Final output must be an .mp4 file.")
 
-        # Probe every source before launching a long assembly job. This catches
-        # corrupt zero-byte/incomplete MP4s before spending CPU on concat.
+        probes = []
         for path in inputs:
             probe = self._probe(path)
             streams = probe.get("streams", [])
             if not any(s.get("codec_type") == "video" for s in streams):
                 raise RuntimeError(f"No video stream found in {path}")
+            probes.append(probe)
 
-        concat_fd, concat_name = tempfile.mkstemp(
-            prefix="concat_", suffix=".txt", dir=self.output_dir
-        )
-        os.close(concat_fd)
-        concat_file = Path(concat_name)
+        concat_file = self._write_concat_file(inputs, self.output_dir)
         destination = (self.output_dir / final_name).resolve()
-        temp_output = self.output_dir / f".{destination.stem}.tmp.mp4"
+        temp_output = self.output_dir / f".{destination.stem}.{os.getpid()}.tmp.mp4"
+        stream_copy = self._can_stream_copy(probes, width, height, fps) and os.getenv("H3_FFMPEG_FORCE_TRANSCODE", "0").strip().lower() not in {"1", "true", "yes", "on"}
 
-        lines = []
-        for path in inputs:
-            escaped = str(path).replace("'", "'\\''")
-            lines.append(f"file '{escaped}'")
-        concat_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        vf = (
-            f"fps={int(fps)},"
-            f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
-            f"crop={int(width)}:{int(height)}:"
-            f"({int(width)}-iw)/2:({int(height)}-ih)/2"
-        )
-        command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            "-vf", vf,
-            "-c:v", video_codec,
-            "-preset", video_preset,
-            "-crf", str(int(video_crf)),
-            "-pix_fmt", "yuv420p",
-            "-c:a", audio_codec,
-            "-b:a", str(audio_bitrate),
-            "-movflags", "+faststart",
-            str(temp_output),
-        ]
+        if stream_copy:
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(temp_output),
+            ]
+        else:
+            vf = (
+                f"fps={int(fps)},"
+                f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
+                f"crop={int(width)}:{int(height)}:"
+                f"({int(width)}-iw)/2:({int(height)}-ih) / 2"
+            ).replace(" / ", "/")
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-vf", vf,
+                "-c:v", video_codec,
+                "-preset", video_preset,
+            ]
+            if video_codec.lower().endswith("_nvenc"):
+                command += ["-cq", str(nvenc_cq), "-rc", "vbr"]
+            else:
+                command += ["-crf", str(int(video_crf))]
+            command += [
+                "-pix_fmt", "yuv420p",
+                "-c:a", audio_codec,
+                "-b:a", audio_bitrate,
+                "-movflags", "+faststart",
+                str(temp_output),
+            ]
 
         try:
             result = subprocess.run(
@@ -159,6 +234,9 @@ class AssemblyManager:
                 )
             if not temp_output.is_file() or temp_output.stat().st_size <= 0:
                 raise RuntimeError("FFmpeg reported success but produced no output.")
+            final_probe = self._probe(temp_output)
+            if not any(s.get("codec_type") == "video" for s in final_probe.get("streams", [])):
+                raise RuntimeError("Final output contains no video stream.")
             os.replace(temp_output, destination)
             return destination
         finally:
