@@ -915,20 +915,6 @@ class ProductionOrchestrator:
                 "user_input",
                 "",
             )
-            or state.get(
-                "base_plan",
-                {},
-            ).get(
-                "story",
-                "",
-            )
-            or state.get(
-                "director_plan",
-                {},
-            ).get(
-                "story",
-                "",
-            )
             or ""
         ).strip()
 
@@ -1052,15 +1038,10 @@ class ProductionOrchestrator:
                     director_plan={},
                 )
             except Exception as checkpoint_error:
-                # Checkpointing is best-effort. Keep a usable store so the
-                # storyboard path can still be persisted and a later checkpoint
-                # save can retry after a transient filesystem failure.
-                print(
-                    "[CHECKPOINT] initial save failed:",
-                    str(checkpoint_error),
-                    flush=True,
-                )
-                checkpoint_store = self._checkpoint_store()
+                raise RuntimeError(
+                    "Initial production checkpoint could not be persisted: "
+                    + str(checkpoint_error)
+                ) from checkpoint_error
 
         try:
 
@@ -1219,20 +1200,13 @@ class ProductionOrchestrator:
                 stage="production_plan",
                 base_plan=deepcopy(base_plan),
                 director_plan=deepcopy(plan),
-                completed_scene_ids=[
-                    str(scene.get("scene_id", "")).strip()
-                    for scene in plan.get("scenes", [])
-                    if str(scene.get("scene_id", "")).strip()
-                ],
+                completed_scene_ids=[],
             )
         except Exception as exc:
-            # The actual storyboard has already been persisted. Do not turn a
-            # checkpoint bookkeeping failure into a fake production failure.
-            print(
-                "[CHECKPOINT] final save failed:",
-                str(exc),
-                flush=True,
-            )
+            raise RuntimeError(
+                "Production plan checkpoint could not be persisted: "
+                + str(exc)
+            ) from exc
 
         return plan
 
