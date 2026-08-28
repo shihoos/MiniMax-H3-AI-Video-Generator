@@ -648,6 +648,40 @@ def validate_workflows() -> None:
     )
 
 
+def validate_upscale_audio_semantics() -> None:
+    """Verify the H3 upscale graph preserves the original audio-bearing latent."""
+    graph = load_json(PRODUCTION_WORKFLOWS["upscale"])
+    nodes = {int(node["id"]): node for node in graph.get("nodes", [])}
+    links = {int(row[0]): row for row in graph.get("links", []) if isinstance(row, list) and len(row) >= 6}
+
+    def find_node(node_type: str):
+        for node in nodes.values():
+            if node.get("type") == node_type:
+                return node
+        raise RuntimeError(f"Upscale workflow is missing {node_type}.")
+
+    sampler = find_node("SamplerCustomAdvanced")
+    video = find_node("VAEDecode")
+    audio = find_node("VAEDecodeAudio")
+    upscale = find_node("MMH3UltimateUpscale")
+
+    def input_link(node, name: str):
+        for item in node.get("inputs", []):
+            if item.get("name") == name:
+                link_id = item.get("link")
+                return links.get(int(link_id)) if link_id is not None else None
+        raise RuntimeError(f"{node.get('type')} is missing input {name}.")
+
+    video_edge = input_link(video, "samples")
+    audio_edge = input_link(audio, "samples")
+    require(video_edge is not None, "Upscale VAEDecode.samples is not connected.")
+    require(audio_edge is not None, "Upscale VAEDecodeAudio.samples is not connected.")
+    require(int(video_edge[1]) == int(upscale["id"]), "Upscale VAEDecode must consume MMH3UltimateUpscale output.")
+    require(int(audio_edge[1]) == int(sampler["id"]), "Upscale VAEDecodeAudio must consume the original SamplerCustomAdvanced latent.")
+    require(int(audio_edge[1]) != int(upscale["id"]), "Upscale audio must never consume MMH3UltimateUpscale output.")
+    print("PASS upscale audio semantic wiring")
+
+
 def validate_model_inventory() -> None:
 
     all_workflows = {
@@ -1061,6 +1095,7 @@ def main() -> None:
     validate_examples()
     validate_python()
     validate_workflows()
+    validate_upscale_audio_semantics()
     validate_production_templates()
     validate_model_inventory()
     validate_config()
