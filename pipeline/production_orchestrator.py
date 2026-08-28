@@ -808,6 +808,11 @@ class ProductionOrchestrator:
             "mode": mode,
             "user_input": str(user_input or ""),
             "user_input_sha256": store.digest_text(user_input),
+            "plan_sha256": (
+                store.plan_digest(director_plan)
+                if isinstance(director_plan, dict) and director_plan
+                else ""
+            ),
             "director_sha256": store.digest_file(
                 self.project_root / "planner" / "qwen_director.py"
             ),
@@ -887,12 +892,18 @@ class ProductionOrchestrator:
                 "Checkpoint is missing base_plan."
             )
 
-        if not isinstance(
-            state.get("director_plan"),
-            dict,
-        ):
+        if not isinstance(state.get("director_plan"), dict):
+            raise RuntimeError("Checkpoint is missing director_plan.")
+
+        checkpoint_plan_hash = str(state.get("plan_sha256", "") or "").strip()
+        if not checkpoint_plan_hash:
             raise RuntimeError(
-                "Checkpoint is missing director_plan."
+                "Checkpoint has no plan fingerprint; refusing unsafe resume."
+            )
+        actual_plan_hash = store.plan_digest(state["director_plan"])
+        if checkpoint_plan_hash != actual_plan_hash:
+            raise RuntimeError(
+                "Checkpoint plan fingerprint is invalid; the persisted production plan may have been modified."
             )
 
         return state
