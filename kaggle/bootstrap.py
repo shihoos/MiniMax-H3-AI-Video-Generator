@@ -525,6 +525,27 @@ def install_nodes() -> None:
                 ],
             )
 
+            requirements = destination / "requirements.txt"
+
+            if requirements.is_file():
+                run(
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
+                    "--disable-pip-version-check",
+                    "-r",
+                    requirements,
+                )
+
+                print(
+                    "[NODE DEPS]",
+                    node[
+                        "name"
+                    ],
+                )
+
             print(
                 "[NODE]",
                 node[
