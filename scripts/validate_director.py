@@ -145,6 +145,128 @@ def test_story_modes() -> None:
         )
 
 
+def test_expand_preservation_gates() -> None:
+    director = QwenDirector(
+        ROOT
+    )
+
+    source = (
+        "A man named Eli enters the abandoned station. "
+        "A woman named Sara gives Eli a map to the underground vault. "
+        "The vault contains 7 sealed chambers."
+    )
+
+    valid = (
+        "Eli enters the abandoned station and searches the ruined platform. "
+        "Sara gives Eli a map to the underground vault, explaining why she "
+        "believes it matters. Eli follows the map and discovers 7 sealed "
+        "chambers, realizing the station hides a much larger secret."
+    )
+
+    director._validate_mode_output(
+        "expand_user_story",
+        source,
+        valid,
+    )
+
+    missing_name = valid.replace("Sara", "Mara")
+    try:
+        director._validate_mode_output(
+            "expand_user_story",
+            source,
+            missing_name,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "Expand Story accepted output that dropped a named source anchor."
+        )
+
+    unrelated = (
+        "A pilot crosses a desert, discovers a hidden temple, and escapes "
+        "before sunset. The journey ends with a mysterious transmission."
+    )
+    try:
+        director._validate_mode_output(
+            "expand_user_story",
+            source,
+            unrelated,
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "Expand Story accepted output with insufficient source overlap."
+        )
+
+
+def test_shot_batch_contract() -> None:
+    director = QwenDirector(
+        ROOT
+    )
+
+    prompt = director._shot_director_batch_system()
+
+    check(
+        "Create exactly TWO production-ready shots for EACH supplied scene." in prompt,
+        "Batch shot prompt does not enforce two shots per scene.",
+    )
+
+    check(
+        "Do not add characters" in prompt or "Do not create new characters" in prompt,
+        "Batch prompt lost the explicit character restriction.",
+    )
+
+    normalized = director._normalize_batch_shot_response(
+        {
+            "scene_shots": [
+                {
+                    "scene_id": "scene_001",
+                    "shots": [
+                        {"shot_id": "a"},
+                        {"shot_id": "b"},
+                    ],
+                },
+                {
+                    "scene_id": "scene_002",
+                    "shots": [
+                        {"shot_id": "c"},
+                        {"shot_id": "d"},
+                    ],
+                },
+            ]
+        }
+    )
+
+    check(
+        set(normalized) == {"scene_001", "scene_002"},
+        "Batch response normalization lost a scene.",
+    )
+
+    check(
+        all(len(values) == 2 for values in normalized.values()),
+        "Batch response normalization did not preserve both shots.",
+    )
+
+
+def test_text_generation_disables_thinking_by_default() -> None:
+    director = QwenDirector(
+        ROOT
+    )
+
+    import inspect
+
+    parameter = inspect.signature(
+        director._chat_text
+    ).parameters["disable_thinking"]
+
+    check(
+        parameter.default is True,
+        "Narrative text generation still enables Qwen reasoning by default.",
+    )
+
+
 def test_character_sanitization() -> None:
 
     director = QwenDirector(
@@ -541,6 +663,9 @@ def main() -> None:
 
     tests = [
         test_story_modes,
+        test_expand_preservation_gates,
+        test_shot_batch_contract,
+        test_text_generation_disables_thinking_by_default,
         test_character_sanitization,
         test_shot_id_normalization,
         test_character_descriptor_deduplication,
