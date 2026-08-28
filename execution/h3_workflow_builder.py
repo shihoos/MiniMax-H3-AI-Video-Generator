@@ -350,6 +350,43 @@ class H3WorkflowBuilder:
             ] = 32
 
     # ============================================================
+    # REFERENCE IMAGE SIZE POLICY
+    # ============================================================
+
+    def _set_ref_image_size(
+        self,
+        workflow: dict,
+        ref_image_size: str | None,
+    ) -> None:
+        if ref_image_size is None:
+            return
+
+        value = str(ref_image_size).strip().lower()
+        if value not in {"match", "max"}:
+            raise ValueError(
+                "ref_image_size must be 'match' or 'max'."
+            )
+
+        nodes = self._find(
+            workflow,
+            "MiniMaxH3ReferenceToVideo",
+        )
+        if len(nodes) != 1:
+            raise RuntimeError(
+                "Expected exactly one MiniMaxH3ReferenceToVideo node."
+            )
+
+        node = nodes[0]
+        widgets = self._widgets(node)
+        while len(widgets) <= 4:
+            widgets.append(None)
+        widgets[4] = value
+
+        named = node.get("widgets_values_named")
+        if isinstance(named, dict):
+            named["ref_image_size"] = value
+
+    # ============================================================
     # LINKED DURATION
     # ============================================================
 
@@ -1345,6 +1382,7 @@ class H3WorkflowBuilder:
         width: int = H3_WIDTH,
         height: int = H3_HEIGHT,
         duration_seconds: float = 5.2,
+        ref_image_size: str | None = None,
     ):
         workflow = self.load(
             mode
@@ -1392,6 +1430,11 @@ class H3WorkflowBuilder:
         self._set_duration(
             workflow,
             duration_seconds,
+        )
+
+        self._set_ref_image_size(
+            workflow,
+            ref_image_size,
         )
 
         if mode == "upscale":
