@@ -65,6 +65,7 @@ REQUIRED_FILES = [
     "execution/h3_upscaled_workflow_builder.py",
     "execution/production_runner.py",
     "execution/shot_executor.py",
+    "execution/metrics.py",
 
     # --------------------------------------------------------
     # SCHEDULER
@@ -128,6 +129,7 @@ RUNTIME_IMPORTS = [
     "execution.production_runner",
     "execution.h3_runtime",
     "execution.assembly_manager",
+    "execution.metrics",
 
     # Scheduler
     "scheduler.gpu_scheduler",
@@ -1088,6 +1090,99 @@ def validate_ui_share_configuration() -> None:
     print("PASS Gradio share configuration")
 
 
+
+def validate_execution_integration() -> None:
+    """Validate runtime cross-file contracts beyond syntax and static graph checks."""
+    metrics_path = ROOT / "execution" / "metrics.py"
+    shot_path = ROOT / "execution" / "shot_executor.py"
+    runner_path = ROOT / "execution" / "production_runner.py"
+    scheduler_path = ROOT / "scheduler" / "gpu_scheduler.py"
+
+    metrics_text = metrics_path.read_text(encoding="utf-8")
+    require("class MetricsRecorder" in metrics_text, "MetricsRecorder class is missing.")
+    require("def record(" in metrics_text, "MetricsRecorder.record() is missing.")
+    require("json.dumps(payload" in metrics_text, "Metrics recorder must serialize JSONL records.")
+    require("os.fsync(handle.fileno())" in metrics_text, "Metrics recorder must durably flush records.")
+
+    shot_text = shot_path.read_text(encoding="utf-8")
+    require("self.gpu_id = int(gpu_id)" in shot_text, "ShotExecutor must store gpu_id for telemetry.")
+    require("self.metrics = MetricsRecorder(Path(metrics_path))" in shot_text, "ShotExecutor must initialize MetricsRecorder when configured.")
+    require("self.metrics.record(" in shot_text, "ShotExecutor must write telemetry events.")
+    require("outputs[-1]" not in shot_text, "ShotExecutor must not select an arbitrary last video output.")
+    require("expected exactly one SaveVideo node" in shot_text, "ShotExecutor must enforce a unique SaveVideo output.")
+
+    runner_text = runner_path.read_text(encoding="utf-8")
+    require("self._completed_shots_lock = threading.RLock()" in runner_text, "ProductionRunner must protect shared completed-shot state.")
+    require("self._add_identity_anchors(\n                shot,\n                character_map,\n            )" in runner_text, "ProductionRunner identity-anchor call signature is incorrect.")
+
+    scheduler_text = scheduler_path.read_text(encoding="utf-8")
+    require("class GPUScheduler" in scheduler_text, "GPUScheduler class is missing.")
+    require("run_independent" in scheduler_text, "GPUScheduler.run_independent() is missing.")
+    require("threading.Thread" in scheduler_text, "GPUScheduler must execute independent GPU jobs concurrently.")
+
+    print("PASS execution integration contracts")
+
+
+def validate_execution_runtime_contracts() -> None:
+    """Check cross-module contracts that syntax/JSON validation cannot catch."""
+    import tempfile
+    import inspect
+
+    metrics_path = ROOT / "execution" / "metrics.py"
+    shot_path = ROOT / "execution" / "shot_executor.py"
+    runner_path = ROOT / "execution" / "production_runner.py"
+
+    require(metrics_path.is_file(), "execution/metrics.py is missing.")
+    metrics_text = metrics_path.read_text(encoding="utf-8")
+    require("class MetricsRecorder" in metrics_text, "MetricsRecorder class is missing.")
+    require("def record(" in metrics_text, "MetricsRecorder.record() is missing.")
+
+    # Verify the actual ShotExecutor constructor/runtime state, not only text tokens.
+    from execution.shot_executor import ShotExecutor
+    from execution.metrics import MetricsRecorder
+
+    sig = inspect.signature(ShotExecutor.__init__)
+    require("gpu_id" in sig.parameters, "ShotExecutor.__init__ must accept gpu_id.")
+    require("metrics_path" in sig.parameters, "ShotExecutor.__init__ must accept metrics_path.")
+
+    class _DummyClient:
+        pass
+
+    with tempfile.TemporaryDirectory(prefix="h3-validator-") as td:
+        tmp_root = Path(td)
+        (tmp_root / "ComfyUI" / "input").mkdir(parents=True, exist_ok=True)
+        executor = ShotExecutor(
+            comfy_client=_DummyClient(),
+            project_root=tmp_root,
+            comfy_input_dir=tmp_root / "ComfyUI" / "input",
+            gpu_id=1,
+            metrics_path=tmp_root / "metrics.jsonl",
+        )
+        require(executor.gpu_id == 1, "ShotExecutor did not retain gpu_id.")
+        require(isinstance(executor.metrics, MetricsRecorder), "ShotExecutor did not initialize MetricsRecorder.")
+        executor._record("validator_smoke", check=True)
+        metrics_file = tmp_root / "metrics.jsonl"
+        require(metrics_file.is_file(), "ShotExecutor failed to write metrics JSONL.")
+        require(metrics_file.read_text(encoding="utf-8").strip(), "Metrics JSONL record is empty.")
+
+    # Verify the ProductionRunner call to _add_identity_anchors has the exact signature.
+    tree = ast.parse(runner_path.read_text(encoding="utf-8"))
+    anchor_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_add_identity_anchors"
+    ]
+    require(len(anchor_calls) == 1, "ProductionRunner must have exactly one _add_identity_anchors call in the scene path.")
+    require(len(anchor_calls[0].args) == 2, "ProductionRunner _add_identity_anchors call must pass only shot and character_map.")
+
+    runner_text = runner_path.read_text(encoding="utf-8")
+    require("self._completed_shots_lock = threading.RLock()" in runner_text, "ProductionRunner shared completed-shot lock is missing.")
+    require("with self._completed_shots_lock:" in runner_text, "ProductionRunner must lock shared completed-shot state.")
+
+    print("PASS execution runtime contracts")
+
 def main() -> None:
 
     validate_files()
@@ -1100,6 +1195,8 @@ def main() -> None:
     validate_model_inventory()
     validate_config()
     validate_runtime_imports()
+    validate_execution_runtime_contracts()
+    validate_execution_integration()
     validate_gradio_ui()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
