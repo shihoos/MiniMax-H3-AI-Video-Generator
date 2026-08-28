@@ -292,106 +292,114 @@ class ShotExecutor:
             return default
 
     @staticmethod
-    def _select_video_output(
-        workflow,
-        history,
+    def _resolve_ref_image_size(shot: dict) -> str:
+        explicit = str(shot.get("ref_image_size", "") or "").strip().lower()
+        if explicit in {"match", "max"}:
+            return explicit
+        camera = " ".join(
+            str(shot.get(key, "") or "")
+            for key in ("camera_shot", "shot_type", "framing")
+        ).lower()
+        close_tokens = ("extreme close", "extreme-close", "ecu", "close-up", "close up", "closeup")
+        return "max" if any(token in camera for token in close_tokens) else "match"
+
+    @staticmethod
+    def _select_savevideo_output(
+        client,
+        workflow: dict,
+        history: dict,
         shot_id: str,
     ) -> dict:
         """
-        Select the actual SaveVideo output deterministically.
+        Select exactly one production video.
 
-        The converted ComfyUI API workflow contains node IDs and class_type
-        values. History is keyed by those node IDs. Do not rely on the
-        incidental ordering of find_video_outputs().
+        The converted API workflow is authoritative: when it exposes one or
+        more SaveVideo nodes, inspect only those nodes in the execution
+        history. Never choose a video merely because it happens to be the
+        last item returned by find_video_outputs().
         """
-        outputs = (
+        workflow_nodes = (
+            workflow
+            if isinstance(workflow, dict)
+            else {}
+        )
+
+        history_outputs = (
             history.get(
                 "outputs",
                 {},
             )
-            if isinstance(
-                history,
-                dict,
-            )
+            if isinstance(history, dict)
             else {}
         )
 
         if not isinstance(
-            outputs,
+            history_outputs,
             dict,
         ):
-            outputs = {}
+            history_outputs = {}
 
-        save_nodes = []
-
-        if isinstance(
-            workflow,
-            dict,
-        ):
-            for node_id, node in workflow.items():
-                if not isinstance(
-                    node,
-                    dict,
-                ):
-                    continue
-
-                if (
-                    str(
-                        node.get(
-                            "class_type",
-                            "",
-                        )
-                        or ""
-                    ).strip()
-                    == "SaveVideo"
-                ):
-                    save_nodes.append(
-                        str(node_id)
-                    )
+        save_node_ids = [
+            str(node_id)
+            for node_id, node
+            in workflow_nodes.items()
+            if isinstance(
+                node,
+                dict,
+            )
+            and str(
+                node.get(
+                    "class_type",
+                    "",
+                )
+                or ""
+            ).strip()
+            == "SaveVideo"
+        ]
 
         candidates = []
 
-        for node_id in save_nodes:
-            node_output = outputs.get(
+        for node_id in save_node_ids:
+            node_history = history_outputs.get(
                 node_id
             )
 
             if not isinstance(
-                node_output,
+                node_history,
                 dict,
             ):
                 continue
 
-            for items in node_output.values():
+            for value in node_history.values():
+
                 if not isinstance(
-                    items,
+                    value,
                     list,
                 ):
                     continue
 
-                for item in items:
+                for item in value:
+
                     if not isinstance(
                         item,
                         dict,
                     ):
                         continue
 
-                    filename = item.get(
-                        "filename"
-                    )
+                    filename = str(
+                        item.get(
+                            "filename",
+                            "",
+                        )
+                        or ""
+                    ).strip()
 
                     if not filename:
                         continue
 
-                    suffix = (
-                        Path(
-                            filename
-                        )
-                        .suffix
-                        .lower()
-                    )
-
-                    if suffix not in {
+                    if Path(
+                        filename
+                    ).suffix.lower() not in {
                         ".mp4",
                         ".mov",
                         ".mkv",
@@ -402,13 +410,19 @@ class ShotExecutor:
                     candidates.append(
                         {
                             "filename": filename,
-                            "subfolder": item.get(
-                                "subfolder",
-                                "",
+                            "subfolder": str(
+                                item.get(
+                                    "subfolder",
+                                    "",
+                                )
+                                or ""
                             ),
-                            "type": item.get(
-                                "type",
-                                "output",
+                            "type": str(
+                                item.get(
+                                    "type",
+                                    "output",
+                                )
+                                or "output"
                             ),
                             "node_id": node_id,
                         }
@@ -420,79 +434,22 @@ class ShotExecutor:
         if len(candidates) > 1:
             raise RuntimeError(
                 f"{shot_id}: multiple SaveVideo outputs were produced; "
-                "the workflow must expose exactly one production video."
+                "the production workflow must expose exactly one final video."
             )
 
-        # Fallback only when the converted workflow does not expose its
-        # SaveVideo node metadata. Still require exactly one video result.
-        fallback = []
+        # Strict fallback for legacy/mock histories that don't retain the
+        # converted workflow graph. We still require exactly one video.
+        outputs = client.find_video_outputs(
+            history
+        )
 
-        if isinstance(
-            outputs,
-            dict,
-        ):
-            for node_output in outputs.values():
-                if not isinstance(
-                    node_output,
-                    dict,
-                ):
-                    continue
-
-                for items in node_output.values():
-                    if not isinstance(
-                        items,
-                        list,
-                    ):
-                        continue
-
-                    for item in items:
-                        if not isinstance(
-                            item,
-                            dict,
-                        ):
-                            continue
-
-                        filename = item.get(
-                            "filename"
-                        )
-
-                        if not filename:
-                            continue
-
-                        if (
-                            Path(
-                                filename
-                            )
-                            .suffix
-                            .lower()
-                            in {
-                                ".mp4",
-                                ".mov",
-                                ".mkv",
-                                ".webm",
-                            }
-                        ):
-                            fallback.append(
-                                {
-                                    "filename": filename,
-                                    "subfolder": item.get(
-                                        "subfolder",
-                                        "",
-                                    ),
-                                    "type": item.get(
-                                        "type",
-                                        "output",
-                                    ),
-                                }
-                            )
-
-        if len(fallback) != 1:
+        if len(outputs) != 1:
             raise RuntimeError(
-                f"{shot_id}: expected exactly one production video output; "
-                f"found {len(fallback)}."
+                f"{shot_id}: expected exactly one production video output, "
+                f"found {len(outputs)}."
             )
 
-        return fallback[0]
+        return outputs[0]
 
     def execute_shot(
         self,
@@ -591,6 +548,7 @@ class ShotExecutor:
                     width=width,
                     height=height,
                     duration_seconds=duration,
+                    ref_image_size=self._resolve_ref_image_size(shot),
                 )
             )
 
@@ -607,6 +565,7 @@ class ShotExecutor:
                 width=width,
                 height=height,
                 duration_seconds=duration,
+                ref_image_size=self._resolve_ref_image_size(shot),
             )
 
         prompt_id = (
@@ -621,7 +580,8 @@ class ShotExecutor:
             timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
         )
 
-        output = self._select_video_output(
+        output = self._select_savevideo_output(
+            self.client,
             workflow,
             history,
             str(
@@ -629,6 +589,7 @@ class ShotExecutor:
                     "shot_id",
                     "",
                 )
+                or ""
             ),
         )
 
