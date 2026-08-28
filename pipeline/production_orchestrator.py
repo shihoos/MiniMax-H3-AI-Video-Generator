@@ -806,6 +806,7 @@ class ProductionOrchestrator:
         store = self._checkpoint_store()
         state = {
             "mode": mode,
+            "user_input": str(user_input or ""),
             "user_input_sha256": store.digest_text(user_input),
             "director_sha256": store.digest_file(
                 self.project_root / "planner" / "qwen_director.py"
@@ -912,6 +913,20 @@ class ProductionOrchestrator:
         original_user_input = str(
             state.get(
                 "user_input",
+                "",
+            )
+            or state.get(
+                "base_plan",
+                {},
+            ).get(
+                "story",
+                "",
+            )
+            or state.get(
+                "director_plan",
+                {},
+            ).get(
+                "story",
                 "",
             )
             or ""
