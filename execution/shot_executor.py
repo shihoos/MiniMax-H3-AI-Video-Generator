@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -390,11 +391,10 @@ class ShotExecutor:
             )
         )
 
-        history = (
-            self.client.wait_for_prompt(
-                prompt_id,
-                timeout=14400,
-            )
+        history = self.client.wait_for_prompt(
+            prompt_id,
+            poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
+            timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
         )
 
         outputs = (
