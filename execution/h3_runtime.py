@@ -97,14 +97,20 @@ class H3Runtime:
         if extra_args:
             command.extend(str(v) for v in extra_args)
 
-        process = subprocess.Popen(
-            command,
-            cwd=str(comfy_root),
-            env=cls.worker_environment(gpu_id),
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=str(comfy_root),
+                env=cls.worker_environment(gpu_id),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except Exception:
+            try:
+                handle.close()
+            finally:
+                raise
         return process, handle
 
     @staticmethod
