@@ -30,6 +30,14 @@ REQUIRED_FILES = [
     "configs/custom_nodes.yaml",
 
     # --------------------------------------------------------
+    # DEPENDENCY / PROJECT DOCUMENTATION
+    # --------------------------------------------------------
+
+    "requirements.txt",
+    "requirements-kaggle.txt",
+    "README.md",
+
+    # --------------------------------------------------------
     # PLANNER
     # --------------------------------------------------------
 
@@ -315,6 +323,49 @@ def executable_model_values(
                 )
 
     return values
+
+
+def validate_dependency_manifests() -> None:
+    base = ROOT / "requirements.txt"
+    kaggle = ROOT / "requirements-kaggle.txt"
+
+    for path in (base, kaggle):
+        require(
+            path.is_file(),
+            f"Dependency manifest is missing: {path}",
+        )
+
+    base_text = base.read_text(
+        encoding="utf-8"
+    )
+
+    kaggle_text = kaggle.read_text(
+        encoding="utf-8"
+    )
+
+    require(
+        "PyYAML==" in base_text,
+        "requirements.txt must pin PyYAML.",
+    )
+
+    require(
+        "gradio==" in base_text,
+        "requirements.txt must pin Gradio.",
+    )
+
+    require(
+        "-r requirements.txt" in kaggle_text,
+        "requirements-kaggle.txt must include requirements.txt.",
+    )
+
+    require(
+        "llama-cpp-python==" in kaggle_text,
+        "requirements-kaggle.txt must pin llama-cpp-python.",
+    )
+
+    print(
+        "PASS dependency manifests"
+    )
 
 
 def validate_files() -> None:
@@ -735,7 +786,7 @@ def validate_gradio_ui() -> None:
         "ProductionRunner",
         "H3Runtime",
         "check_worker",
-        "share=True",
+        "storyboard_share_enabled",
     )
 
     for token in required_tokens:
@@ -874,6 +925,7 @@ def validate_plan_persistence_boundary() -> None:
 def main() -> None:
 
     validate_files()
+    validate_dependency_manifests()
     validate_python()
     validate_workflows()
     validate_model_inventory()
