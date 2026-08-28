@@ -1339,17 +1339,24 @@ Create exactly 2 distinct shots for ONE scene.
 
 Use ONLY characters supplied in the scene.
 Do not create new characters. Do not invent character names.
-Keep every string concise. Never write reasoning, analysis, or <think> text.
+Never output reasoning, analysis, markdown, or <think> text.
+Keep every value concise but specific.
 
-Every shot must materially advance or visualize the scene.
-Use clear cinematic progression:
-1. orientation / establishing
-2. action / subject
-3. detail, reaction, escalation, or reveal when justified
+Make genuinely creative film-direction choices that fit the scene:
+- framing and shot scale
+- camera movement
+- lens / depth of field
+- composition
+- lighting quality
+- color temperature
+- visual emphasis
 
-Vary framing, movement, lens/DOF, composition, and lighting
-when the scene supports it. Do not repeat the same camera
-combination by default.
+Use cinematic progression across the two shots when justified:
+1. orientation / establishing or spatial setup
+2. subject / action / reaction / detail / escalation
+
+Do not use the same framing + movement + lens combination for both shots.
+Use the supplied visual language as the production-wide style bible.
 
 SHOT / FRAMING VOCABULARY:
 extreme wide, wide, full shot, medium wide, medium,
@@ -1382,32 +1389,15 @@ The top-level value MUST be an object with a "shots" array.
 NEVER return a bare shot object.
 The "shots" array MUST contain exactly 2 objects.
 
-Required structure:
+QWEN CREATIVE FIELDS ONLY:
+shot_id, scene_id, duration_seconds, characters, location, action,
+camera_shot, camera_movement, lens_and_depth_of_field,
+composition_notes, lighting, color_temperature, mood, visual_prompt,
+speaking_characters, speech_text.
 
-{
-  "shots": [
-    {
-      "shot_id": "scene_001_shot_001",
-      "scene_id": "scene_001",
-      "duration_seconds": 5.2,
-      "characters": [],
-      "location": "string",
-      "action": "string",
-      "camera_shot": "string",
-      "camera_movement": "string",
-      "lens_and_depth_of_field": "string",
-      "composition_notes": "string",
-      "lighting": "string",
-      "color_temperature": "string",
-      "mood": "string",
-      "visual_prompt": "string",
-      "detailed_description": "string",
-      "continuity_notes": "string",
-      "speaking_characters": [],
-      "speech_text": ""
-    }
-  ]
-}
+Do NOT output these compiler-owned fields:
+retention_analysis, detailed_description, overall_soundscape,
+non_diegetic_music, negative_prompt, continuity_notes.
 """.strip()
 
     def _shot_director_user(
@@ -1418,120 +1408,115 @@ Required structure:
         visual_language: dict | None = None,
     ) -> str:
 
-        return json.dumps(
-            {
-                "story": self._limit_text(
-                    story,
-                    3500,
-                ),
-                "characters": [
-                    {
-                        "name": item.get(
-                            "name",
-                            "",
-                        ),
-                        "role": item.get(
-                            "role",
-                            "",
-                        ),
-                        "appearance": item.get(
-                            "appearance",
-                            {},
-                        ),
-                        "clothing": item.get(
-                            "clothing",
-                            {},
-                        ),
-                    }
-                    for item
-                    in characters
-                ],
-                "visual_language": dict(
-                    visual_language
-                    if isinstance(
-                        visual_language,
-                        dict,
-                    )
-                    else {}
-                ),
-                "scene": {
-                    "scene_id": scene.get(
-                        "scene_id",
-                        "",
-                    ),
-                    "title": scene.get(
-                        "title",
-                        "",
-                    ),
-                    "location": scene.get(
-                        "location",
-                        "",
-                    ),
-                    "description": self._limit_text(
-                        scene.get(
-                            "description",
-                            "",
-                        ),
-                        1800,
-                    ),
-                    "mood": scene.get(
-                        "mood",
-                        "",
-                    ),
-                    "lighting": scene.get(
-                        "lighting",
-                        "",
-                    ),
-                    "color_temperature": scene.get(
-                        "color_temperature",
-                        "",
-                    ),
-                    "time_of_day": scene.get(
-                        "time_of_day",
-                        "",
-                    ),
-                    "weather": scene.get(
-                        "weather",
-                        "",
-                    ),
-                    "atmosphere": scene.get(
-                        "atmosphere",
-                        "",
-                    ),
-                    "environment_details": scene.get(
-                        "environment_details",
-                        [],
-                    ),
-                    "key_props": scene.get(
-                        "key_props",
-                        [],
-                    ),
-                    "characters": scene.get(
-                        "characters",
-                        [],
-                    ),
-                    "scene_objective": scene.get(
-                        "scene_objective",
-                        "",
-                    ),
-                    "continuity_notes": scene.get(
-                        "continuity_notes",
-                        "",
-                    ),
-                },
-            },
-            ensure_ascii=False,
-            separators=(
-                ",",
-                ":",
+        compact_characters = []
+        for item in characters:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if not name:
+                continue
+            compact_characters.append(
+                {
+                    "name": name,
+                    "role": str(
+                        item.get("role", "") or ""
+                    ).strip(),
+                }
+            )
+
+        scene_payload = {
+            "scene_id": str(
+                scene.get("scene_id", "") or ""
+            ).strip(),
+            "title": str(
+                scene.get("title", "") or ""
+            ).strip(),
+            "location": str(
+                scene.get("location", "") or ""
+            ).strip(),
+            "description": self._limit_text(
+                scene.get("description", ""),
+                1100,
             ),
+            "time_of_day": str(
+                scene.get("time_of_day", "") or ""
+            ).strip(),
+            "weather": str(
+                scene.get("weather", "") or ""
+            ).strip(),
+            "atmosphere": self._limit_text(
+                scene.get("atmosphere", ""),
+                220,
+            ),
+            "mood": str(
+                scene.get("mood", "") or ""
+            ).strip(),
+            "lighting": self._limit_text(
+                scene.get("lighting", ""),
+                220,
+            ),
+            "color_temperature": str(
+                scene.get("color_temperature", "") or ""
+            ).strip(),
+            "environment_details": self._clean_list(
+                scene.get("environment_details", []),
+                limit=4,
+            ),
+            "key_props": self._clean_list(
+                scene.get("key_props", []),
+                limit=4,
+            ),
+            "characters": self._clean_list(
+                scene.get("characters", []),
+                limit=6,
+            ),
+            "scene_objective": self._limit_text(
+                scene.get("scene_objective", ""),
+                260,
+            ),
+            "continuity_notes": self._limit_text(
+                scene.get("continuity_notes", ""),
+                220,
+            ),
+        }
+
+        language = {}
+        if isinstance(visual_language, dict):
+            for key in (
+                "genre_tone",
+                "color_palette",
+                "lighting_philosophy",
+                "camera_philosophy",
+                "pacing",
+            ):
+                value = str(
+                    visual_language.get(key, "") or ""
+                ).strip()
+                if value:
+                    language[key] = value
+
+        # The entire story is unnecessary for every shot call. Keep only a
+        # compact narrative context while retaining the scene and visual bible.
+        story_context = self._limit_text(
+            story,
+            1400,
         )
 
-    @staticmethod
-
+        return json.dumps(
+            {
+                "story_context": story_context,
+                "characters": compact_characters,
+                "visual_language": language,
+                "scene": scene_payload,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
     # ========================================================
     # JSON / TEXT HELPERS
+    # ========================================================
+
     # ========================================================
 
     @staticmethod
@@ -2509,13 +2494,31 @@ Required structure:
                 "scene_id"
             ] = scene_id
 
+            required = (
+                "camera_shot",
+                "camera_movement",
+                "lens_and_depth_of_field",
+                "composition_notes",
+                "lighting",
+                "color_temperature",
+                "mood",
+                "visual_prompt",
+            )
+
+            if any(
+                not str(
+                    candidate.get(field, "") or ""
+                ).strip()
+                for field in required
+            ):
+                continue
+
             result.append(
                 candidate
             )
 
         return result
 
-    @staticmethod
     @staticmethod
     def _normalize_ids(
         scenes: list[dict],
@@ -3268,7 +3271,7 @@ Required structure:
                         "shot_pass:"
                         + scene_id
                     ),
-                    max_completion=750,
+                    max_completion=900,
                     json_mode=True,
                     disable_thinking=True,
                 )
@@ -3298,11 +3301,10 @@ Required structure:
                 retry_user = (
                     scene_user
                     + "\n\n"
-                    "RETRY: Return ONLY valid JSON. "
-                    "Return exactly 2 distinct shots for this ONE scene. "
-                    "Use only supplied character names. "
-                    "Keep every field concise. "
-                    "No reasoning, markdown, or <think>."
+                    "RETRY: Return ONLY valid JSON with exactly 2 shots. "
+                    "Use only supplied characters. "
+                    "Use only the QWEN CREATIVE FIELDS. "
+                    "Keep every value concise. No reasoning or markdown."
                 )
 
                 try:
@@ -3317,7 +3319,7 @@ Required structure:
                             "shot_retry:"
                             + scene_id
                         ),
-                        max_completion=750,
+                        max_completion=900,
                         json_mode=True,
                         disable_thinking=True,
                     )
@@ -3408,7 +3410,7 @@ Required structure:
                             "shot_missing_one:"
                             + scene_id
                         ),
-                        max_completion=420,
+                        max_completion=320,
                         json_mode=True,
                         disable_thinking=True,
                     )
@@ -3445,12 +3447,9 @@ Required structure:
                 scene_shots[:2]
             )
 
-        if not all_shots:
-
-            raise RuntimeError(
-                "No usable shots could be produced."
-            )
-
+        # Qwen shot generation can fail or truncate without making the
+        # entire production invalid. Let CinematicCompiler fill any missing
+        # structural shot positions deterministically.
         self._normalize_ids(
             scenes,
             all_shots,
