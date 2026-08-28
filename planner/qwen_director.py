@@ -1983,6 +1983,55 @@ non_diegetic_music, negative_prompt, continuity_notes.
             or "character"
         )
 
+    @staticmethod
+    def _coerce_mapping(
+        value,
+    ) -> dict:
+        """Safely normalize a model field that should be a JSON object."""
+        if isinstance(value, dict):
+            return dict(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("{") and text.endswith("}"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return {}
+                if isinstance(parsed, dict):
+                    return parsed
+
+        return {}
+
+    @staticmethod
+    def _coerce_list(
+        value,
+    ) -> list:
+        """Safely normalize a model field that should be a JSON array."""
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            return list(value)
+
+        if isinstance(value, tuple):
+            return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("[") and text.endswith("]"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return []
+                return list(parsed) if isinstance(parsed, list) else []
+            return [text] if text else []
+
+        return []
+
     def _sanitize_characters(
         self,
         characters,
@@ -2073,48 +2122,43 @@ non_diegetic_music, negative_prompt, continuity_notes.
                         ),
 
                     "appearance":
-                        dict(
+                        self._coerce_mapping(
                             value.get(
                                 "appearance",
                                 {},
                             )
-                            or {}
                         ),
 
                     "clothing":
-                        dict(
+                        self._coerce_mapping(
                             value.get(
                                 "clothing",
                                 {},
                             )
-                            or {}
                         ),
 
                     "distinctive_features":
-                        list(
+                        self._coerce_list(
                             value.get(
                                 "distinctive_features",
                                 [],
                             )
-                            or []
                         ),
 
                     "character_state":
-                        dict(
+                        self._coerce_mapping(
                             value.get(
                                 "character_state",
                                 {},
                             )
-                            or {}
                         ),
 
                     "continuity_rules":
-                        list(
+                        self._coerce_list(
                             value.get(
                                 "continuity_rules",
                                 [],
                             )
-                            or []
                         ),
                 }
             )
@@ -3087,6 +3131,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
     def _validate_production_quality(
         self,
         *,
+        mode: str,
         story: str,
         scenes: list[dict],
         shots: list[dict],
@@ -3095,6 +3140,11 @@ non_diegetic_music, negative_prompt, continuity_notes.
         """Deterministically reject structurally valid but production-poor plans."""
         if not story.strip():
             raise RuntimeError("Production plan has no story.")
+
+        if not characters and mode != PRESERVE_USER_STORY_MODE:
+            raise RuntimeError(
+                "Production plan has no usable character roster for this story mode."
+            )
 
         if not 4 <= len(scenes) <= self.MAX_SCENES:
             raise RuntimeError(
@@ -3137,6 +3187,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     raise RuntimeError(f"Shot {shot_id} is missing {field}.")
             shot_characters = shot.get("characters", []) or []
             speakers = shot.get("speaking_characters", []) or []
+            if allowed and not shot_characters:
+                raise RuntimeError(
+                    f"Shot {shot_id} has no character binding."
+                )
             for name in [*shot_characters, *speakers]:
                 if allowed and str(name).strip().lower() not in allowed:
                     raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
@@ -4714,6 +4768,7 @@ Return JSON only.
         )
 
         self._validate_production_quality(
+            mode=mode,
             story=story,
             scenes=scenes,
             shots=all_shots,
