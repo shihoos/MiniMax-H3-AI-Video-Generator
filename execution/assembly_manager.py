@@ -160,11 +160,14 @@ class AssemblyManager:
         audio_bitrate: str | None = None,
     ) -> Path:
         video_preset = str(video_preset or os.getenv("H3_FFMPEG_PRESET", "medium"))
-        video_crf = int(video_crf if video_crf is not None else os.getenv("H3_FFMPEG_CRF", "17"))
+        try:
+            video_crf = int(video_crf if video_crf is not None else os.getenv("H3_FFMPEG_CRF", "17"))
+            nvenc_cq = int(os.getenv("H3_FFMPEG_NVENC_CQ", "19"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("FFmpeg CRF/CQ environment values must be integers.") from exc
         video_codec = str(video_codec or os.getenv("H3_FFMPEG_VIDEO_CODEC", "libx264"))
         audio_codec = str(audio_codec or os.getenv("H3_FFMPEG_AUDIO_CODEC", "aac"))
         audio_bitrate = str(audio_bitrate or os.getenv("H3_FFMPEG_AUDIO_BITRATE", "192k"))
-        nvenc_cq = int(os.getenv("H3_FFMPEG_NVENC_CQ", "19"))
         self.check_ffmpeg()
         inputs = self._validate_inputs(videos)
 
@@ -190,8 +193,10 @@ class AssemblyManager:
             missing = [str(path) for path, probe in zip(inputs, probes) if not self._has_audio(probe)]
             raise RuntimeError("H3 shot output is missing required audio:\n" + "\n".join(missing))
 
-        concat_file = self._write_concat_file(inputs, self.output_dir)
         destination = (self.output_dir / final_name).resolve()
+        if destination.parent != self.output_dir:
+            raise ValueError("final_name must not escape output_dir.")
+        concat_file = self._write_concat_file(inputs, self.output_dir)
         temp_output = self.output_dir / f".{destination.stem}.{os.getpid()}.tmp.mp4"
         stream_copy = self._can_stream_copy(probes, width, height, fps) and os.getenv("H3_FFMPEG_FORCE_TRANSCODE", "0").strip().lower() not in {"1", "true", "yes", "on"}
 
@@ -208,7 +213,7 @@ class AssemblyManager:
                 f"fps={int(fps)},"
                 f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
                 f"crop={int(width)}:{int(height)}:"
-                f"({int(width)}-iw)/2:({int(height)}-ih) / 2"
+                f"({int(width)}-iw)/2:({int(height)}-ih)/2,setsar=1"
             ).replace(" / ", "/")
             command = [
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -234,7 +239,7 @@ class AssemblyManager:
             if result.returncode != 0 and stream_copy:
                 vf = (
                     f"fps={int(fps)},scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
-                    f"crop={int(width)}:{int(height)}:({int(width)}-iw)/2:({int(height)}-ih)/2"
+                    f"crop={int(width)}:{int(height)}:({int(width)}-iw)/2:({int(height)}-ih)/2,setsar=1"
                 )
                 command = [
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
