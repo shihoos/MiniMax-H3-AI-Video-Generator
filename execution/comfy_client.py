@@ -234,6 +234,20 @@ class ComfyClient:
             "ComfyUI request failed."
         )
 
+    def free_memory(self, *, unload_models: bool = False, free_memory: bool = True) -> bool:
+        """Ask ComfyUI to release resources after a failed GPU job."""
+        result = self._request(
+            "POST",
+            "/free",
+            payload={
+                "unload_models": bool(unload_models),
+                "free_memory": bool(free_memory),
+            },
+            retry=True,
+            timeout=30,
+        )
+        return result is None or result == b"" or isinstance(result, (dict, list))
+
     def health_check(
         self,
     ):
