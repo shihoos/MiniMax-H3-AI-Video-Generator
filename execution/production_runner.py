@@ -1,14 +1,10 @@
 from __future__ import annotations
 
+import errno
 import os
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-
-try:
-    import fcntl  # type: ignore
-except ImportError:  # pragma: no cover
-    fcntl = None
 from typing import Any
 
 from execution.assembly_manager import (
@@ -800,36 +796,33 @@ class ProductionRunner:
         return results
 
     @contextmanager
-    def _production_execution_lock(self, production_id: str):
-        """Prevent two processes from rendering the same production ID concurrently."""
-        lock_dir = (
-            self.project_root
-            / "data"
-            / "production"
-            / "sessions"
-            / self._safe_name(production_id)
-        )
+    def _production_lock(self, production_id: str):
+        lock_dir = self.project_root / "data" / "production" / self._safe_name(production_id)
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_dir / ".render.lock"
-        handle = lock_path.open("a+b")
+        lock_path = lock_dir / ".run.lock"
+        handle = lock_path.open("a+")
         try:
-            if fcntl is None:
-                raise RuntimeError(
-                    "Cross-process production locking requires fcntl on the target runtime."
-                )
+            try:
+                import fcntl
+            except ImportError as exc:
+                raise RuntimeError("Production locking requires fcntl on Linux production targets.") from exc
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as exc:
-                raise RuntimeError(
-                    f"Production {production_id!r} is already being rendered by another process."
-                ) from exc
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise RuntimeError(f"Production {production_id} is already running in another process.") from exc
+                raise
+            handle.seek(0)
+            handle.truncate(0)
+            handle.write(f"pid={os.getpid()}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
             yield
         finally:
-            if fcntl is not None:
-                try:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
             handle.close()
 
     def run(
@@ -837,16 +830,17 @@ class ProductionRunner:
         production_plan: dict[str, Any],
     ):
         if not isinstance(production_plan, dict):
-            raise TypeError("Production plan must be a dictionary.")
+            raise TypeError("production_plan must be a mapping.")
         production_id = self._resolve_production_id(production_plan)
         production_plan["production_id"] = production_id
-        with self._production_execution_lock(production_id):
-            return self._run_unlocked(production_plan)
+        with self._production_lock(production_id):
+            return self._run_locked(production_plan)
 
-    def _run_unlocked(
+    def _run_locked(
         self,
         production_plan: dict[str, Any],
     ):
+
         shots = list(
             production_plan.get(
                 "shots",
@@ -859,7 +853,15 @@ class ProductionRunner:
                 "Production plan contains no shots."
             )
 
-        production_id = self._resolve_production_id(production_plan)
+        production_id = (
+            self._resolve_production_id(
+                production_plan
+            )
+        )
+
+        production_plan[
+            "production_id"
+        ] = production_id
 
         self._prepare_production_paths(production_id)
 
