@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import uuid
 
@@ -40,14 +41,18 @@ class ComfyClient:
                 "ComfyUI base_url must start with http:// or https://."
             )
 
-        self.timeout = max(
-            1,
-            int(timeout),
-        )
+        configured_timeout = os.getenv("H3_COMFY_REQUEST_TIMEOUT")
+        configured_retries = os.getenv("H3_COMFY_REQUEST_RETRIES")
+        if configured_timeout is not None and timeout == 60:
+            timeout = float(configured_timeout)
+        if configured_retries is not None and request_retries == 3:
+            request_retries = int(configured_retries)
 
-        self.request_retries = max(
-            0,
-            int(request_retries),
+        self.timeout = max(1, float(timeout))
+        self.request_retries = max(0, int(request_retries))
+
+        self.client_id = str(
+            uuid.uuid4()
         )
 
     def _request(
@@ -361,9 +366,7 @@ class ComfyClient:
             "/prompt",
             payload={
                 "prompt": workflow,
-                "client_id": str(
-                    uuid.uuid4()
-                ),
+                "client_id": self.client_id,
             },
             retry=False,
         )
@@ -508,19 +511,13 @@ class ComfyClient:
                         f"{status}"
                     )
 
-                if (
-                    status.get(
-                        "status_str"
+                if result.get("node_errors"):
+                    raise RuntimeError(
+                        f"ComfyUI prompt {prompt_id} reported node errors: "
+                        f"{result.get('node_errors')}"
                     )
-                    == "success"
-                ):
 
-                    return result
-
-                if result.get(
-                    "outputs"
-                ):
-
+                if status.get("status_str") == "success":
                     return result
 
             time.sleep(
