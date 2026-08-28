@@ -257,6 +257,99 @@ class ProductionCheckpoint:
         except FileNotFoundError:
             pass
 
+
+    def update(
+        self,
+        session_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically update an existing checkpoint and return its new state."""
+        if not isinstance(updates, dict):
+            raise TypeError(
+                "Checkpoint updates must be a dictionary."
+            )
+
+        state = self.load(session_id)
+        state.update(deepcopy(updates))
+        state["updated_at"] = __import__("datetime").datetime.now().isoformat()
+        self.save(session_id, state)
+        return state
+
+    def mark_rendering(
+        self,
+        session_id: str,
+        current_scene_id: str = "",
+        completed_shot_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.update(
+            session_id,
+            {
+                "status": "rendering",
+                "stage": "rendering",
+                "current_scene_id": current_scene_id,
+                "completed_shot_ids": list(
+                    completed_shot_ids or []
+                ),
+                "error": "",
+            },
+        )
+
+    def mark_failed(
+        self,
+        session_id: str,
+        *,
+        error: str,
+        stage: str = "rendering",
+        current_scene_id: str = "",
+        completed_shot_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        return self.update(
+            session_id,
+            {
+                "status": "failed",
+                "stage": stage,
+                "current_scene_id": current_scene_id,
+                "completed_shot_ids": list(
+                    completed_shot_ids or []
+                ),
+                "error": str(error or ""),
+            },
+        )
+
+    def mark_completed(
+        self,
+        session_id: str,
+        *,
+        final_video: str,
+        shot_outputs: list[str],
+        completed_shot_ids: list[str],
+    ) -> dict[str, Any]:
+        state = self.load(session_id)
+
+        return self.update(
+            session_id,
+            {
+                "status": "completed",
+                "stage": "render_complete",
+                "current_scene_id": "",
+                "completed_scene_ids": list(
+                    state.get(
+                        "completed_scene_ids",
+                        [],
+                    )
+                ),
+                "completed_shot_ids": list(
+                    completed_shot_ids
+                ),
+                "final_video": str(final_video),
+                "shot_outputs": [
+                    str(path)
+                    for path in shot_outputs
+                ],
+                "error": "",
+            },
+        )
+
     def list_sessions(
         self,
     ) -> list[str]:
