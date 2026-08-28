@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import os
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+
+try:
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover
+    fcntl = None
 from typing import Any
 
 from execution.assembly_manager import (
@@ -792,11 +799,54 @@ class ProductionRunner:
 
         return results
 
+    @contextmanager
+    def _production_execution_lock(self, production_id: str):
+        """Prevent two processes from rendering the same production ID concurrently."""
+        lock_dir = (
+            self.project_root
+            / "data"
+            / "production"
+            / "sessions"
+            / self._safe_name(production_id)
+        )
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_dir / ".render.lock"
+        handle = lock_path.open("a+b")
+        try:
+            if fcntl is None:
+                raise RuntimeError(
+                    "Cross-process production locking requires fcntl on the target runtime."
+                )
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    f"Production {production_id!r} is already being rendered by another process."
+                ) from exc
+            yield
+        finally:
+            if fcntl is not None:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+            handle.close()
+
     def run(
         self,
         production_plan: dict[str, Any],
     ):
+        if not isinstance(production_plan, dict):
+            raise TypeError("Production plan must be a dictionary.")
+        production_id = self._resolve_production_id(production_plan)
+        production_plan["production_id"] = production_id
+        with self._production_execution_lock(production_id):
+            return self._run_unlocked(production_plan)
 
+    def _run_unlocked(
+        self,
+        production_plan: dict[str, Any],
+    ):
         shots = list(
             production_plan.get(
                 "shots",
@@ -809,15 +859,7 @@ class ProductionRunner:
                 "Production plan contains no shots."
             )
 
-        production_id = (
-            self._resolve_production_id(
-                production_plan
-            )
-        )
-
-        production_plan[
-            "production_id"
-        ] = production_id
+        production_id = self._resolve_production_id(production_plan)
 
         self._prepare_production_paths(production_id)
 
