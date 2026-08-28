@@ -503,6 +503,8 @@ def test_shot_sanitization_cinematography_fields() -> None:
                 "composition_notes": "rule of thirds with foreground framing",
                 "lighting": "cool moonlight",
                 "color_temperature": "cool 4300K",
+                "mood": "tense and isolated",
+                "visual_prompt": "A lone figure stands among ruined stone structures under cool moonlight.",
             }
         ],
         {
