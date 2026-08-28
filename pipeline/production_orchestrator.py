@@ -948,6 +948,36 @@ class ProductionOrchestrator:
     # PLAN
     # ========================================================
 
+    @staticmethod
+    def _write_storyboard(
+        path: Path,
+        plan: dict,
+    ) -> None:
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = path.with_name(
+            f".{path.name}.{uuid.uuid4().hex}.tmp"
+        )
+
+        try:
+            temporary.write_text(
+                json.dumps(
+                    plan,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(path)
+        finally:
+            if temporary.exists():
+                temporary.unlink(
+                    missing_ok=True
+                )
+
     def create_production_plan(
         self,
         mode: str,
@@ -1010,11 +1040,16 @@ class ProductionOrchestrator:
                     base_plan=deepcopy(base_plan),
                     director_plan={},
                 )
-            except Exception:
-                # Generation must remain usable even if the checkpoint filesystem
-                # is temporarily unavailable. The checkpoint layer is resilience,
-                # not a new hard dependency for production.
-                checkpoint_store = None
+            except Exception as checkpoint_error:
+                # Checkpointing is best-effort. Keep a usable store so the
+                # storyboard path can still be persisted and a later checkpoint
+                # save can retry after a transient filesystem failure.
+                print(
+                    "[CHECKPOINT] initial save failed:",
+                    str(checkpoint_error),
+                    flush=True,
+                )
+                checkpoint_store = self._checkpoint_store()
 
         try:
 
@@ -1154,13 +1189,9 @@ class ProductionOrchestrator:
             session_dir
             / "story_preview.json"
         )
-        plan_path.write_text(
-            json.dumps(
-                plan,
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        self._write_storyboard(
+            plan_path,
+            plan,
         )
 
         # Mark the whole planning stage completed only after the plan has been
