@@ -161,40 +161,41 @@ class AssemblyManager:
         audio_codec = str(audio_codec or os.getenv("H3_FFMPEG_AUDIO_CODEC", "aac"))
         audio_bitrate = str(audio_bitrate or os.getenv("H3_FFMPEG_AUDIO_BITRATE", "192k"))
         nvenc_cq = int(os.getenv("H3_FFMPEG_NVENC_CQ", "19"))
+        require_audio = os.getenv("H3_REQUIRE_AUDIO", "1").strip().lower() in {"1", "true", "yes", "on"}
+        allow_copy_fallback = os.getenv("H3_FFMPEG_COPY_FALLBACK", "1").strip().lower() in {"1", "true", "yes", "on"}
+
         self.check_ffmpeg()
         inputs = self._validate_inputs(videos)
 
         if width <= 0 or height <= 0 or fps <= 0:
             raise ValueError("Invalid final delivery parameters.")
-        if not 0 <= int(video_crf) <= 51:
+        if not 0 <= video_crf <= 51:
             raise ValueError("video_crf must be between 0 and 51.")
         if not 0 <= nvenc_cq <= 51:
             raise ValueError("H3_FFMPEG_NVENC_CQ must be between 0 and 51.")
         if not str(final_name).lower().endswith(".mp4"):
             raise ValueError("Final output must be an .mp4 file.")
 
-        probes = []
+        probes: list[dict] = []
         for path in inputs:
             probe = self._probe(path)
             streams = probe.get("streams", [])
             if not any(s.get("codec_type") == "video" for s in streams):
                 raise RuntimeError(f"No video stream found in {path}")
+            if require_audio and not any(s.get("codec_type") == "audio" for s in streams):
+                raise RuntimeError(f"No audio stream found in H3 shot output: {path}")
             probes.append(probe)
 
         concat_file = self._write_concat_file(inputs, self.output_dir)
         destination = (self.output_dir / final_name).resolve()
         temp_output = self.output_dir / f".{destination.stem}.{os.getpid()}.tmp.mp4"
-        stream_copy = self._can_stream_copy(probes, width, height, fps) and os.getenv("H3_FFMPEG_FORCE_TRANSCODE", "0").strip().lower() not in {"1", "true", "yes", "on"}
+        stream_copy = (
+            self._can_stream_copy(probes, width, height, fps)
+            and os.getenv("H3_FFMPEG_FORCE_TRANSCODE", "0").strip().lower()
+            not in {"1", "true", "yes", "on"}
+        )
 
-        if stream_copy:
-            command = [
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "concat", "-safe", "0", "-i", str(concat_file),
-                "-c", "copy",
-                "-movflags", "+faststart",
-                str(temp_output),
-            ]
-        else:
+        def transcode_command() -> list[str]:
             vf = (
                 f"fps={int(fps)},"
                 f"scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
@@ -211,7 +212,7 @@ class AssemblyManager:
             if video_codec.lower().endswith("_nvenc"):
                 command += ["-cq", str(nvenc_cq), "-rc", "vbr"]
             else:
-                command += ["-crf", str(int(video_crf))]
+                command += ["-crf", str(video_crf)]
             command += [
                 "-pix_fmt", "yuv420p",
                 "-c:a", audio_codec,
@@ -219,26 +220,74 @@ class AssemblyManager:
                 "-movflags", "+faststart",
                 str(temp_output),
             ]
+            return command
+
+        def copy_command() -> list[str]:
+            return [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "concat", "-safe", "0", "-i", str(concat_file),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(temp_output),
+            ]
 
         try:
-            result = subprocess.run(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(
-                    "FFmpeg assembly failed:\n" + result.stderr[-5000:]
+            commands = [copy_command()] if stream_copy else [transcode_command()]
+            if stream_copy and allow_copy_fallback:
+                commands.append(transcode_command())
+
+            last_error = ""
+            for index, command in enumerate(commands):
+                temp_output.unlink(missing_ok=True)
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
                 )
-            if not temp_output.is_file() or temp_output.stat().st_size <= 0:
-                raise RuntimeError("FFmpeg reported success but produced no output.")
-            final_probe = self._probe(temp_output)
-            if not any(s.get("codec_type") == "video" for s in final_probe.get("streams", [])):
-                raise RuntimeError("Final output contains no video stream.")
-            os.replace(temp_output, destination)
-            return destination
+                if result.returncode != 0:
+                    last_error = result.stderr[-5000:]
+                    if index + 1 < len(commands):
+                        continue
+                    raise RuntimeError("FFmpeg assembly failed:\n" + last_error)
+
+                if not temp_output.is_file() or temp_output.stat().st_size <= 0:
+                    last_error = "FFmpeg reported success but produced no output."
+                    if index + 1 < len(commands):
+                        continue
+                    raise RuntimeError(last_error)
+
+                final_probe = self._probe(temp_output)
+                final_streams = final_probe.get("streams", [])
+                video_stream = next((s for s in final_streams if s.get("codec_type") == "video"), None)
+                audio_stream = next((s for s in final_streams if s.get("codec_type") == "audio"), None)
+                if video_stream is None:
+                    last_error = "Final output contains no video stream."
+                    if index + 1 < len(commands):
+                        continue
+                    raise RuntimeError(last_error)
+                if require_audio and audio_stream is None:
+                    last_error = "Final output contains no audio stream."
+                    if index + 1 < len(commands):
+                        continue
+                    raise RuntimeError(last_error)
+
+                try:
+                    final_width = int(video_stream.get("width") or 0)
+                    final_height = int(video_stream.get("height") or 0)
+                    if final_width != int(width) or final_height != int(height):
+                        raise RuntimeError(
+                            f"Final output resolution is {final_width}x{final_height}; expected {int(width)}x{int(height)}."
+                        )
+                except ValueError as exc:
+                    raise RuntimeError("Final output has invalid video dimensions.") from exc
+
+                os.replace(temp_output, destination)
+                return destination
+
+            raise RuntimeError("FFmpeg assembly failed: " + (last_error or "unknown error"))
         finally:
             concat_file.unlink(missing_ok=True)
             temp_output.unlink(missing_ok=True)
+
