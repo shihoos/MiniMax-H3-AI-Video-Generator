@@ -63,6 +63,7 @@ class ProductionRunner:
         )
 
         self.production_id = None
+        self._active_plan_sha256 = ""
 
         self.production_input_root = (
             self.input_root
@@ -133,6 +134,39 @@ class ProductionRunner:
             "production_"
             f"{uuid.uuid4().hex}"
         )
+
+    @staticmethod
+    def _plan_hash(production_plan: dict[str, Any]) -> str:
+        return ProductionCheckpoint.plan_digest(production_plan)
+
+    @staticmethod
+    def _validate_checkpoint_plan(
+        production_plan: dict[str, Any],
+        checkpoint: dict | None,
+    ) -> str:
+        plan_hash = ProductionCheckpoint.plan_digest(production_plan)
+        if not checkpoint:
+            return plan_hash
+
+        existing_hash = str(checkpoint.get("plan_sha256", "") or "").strip()
+        status = str(checkpoint.get("status", "") or "").strip().lower()
+        resume_statuses = {"rendering", "interrupted", "failed", "ready", "running"}
+
+        if existing_hash:
+            if existing_hash != plan_hash:
+                raise RuntimeError(
+                    "Production checkpoint plan fingerprint does not match the supplied plan. "
+                    "Refusing to reuse completed shots from a different plan. "
+                    f"checkpoint={existing_hash} supplied={plan_hash}"
+                )
+            return plan_hash
+
+        if status in resume_statuses:
+            raise RuntimeError(
+                "This production checkpoint predates plan fingerprinting. "
+                "Refusing unsafe resume; start a new production or migrate the checkpoint explicitly."
+            )
+        return plan_hash
 
     def _prepare_production_paths(
         self,
@@ -400,18 +434,15 @@ class ProductionRunner:
         self,
         production_id: str,
     ) -> dict | None:
+        store = self._checkpoint_store()
         try:
-            store = self._checkpoint_store()
-            return store.load(
-                production_id
-            )
-        except (
-            FileNotFoundError,
-            RuntimeError,
-            ValueError,
-            TypeError,
-        ):
+            return store.load(production_id)
+        except FileNotFoundError:
             return None
+        except (RuntimeError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Production checkpoint is unreadable or invalid: {production_id}"
+            ) from exc
 
     def _update_render_checkpoint(
         self,
@@ -432,11 +463,12 @@ class ProductionRunner:
             "status": status,
             "stage": stage,
             "current_scene_id": current_scene_id,
-            "completed_shot_ids": list(
-                completed_shot_ids or []
-            ),
+            "completed_shot_ids": list(completed_shot_ids or []),
             "error": str(error or ""),
         }
+
+        if self._active_plan_sha256:
+            updates["plan_sha256"] = self._active_plan_sha256
 
         if completed_shot is not None:
             updates[
@@ -464,6 +496,38 @@ class ProductionRunner:
             production_id,
             updates,
         )
+
+    def _validate_completed_record(
+        self,
+        shot_id: str,
+        record: dict,
+        production_id: str,
+    ) -> Path | None:
+        record_hash = str(record.get("plan_sha256", "") or "").strip()
+        if not record_hash:
+            raise RuntimeError(
+                f"Checkpoint record for {shot_id} has no plan fingerprint; refusing unsafe reuse."
+            )
+        if record_hash != self._active_plan_sha256:
+            raise RuntimeError(
+                f"Checkpoint record for {shot_id} belongs to a different plan."
+            )
+        recorded_output = str(record.get("output", "") or "").strip()
+        if not recorded_output:
+            return None
+        path = self._existing_shot_output(Path(recorded_output))
+        if path is None:
+            return None
+        production_root = (
+            self.project_root / "data" / "production" / self._safe_name(production_id)
+        ).resolve()
+        try:
+            path.relative_to(production_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Checkpoint output for {shot_id} is outside the production directory: {path}"
+            ) from exc
+        return path
 
     @staticmethod
     def _existing_shot_output(
@@ -553,22 +617,11 @@ class ProductionRunner:
                 dict,
             ):
 
-                recorded_output = str(
-                    record.get(
-                        "output",
-                        "",
-                    )
-                    or ""
-                ).strip()
-
-                if recorded_output:
-                    existing = (
-                        self._existing_shot_output(
-                            Path(
-                                recorded_output
-                            )
-                        )
-                    )
+                existing = self._validate_completed_record(
+                    shot_id,
+                    record,
+                    production_id,
+                )
 
                 # Backward compatibility for older checkpoints that
                 # have GPU ownership but no absolute output path.
@@ -715,16 +768,11 @@ class ProductionRunner:
             previous_video = result
             previous_shot = shot
 
-            completed_shots[
-                shot_id
-            ] = {
+            completed_shots[shot_id] = {
                 "gpu_id": int(gpu_id),
-                "scene_id": str(
-                    scene_id
-                ),
-                "output": str(
-                    result
-                ),
+                "scene_id": str(scene_id),
+                "output": str(result),
+                "plan_sha256": self._active_plan_sha256,
             }
 
             self._update_render_checkpoint(
@@ -771,9 +819,13 @@ class ProductionRunner:
             "production_id"
         ] = production_id
 
-        self._prepare_production_paths(
-            production_id
+        self._prepare_production_paths(production_id)
+
+        checkpoint = self._load_render_checkpoint(production_id)
+        self._active_plan_sha256 = self._validate_checkpoint_plan(
+            production_plan, checkpoint
         )
+        production_plan["plan_sha256"] = self._active_plan_sha256
 
         profile = str(
             production_plan.get(
@@ -797,12 +849,6 @@ class ProductionRunner:
                 "upscale_enabled",
                 profile
                 == PROFILE_UPSCALE,
-            )
-        )
-
-        checkpoint = (
-            self._load_render_checkpoint(
-                production_id
             )
         )
 
