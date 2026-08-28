@@ -6,8 +6,8 @@ from pathlib import Path
 import yaml
 
 
-PROJECT_ROOT = Path(
-    __file__
+PROJECT_ROOT = (
+    Path(__file__)
 ).resolve().parents[1]
 
 CONFIG_ROOT = (
@@ -30,9 +30,7 @@ def _load_runtime_config() -> dict:
         "r",
         encoding="utf-8",
     ) as handle:
-        data = yaml.safe_load(
-            handle
-        )
+        data = yaml.safe_load(handle)
 
     if not isinstance(data, dict):
         raise RuntimeError(
@@ -49,45 +47,18 @@ RUNTIME = _load_runtime_config()
 # DIRECTORIES
 # ============================================================
 
-DATA_DIR = (
-    PROJECT_ROOT / "data"
-)
-
-STORIES_DIR = (
-    DATA_DIR / "stories"
-)
-
-CHARACTERS_DIR = (
-    DATA_DIR / "characters"
-)
-
-GENERATED_CHARACTERS_DIR = (
-    CHARACTERS_DIR / "generated"
-)
-
-SCENES_DIR = (
-    DATA_DIR / "scenes"
-)
-
-SHOTS_DIR = (
-    DATA_DIR / "shots"
-)
-
-PRODUCTION_DIR = (
-    DATA_DIR / "production"
-)
-
-CONTINUITY_DIR = (
-    PRODUCTION_DIR / "continuity"
-)
-
-IDENTITY_DIR = (
-    PRODUCTION_DIR / "identity"
-)
+DATA_DIR = PROJECT_ROOT / "data"
+STORIES_DIR = DATA_DIR / "stories"
+CHARACTERS_DIR = DATA_DIR / "characters"
+GENERATED_CHARACTERS_DIR = CHARACTERS_DIR / "generated"
+SCENES_DIR = DATA_DIR / "scenes"
+SHOTS_DIR = DATA_DIR / "shots"
+PRODUCTION_DIR = DATA_DIR / "production"
+CONTINUITY_DIR = PRODUCTION_DIR / "continuity"
+IDENTITY_DIR = PRODUCTION_DIR / "identity"
 
 
 def ensure_directories() -> None:
-
     for directory in (
         STORIES_DIR,
         CHARACTERS_DIR,
@@ -132,126 +103,76 @@ H3_LATENT_UPSCALER_3D = (
     "minimax_h3_latent_upscaler_3d_fp16.safetensors"
 )
 
-DIRECTOR_MODEL_FILENAME = (
-    RUNTIME[
-        "director"
-    ][
-        "model_filename"
-    ]
-)
+DIRECTOR_MODEL_FILENAME = str(
+    RUNTIME["director"]["model_filename"]
+).strip()
+
+if not DIRECTOR_MODEL_FILENAME:
+    raise RuntimeError(
+        "runtime_versions.yaml director.model_filename is empty."
+    )
 
 
 # ============================================================
 # DIRECTOR MODEL
 # ============================================================
 
-DIRECTOR_MODEL_ENV = (
-    "H3_DIRECTOR_MODEL_PATH"
-)
-
-DIRECTOR_ENABLED_ENV = (
-    "H3_DIRECTOR_ENABLED"
-)
+DIRECTOR_MODEL_ENV = "H3_DIRECTOR_MODEL_PATH"
+DIRECTOR_ENABLED_ENV = "H3_DIRECTOR_ENABLED"
 
 DIRECTOR_N_CTX = int(
     os.getenv(
         "H3_DIRECTOR_N_CTX",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "context"
-            ]
-        ),
+        str(RUNTIME["director"]["context"]),
     )
 )
 
 DIRECTOR_N_GPU_LAYERS = int(
     os.getenv(
         "H3_DIRECTOR_N_GPU_LAYERS",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "gpu_layers"
-            ]
-        ),
+        str(RUNTIME["director"]["gpu_layers"]),
     )
 )
 
 DIRECTOR_N_BATCH = int(
     os.getenv(
         "H3_DIRECTOR_N_BATCH",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "batch"
-            ]
-        ),
+        str(RUNTIME["director"]["batch"]),
     )
 )
 
 DIRECTOR_MAX_TOKENS = int(
     os.getenv(
         "H3_DIRECTOR_MAX_TOKENS",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "max_tokens"
-            ]
-        ),
+        str(RUNTIME["director"]["max_tokens"]),
     )
 )
 
 DIRECTOR_TEMPERATURE = float(
     os.getenv(
         "H3_DIRECTOR_TEMPERATURE",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "temperature"
-            ]
-        ),
+        str(RUNTIME["director"]["temperature"]),
     )
 )
 
 DIRECTOR_TOP_P = float(
     os.getenv(
         "H3_DIRECTOR_TOP_P",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "top_p"
-            ]
-        ),
+        str(RUNTIME["director"]["top_p"]),
     )
 )
 
 DIRECTOR_THREADS = int(
     os.getenv(
         "H3_DIRECTOR_THREADS",
-        str(
-            RUNTIME[
-                "director"
-            ][
-                "threads"
-            ]
-        ),
+        str(RUNTIME["director"]["threads"]),
     )
 )
 
-
-DIRECTOR_KAGGLE_INPUT_ROOT = Path(
-    "/kaggle/input"
-)
+DIRECTOR_KAGGLE_INPUT_ROOT = Path("/kaggle/input")
 
 
 def director_enabled() -> bool:
-
     value = os.getenv(
         DIRECTOR_ENABLED_ENV,
         "1",
@@ -269,76 +190,34 @@ def director_enabled() -> bool:
 # GENERATION
 # ============================================================
 
-H3_FPS = int(
-    RUNTIME[
-        "generation"
-    ][
-        "fps"
-    ]
-)
+H3_FPS = int(RUNTIME["generation"]["fps"])
 
 H3_WIDTH = int(
     os.getenv(
         "H3_WIDTH",
-        str(
-            RUNTIME[
-                "generation"
-            ][
-                "width"
-            ]
-        ),
+        str(RUNTIME["generation"]["width"]),
     )
 )
 
 H3_HEIGHT = int(
     os.getenv(
         "H3_HEIGHT",
-        str(
-            RUNTIME[
-                "generation"
-            ][
-                "height"
-            ]
-        ),
+        str(RUNTIME["generation"]["height"]),
     )
 )
 
 H3_FRAMES_PER_SHOT = int(
     os.getenv(
         "H3_FRAMES_PER_SHOT",
-        str(
-            RUNTIME[
-                "generation"
-            ][
-                "frames_per_shot"
-            ]
-        ),
+        str(RUNTIME["generation"]["frames_per_shot"]),
     )
 )
 
-H3_STEPS = int(
-    RUNTIME[
-        "generation"
-    ][
-        "normal_steps"
-    ]
-)
-
-TURBO_STEPS = int(
-    RUNTIME[
-        "generation"
-    ][
-        "turbo_steps"
-    ]
-)
-
+H3_STEPS = int(RUNTIME["generation"]["normal_steps"])
+TURBO_STEPS = int(RUNTIME["generation"]["turbo_steps"])
 H3_REF_IMAGE_SIZE = str(
-    RUNTIME[
-        "generation"
-    ][
-        "ref_image_size"
-    ]
-)
+    RUNTIME["generation"]["ref_image_size"]
+).strip()
 
 
 # ============================================================
@@ -358,26 +237,14 @@ H3_MAX_REFERENCE_FILES = 12
 UPSCALE_WIDTH = int(
     os.getenv(
         "H3_UPSCALE_WIDTH",
-        str(
-            RUNTIME[
-                "upscale"
-            ][
-                "width"
-            ]
-        ),
+        str(RUNTIME["upscale"]["width"]),
     )
 )
 
 UPSCALE_HEIGHT = int(
     os.getenv(
         "H3_UPSCALE_HEIGHT",
-        str(
-            RUNTIME[
-                "upscale"
-            ][
-                "height"
-            ]
-        ),
+        str(RUNTIME["upscale"]["height"]),
     )
 )
 
@@ -386,29 +253,109 @@ UPSCALE_HEIGHT = int(
 # FINAL DELIVERY
 # ============================================================
 
-DELIVERY_WIDTH = int(
-    RUNTIME[
-        "delivery"
-    ][
-        "width"
-    ]
+DELIVERY_WIDTH = int(RUNTIME["delivery"]["width"])
+DELIVERY_HEIGHT = int(RUNTIME["delivery"]["height"])
+DELIVERY_FPS = int(RUNTIME["delivery"]["fps"])
+
+
+# ============================================================
+# STORYBOARD SERVER
+# ============================================================
+
+STORYBOARD_HOST = str(
+    os.getenv(
+        "H3_STORYBOARD_HOST",
+        str(RUNTIME["storyboard"]["host"]),
+    )
+).strip()
+
+STORYBOARD_PORT = int(
+    os.getenv(
+        "H3_STORYBOARD_PORT",
+        str(RUNTIME["storyboard"]["port"]),
+    )
 )
 
-DELIVERY_HEIGHT = int(
-    RUNTIME[
-        "delivery"
-    ][
-        "height"
-    ]
-)
+GRADIO_SHARE_ENV = "H3_GRADIO_SHARE"
 
-DELIVERY_FPS = int(
-    RUNTIME[
-        "delivery"
-    ][
-        "fps"
+
+def storyboard_share_enabled() -> bool:
+    value = os.getenv(
+        GRADIO_SHARE_ENV,
+        "1",
+    ).strip().lower()
+
+    return value in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+# ============================================================
+# BASIC RUNTIME VALIDATION
+# ============================================================
+
+def validate_runtime_values() -> None:
+    positive = (
+        ("H3_FPS", H3_FPS),
+        ("H3_WIDTH", H3_WIDTH),
+        ("H3_HEIGHT", H3_HEIGHT),
+        ("H3_FRAMES_PER_SHOT", H3_FRAMES_PER_SHOT),
+        ("H3_STEPS", H3_STEPS),
+        ("TURBO_STEPS", TURBO_STEPS),
+        ("UPSCALE_WIDTH", UPSCALE_WIDTH),
+        ("UPSCALE_HEIGHT", UPSCALE_HEIGHT),
+        ("DELIVERY_WIDTH", DELIVERY_WIDTH),
+        ("DELIVERY_HEIGHT", DELIVERY_HEIGHT),
+        ("DELIVERY_FPS", DELIVERY_FPS),
+        ("DIRECTOR_N_CTX", DIRECTOR_N_CTX),
+        ("DIRECTOR_N_BATCH", DIRECTOR_N_BATCH),
+        ("DIRECTOR_MAX_TOKENS", DIRECTOR_MAX_TOKENS),
+        ("DIRECTOR_THREADS", DIRECTOR_THREADS),
+        ("STORYBOARD_PORT", STORYBOARD_PORT),
+    )
+
+    invalid = [
+        f"{name}={value}"
+        for name, value in positive
+        if value <= 0
     ]
-)
+
+    if invalid:
+        raise RuntimeError(
+            "Runtime configuration contains non-positive values: "
+            + ", ".join(invalid)
+        )
+
+    if not 0.0 <= DIRECTOR_TOP_P <= 1.0:
+        raise RuntimeError(
+            f"DIRECTOR_TOP_P must be between 0 and 1: {DIRECTOR_TOP_P}"
+        )
+
+    if DIRECTOR_TEMPERATURE < 0.0:
+        raise RuntimeError(
+            f"DIRECTOR_TEMPERATURE must be >= 0: {DIRECTOR_TEMPERATURE}"
+        )
+
+    for name, width, height in (
+        ("generation", H3_WIDTH, H3_HEIGHT),
+        ("upscale", UPSCALE_WIDTH, UPSCALE_HEIGHT),
+        ("delivery", DELIVERY_WIDTH, DELIVERY_HEIGHT),
+    ):
+        if width / height <= 0:
+            raise RuntimeError(
+                f"{name} dimensions are invalid: {width}x{height}"
+            )
+
+    if STORYBOARD_HOST == "":
+        raise RuntimeError(
+            "Storyboard host cannot be empty."
+        )
+
+
+validate_runtime_values()
 
 
 # ============================================================
@@ -416,14 +363,8 @@ DELIVERY_FPS = int(
 # ============================================================
 
 AI_STORY_MODE = "ai_story"
-
-PRESERVE_USER_STORY_MODE = (
-    "preserve_user_story"
-)
-
-EXPAND_USER_STORY_MODE = (
-    "expand_user_story"
-)
+PRESERVE_USER_STORY_MODE = "preserve_user_story"
+EXPAND_USER_STORY_MODE = "expand_user_story"
 
 VALID_STORY_MODES = {
     AI_STORY_MODE,
