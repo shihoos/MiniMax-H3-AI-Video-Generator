@@ -5,6 +5,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,8 @@ from typing import Any
 
 class ProductionCheckpoint:
     VERSION = 2
+    _update_locks: dict[str, threading.RLock] = {}
+    _update_locks_guard = threading.Lock()
     FILENAME = "director_checkpoint.json"
 
     def __init__(
@@ -33,6 +37,20 @@ class ProductionCheckpoint:
             parents=True,
             exist_ok=True,
         )
+
+    @classmethod
+    def _lock_for(
+        cls,
+        path: Path,
+    ) -> threading.RLock:
+        key = str(path.resolve())
+
+        with cls._update_locks_guard:
+            lock = cls._update_locks.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                cls._update_locks[key] = lock
+            return lock
 
     @staticmethod
     def digest_text(
@@ -226,21 +244,73 @@ class ProductionCheckpoint:
                 "Production checkpoint must be a JSON object."
             )
 
-        version = int(
-            data.get(
-                "checkpoint_version",
-                0,
+        try:
+            version = int(
+                data.get(
+                    "checkpoint_version",
+                    0,
+                )
             )
-        )
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise RuntimeError(
+                "Production checkpoint version is invalid."
+            ) from exc
 
-        if version not in {
-            1,
-            self.VERSION,
-        }:
+        if version not in {1, self.VERSION}:
             raise RuntimeError(
                 "Unsupported production checkpoint version: "
                 f"{version}."
             )
+
+        # Version-1 checkpoints predate the explicit user_input field.
+        # Migrate them in memory from the persisted planning payload so
+        # resume_latest/resume_production_plan remains usable. The next
+        # atomic update/save persists the migrated state as VERSION 2.
+        if version == 1:
+            if not str(
+                data.get(
+                    "user_input",
+                    "",
+                )
+                or ""
+            ).strip():
+                candidates = (
+                    data.get("director_plan"),
+                    data.get("base_plan"),
+                )
+
+                for candidate in candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    story = str(
+                        candidate.get(
+                            "story",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    if story:
+                        data["user_input"] = story
+                        break
+
+            data["checkpoint_version"] = self.VERSION
+
+            user_input = str(
+                data.get(
+                    "user_input",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if user_input:
+                data.setdefault(
+                    "user_input_sha256",
+                    self.digest_text(user_input),
+                )
 
         return data
 
@@ -263,17 +333,145 @@ class ProductionCheckpoint:
         session_id: str,
         updates: dict[str, Any],
     ) -> dict[str, Any]:
-        """Atomically update an existing checkpoint and return its new state."""
-        if not isinstance(updates, dict):
+        """Atomically read, merge, and persist one checkpoint state.
+
+        The production runner can update one checkpoint from multiple GPU
+        worker threads. A plain load -> modify -> save sequence loses updates
+        under concurrency. This method serializes read/modify/write per
+        checkpoint path and merges monotonic progress fields.
+        """
+        if not isinstance(
+            updates,
+            dict,
+        ):
             raise TypeError(
                 "Checkpoint updates must be a dictionary."
             )
 
-        state = self.load(session_id)
-        state.update(deepcopy(updates))
-        state["updated_at"] = __import__("datetime").datetime.now().isoformat()
-        self.save(session_id, state)
-        return state
+        path = self.path(
+            session_id
+        )
+        lock = self._lock_for(path)
+
+        with lock:
+            state = self.load(
+                session_id
+            )
+
+            merged = deepcopy(
+                updates
+            )
+
+            # Completed shots/scenes are monotonic during a production run.
+            # Union them with the durable state instead of replacing the
+            # current set with a stale worker snapshot.
+            for key in (
+                "completed_shot_ids",
+                "completed_scene_ids",
+            ):
+                if key in merged:
+                    existing = {
+                        str(value).strip()
+                        for value in (
+                            state.get(key, [])
+                            or []
+                        )
+                        if str(value).strip()
+                    }
+                    incoming = {
+                        str(value).strip()
+                        for value in (
+                            merged.get(key, [])
+                            or []
+                        )
+                        if str(value).strip()
+                    }
+                    merged[key] = sorted(
+                        existing | incoming
+                    )
+
+            # Render workers complete independently on different GPUs.
+            # Merge their per-shot records atomically so one worker cannot
+            # erase another worker's completed shot or GPU ownership.
+            if "completed_shots" in merged:
+                existing_shots = state.get(
+                    "completed_shots",
+                    {},
+                )
+                if not isinstance(
+                    existing_shots,
+                    dict,
+                ):
+                    existing_shots = {}
+
+                incoming_shots = merged.get(
+                    "completed_shots",
+                    {},
+                )
+                if not isinstance(
+                    incoming_shots,
+                    dict,
+                ):
+                    incoming_shots = {}
+
+                combined_shots = deepcopy(
+                    existing_shots
+                )
+                combined_shots.update(
+                    incoming_shots
+                )
+
+                merged[
+                    "completed_shots"
+                ] = combined_shots
+
+            # Keep completed_shot_ids synchronized with the durable
+            # completed_shots map.
+            durable_shots = merged.get(
+                "completed_shots",
+                {},
+            )
+            if isinstance(
+                durable_shots,
+                dict,
+            ):
+                merged[
+                    "completed_shot_ids"
+                ] = sorted(
+                    {
+                        str(shot_id).strip()
+                        for shot_id
+                        in durable_shots.keys()
+                        if str(shot_id).strip()
+                    }
+                    | {
+                        str(value).strip()
+                        for value
+                        in (
+                            merged.get(
+                                "completed_shot_ids",
+                                [],
+                            )
+                            or []
+                        )
+                        if str(value).strip()
+                    }
+                )
+
+            state.update(
+                merged
+            )
+
+            state["updated_at"] = (
+                datetime.now().isoformat()
+            )
+
+            self.save(
+                session_id,
+                state,
+            )
+
+            return state
 
     def mark_rendering(
         self,
