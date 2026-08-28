@@ -1,26 +1,15 @@
 from __future__ import annotations
 
-import os
 import threading
-import traceback
+import time
 from collections import deque
 
 
-SCHEDULER_JOIN_TIMEOUT_SECONDS = float(
-    os.getenv(
-        "H3_SCHEDULER_JOIN_TIMEOUT",
-        str(6 * 60 * 60),
-    )
-)
-
-
 class GPUScheduler:
-    """Run independent scene jobs across GPUs without feeding new jobs after failure."""
+    """Run independent jobs across all available GPUs with deterministic load balancing."""
 
     def __init__(self, gpu_ids=None):
-        self.gpu_ids = sorted({
-            int(gpu) for gpu in (gpu_ids if gpu_ids is not None else [0])
-        })
+        self.gpu_ids = sorted({int(gpu) for gpu in (gpu_ids if gpu_ids is not None else [0])})
         if not self.gpu_ids:
             raise ValueError("At least one GPU is required.")
 
@@ -38,21 +27,14 @@ class GPUScheduler:
                     if not indexed_jobs:
                         return
                     index, job = indexed_jobs.popleft()
+                started = time.monotonic()
                 try:
                     result = worker_function(gpu_id, job)
                     with result_lock:
-                        results.append((index, result))
+                        results.append((index, result, gpu_id, time.monotonic() - started))
                 except Exception as error:
                     with result_lock:
-                        failures.append(
-                            (
-                                gpu_id,
-                                index,
-                                job,
-                                error,
-                                traceback.format_exc(),
-                            )
-                        )
+                        failures.append((gpu_id, index, job, error, time.monotonic() - started))
                     stop_event.set()
                     return
 
@@ -61,49 +43,21 @@ class GPUScheduler:
                 target=worker,
                 args=(gpu_id,),
                 name=f"h3-gpu-{gpu_id}",
-                daemon=False,
+                daemon=True,
             )
             for gpu_id in self.gpu_ids
         ]
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(
-                timeout=SCHEDULER_JOIN_TIMEOUT_SECONDS
-            )
-
-        alive = [
-            thread.name
-            for thread in threads
-            if thread.is_alive()
-        ]
-
-        if alive:
-            stop_event.set()
-            for thread in threads:
-                if thread.is_alive():
-                    thread.join(
-                        timeout=5.0
-                    )
-
-            raise TimeoutError(
-                "GPU scheduler workers did not finish within "
-                f"{SCHEDULER_JOIN_TIMEOUT_SECONDS}s: "
-                + ", ".join(alive)
-            )
+            thread.join()
 
         if failures:
             messages = "\n".join(
-                (
-                    f"GPU {gpu}: job {job!r} failed:\n"
-                    f"{traceback_text}"
-                )
-                for gpu, _index, job, _error, traceback_text
-                in failures
+                f"GPU {gpu}: job {job!r} failed after {duration:.1f}s: {error}"
+                for gpu, _index, job, error, duration in failures
             )
-            raise RuntimeError(
-                "GPU jobs failed:\n" + messages
-            )
+            raise RuntimeError("GPU jobs failed:\n" + messages)
 
         results.sort(key=lambda item: item[0])
-        return [result for _index, result in results]
+        return [result for _index, result, _gpu_id, _duration in results]
