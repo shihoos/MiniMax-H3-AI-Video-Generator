@@ -10,6 +10,14 @@ from datetime import datetime
 from pathlib import Path
 
 
+from planner.config import (
+    GRADIO_SHARE_ENV,
+    STORYBOARD_HOST,
+    STORYBOARD_PORT,
+    storyboard_share_enabled,
+)
+
+
 ROOT = (
     Path(__file__)
     .resolve()
@@ -104,14 +112,26 @@ class ProductionController:
             / "story_preview.json"
         )
 
-        plan_path.write_text(
-            json.dumps(
-                plan,
-                indent=2,
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        temporary = plan_path.with_name(
+            f".{plan_path.name}.{uuid.uuid4().hex}.tmp"
         )
+
+        try:
+            temporary.write_text(
+                json.dumps(
+                    plan,
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            temporary.replace(
+                plan_path
+            )
+        finally:
+            temporary.unlink(
+                missing_ok=True
+            )
 
         return (
             production_id,
@@ -465,9 +485,16 @@ class ProductionController:
             f"**Characters:** {len(characters)}\n\n"
             f"**Scenes:** {len(scenes)}\n\n"
             f"**Shots:** {len(shots)}\n\n"
-            "**Production:** H3 Turbo 8-step + "
-            "3D latent upscale + Ultimate Upscale\n\n"
-            "**Delivery:** 1280×720"
+            f"**Production profile:** "
+            f"{plan.get('profile', 'base')}\n\n"
+            f"**Workflow:** "
+            f"{plan.get('workflow_mode', 'auto')}\n\n"
+            f"**Upscale:** "
+            f"{'enabled' if plan.get('upscale_enabled', False) else 'disabled'}\n\n"
+            f"**Delivery:** "
+            f"{plan.get('delivery_width', 1280)}×"
+            f"{plan.get('delivery_height', 720)} @ "
+            f"{plan.get('delivery_fps', 24)} FPS"
         )
 
         approval = (
@@ -631,12 +658,9 @@ class ProductionController:
                     None,
             }
 
-            plan[
-                "production_id"
-            ] = (
-                self._production_id()
-            )
-
+            # ProductionOrchestrator already created and checkpointed the
+            # canonical production_id. Preserve it so the UI storyboard and
+            # director checkpoint refer to the same production session.
             (
                 _,
                 plan_path,
@@ -1054,10 +1078,12 @@ class ProductionController:
                 "### VIDEO GENERATION COMPLETE ✅\n\n"
                 f"Production: `{result['production_id']}`\n\n"
                 f"Final video: `{final_video}`\n\n"
-                "Profile: H3 Turbo 8-step\n\n"
-                "Upscale: H3 3D latent + "
-                "MMH3 Ultimate Upscale\n\n"
-                "Delivery: 1280×720",
+                f"Profile: `{plan.get('profile', 'base')}`\n\n"
+                f"Upscale: `{'enabled' if plan.get('upscale_enabled', False) else 'disabled'}`\n\n"
+                f"Delivery: "
+                f"{plan.get('delivery_width', 1280)}×"
+                f"{plan.get('delivery_height', 720)} @ "
+                f"{plan.get('delivery_fps', 24)} FPS",
                 str(
                     final_video
                 ),
@@ -1501,9 +1527,9 @@ def serve_storyboard_gradio(
     )
 
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=8765,
-        share=True,
+        server_name=STORYBOARD_HOST,
+        server_port=STORYBOARD_PORT,
+        share=storyboard_share_enabled(),
         show_error=True,
     )
 
