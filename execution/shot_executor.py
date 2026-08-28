@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 
 from planner.config import (
@@ -27,6 +28,8 @@ class ShotExecutor:
         comfy_client,
         project_root,
         comfy_input_dir,
+        gpu_id: int | None = None,
+        metrics_path: Path | None = None,
     ):
 
         from execution.h3_workflow_builder import (
@@ -305,151 +308,80 @@ class ShotExecutor:
 
     @staticmethod
     def _select_savevideo_output(
-        client,
         workflow: dict,
         history: dict,
+        *,
         shot_id: str,
     ) -> dict:
+        """Select the video artifact emitted by the workflow's SaveVideo node.
+
+        Never rely on list ordering from ComfyUI history: multiple nodes can
+        produce video artifacts and their ordering is not a stable API.
         """
-        Select exactly one production video.
+        if not isinstance(workflow, dict):
+            raise RuntimeError(f"{shot_id}: submitted workflow is not a mapping.")
+        if not isinstance(history, dict):
+            raise RuntimeError(f"{shot_id}: ComfyUI history is not a mapping.")
 
-        The converted API workflow is authoritative: when it exposes one or
-        more SaveVideo nodes, inspect only those nodes in the execution
-        history. Never choose a video merely because it happens to be the
-        last item returned by find_video_outputs().
-        """
-        workflow_nodes = (
-            workflow
-            if isinstance(workflow, dict)
-            else {}
-        )
+        save_nodes = []
+        for node_id, node in workflow.items():
+            if isinstance(node, dict) and node.get("class_type") == "SaveVideo":
+                save_nodes.append(str(node_id))
 
-        history_outputs = (
-            history.get(
-                "outputs",
-                {},
+        if len(save_nodes) != 1:
+            raise RuntimeError(
+                f"{shot_id}: expected exactly one SaveVideo node in the submitted "
+                f"workflow, found {len(save_nodes)}."
             )
-            if isinstance(history, dict)
-            else {}
-        )
 
-        if not isinstance(
-            history_outputs,
-            dict,
-        ):
-            history_outputs = {}
-
-        save_node_ids = [
-            str(node_id)
-            for node_id, node
-            in workflow_nodes.items()
-            if isinstance(
-                node,
-                dict,
+        save_node_id = save_nodes[0]
+        node_history = history.get("outputs", {}).get(save_node_id)
+        if not isinstance(node_history, dict):
+            raise RuntimeError(
+                f"{shot_id}: ComfyUI history has no output record for SaveVideo "
+                f"node {save_node_id}."
             )
-            and str(
-                node.get(
-                    "class_type",
-                    "",
-                )
-                or ""
-            ).strip()
-            == "SaveVideo"
-        ]
 
         candidates = []
-
-        for node_id in save_node_ids:
-            node_history = history_outputs.get(
-                node_id
-            )
-
-            if not isinstance(
-                node_history,
-                dict,
-            ):
+        for output_list in node_history.values():
+            if not isinstance(output_list, list):
                 continue
-
-            for value in node_history.values():
-
-                if not isinstance(
-                    value,
-                    list,
-                ):
+            for item in output_list:
+                if not isinstance(item, dict):
                     continue
+                filename = str(item.get("filename") or "").strip()
+                if filename and Path(filename).suffix.lower() in {
+                    ".mp4", ".mov", ".mkv", ".webm"
+                }:
+                    candidates.append({
+                        "filename": filename,
+                        "subfolder": str(item.get("subfolder") or ""),
+                        "type": str(item.get("type") or "output"),
+                    })
 
-                for item in value:
-
-                    if not isinstance(
-                        item,
-                        dict,
-                    ):
-                        continue
-
-                    filename = str(
-                        item.get(
-                            "filename",
-                            "",
-                        )
-                        or ""
-                    ).strip()
-
-                    if not filename:
-                        continue
-
-                    if Path(
-                        filename
-                    ).suffix.lower() not in {
-                        ".mp4",
-                        ".mov",
-                        ".mkv",
-                        ".webm",
-                    }:
-                        continue
-
-                    candidates.append(
-                        {
-                            "filename": filename,
-                            "subfolder": str(
-                                item.get(
-                                    "subfolder",
-                                    "",
-                                )
-                                or ""
-                            ),
-                            "type": str(
-                                item.get(
-                                    "type",
-                                    "output",
-                                )
-                                or "output"
-                            ),
-                            "node_id": node_id,
-                        }
-                    )
-
-        if len(candidates) == 1:
-            return candidates[0]
-
-        if len(candidates) > 1:
+        if len(candidates) != 1:
             raise RuntimeError(
-                f"{shot_id}: multiple SaveVideo outputs were produced; "
-                "the production workflow must expose exactly one final video."
+                f"{shot_id}: expected exactly one video artifact from SaveVideo "
+                f"node {save_node_id}, found {len(candidates)}."
             )
 
-        # Strict fallback for legacy/mock histories that don't retain the
-        # converted workflow graph. We still require exactly one video.
-        outputs = client.find_video_outputs(
-            history
-        )
+        return candidates[0]
 
-        if len(outputs) != 1:
-            raise RuntimeError(
-                f"{shot_id}: expected exactly one production video output, "
-                f"found {len(outputs)}."
-            )
+    @staticmethod
+    def _is_oom_error(error: BaseException) -> bool:
+        text = str(error).lower()
+        return any(token in text for token in (
+            "out of memory",
+            "cuda oom",
+            "cuda outofmemory",
+            "outofmemoryerror",
+            "cublas_status_alloc_failed",
+            "not enough memory",
+        ))
 
-        return outputs[0]
+    def _record(self, event: str, **fields) -> None:
+        if self.metrics is not None:
+            self.metrics.record(event, gpu_id=(None if self.gpu_id < 0 else self.gpu_id), **fields)
 
     def execute_shot(
         self,
@@ -568,45 +500,63 @@ class ShotExecutor:
                 ref_image_size=self._resolve_ref_image_size(shot),
             )
 
-        prompt_id = (
-            self.client.queue_prompt(
-                workflow
-            )
-        )
+        shot_id = str(shot.get("shot_id") or "")
+        max_oom_retries = max(0, int(os.getenv("H3_OOM_MAX_RETRIES", "1")))
+        oom_retries = 0
+        started = time.monotonic()
 
-        history = self.client.wait_for_prompt(
-            prompt_id,
-            poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
-            timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
-        )
+        while True:
+            attempt_started = time.monotonic()
+            self._record("shot_attempt_started", shot_id=shot_id, workflow_mode=workflow_mode, upscale=bool(upscale), attempt=oom_retries + 1)
+            try:
+                prompt_id = self.client.queue_prompt(workflow)
+                queued_at = time.monotonic()
+                self._record("shot_queued", shot_id=shot_id, prompt_id=prompt_id, queue_submit_seconds=queued_at - attempt_started, attempt=oom_retries + 1)
 
-        output = self._select_savevideo_output(
-            self.client,
-            workflow,
-            history,
-            str(
-                shot.get(
-                    "shot_id",
-                    "",
+                history = self.client.wait_for_prompt(
+                    prompt_id,
+                    poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
+                    timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
                 )
-                or ""
-            ),
-        )
+                output = self._select_savevideo_output(
+                    workflow,
+                    history,
+                    shot_id=shot_id,
+                )
+                destination = output_dir / f"{shot['shot_id']}.mp4"
+                result = self.client.download_file(
+                    filename=output["filename"],
+                    subfolder=output["subfolder"],
+                    file_type=output["type"],
+                    destination=destination,
+                )
+                self._record(
+                    "shot_completed",
+                    shot_id=shot_id,
+                    prompt_id=prompt_id,
+                    attempt=oom_retries + 1,
+                    oom_retries=oom_retries,
+                    total_seconds=time.monotonic() - started,
+                    output_bytes=Path(result).stat().st_size,
+                )
+                return result
+            except Exception as error:
+                self._record(
+                    "shot_failed_attempt",
+                    shot_id=shot_id,
+                    attempt=oom_retries + 1,
+                    oom=self._is_oom_error(error),
+                    error_type=type(error).__name__,
+                    error=str(error)[-2000:],
+                    attempt_seconds=time.monotonic() - attempt_started,
+                )
+                if not self._is_oom_error(error) or oom_retries >= max_oom_retries:
+                    raise
+                oom_retries += 1
+                self._record("shot_oom_recovery", shot_id=shot_id, attempt=oom_retries + 1)
+                try:
+                    self.client.free_memory(unload_models=False, free_memory=True)
+                except Exception as recovery_error:
+                    self._record("shot_oom_recovery_free_failed", shot_id=shot_id, error=str(recovery_error)[-1000:])
+                time.sleep(min(5.0, 1.0 * (2 ** (oom_retries - 1))))
 
-        destination = (
-            output_dir
-            / f"{shot['shot_id']}.mp4"
-        )
-
-        return self.client.download_file(
-            filename=output[
-                "filename"
-            ],
-            subfolder=output[
-                "subfolder"
-            ],
-            file_type=output[
-                "type"
-            ],
-            destination=destination,
-        )
