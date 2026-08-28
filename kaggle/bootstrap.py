@@ -19,9 +19,13 @@ COMFY = ROOT / "ComfyUI"
 CUSTOM = COMFY / "custom_nodes"
 MODELS = COMFY / "models"
 
-KAGGLE_INPUT = Path(
-    "/kaggle/input"
-)
+_configured_input_root = os.getenv("H3_INPUT_ROOT", "").strip()
+if _configured_input_root:
+    KAGGLE_INPUT = Path(_configured_input_root).expanduser().resolve()
+elif Path("/kaggle/input").is_dir():
+    KAGGLE_INPUT = Path("/kaggle/input").resolve()
+else:
+    KAGGLE_INPUT = (ROOT / "input").resolve()
 
 MODEL_MANIFEST = (
     ROOT
