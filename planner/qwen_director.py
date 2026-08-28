@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from planner.cinematic_compiler import CinematicCompiler
+from pipeline.production_checkpoint import ProductionCheckpoint
 
 from planner.config import (
     AI_STORY_MODE,
@@ -2893,6 +2894,74 @@ non_diegetic_music, negative_prompt, continuity_notes.
         }
 
     # ========================================================
+    # CHECKPOINT / RESUME
+    # ========================================================
+
+    def _checkpoint_state(
+        self,
+        session_id: str,
+        mode: str,
+        user_input: str,
+        base_plan: dict,
+        director_plan: dict,
+        status: str,
+        stage: str,
+        completed_scene_ids: list[str],
+        current_scene_id: str = "",
+        error: str = "",
+    ) -> dict:
+
+        checkpoint = ProductionCheckpoint(
+            self.project_root
+        )
+
+        return {
+            "mode": mode,
+            "user_input_sha256": checkpoint.digest_text(
+                user_input
+            ),
+            "director_sha256": checkpoint.digest_file(
+                Path(__file__)
+            ),
+            "status": status,
+            "stage": stage,
+            "completed_scene_ids": list(
+                completed_scene_ids
+            ),
+            "current_scene_id": current_scene_id,
+            "error": error,
+            "base_plan": deepcopy(
+                base_plan
+            ),
+            "director_plan": deepcopy(
+                director_plan
+            ),
+        }
+
+    def _save_checkpoint(
+        self,
+        checkpoint_store: ProductionCheckpoint | None,
+        session_id: str | None,
+        state: dict,
+    ) -> None:
+
+        if checkpoint_store is None or not session_id:
+            return
+
+        try:
+            checkpoint_store.save(
+                session_id,
+                state,
+            )
+        except Exception as exc:
+            # Checkpointing must never make a valid generation fail.
+            print(
+                "[QWEN] checkpoint_save_failed",
+                str(exc),
+                flush=True,
+            )
+
+    # ========================================================
     # GENERATE
     # ========================================================
 
@@ -2902,6 +2971,8 @@ non_diegetic_music, negative_prompt, continuity_notes.
         mode: str,
         user_input: str,
         base_plan: dict,
+        checkpoint_session_id: str | None = None,
+        resume_state: dict | None = None,
     ) -> dict:
 
         if not director_enabled():
@@ -2922,6 +2993,19 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 f"Unsupported story mode: {mode}"
             )
 
+        if (resume_state or {}).get("stage") == "director_complete":
+            prior = deepcopy(
+                (resume_state or {}).get("director_plan", {}) or {}
+            )
+            if prior.get("story") and prior.get("scenes") and prior.get("shots"):
+                return {
+                    "enabled": True,
+                    "plan": prior,
+                    "director_notes": str(
+                        prior.get("director_notes", "") or ""
+                    ),
+                }
+
         self.load()
 
         if self._llama is None:
@@ -2929,6 +3013,52 @@ non_diegetic_music, negative_prompt, continuity_notes.
             raise RuntimeError(
                 "Qwen director model failed to load."
             )
+
+        checkpoint_store = (
+            ProductionCheckpoint(
+                self.project_root
+            )
+            if checkpoint_session_id
+            else None
+        )
+
+        prior_director_plan = (
+            deepcopy(
+                (resume_state or {}).get(
+                    "director_plan",
+                    {},
+                )
+                or {}
+            )
+        )
+
+        prior_shots = list(
+            prior_director_plan.get(
+                "shots",
+                [],
+            )
+            or []
+        )
+
+        resume_stage = str(
+            (resume_state or {}).get(
+                "stage",
+                "",
+            )
+            or ""
+        ).strip()
+
+        resuming = bool(
+            resume_state
+            and prior_director_plan
+            and resume_stage in {
+                "initialized",
+                "narrative",
+                "metadata",
+                "shots",
+                "director_complete",
+            }
+        )
 
         temperature, top_p = (
             self._sampling_for_mode(
@@ -2940,17 +3070,38 @@ non_diegetic_music, negative_prompt, continuity_notes.
         # PASS 1A: narrative
         # ----------------------------------------------------
 
-        if mode == PRESERVE_USER_STORY_MODE:
+        if resuming and prior_director_plan.get(
+            "story"
+        ):
 
-            story = (
-                self._normalize_story(
-                    user_input
+            story = self._normalize_story(
+                prior_director_plan.get(
+                    "story",
+                    "",
                 )
             )
 
+            story_plan = deepcopy(
+                prior_director_plan
+            )
+
+            self._current_visual_language = (
+                self._sanitize_visual_language(
+                    story_plan.get(
+                        "visual_language",
+                        {},
+                    )
+                )
+            )
+
+        elif mode == PRESERVE_USER_STORY_MODE:
+
+            story = self._normalize_story(
+                user_input
+            )
+
             story_plan = {
-                "story":
-                    story,
+                "story": story,
             }
 
             self._current_visual_language = {}
@@ -2974,20 +3125,18 @@ non_diegetic_music, negative_prompt, continuity_notes.
 
             try:
 
-                story = (
-                    self._chat_text(
-                        story_system,
-                        story_user,
-                        minimum_completion=350,
-                        temperature=temperature,
-                        top_p=top_p,
-                        call_name=(
-                            "ai_story_text_pass"
-                            if mode == AI_STORY_MODE
-                            else "expand_story_text_pass"
-                        ),
-                        max_completion=1600,
-                    )
+                story = self._chat_text(
+                    story_system,
+                    story_user,
+                    minimum_completion=350,
+                    temperature=temperature,
+                    top_p=top_p,
+                    call_name=(
+                        "ai_story_text_pass"
+                        if mode == AI_STORY_MODE
+                        else "expand_story_text_pass"
+                    ),
+                    max_completion=1600,
                 )
 
                 self._validate_mode_output(
@@ -3008,26 +3157,24 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     "Do not output JSON or commentary."
                 )
 
-                story = (
-                    self._chat_text(
-                        story_system,
-                        retry_user,
-                        minimum_completion=350,
-                        temperature=min(
-                            0.85,
-                            max(
-                                0.70,
-                                temperature + 0.10,
-                            ),
+                story = self._chat_text(
+                    story_system,
+                    retry_user,
+                    minimum_completion=350,
+                    temperature=min(
+                        0.85,
+                        max(
+                            0.70,
+                            temperature + 0.10,
                         ),
-                        top_p=0.92,
-                        call_name=(
-                            "ai_story_text_retry"
-                            if mode == AI_STORY_MODE
-                            else "expand_story_text_retry"
-                        ),
-                        max_completion=1600,
-                    )
+                    ),
+                    top_p=0.92,
+                    call_name=(
+                        "ai_story_text_retry"
+                        if mode == AI_STORY_MODE
+                        else "expand_story_text_retry"
+                    ),
+                    max_completion=1600,
                 )
 
                 self._validate_mode_output(
@@ -3037,58 +3184,82 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 )
 
             story_plan = {
-                "story":
-                    story,
+                "story": story,
             }
 
         # ----------------------------------------------------
         # PASS 1B: production metadata
         # ----------------------------------------------------
 
-        metadata_response = self._chat_json(
-            self._metadata_director_system(
-                mode
-            ),
-            self._metadata_director_user(
-                mode,
-                story,
-            ),
-            minimum_completion=600,
-            temperature=(
-                0.20
-                if mode == PRESERVE_USER_STORY_MODE
-                else temperature
-            ),
-            top_p=(
-                0.82
-                if mode == PRESERVE_USER_STORY_MODE
-                else top_p
-            ),
-            call_name=(
-                "preserve_metadata_pass"
-                if mode == PRESERVE_USER_STORY_MODE
-                else (
-                    "ai_story_metadata_pass"
-                    if mode == AI_STORY_MODE
-                    else "expand_story_metadata_pass"
-                )
-            ),
-            max_completion=2600,
-            json_mode=True,
-        )
-
-        story_plan.update(
-            metadata_response
-        )
-
-        story = (
-            self._normalize_story(
+        metadata_ready = (
+            resuming
+            and resume_stage in {
+                "metadata",
+                "shots",
+            }
+            and isinstance(
                 story_plan.get(
-                    "story",
-                    story,
-                )
-                or story
+                    "characters"
+                ),
+                list,
             )
+            and isinstance(
+                story_plan.get(
+                    "scenes"
+                ),
+                list,
+            )
+            and bool(
+                story_plan.get(
+                    "scenes"
+                )
+            )
+        )
+
+        if not metadata_ready:
+
+            metadata_response = self._chat_json(
+                self._metadata_director_system(
+                    mode
+                ),
+                self._metadata_director_user(
+                    mode,
+                    story,
+                ),
+                minimum_completion=600,
+                temperature=(
+                    0.20
+                    if mode == PRESERVE_USER_STORY_MODE
+                    else temperature
+                ),
+                top_p=(
+                    0.82
+                    if mode == PRESERVE_USER_STORY_MODE
+                    else top_p
+                ),
+                call_name=(
+                    "preserve_metadata_pass"
+                    if mode == PRESERVE_USER_STORY_MODE
+                    else (
+                        "ai_story_metadata_pass"
+                        if mode == AI_STORY_MODE
+                        else "expand_story_metadata_pass"
+                    )
+                ),
+                max_completion=2600,
+                json_mode=True,
+            )
+
+            story_plan.update(
+                metadata_response
+            )
+
+        story = self._normalize_story(
+            story_plan.get(
+                "story",
+                story,
+            )
+            or story
         )
 
         director_notes = str(
@@ -3115,30 +3286,21 @@ non_diegetic_music, negative_prompt, continuity_notes.
         )
 
         # ----------------------------------------------------
-        # CHARACTERS
+        # CHARACTERS / SCENES
         # ----------------------------------------------------
 
-        characters = (
-            self._sanitize_characters(
-                story_plan.get(
-                    "characters",
-                    [],
-                )
+        characters = self._sanitize_characters(
+            story_plan.get(
+                "characters",
+                [],
             )
         )
 
         if not characters:
-
-            characters = (
-                self._recover_characters(
-                    mode,
-                    story,
-                )
+            characters = self._recover_characters(
+                mode,
+                story,
             )
-
-        # ----------------------------------------------------
-        # SCENES
-        # ----------------------------------------------------
 
         character_names = {
             str(
@@ -3147,8 +3309,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     "",
                 )
             ).strip().lower()
-            for character
-            in characters
+            for character in characters
             if str(
                 character.get(
                     "name",
@@ -3157,29 +3318,23 @@ non_diegetic_music, negative_prompt, continuity_notes.
             ).strip()
         }
 
-        scenes = (
-            self._sanitize_scenes(
-                story_plan.get(
-                    "scenes",
-                    [],
-                ),
-                character_names,
-            )
+        scenes = self._sanitize_scenes(
+            story_plan.get(
+                "scenes",
+                [],
+            ),
+            character_names,
         )
 
         if not scenes:
-
-            scenes = (
-                self._recover_scenes(
-                    mode,
-                    story,
-                    characters,
-                    character_names,
-                )
+            scenes = self._recover_scenes(
+                mode,
+                story,
+                characters,
+                character_names,
             )
 
         if not scenes:
-
             fallback_characters, fallback_scenes = (
                 self._build_deterministic_fallback(
                     story
@@ -3187,13 +3342,9 @@ non_diegetic_music, negative_prompt, continuity_notes.
             )
 
             if not characters:
-
-                characters = (
-                    self._sanitize_characters(
-                        fallback_characters
-                    )
+                characters = self._sanitize_characters(
+                    fallback_characters
                 )
-
                 character_names = {
                     str(
                         character.get(
@@ -3201,8 +3352,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
                             "",
                         )
                     ).strip().lower()
-                    for character
-                    in characters
+                    for character in characters
                     if str(
                         character.get(
                             "name",
@@ -3211,274 +3361,371 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     ).strip()
                 }
 
-            scenes = (
-                self._sanitize_scenes(
-                    fallback_scenes,
-                    character_names,
-                )
+            scenes = self._sanitize_scenes(
+                fallback_scenes,
+                character_names,
             )
 
         if not scenes:
-
             raise RuntimeError(
                 "Qwen director produced no usable scenes."
             )
 
-        # ----------------------------------------------------
-        # PASS 2: cinematography
-        # ----------------------------------------------------
+        director_plan = {
+            "story": story,
+            "story_mode": mode,
+            "director_notes": director_notes,
+            "visual_language": visual_language,
+            "characters": characters,
+            "scenes": scenes,
+            "shots": prior_shots,
+        }
 
-        all_shots: list[dict] = []
+        completed_scene_ids = []
+        prior_by_scene = {}
 
-        shot_temperature, shot_top_p = (
-            self._shot_sampling()
-        )
+        for shot in prior_shots:
+            if not isinstance(shot, dict):
+                continue
+            sid = str(
+                shot.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+            if sid:
+                prior_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(shot)
 
-        # Quality-first contract:
-        # one scene enters each Qwen call and exactly two shots are requested.
-        # Missing positions are recovered only when Qwen returns too few shots;
-        # the final mechanical fallback belongs to CinematicCompiler.
         for scene in scenes:
-
-            scene_id = str(
+            sid = str(
                 scene.get(
                     "scene_id",
                     "",
                 )
                 or ""
             ).strip()
+            if len(prior_by_scene.get(sid, [])) >= 2:
+                completed_scene_ids.append(sid)
 
-            scene_user = (
-                self._shot_director_user(
+        if checkpoint_store and checkpoint_session_id:
+            self._save_checkpoint(
+                checkpoint_store,
+                checkpoint_session_id,
+                self._checkpoint_state(
+                    checkpoint_session_id,
+                    mode,
+                    user_input,
+                    base_plan,
+                    director_plan,
+                    "running",
+                    "shots",
+                    completed_scene_ids,
+                    completed_scene_ids[-1]
+                    if completed_scene_ids
+                    else "",
+                ),
+            )
+
+        # ----------------------------------------------------
+        # PASS 2: cinematography, one scene at a time
+        # ----------------------------------------------------
+
+        all_shots: list[dict] = []
+        shot_temperature, shot_top_p = self._shot_sampling()
+
+        try:
+
+            for scene in scenes:
+
+                scene_id = str(
+                    scene.get(
+                        "scene_id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                existing_scene_shots = [
+                    deepcopy(item)
+                    for item
+                    in prior_by_scene.get(
+                        scene_id,
+                        [],
+                    )[:2]
+                    if isinstance(
+                        item,
+                        dict,
+                    )
+                ]
+
+                # A previously completed scene is never regenerated.
+                if len(existing_scene_shots) >= 2:
+
+                    all_shots.extend(
+                        existing_scene_shots[:2]
+                    )
+
+                    continue
+
+                scene_user = self._shot_director_user(
                     story,
                     characters,
                     scene,
                     visual_language,
                 )
-            )
 
-            scene_shots: list[dict] = []
-
-            try:
-
-                shot_plan = self._chat_json(
-                    self._shot_director_system(),
-                    scene_user,
-                    minimum_completion=180,
-                    temperature=shot_temperature,
-                    top_p=shot_top_p,
-                    call_name=(
-                        "shot_pass:"
-                        + scene_id
-                    ),
-                    max_completion=900,
-                    json_mode=True,
-                    disable_thinking=True,
+                scene_shots = list(
+                    existing_scene_shots
                 )
 
-                scene_shots = (
-                    self._sanitize_shots(
-                        self._normalize_shot_response(
-                            shot_plan
-                        ),
-                        scene,
-                        character_names,
-                    )
-                )
+                # Resume a partially completed scene by requesting only
+                # its missing companion shot instead of regenerating shot 1.
+                if not scene_shots:
 
-            except Exception as first_error:
+                    try:
 
-                print(
-                    "[QWEN]",
-                    "shot_retry",
-                    scene_id,
-                    str(
-                        first_error
-                    ),
-                    flush=True,
-                )
+                        shot_plan = self._chat_json(
+                            self._shot_director_system(),
+                            scene_user,
+                            minimum_completion=180,
+                            temperature=shot_temperature,
+                            top_p=shot_top_p,
+                            call_name=(
+                                "shot_pass:"
+                                + scene_id
+                            ),
+                            max_completion=900,
+                            json_mode=True,
+                            disable_thinking=True,
+                        )
 
-                retry_user = (
-                    scene_user
-                    + "\n\n"
-                    "RETRY: Return ONLY valid JSON with exactly 2 shots. "
-                    "Use only supplied characters. "
-                    "Use only the QWEN CREATIVE FIELDS. "
-                    "Keep every value concise. No reasoning or markdown."
-                )
-
-                try:
-
-                    shot_plan = self._chat_json(
-                        self._shot_director_system(),
-                        retry_user,
-                        minimum_completion=180,
-                        temperature=0.70,
-                        top_p=0.94,
-                        call_name=(
-                            "shot_retry:"
-                            + scene_id
-                        ),
-                        max_completion=900,
-                        json_mode=True,
-                        disable_thinking=True,
-                    )
-
-                    scene_shots = (
-                        self._sanitize_shots(
+                        scene_shots = self._sanitize_shots(
                             self._normalize_shot_response(
                                 shot_plan
                             ),
                             scene,
                             character_names,
                         )
-                    )
 
-                except Exception as retry_error:
+                    except Exception as first_error:
 
-                    print(
-                        "[QWEN]",
-                        "shot_retry_failed",
-                        scene_id,
-                        str(
-                            retry_error
-                        ),
-                        flush=True,
-                    )
+                        print(
+                            "[QWEN]",
+                            "shot_retry",
+                            scene_id,
+                            str(first_error),
+                            flush=True,
+                        )
 
-                    scene_shots = []
+                        retry_user = (
+                            scene_user
+                            + "\n\n"
+                            "RETRY: Return ONLY valid JSON with exactly 2 shots. "
+                            "Use only supplied characters. "
+                            "Keep every value concise. No reasoning or markdown."
+                        )
 
-            # If Qwen returned one good shot, ask for its companion.
-            if len(scene_shots) == 1:
+                        try:
 
-                existing = scene_shots[0]
+                            shot_plan = self._chat_json(
+                                self._shot_director_system(),
+                                retry_user,
+                                minimum_completion=180,
+                                temperature=0.70,
+                                top_p=0.94,
+                                call_name=(
+                                    "shot_retry:"
+                                    + scene_id
+                                ),
+                                max_completion=900,
+                                json_mode=True,
+                                disable_thinking=True,
+                            )
 
-                recovery_user = (
-                    scene_user
-                    + "\n\n"
-                    + json.dumps(
-                        {
-                            "existing_shot": {
-                                "camera_shot":
-                                    existing.get(
+                            scene_shots = self._sanitize_shots(
+                                self._normalize_shot_response(
+                                    shot_plan
+                                ),
+                                scene,
+                                character_names,
+                            )
+
+                        except Exception as retry_error:
+
+                            print(
+                                "[QWEN]",
+                                "shot_retry_failed",
+                                scene_id,
+                                str(retry_error),
+                                flush=True,
+                            )
+
+                            scene_shots = []
+
+                # Exactly one existing/generated shot: generate only the missing one.
+                if len(scene_shots) == 1:
+
+                    existing = scene_shots[0]
+
+                    recovery_user = (
+                        scene_user
+                        + "\n\n"
+                        + json.dumps(
+                            {
+                                "existing_shot": {
+                                    "camera_shot": existing.get(
                                         "camera_shot",
                                         "",
                                     ),
-                                "camera_movement":
-                                    existing.get(
+                                    "camera_movement": existing.get(
                                         "camera_movement",
                                         "",
                                     ),
-                                "lens_and_depth_of_field":
-                                    existing.get(
+                                    "lens_and_depth_of_field": existing.get(
                                         "lens_and_depth_of_field",
                                         "",
                                     ),
-                                "composition_notes":
-                                    existing.get(
+                                    "composition_notes": existing.get(
                                         "composition_notes",
                                         "",
                                     ),
-                            }
-                        },
-                        ensure_ascii=False,
-                        separators=(
-                            ",",
-                            ":",
-                        ),
-                    )
-                )
-
-                recovery_system = (
-                    self._shot_director_system()
-                    + "\n\n"
-                    "RECOVERY: Return exactly ONE additional "
-                    "distinct shot for this ONE scene. "
-                    "Do not duplicate the existing shot's "
-                    "framing, movement, lens, or composition."
-                )
-
-                try:
-
-                    recovery_plan = self._chat_json(
-                        recovery_system,
-                        recovery_user,
-                        minimum_completion=100,
-                        temperature=shot_temperature,
-                        top_p=shot_top_p,
-                        call_name=(
-                            "shot_missing_one:"
-                            + scene_id
-                        ),
-                        max_completion=320,
-                        json_mode=True,
-                        disable_thinking=True,
+                                }
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
                     )
 
-                    recovered = (
-                        self._sanitize_shots(
+                    recovery_system = (
+                        self._shot_director_system()
+                        + "\n\n"
+                        "RECOVERY: Return exactly ONE additional distinct shot "
+                        "for this ONE scene. Do not duplicate the existing shot's "
+                        "framing, movement, lens, or composition."
+                    )
+
+                    try:
+
+                        recovery_plan = self._chat_json(
+                            recovery_system,
+                            recovery_user,
+                            minimum_completion=100,
+                            temperature=shot_temperature,
+                            top_p=shot_top_p,
+                            call_name=(
+                                "shot_missing_one:"
+                                + scene_id
+                            ),
+                            max_completion=320,
+                            json_mode=True,
+                            disable_thinking=True,
+                        )
+
+                        recovered = self._sanitize_shots(
                             self._normalize_shot_response(
                                 recovery_plan
                             ),
                             scene,
                             character_names,
                         )
-                    )
 
-                    if recovered:
+                        if recovered:
+                            scene_shots.append(
+                                recovered[0]
+                            )
 
-                        scene_shots.append(
-                            recovered[0]
+                    except Exception as recovery_error:
+
+                        print(
+                            "[QWEN]",
+                            "shot_missing_one_failed",
+                            scene_id,
+                            str(recovery_error),
+                            flush=True,
                         )
 
-                except Exception as recovery_error:
+                # Never put a third Qwen shot into the plan.
+                scene_shots = scene_shots[:2]
+                all_shots.extend(
+                    scene_shots
+                )
 
-                    print(
-                        "[QWEN]",
-                        "shot_missing_one_failed",
+                if len(scene_shots) >= 2:
+                    if scene_id not in completed_scene_ids:
+                        completed_scene_ids.append(
+                            scene_id
+                        )
+
+                director_plan["shots"] = deepcopy(
+                    all_shots
+                )
+
+                self._save_checkpoint(
+                    checkpoint_store,
+                    checkpoint_session_id,
+                    self._checkpoint_state(
+                        checkpoint_session_id or "",
+                        mode,
+                        user_input,
+                        base_plan,
+                        director_plan,
+                        "running",
+                        "shots",
+                        completed_scene_ids,
                         scene_id,
-                        str(
-                            recovery_error
-                        ),
-                        flush=True,
-                    )
+                    ),
+                )
 
-            all_shots.extend(
-                scene_shots[:2]
+        except Exception as exc:
+
+            director_plan["shots"] = deepcopy(
+                all_shots
             )
 
-        # Qwen shot generation can fail or truncate without making the
-        # entire production invalid. Let CinematicCompiler fill any missing
-        # structural shot positions deterministically.
+            self._save_checkpoint(
+                checkpoint_store,
+                checkpoint_session_id,
+                self._checkpoint_state(
+                    checkpoint_session_id or "",
+                    mode,
+                    user_input,
+                    base_plan,
+                    director_plan,
+                    "failed",
+                    "shots",
+                    completed_scene_ids,
+                    scene_id if 'scene_id' in locals() else "",
+                    str(exc),
+                ),
+            )
+
+            raise
+
+        # No Qwen-shot failure is fatal here: the deterministic compiler
+        # completes missing structural shots while preserving every valid
+        # creative shot that Qwen produced.
         self._normalize_ids(
             scenes,
             all_shots,
         )
 
-        all_shots = (
-            CinematicCompiler(
-                character_names=character_names,
-            ).compile_all(
-                scenes,
-                all_shots,
-            )
+        all_shots = CinematicCompiler(
+            character_names=character_names,
+        ).compile_all(
+            scenes,
+            all_shots,
         )
 
         for scene in scenes:
 
-            scene[
-                "shot_ids"
-            ] = [
-                shot[
-                    "shot_id"
-                ]
+            scene["shot_ids"] = [
+                shot["shot_id"]
                 for shot in all_shots
-                if shot.get(
-                    "scene_id"
-                )
-                == scene.get(
-                    "scene_id"
-                )
+                if shot.get("scene_id") == scene.get("scene_id")
             ]
 
         self._validate_shot_character_contract(
@@ -3486,32 +3733,41 @@ non_diegetic_music, negative_prompt, continuity_notes.
             characters,
         )
 
+        final_director_plan = {
+            "story": story,
+            "story_mode": mode,
+            "director_notes": director_notes,
+            "visual_language": visual_language,
+            "characters": characters,
+            "scenes": scenes,
+            "shots": all_shots,
+        }
+
+        self._save_checkpoint(
+            checkpoint_store,
+            checkpoint_session_id,
+            self._checkpoint_state(
+                checkpoint_session_id or "",
+                mode,
+                user_input,
+                base_plan,
+                final_director_plan,
+                "director_completed",
+                "director_complete",
+                [
+                    str(scene.get("scene_id", "")).strip()
+                    for scene in scenes
+                    if str(scene.get("scene_id", "")).strip()
+                ],
+                "",
+                "",
+            ),
+        )
+
         return {
             "enabled": True,
-            "plan": {
-                "story":
-                    story,
-
-                "story_mode":
-                    mode,
-
-                "director_notes":
-                    director_notes,
-
-                "visual_language":
-                    visual_language,
-
-                "characters":
-                    characters,
-
-                "scenes":
-                    scenes,
-
-                "shots":
-                    all_shots,
-            },
-            "director_notes":
-                director_notes,
+            "plan": final_director_plan,
+            "director_notes": director_notes,
         }
 
     # ========================================================
@@ -3524,12 +3780,16 @@ non_diegetic_music, negative_prompt, continuity_notes.
         mode: str,
         user_input: str,
         base_plan: dict,
+        checkpoint_session_id: str | None = None,
+        resume_state: dict | None = None,
     ) -> dict:
 
         result = self.generate(
             mode=mode,
             user_input=user_input,
             base_plan=base_plan,
+            checkpoint_session_id=checkpoint_session_id,
+            resume_state=resume_state,
         )
 
         if not result.get(
