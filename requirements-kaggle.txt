@@ -1,9 +1,0 @@
-# Base repository dependencies.
--r requirements.txt
-
-# Versions mirrored from configs/runtime_versions.yaml.
-nvidia-cuda-runtime==13.3.29
-nvidia-cublas==13.6.1.10
-
---extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130
-llama-cpp-python==0.3.35
