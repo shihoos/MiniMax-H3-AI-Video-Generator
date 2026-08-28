@@ -354,6 +354,15 @@ def validate_runtime_values() -> None:
             "Storyboard host cannot be empty."
         )
 
+    comfy_startup = float(os.getenv("H3_COMFY_STARTUP_TIMEOUT", "300"))
+    comfy_job = float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400"))
+    comfy_poll = float(os.getenv("H3_COMFY_POLL_INTERVAL", "2"))
+    comfy_retries = int(os.getenv("H3_COMFY_REQUEST_RETRIES", "3"))
+    if comfy_startup <= 0 or comfy_job <= 0 or comfy_poll <= 0:
+        raise RuntimeError("ComfyUI timeouts/intervals must be positive.")
+    if comfy_retries < 0:
+        raise RuntimeError("H3_COMFY_REQUEST_RETRIES must be >= 0.")
+
 
 validate_runtime_values()
 
