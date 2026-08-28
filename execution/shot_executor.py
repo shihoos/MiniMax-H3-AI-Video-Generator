@@ -41,6 +41,11 @@ class ShotExecutor:
         )
 
         self.client = comfy_client
+        self.gpu_id = int(gpu_id) if gpu_id is not None else -1
+        self.metrics = None
+        if metrics_path is not None:
+            from execution.metrics import MetricsRecorder
+            self.metrics = MetricsRecorder(Path(metrics_path))
 
         self.project_root = Path(
             project_root
