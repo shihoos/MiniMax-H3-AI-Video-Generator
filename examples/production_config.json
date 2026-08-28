@@ -1,12 +1,43 @@
 {
-  "story_mode": "ai_story",
-  "reference_mode": "auto",
-  "use_character_references": true,
-  "use_general_references": true,
-  "use_audio": true,
-  "use_music": true,
-  "use_ic_lora_detailer": true,
-  "use_ltx_spatial_upscaler": true,
-  "multi_gpu_mode": "parallel",
-  "gpu_ids": [0, 1]
+  "story_mode": "preserve_user_story",
+  "workflow_mode": "auto",
+  "profile": "turbo",
+  "upscale_enabled": true,
+  "parallel_safe": false,
+  "story": "A lone traveler crosses a storm-damaged coastal city and discovers a signal beneath the ruins.",
+  "approval": {
+    "status": "draft",
+    "approved_at": null
+  },
+  "generation": {
+    "width": 1344,
+    "height": 768,
+    "fps": 24,
+    "normal_steps": 20,
+    "turbo_steps": 8,
+    "reference_image_size": "match"
+  },
+  "upscale": {
+    "width": 1920,
+    "height": 1088,
+    "final_delivery_width": 1280,
+    "final_delivery_height": 720,
+    "final_delivery_fps": 24
+  },
+  "references": {
+    "max_images": 9,
+    "max_videos": 3,
+    "max_audio": 3,
+    "max_total_files": 12
+  },
+  "workers": {
+    "mode": "auto",
+    "base_port": 8188,
+    "existing_urls": []
+  },
+  "notes": [
+    "This is an example production-plan payload. The application does not load this file as a second runtime configuration source.",
+    "Runtime/model/node versions remain controlled by configs/runtime_versions.yaml, configs/model_inventory.yaml, and configs/custom_nodes.yaml.",
+    "Kaggle GPU/model installation is performed by kaggle/bootstrap.py from the runtime manifests."
+  ]
 }
