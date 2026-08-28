@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 import time
 import uuid
 
@@ -537,111 +536,53 @@ class ComfyClient:
         file_type="output",
         destination=None,
     ) -> Path:
-        """Stream a ComfyUI output to disk without buffering the whole file in RAM.
-
-        The download is written to a temporary file, fsynced, then atomically
-        renamed into place. Transient network failures are retried using the
-        same retry policy as other idempotent GET requests.
-        """
-        query = urlencode(
-            {
-                "filename": filename,
-                "subfolder": subfolder,
-                "type": file_type,
-            }
-        )
-        url = f"{self.base_url}/view?{query}"
-
-        if destination is None:
-            destination = Path(filename)
-        destination = Path(destination)
+        """Stream a ComfyUI output to disk with bounded memory usage and atomic publication."""
+        query = urlencode({"filename": filename, "subfolder": subfolder, "type": file_type})
+        destination = Path(destination if destination is not None else filename).resolve()
         destination.parent.mkdir(parents=True, exist_ok=True)
-
+        temp_path = destination.with_name(f".{destination.name}.{os.getpid()}.download")
         attempts = self.request_retries + 1
-        request_timeout = max(1, int(self.timeout))
-        chunk_size = max(64 * 1024, int(os.getenv("H3_COMFY_DOWNLOAD_CHUNK_BYTES", str(1024 * 1024))))
-        temp_path: Path | None = None
+        last_error = None
 
-        for attempt in range(attempts):
-            request = Request(url=url, method="GET")
-            try:
-                with urlopen(request, timeout=request_timeout) as response:
-                    content_type = (response.headers.get("Content-Type", "") or "").lower()
-                    if "text/html" in content_type or "application/json" in content_type:
-                        preview = response.read(4096).decode("utf-8", errors="replace")
-                        raise RuntimeError(
-                            f"ComfyUI /view returned unexpected {content_type or 'text'} data: {preview}"
-                        )
-
-                    fd, name = tempfile.mkstemp(
-                        prefix=f".{destination.stem}.",
-                        suffix=".download",
-                        dir=str(destination.parent),
-                    )
-                    temp_path = Path(name)
-                    try:
-                        total = 0
-                        with os.fdopen(fd, "wb") as handle:
+        try:
+            for attempt in range(attempts):
+                try:
+                    request = Request(self.base_url + f"/view?{query}", method="GET")
+                    with urlopen(request, timeout=self.timeout) as response:
+                        content_type = (response.headers.get("Content-Type", "") or "").lower()
+                        if "json" in content_type:
+                            body = response.read(8192).decode("utf-8", errors="replace")
+                            raise RuntimeError(f"ComfyUI /view returned JSON instead of media: {body}")
+                        with temp_path.open("wb") as handle:
                             while True:
-                                chunk = response.read(chunk_size)
+                                chunk = response.read(8 * 1024 * 1024)
                                 if not chunk:
                                     break
                                 handle.write(chunk)
-                                total += len(chunk)
-                            if total <= 0:
-                                raise RuntimeError("ComfyUI /view returned an empty file.")
                             handle.flush()
                             os.fsync(handle.fileno())
-
-                        os.replace(temp_path, destination)
-                        temp_path = None
-                        try:
-                            dir_fd = os.open(destination.parent, os.O_RDONLY)
-                            try:
-                                os.fsync(dir_fd)
-                            finally:
-                                os.close(dir_fd)
-                        except OSError:
-                            pass
-
-                        if not destination.is_file() or destination.stat().st_size <= 0:
-                            raise RuntimeError("Downloaded file is missing or empty.")
-                        return destination
-                    finally:
-                        if temp_path is not None:
-                            temp_path.unlink(missing_ok=True)
-                            temp_path = None
-
-            except HTTPError as error:
-                body = error.read().decode("utf-8", errors="replace")
-                retryable = error.code in {408, 429, 500, 502, 503, 504}
-                if retryable and attempt < attempts - 1:
-                    delay = min(2 ** attempt, 10)
-                    LOGGER.warning(
-                        "ComfyUI download HTTP %s for %s; retrying in %ss (attempt %s/%s).",
-                        error.code, url, delay, attempt + 1, attempts,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise RuntimeError(
-                    f"ComfyUI download HTTP {error.code}: {body}"
-                ) from error
-            except (URLError, TimeoutError, OSError) as error:
-                if attempt < attempts - 1:
-                    delay = min(2 ** attempt, 10)
-                    LOGGER.warning(
-                        "ComfyUI download failure for %s; retrying in %ss (attempt %s/%s): %s",
-                        url, delay, attempt + 1, attempts, error,
-                    )
-                    time.sleep(delay)
-                    continue
-                raise RuntimeError(
-                    f"Cannot download ComfyUI output from {url}: {error}"
-                ) from error
-            except RuntimeError:
-                raise
-
-        raise RuntimeError("ComfyUI download failed.")
+                    if not temp_path.is_file() or temp_path.stat().st_size <= 0:
+                        raise RuntimeError("ComfyUI /view returned an empty file.")
+                    os.replace(temp_path, destination)
+                    return destination
+                except HTTPError as error:
+                    body = error.read().decode("utf-8", errors="replace")[-4000:]
+                    last_error = RuntimeError(f"ComfyUI HTTP {error.code}: {body}")
+                    if error.code not in {408, 429, 500, 502, 503, 504} or attempt >= attempts - 1:
+                        raise last_error from error
+                except (URLError, TimeoutError, OSError, RuntimeError) as error:
+                    last_error = error
+                    if attempt >= attempts - 1:
+                        raise RuntimeError(f"ComfyUI download failed for {filename}: {error}") from error
+                delay = min(2 ** attempt, 10)
+                LOGGER.warning(
+                    "ComfyUI download failed for %s; retrying in %ss (attempt %s/%s).",
+                    filename, delay, attempt + 1, attempts - 1,
+                )
+                time.sleep(delay)
+            raise RuntimeError(f"ComfyUI download failed: {last_error}")
+        finally:
+            temp_path.unlink(missing_ok=True)
 
     @staticmethod
     def _is_video(
