@@ -885,7 +885,11 @@ class ProductionPlanner:
         # No supplied reference is not an error.
         # The story-derived identity profile becomes the
         # canonical identity source.
-        if not character.reference_paths:
+        if not (
+            character.reference_paths
+            or character.reference_video_paths
+            or character.reference_audio_paths
+        ):
             character.reference_mode = (
                 "story_generated"
             )
