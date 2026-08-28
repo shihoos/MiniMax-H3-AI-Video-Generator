@@ -50,8 +50,15 @@ def discover_gpu_ids():
 
 
 def load_clients(
-    urls,
+    workers,
 ):
+    """Create ComfyUI clients while preserving physical GPU IDs.
+
+    ``workers`` may contain either plain URLs (assigned IDs 0..N-1 for
+    backwards compatibility) or ``(gpu_id, url)`` pairs produced by
+    H3Runtime.launch_workers(). Keeping the actual GPU ID is important
+    when H3_GPU_IDS is non-contiguous, such as ``2,3``.
+    """
 
     from execution.comfy_client import (
         ComfyClient,
@@ -59,9 +66,33 @@ def load_clients(
 
     clients = {}
 
-    for index, url in enumerate(
-        urls
+    for index, item in enumerate(
+        workers
     ):
+
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            gpu_id = int(item[0])
+            url = str(item[1]).strip()
+        elif isinstance(item, dict):
+            if "gpu_id" not in item or "url" not in item:
+                raise ValueError(
+                    "Worker mapping dictionaries must contain gpu_id and url."
+                )
+            gpu_id = int(item["gpu_id"])
+            url = str(item["url"]).strip()
+        else:
+            gpu_id = index
+            url = str(item).strip()
+
+        if not url:
+            raise ValueError(
+                f"ComfyUI worker URL is empty for GPU {gpu_id}."
+            )
+
+        if gpu_id in clients:
+            raise ValueError(
+                f"Duplicate ComfyUI worker GPU ID: {gpu_id}."
+            )
 
         client = ComfyClient(
             base_url=url,
@@ -73,12 +104,15 @@ def load_clients(
 
             raise RuntimeError(
                 "ComfyUI worker unavailable: "
-                f"{url}"
+                f"GPU {gpu_id} at {url}"
             )
 
-        clients[
-            index
-        ] = client
+        clients[gpu_id] = client
+
+    if not clients:
+        raise RuntimeError(
+            "At least one ComfyUI worker is required."
+        )
 
     return clients
 
@@ -581,11 +615,14 @@ def main():
         )
 
         workers = [
-            item[
-                "url"
-            ]
-            for item
-            in runtime_workers.values()
+            (
+                int(gpu_id),
+                item[
+                    "url"
+                ],
+            )
+            for gpu_id, item
+            in runtime_workers.items()
         ]
 
     try:
