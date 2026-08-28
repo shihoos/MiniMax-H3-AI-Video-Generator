@@ -114,6 +114,8 @@ class H3Runtime:
 
         started = time.time()
 
+        last_error = None
+
         while (
             time.time() - started
             < timeout
@@ -125,13 +127,20 @@ class H3Runtime:
                 ) as response:
                     if response.status == 200:
                         return
-            except Exception:
-                pass
+            except Exception as error:
+                last_error = error
 
             time.sleep(2)
 
+        detail = (
+            f" Last error: {last_error}"
+            if last_error is not None
+            else ""
+        )
+
         raise TimeoutError(
-            f"ComfyUI did not start: {url}"
+            f"ComfyUI did not start: {url}."
+            + detail
         )
 
     @classmethod
@@ -171,33 +180,62 @@ class H3Runtime:
 
         processes = {}
 
-        for offset, gpu_id in enumerate(
-            gpu_ids
-        ):
-            port = base_port + offset
+        try:
+            for offset, gpu_id in enumerate(
+                gpu_ids
+            ):
+                port = base_port + offset
 
-            process, handle = (
-                cls.launch_worker(
-                    comfy_root,
-                    gpu_id,
-                    port,
-                    log_root
-                    / f"gpu_{gpu_id}.log",
+                process, handle = (
+                    cls.launch_worker(
+                        comfy_root,
+                        gpu_id,
+                        port,
+                        log_root
+                        / f"gpu_{gpu_id}.log",
+                    )
                 )
-            )
 
-            cls.wait_http(
-                f"http://127.0.0.1:{port}/system_stats"
-            )
+                try:
+                    cls.wait_http(
+                        f"http://127.0.0.1:{port}/system_stats"
+                    )
+                except Exception:
+                    # A failed startup must not leak previously started workers.
+                    try:
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=10)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                    finally:
+                        handle.close()
+                    raise
 
-            processes[gpu_id] = {
-                "process": process,
-                "handle": handle,
-                "url": (
-                    f"http://127.0.0.1:{port}"
-                ),
-                "port": port,
-            }
+                if process.poll() is not None:
+                    handle.close()
+                    raise RuntimeError(
+                        f"ComfyUI worker for GPU {gpu_id} exited "
+                        f"before becoming ready."
+                    )
+
+                processes[gpu_id] = {
+                    "process": process,
+                    "handle": handle,
+                    "url": (
+                        f"http://127.0.0.1:{port}"
+                    ),
+                    "port": port,
+                }
+
+        except Exception:
+            cls.stop_workers(
+                processes
+            )
+            raise
 
         return processes
 
