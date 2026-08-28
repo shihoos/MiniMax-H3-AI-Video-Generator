@@ -34,7 +34,6 @@ REQUIRED_FILES = [
     # --------------------------------------------------------
 
     "requirements.txt",
-    "requirements-kaggle.txt",
     "README.md",
 
     # --------------------------------------------------------
@@ -327,21 +326,13 @@ def executable_model_values(
 
 def validate_dependency_manifests() -> None:
     base = ROOT / "requirements.txt"
-    kaggle = ROOT / "requirements-kaggle.txt"
 
-    for path in (base, kaggle):
-        require(
-            path.is_file(),
-            f"Dependency manifest is missing: {path}",
-        )
-
-    base_text = base.read_text(
-        encoding="utf-8"
+    require(
+        base.is_file(),
+        f"Dependency manifest is missing: {base}",
     )
 
-    kaggle_text = kaggle.read_text(
-        encoding="utf-8"
-    )
+    base_text = base.read_text(encoding="utf-8")
 
     require(
         "PyYAML==" in base_text,
@@ -353,20 +344,13 @@ def validate_dependency_manifests() -> None:
         "requirements.txt must pin Gradio.",
     )
 
+    legacy = ROOT / "requirements-kaggle.txt"
     require(
-        "-r requirements.txt" in kaggle_text,
-        "requirements-kaggle.txt must include requirements.txt.",
+        not legacy.exists(),
+        "requirements-kaggle.txt is obsolete; Kaggle dependencies are controlled by configs/runtime_versions.yaml and kaggle/bootstrap.py.",
     )
 
-    require(
-        "llama-cpp-python==" in kaggle_text,
-        "requirements-kaggle.txt must pin llama-cpp-python.",
-    )
-
-    print(
-        "PASS dependency manifests"
-    )
-
+    print("PASS dependency manifests")
 
 def validate_files() -> None:
 
@@ -448,6 +432,54 @@ def validate_python() -> None:
     )
 
 
+def validate_workflow_graph_integrity(graph: dict, name: str) -> None:
+    nodes = {
+        int(node["id"]): node
+        for node in graph.get("nodes", [])
+        if isinstance(node, dict) and "id" in node
+    }
+
+    links = {}
+    for row in graph.get("links", []):
+        require(
+            isinstance(row, list) and len(row) >= 6,
+            f"{name}: malformed workflow link: {row!r}",
+        )
+        link_id = int(row[0])
+        require(
+            link_id not in links,
+            f"{name}: duplicate workflow link id {link_id}.",
+        )
+        links[link_id] = row
+
+    for node_id, node in nodes.items():
+        for slot, item in enumerate(node.get("inputs", []) or []):
+            require(isinstance(item, dict), f"{name}: node {node_id} input {slot} is not an object.")
+            link_id = item.get("link")
+            if link_id is None:
+                continue
+            link_id = int(link_id)
+            require(link_id in links, f"{name}: node {node_id} input {slot} references missing link {link_id}.")
+            row = links[link_id]
+            require(int(row[3]) == node_id and int(row[4]) == slot, f"{name}: input link {link_id} does not point to node {node_id}:{slot}.")
+
+        for slot, item in enumerate(node.get("outputs", []) or []):
+            require(isinstance(item, dict), f"{name}: node {node_id} output {slot} is not an object.")
+            for link_id in item.get("links") or []:
+                link_id = int(link_id)
+                require(link_id in links, f"{name}: node {node_id} output {slot} references missing link {link_id}.")
+                row = links[link_id]
+                require(int(row[1]) == node_id and int(row[2]) == slot, f"{name}: output link {link_id} does not point from node {node_id}:{slot}.")
+
+    for link_id, row in links.items():
+        source_id, source_slot = int(row[1]), int(row[2])
+        target_id, target_slot = int(row[3]), int(row[4])
+        require(source_id in nodes, f"{name}: link {link_id} references missing source node {source_id}.")
+        require(target_id in nodes, f"{name}: link {link_id} references missing destination node {target_id}.")
+        require(source_slot < len(nodes[source_id].get("outputs", []) or []), f"{name}: link {link_id} has invalid source slot {source_slot}.")
+        require(target_slot < len(nodes[target_id].get("inputs", []) or []), f"{name}: link {link_id} has invalid target slot {target_slot}.")
+
+
 def validate_workflows() -> None:
 
     all_workflows = {
@@ -457,8 +489,13 @@ def validate_workflows() -> None:
 
     for name, path in all_workflows.items():
 
-        load_json(
+        graph = load_json(
             path
+        )
+
+        validate_workflow_graph_integrity(
+            graph,
+            name,
         )
 
         print(
@@ -922,18 +959,78 @@ def validate_plan_persistence_boundary() -> None:
 
 
 
+def validate_production_templates() -> None:
+    for name, path in PRODUCTION_WORKFLOWS.items():
+        graph = load_json(path)
+        for node in graph.get("nodes", []):
+            if node.get("type") != "LoadImage":
+                continue
+            widgets = node.get("widgets_values", [])
+            filename = widgets[0] if isinstance(widgets, list) and widgets else ""
+            require(
+                not (isinstance(filename, str) and filename.startswith("__H3_REF_IMAGE_")),
+                f"{name}: contains a runtime placeholder reference {filename!r}.",
+            )
+    print("PASS production reference templates")
+
+
+def validate_examples() -> None:
+    path = ROOT / "examples" / "production_config.json"
+    require(path.is_file(), "examples/production_config.json is missing.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        fail(f"Invalid production example: {exc}")
+    require(isinstance(data, dict), "Production example must be a JSON object.")
+    for key in ("story_mode", "workflow_mode", "profile", "upscale_enabled", "story"):
+        require(key in data, f"Production example is missing {key}.")
+    require(data["story_mode"] in {"ai_story", "expand_user_story", "preserve_user_story"}, "Example story_mode is invalid.")
+    require(data["workflow_mode"] in {"auto", "ref2v", "turbo_ref2v", "upscale"}, "Example workflow_mode is invalid.")
+    require(data["profile"] in {"base", "turbo", "upscale"}, "Example profile is invalid.")
+    require(isinstance(data["upscale_enabled"], bool), "Example upscale_enabled must be boolean.")
+    require(bool(str(data["story"]).strip()), "Example story cannot be empty.")
+
+    stale_fields = {
+        "use_character_references",
+        "use_general_references",
+        "use_audio",
+        "use_music",
+        "use_ic_lora_detailer",
+        "use_ltx_spatial_upscaler",
+        "multi_gpu_mode",
+    }
+    stale = stale_fields & set(data)
+    require(
+        not stale,
+        "Production example contains obsolete fields: "
+        + ", ".join(sorted(stale)),
+    )
+
+    print("PASS production example configuration")
+
+
+def validate_ui_security_defaults() -> None:
+    text = (ROOT / "planner" / "config.py").read_text(encoding="utf-8")
+    section = text[text.index("def storyboard_share_enabled"):text.index("# ============================================================\n# BASIC RUNTIME VALIDATION")]
+    require('        "0",' in section, "Gradio public sharing must be disabled by default.")
+    print("PASS UI security defaults")
+
+
 def main() -> None:
 
     validate_files()
     validate_dependency_manifests()
+    validate_examples()
     validate_python()
     validate_workflows()
+    validate_production_templates()
     validate_model_inventory()
     validate_config()
     validate_runtime_imports()
     validate_gradio_ui()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
+    validate_ui_security_defaults()
 
     
     print(
