@@ -907,28 +907,24 @@ class ProductionOrchestrator:
 
         mode = str(
             state.get("mode", "") or ""
-        )
-        director_plan = state.get(
-            "director_plan",
-        ) or {}
-        base_plan = state.get(
-            "base_plan",
-        ) or {}
+        ).strip()
 
-        story = str(
-            director_plan.get(
-                "story",
-                base_plan.get(
-                    "story",
-                    "",
-                ),
+        original_user_input = str(
+            state.get(
+                "user_input",
+                "",
             )
             or ""
         ).strip()
 
+        if not original_user_input:
+            raise RuntimeError(
+                "Checkpoint is missing the original user input."
+            )
+
         return self.create_production_plan(
             mode=mode,
-            user_input=story,
+            user_input=original_user_input,
             workflow_mode=str(
                 state.get(
                     "workflow_mode",
@@ -1194,8 +1190,9 @@ class ProductionOrchestrator:
             plan,
         )
 
-        # Mark the whole planning stage completed only after the plan has been
-        # rebound to real Character/Shot objects and persisted successfully.
+        # Mark the planning stage READY. Rendering is a separate persisted
+        # stage owned by ProductionRunner; do not claim production completed
+        # until the final H3 video has actually been assembled.
         try:
             self._save_checkpoint(
                 production_id,
@@ -1203,7 +1200,7 @@ class ProductionOrchestrator:
                 user_input=user_input,
                 workflow_mode=workflow_mode,
                 profile=profile,
-                status="completed",
+                status="ready",
                 stage="production_plan",
                 base_plan=deepcopy(base_plan),
                 director_plan=deepcopy(plan),
