@@ -215,6 +215,51 @@ class ProductionPlanner:
         "runs",
     )
 
+    # Broad narrative-verb list (both present and past tense, plus
+    # a few common auxiliaries) used to recognize a character name
+    # used in ordinary sentence-subject position, e.g. "Eli walked
+    # through the ruined city" or "Sara was hiding near the tower".
+    # ACTION_WORDS above only covers present tense and is kept for
+    # backward compatibility; this list is intentionally much wider
+    # since most short-story prose is written in past tense.
+    NARRATIVE_SUBJECT_VERBS = (
+        "walked", "walks", "walk", "ran", "runs", "run",
+        "moved", "moves", "move", "looked", "looks", "look",
+        "turned", "turns", "turn", "entered", "enters", "enter",
+        "left", "leaves", "leave", "fought", "fights", "fight",
+        "talked", "talks", "talk", "spoke", "speaks", "speak",
+        "stood", "stands", "stand", "sat", "sits", "sit",
+        "drove", "drives", "drive", "flew", "flies", "fly",
+        "jumped", "jumps", "jump", "opened", "opens", "open",
+        "closed", "closes", "close", "reached", "reaches", "reach",
+        "held", "holds", "hold", "watched", "watches", "watch",
+        "waited", "waits", "wait", "hid", "hides", "hiding", "hide",
+        "stared", "stares", "stare", "whispered", "whispers", "whisper",
+        "shouted", "shouts", "shout", "cried", "cries", "cry",
+        "smiled", "smiles", "smile", "frowned", "frowns", "frown",
+        "nodded", "nods", "nod", "gasped", "gasps", "gasp",
+        "sighed", "sighs", "sigh", "followed", "follows", "follow",
+        "chased", "chases", "chase", "searched", "searches", "search",
+        "found", "finds", "find", "saw", "sees", "see",
+        "heard", "hears", "hear", "felt", "feels", "feel",
+        "knew", "knows", "know", "remembered", "remembers", "remember",
+        "thought", "thinks", "think", "wondered", "wonders", "wonder",
+        "decided", "decides", "decide", "realized", "realizes", "realize",
+        "climbed", "climbs", "climb", "carried", "carries", "carry",
+        "pushed", "pushes", "push", "pulled", "pulls", "pull",
+        "was", "is", "had", "has",
+    )
+
+    # Capitalized words that are pronouns or sentence-starting
+    # function words rather than character names, so the
+    # subject-verb heuristic below must never treat them as names.
+    NARRATIVE_SUBJECT_EXCLUSIONS = {
+        "He", "She", "It", "They", "We", "You", "I",
+        "His", "Her", "Its", "Their", "Our", "Your",
+        "This", "That", "These", "Those",
+        "There", "Here", "Who", "What", "Which",
+    }
+
     LOCATION_PATTERNS = (
         r"\bin\s+(?:the\s+)?([^,.!?]+)",
         r"\bat\s+(?:the\s+)?([^,.!?]+)",
@@ -582,6 +627,67 @@ class ProductionPlanner:
             explicit_names.append(
                 name
             )
+
+        # Subject-position names: ordinary narrative prose almost
+        # never says "named Eli" -- it just uses the name as the
+        # sentence subject ("Eli walked through the ruined city").
+        # Recognize a capitalized word immediately followed by a
+        # recognized narrative verb, or immediately followed by an
+        # appositive ", who"/", which" clause, as a character name.
+        subject_verb_pattern = re.compile(
+            r"\b([A-Z][a-z]+)\s+"
+            r"(?:"
+            + "|".join(
+                sorted(
+                    self.NARRATIVE_SUBJECT_VERBS,
+                    key=len,
+                    reverse=True,
+                )
+            )
+            + r")\b"
+        )
+
+        appositive_pattern = re.compile(
+            r"\b([A-Z][a-z]+)\s*,\s*(?:who|which)\b"
+        )
+
+        for pattern in (
+            subject_verb_pattern,
+            appositive_pattern,
+        ):
+
+            for match in pattern.finditer(
+                story
+            ):
+
+                name = match.group(
+                    1
+                ).strip()
+
+                if not name:
+                    continue
+
+                if name in self.COMMON_PROPER_WORDS:
+                    continue
+
+                if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+                    continue
+
+                if name.lower() in role_names:
+                    continue
+
+                if (
+                    name.lower()
+                    in {
+                        existing.lower()
+                        for existing in explicit_names
+                    }
+                ):
+                    continue
+
+                explicit_names.append(
+                    name
+                )
 
         explicit_lower = {
             name.lower()
@@ -1604,6 +1710,7 @@ class ProductionPlanner:
                 "characters": [],
                 "scenes": [],
                 "shots": [],
+                "visual_language": {},
 
                 "width": H3_WIDTH,
                 "height": H3_HEIGHT,
@@ -1698,6 +1805,7 @@ class ProductionPlanner:
             "characters": character_dicts,
             "scenes": scene_dicts,
             "shots": shot_dicts,
+            "visual_language": {},
 
             "width": H3_WIDTH,
             "height": H3_HEIGHT,
