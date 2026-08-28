@@ -410,6 +410,7 @@ class H3UpscaledWorkflowBuilder(
         width: int = H3_WIDTH,
         height: int = H3_HEIGHT,
         duration_seconds: float = 5.2,
+        ref_image_size: str | None = None,
     ):
 
         if generation_mode not in {
@@ -470,6 +471,11 @@ class H3UpscaledWorkflowBuilder(
         self._set_duration(
             workflow,
             duration_seconds,
+        )
+
+        self._set_ref_image_size(
+            workflow,
+            ref_image_size,
         )
 
         (
