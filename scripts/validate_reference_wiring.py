@@ -29,6 +29,9 @@ from pipeline.h3_scene_continuity import (
 from pipeline.identity_anchor_store import (
     IdentityAnchorStore,
 )
+from pipeline.reference_manager import (
+    ReferenceManager,
+)
 
 
 class FakeClient:
@@ -295,6 +298,56 @@ def main() -> None:
                 "Production B identity path does not "
                 "contain production_b."
             )
+
+        # ----------------------------------------------------
+        # VIDEO/AUDIO-ONLY CHARACTER REFERENCE CONTRACT
+        # ----------------------------------------------------
+
+        video_root = (
+            root
+            / "assets"
+            / "references"
+            / "video_only"
+            / "videos"
+        )
+        audio_root = (
+            root
+            / "assets"
+            / "references"
+            / "audio_only"
+            / "audio"
+        )
+
+        video_root.mkdir(parents=True, exist_ok=True)
+        audio_root.mkdir(parents=True, exist_ok=True)
+
+        video_file = video_root / "video_only.mp4"
+        audio_file = audio_root / "audio_only.wav"
+        video_file.write_bytes(b"fake-video")
+        audio_file.write_bytes(b"fake-audio")
+
+        manager = ReferenceManager(root)
+
+        video_source = manager.get_character_source(
+            "video_only"
+        )
+        audio_source = manager.get_character_source(
+            "audio_only"
+        )
+
+        if video_source["mode"] != "provided":
+            raise RuntimeError(
+                "Video-only character references were not classified as provided."
+            )
+
+        if audio_source["mode"] != "provided":
+            raise RuntimeError(
+                "Audio-only character references were not classified as provided."
+            )
+
+        print(
+            "Reference media-only classification PASSED."
+        )
 
         print(
             "Reference media path wiring PASSED."
