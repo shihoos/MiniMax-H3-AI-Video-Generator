@@ -1239,67 +1239,72 @@ def build_app(
         allow_custom_value=False,
         )
 
-    def generate_storyboard_ui(
+    def _stream_generation_ui(
         story_value: str,
         mode_value: str,
         resume_id_value: str,
     ):
-        result = (
-            controller.generate_storyboard(
-                story_value,
-                mode_value,
-                resume_id_value,
+        # Run the existing synchronous controller in a worker thread while
+        # the Gradio callback yields heartbeat/status frames. This keeps the
+        # browser/proxy connection alive during long Qwen planning without
+        # changing the controller's locking/checkpoint behavior.
+        result_holder = {}
+        error_holder = {}
+        done = threading.Event()
+
+        def worker():
+            try:
+                result_holder["result"] = controller.generate_storyboard(
+                    story_value,
+                    mode_value,
+                    resume_id_value,
+                )
+            except Exception as exc:  # controller already formats normal failures
+                error_holder["error"] = exc
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=worker,
+            name="storyboard-generation",
+            daemon=True,
+        ).start()
+
+        yield (
+            "### PLANNING\nGenerating the storyboard with the Qwen Director...",
+            "", "", "", "", None, "",
+            dropdown_update(preserve_value=None),
+        )
+
+        while not done.wait(2.0):
+            yield (
+                "### PLANNING\nStill working — Qwen scene/shot planning is in progress...",
+                "", "", "", "", None, "",
+                dropdown_update(preserve_value=None),
             )
+
+        if "error" in error_holder:
+            raise error_holder["error"]
+
+        result = list(result_holder["result"])
+        stored_path = result[6] if len(result) > 6 else ""
+        result[7] = dropdown_update(
+            selected_path=stored_path if stored_path else None,
         )
+        yield tuple(result)
 
-        result = list(result)
-
-        stored_path = (
-            result[6]
-            if len(result) > 6
-            else ""
-        )
-
-        result[7] = (
-            dropdown_update(
-                selected_path=stored_path
-                if stored_path
-                else None,
-            )
-        )
-
-        return tuple(result)
+    generate_storyboard_ui = _stream_generation_ui
 
     def regenerate_storyboard_ui(
         story_value: str,
         mode_value: str,
         resume_id_value: str,
     ):
-        result = (
-            controller.generate_storyboard(
-                story_value,
-                mode_value,
-                resume_id_value,
-            )
+        yield from _stream_generation_ui(
+            story_value,
+            mode_value,
+            resume_id_value,
         )
-
-        result = list(result)
-
-        stored_path = (
-            result[6]
-            if len(result) > 6
-            else ""
-        )
-
-        result[7] = (
-            dropdown_update(
-                selected_path=stored_path
-                if stored_path
-                else None,
-            )
-        )
-
-        return tuple(result)
 
     def preview_latest_ui(
         mode_value: str,
