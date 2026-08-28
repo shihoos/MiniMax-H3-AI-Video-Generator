@@ -671,17 +671,21 @@ def verify_inventory() -> None:
 
     expected = {
         (
-            model[
-                "directory"
-            ],
-            model[
-                "filename"
-            ].lower(),
+            model["directory"],
+            model["filename"].lower(),
         )
-        for model
-        in manifest[
-            "models"
-        ].values()
+        for model in manifest["models"].values()
+    }
+
+    # These files are created by ComfyUI as empty placeholder markers.
+    # They are not model assets and must not be treated as unexpected
+    # production models.
+    placeholder_names = {
+        "put_diffusion_model_files_here",
+        "put_latent_upscale_models_here",
+        "put_loras_here",
+        "put_text_encoder_files_here",
+        "put_vae_here",
     }
 
     actual = set()
@@ -694,9 +698,7 @@ def verify_inventory() -> None:
         "latent_upscale_models",
     }
 
-    for directory_name in (
-        production_directories
-    ):
+    for directory_name in production_directories:
 
         directory = (
             MODELS
@@ -709,6 +711,13 @@ def verify_inventory() -> None:
         for item in directory.iterdir():
 
             if not item.is_file():
+                continue
+
+            # Ignore only ComfyUI's known empty placeholder markers.
+            if (
+                item.name.lower()
+                in placeholder_names
+            ):
                 continue
 
             actual.add(
@@ -753,7 +762,6 @@ def verify_inventory() -> None:
                 )
             )
         )
-
 
 
 
