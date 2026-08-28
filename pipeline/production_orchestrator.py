@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from copy import deepcopy
 from pathlib import Path
+import uuid
 
 from pipeline.identity_continuity import (
     IdentityContinuity,
+)
+from pipeline.production_checkpoint import (
+    ProductionCheckpoint,
 )
 from pipeline.reference_manager import (
     ReferenceManager,
@@ -765,6 +771,180 @@ class ProductionOrchestrator:
 
 
     # ========================================================
+    # CHECKPOINT / RESUME
+    # ========================================================
+
+    def _new_session_id(self) -> str:
+        return (
+            "production_"
+            + datetime.now().strftime("%Y%m%d_%H%M%S")
+            + "_"
+            + uuid.uuid4().hex[:12]
+        )
+
+    def _checkpoint_store(self) -> ProductionCheckpoint:
+        return ProductionCheckpoint(
+            self.project_root
+        )
+
+    def _save_checkpoint(
+        self,
+        session_id: str,
+        *,
+        mode: str,
+        user_input: str,
+        workflow_mode: str,
+        profile: str,
+        status: str,
+        stage: str,
+        base_plan: dict,
+        director_plan: dict,
+        completed_scene_ids: list[str] | None = None,
+        current_scene_id: str = "",
+        error: str = "",
+    ) -> None:
+        store = self._checkpoint_store()
+        state = {
+            "mode": mode,
+            "user_input_sha256": store.digest_text(user_input),
+            "director_sha256": store.digest_file(
+                self.project_root / "planner" / "qwen_director.py"
+            ),
+            "workflow_mode": workflow_mode,
+            "profile": profile,
+            "status": status,
+            "stage": stage,
+            "base_plan": base_plan,
+            "director_plan": director_plan,
+            "completed_scene_ids": list(
+                completed_scene_ids or []
+            ),
+            "current_scene_id": current_scene_id,
+            "error": error,
+            "updated_at": datetime.now().isoformat(),
+        }
+        store.save(
+            session_id,
+            state,
+        )
+
+    def _load_resume_state(
+        self,
+        session_id: str,
+        mode: str,
+        user_input: str,
+        workflow_mode: str,
+        profile: str,
+    ) -> dict:
+        store = self._checkpoint_store()
+        state = store.load(
+            session_id
+        )
+
+        if state.get("mode") != mode:
+            raise RuntimeError(
+                "Checkpoint mode does not match the requested mode."
+            )
+
+        if state.get("user_input_sha256") != store.digest_text(user_input):
+            raise RuntimeError(
+                "Checkpoint story/input does not match the requested story."
+            )
+
+        if state.get("workflow_mode", workflow_mode) != workflow_mode:
+            raise RuntimeError(
+                "Checkpoint workflow mode does not match the requested workflow."
+            )
+
+        if state.get("profile", profile) != profile:
+            raise RuntimeError(
+                "Checkpoint profile does not match the requested profile."
+            )
+
+        expected_director = store.digest_file(
+            self.project_root / "planner" / "qwen_director.py"
+        )
+        if state.get("director_sha256") != expected_director:
+            raise RuntimeError(
+                "Checkpoint was created by a different qwen_director.py. "
+                "Start a new production instead of mixing director versions."
+            )
+
+        status = str(
+            state.get("status", "") or ""
+        )
+        if status == "completed":
+            raise RuntimeError(
+                "Production checkpoint is already completed."
+            )
+
+        if not isinstance(
+            state.get("base_plan"),
+            dict,
+        ):
+            raise RuntimeError(
+                "Checkpoint is missing base_plan."
+            )
+
+        if not isinstance(
+            state.get("director_plan"),
+            dict,
+        ):
+            raise RuntimeError(
+                "Checkpoint is missing director_plan."
+            )
+
+        return state
+
+    def resume_production_plan(
+        self,
+        session_id: str,
+    ) -> dict:
+        store = self._checkpoint_store()
+        state = store.load(
+            session_id
+        )
+
+        mode = str(
+            state.get("mode", "") or ""
+        )
+        director_plan = state.get(
+            "director_plan",
+        ) or {}
+        base_plan = state.get(
+            "base_plan",
+        ) or {}
+
+        story = str(
+            director_plan.get(
+                "story",
+                base_plan.get(
+                    "story",
+                    "",
+                ),
+            )
+            or ""
+        ).strip()
+
+        return self.create_production_plan(
+            mode=mode,
+            user_input=story,
+            workflow_mode=str(
+                state.get(
+                    "workflow_mode",
+                    WORKFLOW_AUTO,
+                )
+            ),
+            profile=str(
+                state.get(
+                    "profile",
+                    "base",
+                )
+            ),
+            resume_session_id=session_id,
+        )
+
+    # ========================================================
     # PLAN
     # ========================================================
 
@@ -774,45 +954,111 @@ class ProductionOrchestrator:
         user_input: str,
         workflow_mode: str = WORKFLOW_AUTO,
         profile: str = "base",
+        resume_session_id: str | None = None,
     ) -> dict:
 
-        base_plan = (
-            self.planner.build(
-                mode=mode,
-                user_input=user_input,
-                workflow_mode=workflow_mode,
-                profile=profile,
+        checkpoint_store = self._checkpoint_store()
+
+        if resume_session_id:
+
+            state = self._load_resume_state(
+                resume_session_id,
+                mode,
+                user_input,
+                workflow_mode,
+                profile,
             )
-        )
 
-        try:
+            production_id = str(
+                resume_session_id
+            )
 
-            plan = (
-                self.director.enrich_plan(
+            base_plan = deepcopy(
+                state[
+                    "base_plan"
+                ]
+            )
+
+            director_resume_state = deepcopy(
+                state
+            )
+
+        else:
+
+            production_id = self._new_session_id()
+
+            base_plan = (
+                self.planner.build(
                     mode=mode,
                     user_input=user_input,
-                    base_plan=base_plan,
+                    workflow_mode=workflow_mode,
+                    profile=profile,
                 )
             )
 
+            director_resume_state = None
+
+            try:
+                self._save_checkpoint(
+                    production_id,
+                    mode=mode,
+                    user_input=user_input,
+                    workflow_mode=workflow_mode,
+                    profile=profile,
+                    status="running",
+                    stage="initialized",
+                    base_plan=deepcopy(base_plan),
+                    director_plan={},
+                )
+            except Exception:
+                # Generation must remain usable even if the checkpoint filesystem
+                # is temporarily unavailable. The checkpoint layer is resilience,
+                # not a new hard dependency for production.
+                checkpoint_store = None
+
+        try:
+
+            try:
+
+                plan = self.director.enrich_plan(
+                    mode=mode,
+                    user_input=user_input,
+                    base_plan=base_plan,
+                    checkpoint_session_id=production_id,
+                    resume_state=director_resume_state,
+                )
+
+            except Exception as exc:
+
+                try:
+                    state = checkpoint_store.load(
+                        production_id
+                    )
+                    state["status"] = "failed"
+                    state["stage"] = "director"
+                    state["error"] = str(exc)
+                    state["updated_at"] = datetime.now().isoformat()
+                    checkpoint_store.save(
+                        production_id,
+                        state,
+                    )
+                except Exception:
+                    pass
+
+                raise
+
         finally:
 
-            # Critical:
-            # Qwen director must be fully released before H3.
             self.director.unload()
 
         if mode == PRESERVE_USER_STORY_MODE:
 
-            plan["story"] = (
-                base_plan["story"]
-            )
+            plan["story"] = base_plan["story"]
 
-        characters = (
-            self._character_objects(
-                plan.get(
-                    "characters",
-                    [],
-                )
+        characters = self._character_objects(
+            plan.get(
+                "characters",
+                [],
             )
         )
 
@@ -821,11 +1067,6 @@ class ProductionOrchestrator:
             characters,
         )
 
-        # ----------------------------------------------------
-        # SCENE CONTINUITY LINKS
-        # ----------------------------------------------------
-
-        # Continuity links are scoped within each scene.
         previous_by_scene = {}
 
         for shot in plan.get(
@@ -833,44 +1074,16 @@ class ProductionOrchestrator:
             [],
         ):
 
-            scene_id = shot[
-                "scene_id"
-            ]
-
-            previous = (
-                previous_by_scene.get(
-                    scene_id
-                )
+            scene_id = shot["scene_id"]
+            previous = previous_by_scene.get(
+                scene_id
             )
 
             if previous:
+                shot["previous_shot"] = previous["shot_id"]
+                previous["next_shot"] = shot["shot_id"]
 
-                shot[
-                    "previous_shot"
-                ] = previous[
-                    "shot_id"
-                ]
-
-            if previous:
-
-                previous[
-                    "next_shot"
-                ] = shot[
-                    "shot_id"
-                ]
-
-            previous_by_scene[
-                scene_id
-            ] = shot
-
-        # ----------------------------------------------------
-        # PARALLEL SAFETY
-        # ----------------------------------------------------
-
-        # A scene is safe to run independently only if:
-        #
-        # 1. no character is shared across scenes
-        # 2. there is no cross-scene continuity dependency
+            previous_by_scene[scene_id] = shot
 
         scene_characters = {}
 
@@ -880,9 +1093,7 @@ class ProductionOrchestrator:
         ):
 
             scene_characters.setdefault(
-                shot[
-                    "scene_id"
-                ],
+                shot["scene_id"],
                 set(),
             ).update(
                 str(name).lower()
@@ -896,97 +1107,114 @@ class ProductionOrchestrator:
             )
 
         seen_characters = {}
-
         shared = False
 
-        for scene_id, names in (
-            scene_characters.items()
-        ):
-
+        for scene_id, names in scene_characters.items():
             for name in names:
-
                 if name in seen_characters:
-
                     shared = True
+                seen_characters[name] = scene_id
 
-                seen_characters[
-                    name
-                ] = scene_id
+        plan["parallel_safe"] = not shared
 
-        plan[
-            "parallel_safe"
-        ] = not shared
-
-        # ----------------------------------------------------
-        # FINAL DELIVERY CONFIGURATION
-        # ----------------------------------------------------
-
-        plan[
-            "delivery_width"
-        ] = DELIVERY_WIDTH
-
-        plan[
-            "delivery_height"
-        ] = DELIVERY_HEIGHT
-
-        plan[
-            "delivery_fps"
-        ] = DELIVERY_FPS
-
-        plan[
-            "upscale_width"
-        ] = int(
+        plan["delivery_width"] = DELIVERY_WIDTH
+        plan["delivery_height"] = DELIVERY_HEIGHT
+        plan["delivery_fps"] = DELIVERY_FPS
+        plan["upscale_width"] = int(
             plan.get(
                 "upscale_width",
                 UPSCALE_WIDTH,
             )
         )
-
-        plan[
-            "upscale_height"
-        ] = int(
+        plan["upscale_height"] = int(
             plan.get(
                 "upscale_height",
                 UPSCALE_HEIGHT,
             )
         )
 
-        # ----------------------------------------------------
-        # PLAN METADATA
-        # ----------------------------------------------------
+        plan["preview_ready"] = True
+        plan["created_at"] = datetime.now().isoformat()
+        plan["production_id"] = production_id
 
-        plan[
-            "preview_ready"
-        ] = True
-
-        plan[
-            "created_at"
-        ] = (
-            datetime.now().isoformat()
+        plan.setdefault(
+            "profile",
+            profile,
+        )
+        plan.setdefault(
+            "workflow_mode",
+            workflow_mode,
         )
 
-        # ----------------------------------------------------
-        # PERSISTENCE BOUNDARY
-        # ----------------------------------------------------
-        #
-        # The orchestrator creates and normalizes the plan.
-        #
-        # It does NOT persist a global story_preview.json.
-        #
-        # The caller owns persistence:
-        #
-        # Gradio:
-        # data/production/sessions/<production_id>/
-        # story_preview.json
-        #
-        # CLI:
-        # data/production/<production_id>/
-        # story_preview.json
-        #
-        # This prevents different productions from overwriting
-        # one shared data/production/story_preview.json file.
+        # This is the durable final storyboard used by the UI/render boundary.
+        session_dir = checkpoint_store.session_dir(
+            production_id
+        )
+        plan_path = (
+            session_dir
+            / "story_preview.json"
+        )
+        plan_path.write_text(
+            json.dumps(
+                plan,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        # Mark the whole planning stage completed only after the plan has been
+        # rebound to real Character/Shot objects and persisted successfully.
+        try:
+            self._save_checkpoint(
+                production_id,
+                mode=mode,
+                user_input=user_input,
+                workflow_mode=workflow_mode,
+                profile=profile,
+                status="completed",
+                stage="production_plan",
+                base_plan=deepcopy(base_plan),
+                director_plan=deepcopy(plan),
+                completed_scene_ids=[
+                    str(scene.get("scene_id", "")).strip()
+                    for scene in plan.get("scenes", [])
+                    if str(scene.get("scene_id", "")).strip()
+                ],
+            )
+        except Exception as exc:
+            # The actual storyboard has already been persisted. Do not turn a
+            # checkpoint bookkeeping failure into a fake production failure.
+            print(
+                "[CHECKPOINT] final save failed:",
+                str(exc),
+                flush=True,
+            )
 
         return plan
+
+    def resume_latest_production_plan(
+        self,
+        mode: str,
+        user_input: str,
+    ) -> dict:
+
+        state = self._checkpoint_store().latest_resumable(
+            mode,
+            user_input,
+        )
+
+        if state is None:
+            raise RuntimeError(
+                "No resumable production checkpoint was found "
+                "for the supplied mode and story."
+            )
+
+        return self.resume_production_plan(
+            str(
+                state["session_id"]
+            )
+        )
 
     def unload_models(
         self,
