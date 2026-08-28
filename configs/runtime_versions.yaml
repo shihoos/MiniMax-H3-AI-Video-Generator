@@ -1,22 +1,20 @@
 python:
-  ci: "3.11"
-  kaggle: "3.12"
-
+  ci: '3.11'
+  kaggle: '3.12'
 comfyui:
-  expected_version: "0.33.0"
-
+  repository: https://github.com/Comfy-Org/ComfyUI.git
+  expected_version: 0.33.0
+  revision: v0.33.0
 llama_cpp:
-  package: "llama-cpp-python"
-  version: "0.3.35"
-  cuda_wheel: "cu130"
-  cuda_index: "https://abetlen.github.io/llama-cpp-python/whl/cu130"
-
+  package: llama-cpp-python
+  version: 0.3.35
+  cuda_wheel: cu130
+  cuda_index: https://abetlen.github.io/llama-cpp-python/whl/cu130
 cuda_runtime:
-  runtime_package: "nvidia-cuda-runtime"
-  runtime_version: "13.3.29"
-  cublas_package: "nvidia-cublas"
-  cublas_version: "13.6.1.10"
-
+  runtime_package: nvidia-cuda-runtime
+  runtime_version: 13.3.29
+  cublas_package: nvidia-cublas
+  cublas_version: 13.6.1.10
 generation:
   width: 1344
   height: 768
@@ -24,31 +22,40 @@ generation:
   frames_per_shot: 124
   normal_steps: 20
   turbo_steps: 8
-  ref_image_size: "match"
-
+  ref_image_size: match
 upscale:
-  # The H3 3D upscaler requires 32-pixel alignment.
-  # 1920x1088 is used as the internal refinement size
-  # and is finally delivered at 1280x720.
   width: 1920
   height: 1088
-
 delivery:
   width: 1280
   height: 720
   fps: 24
-
 director:
-  model_filename: "Qwen3-14B-Q4_K_M.gguf"
+  model_filename: Qwen3-14B-Q4_K_M.gguf
   context: 8192
   max_tokens: 7000
-  temperature: 0.20
+  temperature: 0.2
   top_p: 0.85
   batch: 512
   gpu_layers: -1
   threads: 8
-
 storyboard:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8765
-  gradio_version: "6.0.0"
+  gradio_version: 6.0.0
+runtime:
+  comfyui_startup_timeout_seconds: 300
+  comfyui_request_timeout_seconds: 60
+  comfyui_job_timeout_seconds: 14400
+  comfyui_request_retries: 3
+  lowvram: true
+  cpu_vae: true
+assembly:
+  video_codec: libx264
+  preset: medium
+  crf: 17
+  audio_codec: aac
+  audio_bitrate: 192k
+storage:
+  keep_worker_logs: true
+  keep_concat_file: false
