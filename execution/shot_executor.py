@@ -124,19 +124,40 @@ class ShotExecutor:
             exist_ok=True,
         )
 
-        shutil.copy2(
-            source,
-            destination,
-        )
+        # Reference media is immutable during a shot. Prefer a symlink so a
+        # large image/video/audio asset is not physically copied into
+        # ComfyUI/input for every shot. Fall back to a hard link, then a real
+        # copy on filesystems that do not support links.
+        if destination.exists() or destination.is_symlink():
+            destination.unlink()
+
+        linked = False
+        try:
+            destination.symlink_to(source)
+            linked = True
+        except (OSError, NotImplementedError):
+            try:
+                os.link(source, destination)
+                linked = True
+            except OSError:
+                shutil.copy2(source, destination)
 
         if (
             not destination.is_file()
             or destination.stat().st_size <= 0
         ):
             raise RuntimeError(
-                f"Copied media is missing or empty:\n"
+                f"Prepared media is missing or empty:\n"
                 f"{destination}"
             )
+
+        if linked and destination.is_symlink():
+            resolved_target = destination.resolve()
+            if resolved_target != source:
+                raise RuntimeError(
+                    "Reference symlink resolved to an unexpected target:\n"
+                    f"{resolved_target}"
+                )
 
         try:
             relative = (
