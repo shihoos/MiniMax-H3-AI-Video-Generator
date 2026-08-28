@@ -397,6 +397,39 @@ def check_director() -> None:
 
 
 # ============================================================
+# COMFYUI RUNTIME
+# ============================================================
+
+def check_comfyui() -> None:
+    runtime = load_yaml(RUNTIME_MANIFEST)
+    config = runtime.get("comfyui", {})
+    main_py = COMFY / "main.py"
+    if not main_py.is_file():
+        raise RuntimeError(f"ComfyUI is not installed: {main_py}")
+
+    expected_version = str(config.get("expected_version", "") or "").strip()
+    revision = str(config.get("revision", "") or "").strip()
+    if not (COMFY / ".git").is_dir():
+        raise RuntimeError(f"ComfyUI is not a git checkout: {COMFY}")
+
+    head = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    if revision:
+        expected_head = subprocess.run(
+            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if head != expected_head:
+            raise RuntimeError(
+                f"ComfyUI revision mismatch: {head} != {expected_head}"
+            )
+
+    print("COMFYUI RUNTIME: PASS", expected_version or revision)
+
+
+# ============================================================
 # H3 MODELS
 # ============================================================
 
@@ -735,6 +768,8 @@ def check_delivery() -> None:
 def main():
 
     check_director()
+
+    check_comfyui()
 
     check_models()
 
