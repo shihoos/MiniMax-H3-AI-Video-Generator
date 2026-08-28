@@ -404,6 +404,7 @@ class ProductionCheckpoint:
             if state.get(
                 "status"
             ) not in {
+                "ready",
                 "running",
                 "interrupted",
                 "failed",
