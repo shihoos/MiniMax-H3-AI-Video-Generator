@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -67,6 +68,7 @@ class ProductionRunner:
 
         self.production_id = None
         self._active_plan_sha256 = ""
+        self._completed_shots_lock = threading.RLock()
 
         self.production_input_root = (
             self.input_root
@@ -645,9 +647,10 @@ class ProductionRunner:
             # Never assume the original output was rendered
             # on the GPU currently executing the resume.
             # ------------------------------------------------
-            record = completed_shots.get(
-                shot_id
-            )
+            with self._completed_shots_lock:
+                record = completed_shots.get(
+                    shot_id
+                )
 
             existing = None
 
@@ -807,12 +810,14 @@ class ProductionRunner:
             previous_video = result
             previous_shot = shot
 
-            completed_shots[shot_id] = {
-                "gpu_id": int(gpu_id),
-                "scene_id": str(scene_id),
-                "output": str(result),
-                "plan_sha256": self._active_plan_sha256,
-            }
+            with self._completed_shots_lock:
+                completed_shots[shot_id] = {
+                    "gpu_id": int(gpu_id),
+                    "scene_id": str(scene_id),
+                    "output": str(result),
+                    "plan_sha256": self._active_plan_sha256,
+                }
+                completed_record = dict(completed_shots[shot_id])
 
             self._update_render_checkpoint(
                 production_id,
@@ -823,9 +828,7 @@ class ProductionRunner:
                     shot_id
                 ],
                 completed_shot={
-                    shot_id: completed_shots[
-                        shot_id
-                    ],
+                    shot_id: completed_record,
                 },
             )
 
