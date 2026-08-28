@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import threading
 import uuid
@@ -143,6 +144,33 @@ class ProductionRunner:
     @staticmethod
     def _plan_hash(production_plan: dict[str, Any]) -> str:
         return ProductionCheckpoint.plan_digest(production_plan)
+
+    @staticmethod
+    def _deterministic_shot_seed(
+        production_id: str,
+        scene_id: str,
+        shot_id: str,
+    ) -> int:
+        """Return a stable positive seed for a production/scene/shot.
+
+        Explicit shot["seed"] values always win. The derived seed makes
+        otherwise-unseeded renders reproducible across retries and resumes
+        while keeping different shots on independent random streams.
+        """
+        material = (
+            f"{production_id}\x1f"
+            f"{scene_id}\x1f"
+            f"{shot_id}"
+        ).encode("utf-8")
+
+        digest = hashlib.sha256(
+            material
+        ).digest()
+
+        return int.from_bytes(
+            digest[:8],
+            "big",
+        ) & 0x7FFFFFFFFFFFFFFF
 
     @staticmethod
     def _validate_checkpoint_plan(
@@ -640,6 +668,15 @@ class ProductionRunner:
             if not shot_id:
                 raise RuntimeError(
                     "Shot is missing shot_id."
+                )
+
+            # Preserve any explicit user/planner seed. Only synthesize a
+            # deterministic seed when the plan did not provide one.
+            if shot.get("seed") in (None, ""):
+                shot["seed"] = self._deterministic_shot_seed(
+                    production_id,
+                    str(scene_id),
+                    shot_id,
                 )
 
             # ------------------------------------------------
