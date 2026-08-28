@@ -41,7 +41,7 @@ jobs:
       - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install PyYAML gradio
+          python -m pip install -r requirements.txt
 
       - name: Python syntax
         run: |
@@ -64,6 +64,12 @@ jobs:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python scripts/validate_project.py
+
+      - name: Repair validation
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python scripts/validate_repairs.py
 
       - name: Director validation
         env:
