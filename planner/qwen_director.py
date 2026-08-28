@@ -2329,10 +2329,23 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     or f"Scene {index}"
                 )
 
+            used_scene_ids = {
+                str(item.get("scene_id", "")).strip().lower()
+                for item in result
+                if isinstance(item, dict) and str(item.get("scene_id", "")).strip()
+            }
+            normalized_scene_id = scene_id
+            if normalized_scene_id.lower() in used_scene_ids:
+                base = normalized_scene_id
+                suffix = 2
+                while f"{base}_{suffix}".lower() in used_scene_ids:
+                    suffix += 1
+                normalized_scene_id = f"{base}_{suffix}"
+
             result.append(
                 {
                     "scene_id":
-                        scene_id,
+                        normalized_scene_id,
 
                     "title":
                         title,
@@ -2676,18 +2689,15 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 or ""
             ).strip()
 
-            if (
-                not scene_id
-                or scene_id in seen_scene_ids
-            ):
+            if not scene_id:
+                scene_id = f"scene_{index:03d}"
 
-                scene_id = (
-                    f"scene_{index:03d}"
+            if scene_id in seen_scene_ids:
+                raise RuntimeError(
+                    f"Duplicate scene_id encountered during normalization: {scene_id}"
                 )
 
-            seen_scene_ids.add(
-                scene_id
-            )
+            seen_scene_ids.add(scene_id)
 
             scene[
                 "scene_id"
