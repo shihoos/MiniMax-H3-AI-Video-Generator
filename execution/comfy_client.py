@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 
@@ -16,6 +17,9 @@ from urllib.request import (
 )
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class ComfyClient:
 
     def __init__(
@@ -26,8 +30,15 @@ class ComfyClient:
     ):
 
         self.base_url = (
-            base_url.rstrip("/")
+            str(base_url).strip().rstrip("/")
         )
+
+        if not self.base_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError(
+                "ComfyUI base_url must start with http:// or https://."
+            )
 
         self.timeout = max(
             1,
@@ -159,12 +170,20 @@ class ComfyClient:
                     < attempts - 1
                 ):
 
-                    time.sleep(
-                        min(
-                            2 ** attempt,
-                            10,
-                        )
+                    delay = min(
+                        2 ** attempt,
+                        10,
                     )
+                    LOGGER.warning(
+                        "ComfyUI HTTP %s for %s; retrying in %ss "
+                        "(attempt %s/%s).",
+                        error.code,
+                        url,
+                        delay,
+                        attempt + 1,
+                        attempts - 1,
+                    )
+                    time.sleep(delay)
 
                     continue
 
@@ -184,12 +203,20 @@ class ComfyClient:
                     < attempts - 1
                 ):
 
-                    time.sleep(
-                        min(
-                            2 ** attempt,
-                            10,
-                        )
+                    delay = min(
+                        2 ** attempt,
+                        10,
                     )
+                    LOGGER.warning(
+                        "ComfyUI connection failure for %s; "
+                        "retrying in %ss (attempt %s/%s): %s",
+                        url,
+                        delay,
+                        attempt + 1,
+                        attempts - 1,
+                        error,
+                    )
+                    time.sleep(delay)
 
                     continue
 
@@ -215,7 +242,13 @@ class ComfyClient:
 
             return True
 
-        except Exception:
+        except Exception as error:
+            LOGGER.debug(
+                "ComfyUI health check failed for %s: %s",
+                self.base_url,
+                error,
+                exc_info=True,
+            )
             return False
 
     def get_object_info(
@@ -399,10 +432,34 @@ class ComfyClient:
         timeout=14400.0,
     ):
 
-        started = time.monotonic()
+        prompt_id = str(
+            prompt_id or ""
+        ).strip()
+
+        if not prompt_id:
+            raise ValueError(
+                "prompt_id cannot be empty."
+            )
+
         delay = float(
             poll_interval
         )
+
+        if delay <= 0:
+            raise ValueError(
+                "poll_interval must be greater than zero."
+            )
+
+        timeout = float(
+            timeout
+        )
+
+        if timeout <= 0:
+            raise ValueError(
+                "timeout must be greater than zero."
+            )
+
+        started = time.monotonic()
 
         while True:
 
@@ -440,6 +497,11 @@ class ComfyClient:
                     )
                     == "error"
                 ):
+                    LOGGER.error(
+                        "ComfyUI prompt %s failed: %s",
+                        prompt_id,
+                        status,
+                    )
 
                     raise RuntimeError(
                         f"ComfyUI failed {prompt_id}: "
