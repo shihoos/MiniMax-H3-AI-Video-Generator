@@ -291,6 +291,209 @@ class ShotExecutor:
         ):
             return default
 
+    @staticmethod
+    def _select_video_output(
+        workflow,
+        history,
+        shot_id: str,
+    ) -> dict:
+        """
+        Select the actual SaveVideo output deterministically.
+
+        The converted ComfyUI API workflow contains node IDs and class_type
+        values. History is keyed by those node IDs. Do not rely on the
+        incidental ordering of find_video_outputs().
+        """
+        outputs = (
+            history.get(
+                "outputs",
+                {},
+            )
+            if isinstance(
+                history,
+                dict,
+            )
+            else {}
+        )
+
+        if not isinstance(
+            outputs,
+            dict,
+        ):
+            outputs = {}
+
+        save_nodes = []
+
+        if isinstance(
+            workflow,
+            dict,
+        ):
+            for node_id, node in workflow.items():
+                if not isinstance(
+                    node,
+                    dict,
+                ):
+                    continue
+
+                if (
+                    str(
+                        node.get(
+                            "class_type",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    == "SaveVideo"
+                ):
+                    save_nodes.append(
+                        str(node_id)
+                    )
+
+        candidates = []
+
+        for node_id in save_nodes:
+            node_output = outputs.get(
+                node_id
+            )
+
+            if not isinstance(
+                node_output,
+                dict,
+            ):
+                continue
+
+            for items in node_output.values():
+                if not isinstance(
+                    items,
+                    list,
+                ):
+                    continue
+
+                for item in items:
+                    if not isinstance(
+                        item,
+                        dict,
+                    ):
+                        continue
+
+                    filename = item.get(
+                        "filename"
+                    )
+
+                    if not filename:
+                        continue
+
+                    suffix = (
+                        Path(
+                            filename
+                        )
+                        .suffix
+                        .lower()
+                    )
+
+                    if suffix not in {
+                        ".mp4",
+                        ".mov",
+                        ".mkv",
+                        ".webm",
+                    }:
+                        continue
+
+                    candidates.append(
+                        {
+                            "filename": filename,
+                            "subfolder": item.get(
+                                "subfolder",
+                                "",
+                            ),
+                            "type": item.get(
+                                "type",
+                                "output",
+                            ),
+                            "node_id": node_id,
+                        }
+                    )
+
+        if len(candidates) == 1:
+            return candidates[0]
+
+        if len(candidates) > 1:
+            raise RuntimeError(
+                f"{shot_id}: multiple SaveVideo outputs were produced; "
+                "the workflow must expose exactly one production video."
+            )
+
+        # Fallback only when the converted workflow does not expose its
+        # SaveVideo node metadata. Still require exactly one video result.
+        fallback = []
+
+        if isinstance(
+            outputs,
+            dict,
+        ):
+            for node_output in outputs.values():
+                if not isinstance(
+                    node_output,
+                    dict,
+                ):
+                    continue
+
+                for items in node_output.values():
+                    if not isinstance(
+                        items,
+                        list,
+                    ):
+                        continue
+
+                    for item in items:
+                        if not isinstance(
+                            item,
+                            dict,
+                        ):
+                            continue
+
+                        filename = item.get(
+                            "filename"
+                        )
+
+                        if not filename:
+                            continue
+
+                        if (
+                            Path(
+                                filename
+                            )
+                            .suffix
+                            .lower()
+                            in {
+                                ".mp4",
+                                ".mov",
+                                ".mkv",
+                                ".webm",
+                            }
+                        ):
+                            fallback.append(
+                                {
+                                    "filename": filename,
+                                    "subfolder": item.get(
+                                        "subfolder",
+                                        "",
+                                    ),
+                                    "type": item.get(
+                                        "type",
+                                        "output",
+                                    ),
+                                }
+                            )
+
+        if len(fallback) != 1:
+            raise RuntimeError(
+                f"{shot_id}: expected exactly one production video output; "
+                f"found {len(fallback)}."
+            )
+
+        return fallback[0]
+
     def execute_shot(
         self,
         *,
@@ -418,19 +621,16 @@ class ShotExecutor:
             timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
         )
 
-        outputs = (
-            self.client.find_video_outputs(
-                history
-            )
+        output = self._select_video_output(
+            workflow,
+            history,
+            str(
+                shot.get(
+                    "shot_id",
+                    "",
+                )
+            ),
         )
-
-        if not outputs:
-            raise RuntimeError(
-                f"No video output for "
-                f"{shot.get('shot_id')}"
-            )
-
-        output = outputs[-1]
 
         destination = (
             output_dir
