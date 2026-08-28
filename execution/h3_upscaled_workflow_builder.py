@@ -704,6 +704,76 @@ class H3UpscaledWorkflowBuilder(
             "LATENT",
         )
 
+        # CRITICAL: VAEDecodeAudio must consume the original H3
+        # audio-bearing latent emitted by the generation sampler. The
+        # UltimateUpscale node produces a video latent and is not a valid
+        # source for VAEDecodeAudio. The source workflow historically had
+        # an accidental 150 -> 121 connection, so enforce the correct edge
+        # in the generated graph rather than relying on the static JSON.
+        audio_decode = next(
+            (
+                node
+                for node in self._nodes(workflow)
+                if node.get("type") == "VAEDecodeAudio"
+            ),
+            None,
+        )
+        if audio_decode is None:
+            raise RuntimeError(
+                "Combined H3 upscale graph is missing VAEDecodeAudio."
+            )
+
+        audio_input = next(
+            (
+                item
+                for item in audio_decode.get("inputs", [])
+                if item.get("name") == "samples"
+            ),
+            None,
+        )
+        if audio_input is None:
+            raise RuntimeError(
+                "VAEDecodeAudio samples input not found."
+            )
+
+        self._connect_graph(
+            workflow,
+            self._node_id(latent_source),
+            0,
+            self._node_id(audio_decode),
+            "samples",
+            "LATENT",
+        )
+
+        # Defensive postcondition: video and audio decoders must now have
+        # different sources. If this ever regresses, fail before submitting
+        # an invalid graph to ComfyUI.
+        video_samples_link = next(
+            item.get("link")
+            for item in video_decode.get("inputs", [])
+            if item.get("name") == "samples"
+        )
+        audio_samples_link = next(
+            item.get("link")
+            for item in audio_decode.get("inputs", [])
+            if item.get("name") == "samples"
+        )
+        links_by_id = {
+            int(row[0]): row
+            for row in workflow.get("links", [])
+            if isinstance(row, list) and len(row) >= 6
+        }
+        video_edge = links_by_id.get(int(video_samples_link)) if video_samples_link is not None else None
+        audio_edge = links_by_id.get(int(audio_samples_link)) if audio_samples_link is not None else None
+        if not video_edge or int(video_edge[1]) != int(ultimate_id):
+            raise RuntimeError(
+                "Upscale postcondition failed: VAEDecode is not connected to MMH3UltimateUpscale."
+            )
+        if not audio_edge or int(audio_edge[1]) != self._node_id(latent_source):
+            raise RuntimeError(
+                "Upscale postcondition failed: VAEDecodeAudio is not connected to the original latent source."
+            )
+
         # Store explicit metadata for the runtime and UI.
         workflow[
             "_h3_combined_upscale"
