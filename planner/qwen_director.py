@@ -2917,6 +2917,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
 
         return {
             "mode": mode,
+            "user_input": str(user_input or ""),
             "user_input_sha256": checkpoint.digest_text(
                 user_input
             ),
@@ -2948,18 +2949,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
         if checkpoint_store is None or not session_id:
             return
 
-        try:
-            checkpoint_store.save(
-                session_id,
-                state,
-            )
-        except Exception as exc:
-            # Checkpointing must never make a valid generation fail.
-            print(
-                "[QWEN] checkpoint_save_failed",
-                str(exc),
-                flush=True,
-            )
+        checkpoint_store.save(
+            session_id,
+            state,
+        )
 
     # ========================================================
     # GENERATE
@@ -2993,11 +2986,20 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 f"Unsupported story mode: {mode}"
             )
 
-        if (resume_state or {}).get("stage") == "director_complete":
+        if (resume_state or {}).get("stage") in {
+            "director_complete",
+            "production_plan",
+            "rendering",
+            "render_complete",
+        }:
             prior = deepcopy(
                 (resume_state or {}).get("director_plan", {}) or {}
             )
-            if prior.get("story") and prior.get("scenes") and prior.get("shots"):
+            if (
+                prior.get("story")
+                and prior.get("scenes")
+                and prior.get("shots")
+            ):
                 return {
                     "enabled": True,
                     "plan": prior,
