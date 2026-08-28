@@ -247,6 +247,26 @@ def _configure_cuda_environment(
     return environment
 
 
+def install_base_requirements() -> None:
+    requirements = ROOT / "requirements.txt"
+
+    if not requirements.is_file():
+        raise RuntimeError(
+            f"Repository dependency manifest is missing: {requirements}"
+        )
+
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        "-r",
+        requirements,
+    )
+
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -666,6 +686,8 @@ def main():
         "[DIRECTOR MODEL]",
         director_model,
     )
+
+    install_base_requirements()
 
     install_director_runtime(
         runtime
