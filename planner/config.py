@@ -169,7 +169,15 @@ DIRECTOR_THREADS = int(
     )
 )
 
-DIRECTOR_KAGGLE_INPUT_ROOT = Path("/kaggle/input")
+_configured_input_root = os.getenv("H3_INPUT_ROOT", "").strip()
+if _configured_input_root:
+    DIRECTOR_KAGGLE_INPUT_ROOT = Path(_configured_input_root).expanduser().resolve()
+elif Path("/kaggle/input").is_dir():
+    DIRECTOR_KAGGLE_INPUT_ROOT = Path("/kaggle/input").resolve()
+else:
+    DIRECTOR_KAGGLE_INPUT_ROOT = (
+        Path(__file__).resolve().parents[1] / "input"
+    ).resolve()
 
 
 def director_enabled() -> bool:
