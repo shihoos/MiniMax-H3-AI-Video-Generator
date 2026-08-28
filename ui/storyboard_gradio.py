@@ -428,8 +428,16 @@ class ProductionController:
                 f"{scene.get('description', '')}\n\n"
                 f"**Location:** {scene.get('location', '')}\n"
                 f"**Time:** {scene.get('time_of_day', '')}\n"
+                f"**Weather:** {scene.get('weather', '')}\n"
+                f"**Atmosphere:** {scene.get('atmosphere', '')}\n"
                 f"**Mood:** {scene.get('mood', '')}\n"
                 f"**Lighting:** {scene.get('lighting', '')}\n"
+                f"**Color Temperature:** "
+                f"{scene.get('color_temperature', '')}\n"
+                f"**Environment Details:** "
+                f"{', '.join(scene.get('environment_details', []) or [])}\n"
+                f"**Key Props:** "
+                f"{', '.join(scene.get('key_props', []) or [])}\n"
                 f"**Characters:** "
                 f"{', '.join(scene.get('characters', []) or [])}\n\n"
                 f"**Continuity:** "
@@ -478,6 +486,39 @@ class ProductionController:
             in shots
         )
 
+        visual_language = (
+            plan.get(
+                "visual_language",
+                {},
+            )
+            or {}
+        )
+
+        if visual_language:
+
+            visual_language_text = (
+                "\n\n### VISUAL LANGUAGE\n\n"
+                f"**Genre / Tone:** "
+                f"{visual_language.get('genre_tone', '')}\n\n"
+                f"**Color Palette:** "
+                f"{visual_language.get('color_palette', '')}\n\n"
+                f"**Lighting Philosophy:** "
+                f"{visual_language.get('lighting_philosophy', '')}\n\n"
+                f"**Camera Philosophy:** "
+                f"{visual_language.get('camera_philosophy', '')}\n\n"
+                f"**Pacing:** "
+                f"{visual_language.get('pacing', '')}"
+            )
+
+        else:
+
+            visual_language_text = (
+                "\n\n### VISUAL LANGUAGE\n\n"
+                "Not available for this storyboard "
+                "(director did not run, or this draft "
+                "predates the visual language feature)."
+            )
+
         summary = (
             "### STORYBOARD READY\n\n"
             f"**Production ID:** `{production_id}`\n\n"
@@ -495,6 +536,7 @@ class ProductionController:
             f"{plan.get('delivery_width', 1280)}×"
             f"{plan.get('delivery_height', 720)} @ "
             f"{plan.get('delivery_fps', 24)} FPS"
+            f"{visual_language_text}"
         )
 
         approval = (
@@ -544,10 +586,15 @@ class ProductionController:
         self,
         story: str,
         mode: str,
+        resume_id: str | None = None,
     ):
 
         story = str(
             story or ""
+        ).strip()
+
+        resume_id = str(
+            resume_id or ""
         ).strip()
 
         if not story:
@@ -609,6 +656,10 @@ class ProductionController:
                     user_input=story,
                     workflow_mode="auto",
                     profile="turbo",
+                    resume_session_id=(
+                        resume_id
+                        or None
+                    ),
                 )
             )
 
@@ -1191,11 +1242,13 @@ def build_app(
     def generate_storyboard_ui(
         story_value: str,
         mode_value: str,
+        resume_id_value: str,
     ):
         result = (
             controller.generate_storyboard(
                 story_value,
                 mode_value,
+                resume_id_value,
             )
         )
 
@@ -1220,11 +1273,13 @@ def build_app(
     def regenerate_storyboard_ui(
         story_value: str,
         mode_value: str,
+        resume_id_value: str,
     ):
         result = (
             controller.generate_storyboard(
                 story_value,
                 mode_value,
+                resume_id_value,
             )
         )
 
@@ -1334,6 +1389,20 @@ def build_app(
             ),
         )
 
+        resume_id = gr.Textbox(
+            label="Resume Production ID (optional)",
+            value="",
+            placeholder=(
+                "Paste a production_id here to resume a "
+                "generation that stopped partway through "
+                "(e.g. after a Kaggle session died). Leave "
+                "empty to start a new production. The story "
+                "text and mode above must exactly match the "
+                "original request."
+            ),
+            lines=1,
+        )
+
         with gr.Row():
 
             generate = gr.Button(
@@ -1431,6 +1500,7 @@ def build_app(
             inputs=[
                 story,
                 mode,
+                resume_id,
             ],
             outputs=generation_outputs,
         )
@@ -1440,6 +1510,7 @@ def build_app(
             inputs=[
                 story,
                 mode,
+                resume_id,
             ],
             outputs=generation_outputs,
         )
