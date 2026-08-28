@@ -382,7 +382,11 @@ class ReferenceManager:
 
             character.reference_mode = (
                 "provided"
-                if character.reference_paths
+                if (
+                    character.reference_paths
+                    or character.reference_video_paths
+                    or character.reference_audio_paths
+                )
                 else "story_generated"
             )
 
