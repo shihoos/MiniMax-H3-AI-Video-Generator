@@ -413,6 +413,87 @@ class ProductionRunner:
         ):
             return None
 
+    def _initialize_render_checkpoint(
+        self,
+        production_id: str,
+        production_plan: dict[str, Any],
+        profile: str,
+        workflow_mode: str,
+    ) -> dict:
+        """Create a durable render checkpoint for an external plan.
+
+        Plans created by ProductionOrchestrator already have a planning
+        checkpoint. A standalone --plan file may not, so rendering must
+        initialize its own checkpoint before any render progress is saved.
+        """
+        store = self._checkpoint_store()
+
+        user_input = str(
+            production_plan.get(
+                "user_input",
+                "",
+            )
+            or production_plan.get(
+                "story",
+                "",
+            )
+            or ""
+        ).strip()
+
+        director_path = (
+            self.project_root
+            / "planner"
+            / "qwen_director.py"
+        )
+
+        if not director_path.is_file():
+            raise RuntimeError(
+                f"Qwen director source is missing: {director_path}"
+            )
+
+        state = {
+            "mode": str(
+                production_plan.get(
+                    "story_mode",
+                    "",
+                )
+                or ""
+            ).strip(),
+            "user_input": user_input,
+            "user_input_sha256": store.digest_text(
+                user_input
+            ),
+            "director_sha256": store.digest_file(
+                director_path
+            ),
+            "workflow_mode": str(
+                production_plan.get(
+                    "workflow_mode",
+                    workflow_mode,
+                )
+                or workflow_mode
+            ).strip(),
+            "profile": profile,
+            "status": "rendering",
+            "stage": "rendering_initialized",
+            "base_plan": {},
+            "director_plan": production_plan,
+            "completed_scene_ids": [],
+            "completed_shot_ids": [],
+            "current_scene_id": "",
+            "error": "",
+            "updated_at": __import__(
+                "datetime"
+            ).datetime.now().isoformat(),
+        }
+
+        store.save(
+            production_id,
+            state,
+        )
+
+        return state
+
     def _update_render_checkpoint(
         self,
         production_id: str,
@@ -761,6 +842,20 @@ class ProductionRunner:
                 production_id
             )
         )
+
+        if checkpoint is None:
+            checkpoint = self._initialize_render_checkpoint(
+                production_id,
+                production_plan,
+                profile,
+                str(
+                    production_plan.get(
+                        "workflow_mode",
+                        WORKFLOW_REF2V,
+                    )
+                    or WORKFLOW_REF2V
+                ),
+            )
 
         completed_shot_ids = set(
             str(value).strip()
