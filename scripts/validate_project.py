@@ -1104,10 +1104,14 @@ def validate_execution_integration() -> None:
     require("json.dumps(payload" in metrics_text, "Metrics recorder must serialize JSONL records.")
     require("os.fsync(handle.fileno())" in metrics_text, "Metrics recorder must durably flush records.")
 
+    client_path = ROOT / "execution" / "comfy_client.py"
+    client_text = client_path.read_text(encoding="utf-8")
     shot_text = shot_path.read_text(encoding="utf-8")
     require("self.gpu_id = int(gpu_id)" in shot_text, "ShotExecutor must store gpu_id for telemetry.")
     require("self.metrics = MetricsRecorder(Path(metrics_path))" in shot_text, "ShotExecutor must initialize MetricsRecorder when configured.")
     require("self.metrics.record(" in shot_text, "ShotExecutor must write telemetry events.")
+    require("def cancel_prompt(" in client_text, "ComfyClient must provide prompt cancellation.")
+    require("liveness_interval" in client_text and "max_liveness_failures" in client_text, "ComfyClient wait_for_prompt must expose liveness controls.")
     require("outputs[-1]" not in shot_text, "ShotExecutor must not select an arbitrary last video output.")
     require("expected exactly one SaveVideo node" in shot_text, "ShotExecutor must enforce a unique SaveVideo output.")
 
