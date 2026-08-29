@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import hashlib
 import json
 import os
 import re
@@ -152,6 +153,179 @@ class QwenDirector:
 
         self._fallback_planner = None
         self._current_visual_language: dict = {}
+
+        # Optional development diagnostics. Both are disabled unless the
+        # corresponding environment variable is explicitly configured.
+        self._trace_dir = self._optional_directory_env(
+            "H3_DIRECTOR_TRACE_DIR"
+        )
+        self._cache_dir = self._optional_directory_env(
+            "H3_DIRECTOR_CACHE_DIR"
+        )
+        self._cache_namespace = "minimax-h3-qwen-schema-v1"
+
+    @staticmethod
+    def _optional_directory_env(name: str) -> Path | None:
+        value = os.getenv(name, "").strip()
+        if not value:
+            return None
+        path = Path(value)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _strip_thinking(text: str) -> str:
+        value = str(text or "").strip()
+        value = re.sub(
+            r"<think>.*?</think>",
+            "",
+            value,
+            flags=re.IGNORECASE | re.DOTALL,
+        ).strip()
+        if re.search(r"<think>", value, flags=re.IGNORECASE):
+            value = re.split(
+                r"<think>",
+                value,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip()
+        return value
+
+    def _trace_call(
+        self,
+        call_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        response,
+        elapsed: float,
+        error: str = "",
+        response_format=None,
+    ) -> None:
+        if self._trace_dir is None:
+            return
+
+        raw_content = ""
+        if isinstance(response, dict):
+            try:
+                raw_content = str(
+                    response["choices"][0]["message"]["content"] or ""
+                )
+            except Exception:
+                raw_content = ""
+
+        payload = {
+            "call_name": call_name,
+            "elapsed_seconds": elapsed,
+            "error": error,
+            "response_format": response_format,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "raw_content": raw_content,
+            "raw_response": response,
+        }
+        digest = hashlib.sha256(
+            (
+                self._cache_namespace
+                + "\n"
+                + call_name
+                + "\n"
+                + system_prompt
+                + "\n"
+                + user_prompt
+            ).encode("utf-8")
+        ).hexdigest()
+        path = self._trace_dir / f"{call_name.replace(':', '_')}_{digest[:16]}.json"
+        try:
+            path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(
+                "[QWEN]",
+                "trace_write_failed",
+                call_name,
+                str(exc),
+                flush=True,
+            )
+
+    def _cache_key(
+        self,
+        call_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        response_schema: dict | None,
+    ) -> str:
+        material = json.dumps(
+            {
+                "namespace": self._cache_namespace,
+                "call_name": call_name,
+                "system": system_prompt,
+                "user": user_prompt,
+                "schema": response_schema,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()
+
+    def _cache_read(
+        self,
+        key: str,
+    ) -> dict | None:
+        if self._cache_dir is None:
+            return None
+        path = self._cache_dir / f"{key}.json"
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(
+                path.read_text(encoding="utf-8")
+            )
+            result = payload.get("parsed")
+            return result if isinstance(result, dict) else None
+        except Exception:
+            return None
+
+    def _cache_write(
+        self,
+        key: str,
+        parsed: dict,
+        *,
+        call_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        elapsed: float,
+        raw_content: str,
+    ) -> None:
+        if self._cache_dir is None:
+            return
+        path = self._cache_dir / f"{key}.json"
+        payload = {
+            "namespace": self._cache_namespace,
+            "call_name": call_name,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "elapsed_seconds": elapsed,
+            "raw_content": raw_content,
+            "parsed": parsed,
+        }
+        try:
+            path.write_text(
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(
+                "[QWEN]",
+                "cache_write_failed",
+                call_name,
+                str(exc),
+                flush=True,
+            )
 
     # ========================================================
     # MODEL DISCOVERY
@@ -868,7 +1042,7 @@ Create only:
 Do NOT create shots in this pass.
 
 Create exactly 4–6 meaningful narrative scenes.
-Never output more than 6 scenes. Every scene must represent a real dramatic beat, not a camera instruction.
+Prefer exactly 5 scenes when the narrative supports it; use 6 only when a distinct dramatic beat genuinely requires it. Never output more than 6 scenes. Every scene must represent a real dramatic beat, not a camera instruction.
 
 Avoid scene titles such as:
 "distance"
@@ -892,11 +1066,15 @@ description
 mood
 lighting
 color_temperature
-environment_details
-key_props
+environment_details (3–6 short noun phrases; no full sentences)
+key_props (2–4 short noun phrases)
 characters
-scene_objective
-continuity_notes
+scene_objective (one concise sentence)
+continuity_notes (one concise sentence)
+
+For AI STORY and EXPAND STORY modes, the characters array MUST contain all clearly named characters from the story. Never return an empty roster when named characters are present.
+
+Do NOT output story_summary; it is derived from each scene description by the Python sanitizer.
 
 Create one coherent visual_language bible:
 genre_tone
@@ -1091,6 +1269,247 @@ Return:
         )
 
     # ========================================================
+    # STRUCTURED OUTPUT SCHEMAS
+    # ========================================================
+
+    @staticmethod
+    def _character_json_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "role": {"type": "string"},
+                        },
+                        "required": [
+                            "name",
+                            "role",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "characters",
+            ],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _metadata_json_schema() -> dict:
+        scene_properties = {
+            "scene_id": {"type": "string"},
+            "title": {"type": "string"},
+            "order": {"type": "integer"},
+            "location": {"type": "string"},
+            "time_of_day": {"type": "string"},
+            "weather": {"type": "string"},
+            "atmosphere": {"type": "string"},
+            "description": {"type": "string"},
+            "mood": {"type": "string"},
+            "lighting": {"type": "string"},
+            "color_temperature": {"type": "string"},
+            "environment_details": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "key_props": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "characters": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "scene_objective": {"type": "string"},
+            "continuity_notes": {"type": "string"},
+        }
+
+        character_properties = {
+            "character_id": {"type": "string"},
+            "name": {"type": "string"},
+            "role": {"type": "string"},
+            "description": {"type": "string"},
+            "personality": {"type": "string"},
+            "appearance": {"type": "object"},
+            "clothing": {"type": "object"},
+            "distinctive_features": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "character_state": {"type": "object"},
+            "continuity_rules": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        }
+
+        return {
+            "type": "object",
+            "properties": {
+                "director_notes": {"type": "string"},
+                "visual_language": {
+                    "type": "object",
+                    "properties": {
+                        "genre_tone": {"type": "string"},
+                        "color_palette": {"type": "string"},
+                        "lighting_philosophy": {"type": "string"},
+                        "camera_philosophy": {"type": "string"},
+                        "pacing": {"type": "string"},
+                    },
+                    "required": [
+                        "genre_tone",
+                        "color_palette",
+                        "lighting_philosophy",
+                        "camera_philosophy",
+                        "pacing",
+                    ],
+                    "additionalProperties": False,
+                },
+                "characters": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": character_properties,
+                        "required": [
+                            "name",
+                            "role",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+                "scenes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": scene_properties,
+                        "required": [
+                            "scene_id",
+                            "title",
+                            "order",
+                            "location",
+                            "time_of_day",
+                            "weather",
+                            "atmosphere",
+                            "description",
+                            "mood",
+                            "lighting",
+                            "color_temperature",
+                            "environment_details",
+                            "key_props",
+                            "characters",
+                            "scene_objective",
+                            "continuity_notes",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": [
+                "director_notes",
+                "visual_language",
+                "characters",
+                "scenes",
+            ],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _scene_json_schema() -> dict:
+        metadata = QwenDirector._metadata_json_schema()
+        return {
+            "type": "object",
+            "properties": {
+                "scenes": metadata["properties"]["scenes"],
+            },
+            "required": ["scenes"],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _scene_compression_json_schema() -> dict:
+        return QwenDirector._scene_json_schema()
+
+    @staticmethod
+    def _shot_json_schema() -> dict:
+        shot_properties = {
+            "shot_id": {"type": "string"},
+            "scene_id": {"type": "string"},
+            "duration_seconds": {"type": "number"},
+            "characters": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "location": {"type": "string"},
+            "action": {"type": "string"},
+            "camera_shot": {"type": "string"},
+            "camera_movement": {"type": "string"},
+            "lens_and_depth_of_field": {"type": "string"},
+            "composition_notes": {"type": "string"},
+            "lighting": {"type": "string"},
+            "color_temperature": {"type": "string"},
+            "mood": {"type": "string"},
+            "visual_prompt": {"type": "string"},
+            "speaking_characters": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+            "speech_text": {"type": "string"},
+        }
+        required = list(shot_properties.keys())
+        return {
+            "type": "object",
+            "properties": {
+                "shots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": shot_properties,
+                        "required": required,
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["shots"],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _shot_batch_json_schema() -> dict:
+        shot_schema = QwenDirector._shot_json_schema()[
+            "properties"
+        ]["shots"]["items"]
+        return {
+            "type": "object",
+            "properties": {
+                "scene_shots": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_id": {"type": "string"},
+                            "shots": {
+                                "type": "array",
+                                "items": shot_schema,
+                            },
+                        },
+                        "required": [
+                            "scene_id",
+                            "shots",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["scene_shots"],
+            "additionalProperties": False,
+        }
+
+    # ========================================================
     # CHARACTER RECOVERY
     # ========================================================
 
@@ -1104,26 +1523,22 @@ You are the CHARACTER DIRECTOR for MiniMax H3.
 
 {self._mode_instruction(mode)}
 
-Extract or create ONLY the characters genuinely required
-by the story.
+Extract ONLY the characters genuinely required by the story.
+For AI STORY and EXPAND STORY modes, every clearly named story character
+must appear in the roster. Do not invent unrelated people.
 
-Return JSON only:
-
+Return ONLY this JSON shape:
 {{
   "characters": [
     {{
       "name": "string",
-      "role": "string",
-      "description": "string",
-      "personality": "string",
-      "appearance": {{}},
-      "clothing": {{}},
-      "distinctive_features": [],
-      "character_state": {{}},
-      "continuity_rules": []
+      "role": "string"
     }}
   ]
 }}
+
+Keep names and roles concise. Do not output descriptions, appearance,
+clothing, state, or continuity fields in this recovery pass.
 """.strip()
 
     def _character_recovery_user(
@@ -1131,47 +1546,60 @@ Return JSON only:
         story: str,
         visual_language: dict | None = None,
     ) -> str:
-
         return json.dumps(
             {
                 "story": self._limit_text(
                     story,
-                    5500,
-                ),
-                "visual_language": dict(
-                    visual_language
-                    if isinstance(
-                        visual_language,
-                        dict,
-                    )
-                    else {}
+                    4500,
                 ),
             },
             ensure_ascii=False,
-            separators=(
-                ",",
-                ":",
-            ),
+            separators=(",", ":"),
         )
+
+    @staticmethod
+    def _extract_obvious_character_names(
+        story: str,
+    ) -> list[dict]:
+        text = str(story or "")
+        patterns = [
+            r"\b(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Detective)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b",
+        ]
+        names: list[str] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                name = match.group(0).strip()
+                key = name.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                names.append(name)
+
+        return [
+            {
+                "name": name,
+                "role": (
+                    "protagonist"
+                    if index == 0
+                    else "supporting character"
+                ),
+            }
+            for index, name in enumerate(names)
+        ]
 
     def _recover_characters(
         self,
         mode: str,
         story: str,
     ) -> list[dict]:
-
         try:
-
             temperature, top_p = (
-                self._sampling_for_mode(
-                    mode
-                )
+                self._sampling_for_mode(mode)
             )
 
             response = self._chat_json(
-                self._character_recovery_system(
-                    mode
-                ),
+                self._character_recovery_system(mode),
                 self._character_recovery_user(
                     story,
                     getattr(
@@ -1180,22 +1608,35 @@ Return JSON only:
                         {},
                     ),
                 ),
-                minimum_completion=400,
+                minimum_completion=64,
                 temperature=temperature,
                 top_p=top_p,
                 call_name="character_recovery",
-                max_completion=1000,
+                max_completion=192,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=self._character_json_schema(),
             )
 
-        except Exception:
+            characters = self._sanitize_characters(
+                response.get("characters", [])
+            )
 
-            return []
+            if characters:
+                return characters
 
+        except Exception as exc:
+            print(
+                "[QWEN]",
+                "character_recovery_failed",
+                str(exc),
+                flush=True,
+            )
+
+        # Deterministic fallback is only used after the model path fails or
+        # returns an empty roster. This prevents another expensive retry loop.
         return self._sanitize_characters(
-            response.get(
-                "characters",
-                [],
-            )
+            self._extract_obvious_character_names(story)
         )
 
     # ========================================================
@@ -1320,6 +1761,9 @@ Return JSON only:
                 top_p=top_p,
                 call_name="scene_recovery",
                 max_completion=1600,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=self._scene_json_schema(),
             )
 
         except Exception:
@@ -1351,7 +1795,7 @@ Use ONLY characters supplied in the scene.
 Do not create new characters. Do not invent character names.
 Never output reasoning, analysis, markdown, or <think> text.
 Keep every value concise but specific.
-Keep action/visual_prompt values under 70 words; keep all other string fields brief.
+Use these output budgets: action 10–30 words; visual_prompt 15–40 words; composition_notes <=18 words; lighting <=12 words; lens_and_depth_of_field <=10 words; mood <=5 words; camera_shot <=5 words; camera_movement <=5 words.
 
 Make genuinely creative film-direction choices that fit the scene:
 - framing and shot scale
@@ -1369,31 +1813,12 @@ Use cinematic progression across the two shots when justified:
 Do not use the same framing + movement + lens combination for both shots.
 Use the supplied visual language as the production-wide style bible.
 
-SHOT / FRAMING VOCABULARY:
-extreme wide, wide, full shot, medium wide, medium,
-medium close-up, close-up, extreme close-up,
-over-the-shoulder, two-shot, POV, insert,
-low angle, high angle, dutch angle.
-
-CAMERA MOVEMENT VOCABULARY:
-static, slow pan, tilt, dolly in, dolly out, truck,
-pedestal, crane, handheld, steadicam glide,
-whip pan, push-in, pull-out, orbit, tracking shot.
-
-LENS / DOF:
-wide-angle, normal perspective, telephoto compression,
-shallow depth of field, deep focus, selective focus.
-
-COMPOSITION:
-rule of thirds, centered symmetry, leading lines,
-foreground framing, negative space, silhouette,
-depth layering, diagonal composition, subject isolation.
-
-LIGHTING VOCABULARY:
-warm tungsten, cool daylight, golden-hour backlight,
-blue-hour ambient, moonlight, practical neon,
-hard chiaroscuro, soft diffused overcast,
-firelight flicker, mixed practical and ambient.
+STANDARD FILM VOCABULARY:
+framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
+movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
+lens/DOF: wide-angle, normal, telephoto, shallow focus, deep focus, selective focus.
+composition: centered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.
+lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
 
 Return JSON only.
 The top-level value MUST be an object with a "shots" array.
@@ -1556,62 +1981,79 @@ non_diegetic_music, negative_prompt, continuity_notes.
         text: str,
     ) -> dict:
 
-        value = str(
-            text or ""
-        ).strip()
+        value = QwenDirector._strip_thinking(
+            text
+        )
 
         value = re.sub(
-            r"^```(?:json)?",
+            r"^```(?:json)?\s*",
             "",
             value,
             flags=re.IGNORECASE,
-        ).strip()
-
+        )
         value = re.sub(
-            r"```$",
+            r"\s*```$",
             "",
             value,
         ).strip()
 
-        start = value.find(
-            "{"
-        )
-
-        end = value.rfind(
-            "}"
-        )
-
-        if start < 0 or end <= start:
-
-            raise RuntimeError(
-                "Qwen director did not return JSON."
-            )
-
         try:
+            result = json.loads(value)
+            if not isinstance(result, dict):
+                raise RuntimeError(
+                    "Qwen director output must be a JSON object."
+                )
+            return result
+        except json.JSONDecodeError:
+            pass
 
-            result = json.loads(
-                value[
-                    start:end + 1
-                ]
-            )
+        # Scan balanced JSON objects so surrounding prose cannot invalidate
+        # an otherwise usable structured response.
+        for start_index, char in enumerate(value):
+            if char != "{":
+                continue
 
-        except json.JSONDecodeError as exc:
+            depth = 0
+            in_string = False
+            escaped = False
 
-            raise RuntimeError(
-                "Qwen director returned invalid JSON: "
-                f"{exc}"
-            ) from exc
+            for index in range(start_index, len(value)):
+                current = value[index]
 
-        if not isinstance(
-            result,
-            dict,
-        ):
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif current == "\\":
+                        escaped = True
+                    elif current == '"':
+                        in_string = False
+                    continue
 
-            raise RuntimeError(
-                "Qwen director output must be a JSON object."
-            )
+                if current == '"':
+                    in_string = True
+                    continue
 
-        return result
+                if current == "{":
+                    depth += 1
+                elif current == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = value[
+                            start_index:index + 1
+                        ]
+                        try:
+                            result = json.loads(candidate)
+                        except json.JSONDecodeError:
+                            break
+                        if not isinstance(result, dict):
+                            raise RuntimeError(
+                                "Qwen director output must be a JSON object."
+                            )
+                        return result
+
+        raise RuntimeError(
+            "Qwen director returned invalid JSON."
+        )
 
     def _chat_json(
         self,
@@ -1624,6 +2066,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
         max_completion: int | None = None,
         json_mode: bool = True,
         disable_thinking: bool = True,
+        response_schema: dict | None = None,
     ) -> dict:
 
         if self._llama is None:
@@ -1637,12 +2080,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
         if top_p is None:
             top_p = DIRECTOR_TOP_P
 
-        _, max_tokens = (
-            self._available_output_tokens(
-                system_prompt,
-                user_prompt,
-                minimum_completion=minimum_completion,
-            )
+        _, max_tokens = self._available_output_tokens(
+            system_prompt,
+            user_prompt,
+            minimum_completion=minimum_completion,
         )
 
         if max_completion is not None:
@@ -1650,6 +2091,29 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 max_tokens,
                 int(max_completion),
             )
+
+        if max_tokens <= 0:
+            raise RuntimeError(
+                f"No completion budget remains for {call_name}."
+            )
+
+        cache_key = None
+        if self._cache_dir is not None:
+            cache_key = self._cache_key(
+                call_name,
+                system_prompt,
+                user_prompt,
+                response_schema,
+            )
+            cached = self._cache_read(cache_key)
+            if cached is not None:
+                print(
+                    "[QWEN]",
+                    call_name,
+                    "cache_hit",
+                    flush=True,
+                )
+                return cached
 
         messages = [
             {
@@ -1666,9 +2130,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
             messages.append(
                 {
                     "role": "assistant",
-                    "content": (
-                        "<think>\n\n</think>\n\n"
-                    ),
+                    "content": "<think>\n\n</think>\n\n",
                 }
             )
 
@@ -1680,19 +2142,28 @@ non_diegetic_music, negative_prompt, continuity_notes.
         }
 
         if json_mode:
+            if response_schema is None:
+                raise RuntimeError(
+                    f"No JSON schema supplied for {call_name}."
+                )
             kwargs["response_format"] = {
-                "type": "json_object",
+                "type": "json_schema",
+                "schema": response_schema,
             }
 
         started = time.perf_counter()
         response = None
+        error_text = ""
 
         try:
-            response = (
-                self._llama.create_chat_completion(
-                    **kwargs
-                )
+            response = self._llama.create_chat_completion(
+                **kwargs
             )
+        except Exception as exc:
+            error_text = (
+                f"{type(exc).__name__}: {exc}"
+            )
+            raise
         finally:
             elapsed = (
                 time.perf_counter()
@@ -1700,24 +2171,23 @@ non_diegetic_music, negative_prompt, continuity_notes.
             )
 
             usage = (
-                response.get(
-                    "usage",
-                    {},
-                )
-                if isinstance(
-                    response,
-                    dict,
-                )
+                response.get("usage", {})
+                if isinstance(response, dict)
                 else {}
             )
 
-            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
-            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            prompt_tokens = int(
+                usage.get("prompt_tokens", 0) or 0
+            )
+            completion_tokens = int(
+                usage.get("completion_tokens", 0) or 0
+            )
             decode_tps = (
                 completion_tokens / elapsed
                 if elapsed > 0 and completion_tokens > 0
                 else 0.0
             )
+
             print(
                 "[QWEN]",
                 call_name,
@@ -1729,38 +2199,46 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 flush=True,
             )
 
-        try:
-            content = (
-                response[
-                    "choices"
-                ][0][
-                    "message"
-                ][
-                    "content"
-                ]
+            self._trace_call(
+                call_name,
+                system_prompt,
+                user_prompt,
+                response,
+                elapsed,
+                error_text,
+                kwargs.get("response_format"),
             )
-        except (
-            KeyError,
-            IndexError,
-            TypeError,
-        ) as exc:
+
+        try:
+            content = str(
+                response["choices"][0]["message"]["content"] or ""
+            )
+        except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(
-                "Qwen director returned an "
-                "unexpected completion structure."
+                "Qwen director returned an unexpected completion structure."
             ) from exc
 
-        if not content:
+        if not content.strip():
             raise RuntimeError(
                 "Qwen returned an empty response."
             )
 
-        parsed = self._extract_json(
-            content
-        )
+        parsed = self._extract_json(content)
 
         if not parsed:
             raise RuntimeError(
                 f"Qwen returned an empty JSON object for {call_name}."
+            )
+
+        if cache_key is not None:
+            self._cache_write(
+                cache_key,
+                parsed,
+                call_name=call_name,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                elapsed=elapsed,
+                raw_content=content,
             )
 
         return parsed
@@ -2300,6 +2778,21 @@ non_diegetic_music, negative_prompt, continuity_notes.
                         canonical
                     )
 
+            if not selected and character_names:
+                searchable = " ".join(
+                    [
+                        description,
+                        str(value.get("title", "") or ""),
+                        str(value.get("scene_objective", "") or ""),
+                        str(value.get("continuity_notes", "") or ""),
+                    ]
+                ).lower()
+                selected = [
+                    name
+                    for name in sorted(character_names)
+                    if name in searchable
+                ]
+
             scene_id = str(
                 value.get(
                     "scene_id",
@@ -2329,23 +2822,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
                     or f"Scene {index}"
                 )
 
-            used_scene_ids = {
-                str(item.get("scene_id", "")).strip().lower()
-                for item in result
-                if isinstance(item, dict) and str(item.get("scene_id", "")).strip()
-            }
-            normalized_scene_id = scene_id
-            if normalized_scene_id.lower() in used_scene_ids:
-                base = normalized_scene_id
-                suffix = 2
-                while f"{base}_{suffix}".lower() in used_scene_ids:
-                    suffix += 1
-                normalized_scene_id = f"{base}_{suffix}"
-
             result.append(
                 {
                     "scene_id":
-                        normalized_scene_id,
+                        scene_id,
 
                     "title":
                         title,
@@ -2674,107 +3154,55 @@ non_diegetic_music, negative_prompt, continuity_notes.
         shots: list[dict],
     ) -> None:
 
-        seen_scene_ids: set[str] = set()
+        old_to_new: dict[str, str] = {}
 
         for index, scene in enumerate(
             scenes,
             start=1,
         ):
-
-            scene_id = str(
+            old_id = str(
                 scene.get(
                     "scene_id",
                     "",
                 )
                 or ""
             ).strip()
-
-            if not scene_id:
-                scene_id = f"scene_{index:03d}"
-
-            if scene_id in seen_scene_ids:
-                raise RuntimeError(
-                    f"Duplicate scene_id encountered during normalization: {scene_id}"
+            canonical = f"scene_{index:03d}"
+            if old_id:
+                old_to_new.setdefault(
+                    old_id.lower(),
+                    canonical,
                 )
+            scene["scene_id"] = canonical
+            scene["order"] = index
 
-            seen_scene_ids.add(scene_id)
-
-            scene[
-                "scene_id"
-            ] = scene_id
-
-            scene[
-                "order"
-            ] = index
-
-        used_shot_ids: set[str] = set()
-
-        scene_counters: dict[str, int] = {}
-
-        for global_index, shot in enumerate(
-            shots,
-            start=1,
-        ):
-
-            scene_id = str(
+        scene_shot_counts: dict[str, int] = {}
+        for shot in shots:
+            old_scene_id = str(
                 shot.get(
                     "scene_id",
-                    "",
-                )
-            ).strip()
-
-            scene_counters[
-                scene_id
-            ] = (
-                scene_counters.get(
-                    scene_id,
-                    0,
-                )
-                + 1
-            )
-
-            shot_number = (
-                scene_counters[
-                    scene_id
-                ]
-            )
-
-            preferred = str(
-                shot.get(
-                    "shot_id",
                     "",
                 )
                 or ""
             ).strip()
 
-            candidate = preferred
-
-            if (
-                not candidate
-                or candidate in used_shot_ids
-            ):
-
-                candidate = (
-                    f"{scene_id}"
-                    f"_shot_{shot_number:03d}"
-                )
-
-            while candidate in used_shot_ids:
-
-                candidate = (
-                    f"{scene_id}"
-                    f"_shot_{global_index:03d}"
-                )
-
-                global_index += 1
-
-            used_shot_ids.add(
-                candidate
+            scene_id = old_to_new.get(
+                old_scene_id.lower(),
+                old_scene_id,
             )
 
-            shot[
-                "shot_id"
-            ] = candidate
+            shot["scene_id"] = scene_id
+            scene_shot_counts[scene_id] = (
+                scene_shot_counts.get(
+                    scene_id,
+                    0,
+                )
+                + 1
+            )
+            shot_number = scene_shot_counts[scene_id]
+            shot["shot_id"] = (
+                f"{scene_id}_shot_{shot_number:03d}"
+            )
 
     # ========================================================
     # MODE VALIDATION
@@ -3055,61 +3483,64 @@ non_diegetic_music, negative_prompt, continuity_notes.
         shots: list[dict],
         characters: list[dict],
     ) -> None:
-
         if not characters:
             return
 
         allowed = {
-            str(
-                value.get(
-                    "name",
-                    "",
-                )
-            ).strip().lower()
+            str(value.get("name", "")).strip().lower()
             for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
         }
 
         for shot in shots:
-
             shot_characters = [
                 str(name).strip()
                 for name in (
-                    shot.get(
-                        "characters",
-                        [],
-                    )
+                    shot.get("characters", [])
                     or []
                 )
                 if str(name).strip()
             ]
 
+            if not shot_characters:
+                raise RuntimeError(
+                    f"Shot {shot.get('shot_id', '')} has no character binding."
+                )
+
             for field in (
                 "characters",
                 "speaking_characters",
             ):
-
                 for name in (
-                    shot.get(
-                        field,
-                        [],
-                    )
+                    shot.get(field, [])
                     or []
                 ):
-
                     if (
-                        str(
-                            name
-                        )
-                        .strip()
-                        .lower()
+                        str(name).strip().lower()
                         not in allowed
                     ):
-
                         raise RuntimeError(
-                            f"Shot {shot.get('shot_id', '')} "
-                            f"contains unknown character "
-                            f"'{name}'."
+                            f"Shot {shot.get('shot_id', '')} contains unknown character '{name}'."
                         )
+
+            speakers = {
+                str(name).strip().lower()
+                for name in (
+                    shot.get("speaking_characters", [])
+                    or []
+                )
+                if str(name).strip()
+            }
+            if not speakers.issubset(
+                {
+                    name.lower()
+                    for name in shot_characters
+                }
+            ):
+                raise RuntimeError(
+                    f"Shot {shot.get('shot_id', '')} has a speaker not present in its character bindings."
+                )
 
     @staticmethod
     def _sanitize_visual_language(
@@ -3365,8 +3796,7 @@ Return JSON only:
       "key_props": [],
       "characters": [],
       "scene_objective": "...",
-      "continuity_notes": "...",
-      "story_summary": "..."
+      "continuity_notes": "..."
     }
   ]
 }
@@ -3405,9 +3835,10 @@ Return JSON only:
                 temperature=0.20,
                 top_p=0.82,
                 call_name="scene_budget_compression",
-                max_completion=1800,
+                max_completion=1600,
                 json_mode=True,
                 disable_thinking=True,
+                response_schema=self._scene_compression_json_schema(),
             )
 
             compressed = self._sanitize_scenes(
@@ -3457,6 +3888,7 @@ You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 Create exactly TWO production-ready shots for EACH supplied scene.
 
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
+Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
 Preserve:
 - character identity;
 - chronology;
@@ -3742,6 +4174,7 @@ Return JSON only.
                 max_completion=700,
                 json_mode=True,
                 disable_thinking=True,
+                response_schema=self._shot_json_schema(),
             )
 
             scene_shots = self._sanitize_shots(
@@ -3780,6 +4213,7 @@ Return JSON only.
                     max_completion=700,
                     json_mode=True,
                     disable_thinking=True,
+                    response_schema=self._shot_json_schema(),
                 )
 
                 scene_shots = self._sanitize_shots(
@@ -3850,6 +4284,7 @@ Return JSON only.
                     max_completion=320,
                     json_mode=True,
                     disable_thinking=True,
+                    response_schema=self._shot_json_schema(),
                 )
 
                 recovered = self._sanitize_shots(
@@ -4174,8 +4609,10 @@ Return JSON only.
                         else "expand_story_metadata_pass"
                     )
                 ),
-                max_completion=2600,
+                max_completion=2200,
                 json_mode=True,
+                disable_thinking=True,
+                response_schema=self._metadata_json_schema(),
             )
 
             story_plan.update(
@@ -4228,6 +4665,11 @@ Return JSON only.
             characters = self._recover_characters(
                 mode,
                 story,
+            )
+
+        if not characters:
+            characters = self._sanitize_characters(
+                self._extract_obvious_character_names(story)
             )
 
         character_names = {
@@ -4534,9 +4976,10 @@ Return JSON only.
                                 "shot_batch:"
                                 + "_".join(batch_ids)
                             ),
-                            max_completion=2200,
+                            max_completion=1800,
                             json_mode=True,
                             disable_thinking=True,
+                            response_schema=self._shot_batch_json_schema(),
                         )
 
                         batch_map = (
