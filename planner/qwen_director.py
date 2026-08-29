@@ -1315,6 +1315,8 @@ Return:
             "color_temperature": {"type": "string"},
             "environment_details": {
                 "type": "array",
+                "minItems": 3,
+                "maxItems": 6,
                 "items": {"type": "string"},
             },
             "key_props": {
@@ -1384,6 +1386,8 @@ Return:
                 },
                 "scenes": {
                     "type": "array",
+                    "minItems": 4,
+                    "maxItems": 6,
                     "items": {
                         "type": "object",
                         "properties": scene_properties,
@@ -1612,7 +1616,7 @@ clothing, state, or continuity fields in this recovery pass.
                 temperature=temperature,
                 top_p=top_p,
                 call_name="character_recovery",
-                max_completion=192,
+                max_completion=320,
                 json_mode=True,
                 disable_thinking=True,
                 response_schema=self._character_json_schema(),
@@ -1813,11 +1817,13 @@ Use cinematic progression across the two shots when justified:
 Do not use the same framing + movement + lens combination for both shots.
 Use the supplied visual language as the production-wide style bible.
 
-STANDARD FILM VOCABULARY:
+SHOT / FRAMING VOCABULARY:
 framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
+CAMERA MOVEMENT VOCABULARY:
 movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
 lens/DOF: wide-angle, normal, telephoto, shallow focus, deep focus, selective focus.
 composition: centered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.
+LIGHTING VOCABULARY:
 lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
 
 Return JSON only.
@@ -2701,6 +2707,69 @@ non_diegetic_music, negative_prompt, continuity_notes.
     # SCENE SANITIZATION
     # ========================================================
 
+    @staticmethod
+    def _character_alias_map(
+        character_names: set[str],
+    ) -> dict[str, str]:
+        """Resolve safe, unambiguous aliases to canonical roster names."""
+        canonical_names = sorted(
+            {
+                str(name or "").strip().lower()
+                for name in character_names
+                if str(name or "").strip()
+            }
+        )
+
+        aliases: dict[str, str] = {}
+
+        for canonical in canonical_names:
+            aliases[canonical] = canonical
+
+        first_candidates: dict[str, set[str]] = {}
+        pair_candidates: dict[str, set[str]] = {}
+
+        for canonical in canonical_names:
+
+            tokens = re.findall(
+                r"[a-z0-9']+",
+                canonical,
+            )
+
+            if not tokens:
+                continue
+
+            first_candidates.setdefault(
+                tokens[0],
+                set(),
+            ).add(canonical)
+
+            if len(tokens) >= 2:
+
+                pair = " ".join(
+                    tokens[-2:]
+                )
+
+                pair_candidates.setdefault(
+                    pair,
+                    set(),
+                ).add(canonical)
+
+        for alias, matches in first_candidates.items():
+
+            if len(matches) == 1:
+                aliases[alias] = next(
+                    iter(matches)
+                )
+
+        for alias, matches in pair_candidates.items():
+
+            if len(matches) == 1:
+                aliases[alias] = next(
+                    iter(matches)
+                )
+
+        return aliases
+
     def _sanitize_scenes(
         self,
         scenes,
@@ -2758,6 +2827,10 @@ non_diegetic_music, negative_prompt, continuity_notes.
 
             selected: list[str] = []
 
+            alias_map = self._character_alias_map(
+                character_names
+            )
+
             for name in (
                 value.get(
                     "characters",
@@ -2766,19 +2839,21 @@ non_diegetic_music, negative_prompt, continuity_notes.
                 or []
             ):
 
-                canonical = str(
+                supplied = str(
                     name
-                ).strip()
+                ).strip().lower()
 
-                if (
-                    canonical.lower()
-                    in character_names
-                ):
+                resolved = alias_map.get(
+                    supplied
+                )
+
+                if resolved:
                     selected.append(
-                        canonical
+                        resolved
                     )
 
             if not selected and character_names:
+
                 searchable = " ".join(
                     [
                         description,
@@ -2787,11 +2862,31 @@ non_diegetic_music, negative_prompt, continuity_notes.
                         str(value.get("continuity_notes", "") or ""),
                     ]
                 ).lower()
-                selected = [
-                    name
-                    for name in sorted(character_names)
-                    if name in searchable
-                ]
+
+                for alias, canonical in sorted(
+                    alias_map.items(),
+                    key=lambda item: (
+                        -len(item[0]),
+                        item[0],
+                    ),
+                ):
+
+                    if re.search(
+                        r"(?<![a-z0-9'])"
+                        + re.escape(alias)
+                        + r"(?![a-z0-9'])",
+                        searchable,
+                    ):
+
+                        if canonical not in selected:
+                            selected.append(
+                                canonical
+                            )
+
+            selected = self._clean_list(
+                selected,
+                limit=6,
+            )
 
             scene_id = str(
                 value.get(
@@ -2963,7 +3058,7 @@ non_diegetic_music, negative_prompt, continuity_notes.
             candidate = base_id
             suffix = 2
             while candidate.lower() in used_ids:
-                candidate = f"{base_id}_{suffix:02d}"
+                candidate = f"{base_id}_{suffix}"
                 suffix += 1
             scene["scene_id"] = candidate
             used_ids.add(candidate.lower())
@@ -4509,15 +4604,74 @@ Return JSON only.
 
             except RuntimeError as first_error:
 
-                retry_user = (
-                    story_user
-                    + "\n\n"
-                    "REPAIR REQUIRED.\n"
-                    f"Previous validation failure: {first_error}\n"
-                    "Write the complete narrative again. "
-                    "Return ONLY the story prose. "
-                    "Do not output JSON or commentary."
+                failure_text = str(
+                    first_error
                 )
+
+                if mode == EXPAND_USER_STORY_MODE:
+
+                    repair_events: list[str] = []
+
+                    match = re.search(
+                        r"Unmatched source events:\s*(.*)$",
+                        failure_text,
+                        flags=re.DOTALL,
+                    )
+
+                    if match:
+
+                        repair_events = [
+                            item.strip(" ;")
+                            for item in re.split(
+                                r"\s*;\s*",
+                                match.group(1).strip(),
+                            )
+                            if item.strip(" ;")
+                        ]
+
+                    if repair_events:
+
+                        repair_requirements = "\n".join(
+                            f"- {event}"
+                            for event in repair_events
+                        )
+
+                    else:
+
+                        repair_requirements = (
+                            "- Preserve every major source event.\n"
+                            "- Preserve every named character.\n"
+                            "- Preserve chronology, setting, and outcome."
+                        )
+
+                    retry_user = (
+                        story_user
+                        + "\n\n"
+                        "REPAIR REQUIRED — EXPAND STORY.\n"
+                        "Rewrite the COMPLETE expanded story while explicitly "
+                        "preserving the required source events below.\n\n"
+                        "REQUIRED SOURCE EVENTS:\n"
+                        + repair_requirements
+                        + "\n\n"
+                        "PREVIOUS VALIDATION FAILURE:\n"
+                        + failure_text
+                        + "\n\n"
+                        "Return ONLY the complete expanded story prose. "
+                        "Do not output JSON, labels, analysis, notes, "
+                        "camera directions, or explanations."
+                    )
+
+                else:
+
+                    retry_user = (
+                        story_user
+                        + "\n\n"
+                        "REPAIR REQUIRED.\n"
+                        f"Previous validation failure: {failure_text}\n"
+                        "Write the complete narrative again. "
+                        "Return ONLY the story prose. "
+                        "Do not output JSON or commentary."
+                    )
 
                 story = self._chat_text(
                     story_system,
