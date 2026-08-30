@@ -15,6 +15,7 @@ from pipeline.production_checkpoint import (
 from pipeline.reference_manager import (
     ReferenceManager,
 )
+from planner.entity_resolver import EntityResolver
 from planner.config import (
     DELIVERY_FPS,
     DELIVERY_HEIGHT,
@@ -249,113 +250,182 @@ class ProductionOrchestrator:
         plan: dict,
         characters: list[Character],
     ) -> None:
+        """
+        Deterministically reconcile Director character references.
+
+        Canonical Character objects are authoritative. Qwen may emit names,
+        aliases, or already-canonical character IDs, but it cannot create or
+        redefine identity. Existing EntityResolver normalization is used so
+        the final binding path cannot silently fall back to exact-name-only
+        matching.
+        """
+
+        by_id = {
+            str(character.character_id).strip(): character
+            for character in characters
+            if str(character.character_id).strip()
+        }
 
         by_name = {
-            character.name.lower():
-                character
+            EntityResolver.normalize(character.name): character
             for character in characters
+            if EntityResolver.normalize(character.name)
         }
 
-        scenes_by_id = {
-            str(
-                scene.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
-            ).strip(): scene
-            for scene in plan.get(
-                "scenes",
-                [],
-            )
-            if isinstance(
-                scene,
-                dict,
-            )
-            and str(
-                scene.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
-            ).strip()
-        }
+        alias_names = EntityResolver.build_alias_map(
+            [
+                character.name
+                for character in characters
+                if str(character.name).strip()
+            ]
+        )
 
-        for scene in plan.get(
-            "scenes",
-            [],
-        ):
-            scene["shot_ids"] = []
-
-        for index, raw in enumerate(
-            plan.get(
-                "shots",
-                [],
-            ),
-            start=1,
-        ):
-
-            scene_id = str(
-                raw.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
-            ).strip()
-
-            raw_characters = raw.get(
-                "characters",
-                [],
-            )
-
-            if not raw_characters:
-
-                scene = scenes_by_id.get(
-                    scene_id,
-                    {},
+        def resolve_character(value):
+            if isinstance(value, dict):
+                value = (
+                    value.get("character_id")
+                    or value.get("id")
+                    or value.get("name")
+                    or value.get("character")
+                    or ""
                 )
 
-                raw_characters = scene.get(
-                    "characters",
-                    [],
+            raw = str(value or "").strip()
+            if not raw:
+                return None
+
+            if raw in by_id:
+                return by_id[raw]
+
+            normalized = EntityResolver.normalize(raw)
+
+            exact = by_name.get(normalized)
+            if exact is not None:
+                return exact
+
+            canonical_name = alias_names.get(normalized)
+            if canonical_name:
+                return by_name.get(
+                    EntityResolver.normalize(canonical_name)
                 )
 
-            names = []
+            stripped = EntityResolver.strip_honorific(normalized)
+            if stripped != normalized:
+                exact = by_name.get(stripped)
+                if exact is not None:
+                    return exact
 
-            for value in (
-                raw_characters
-                if isinstance(
-                    raw_characters,
-                    (list, tuple, set),
-                )
-                else [raw_characters]
-            ):
-
-                name = str(
-                    value
-                ).strip()
-
-                if (
-                    name
-                    and name.lower()
-                    in by_name
-                    and name.lower()
-                    not in {
-                        item.lower()
-                        for item in names
-                    }
-                ):
-                    names.append(
-                        by_name[
-                            name.lower()
-                        ].name
+                canonical_name = alias_names.get(stripped)
+                if canonical_name:
+                    return by_name.get(
+                        EntityResolver.normalize(canonical_name)
                     )
 
-            selected = [
-                by_name[name.lower()]
-                for name in names
-                if name.lower()
-                in by_name
+            return None
+
+        def resolve_values(values, fallback=None):
+            if values is None:
+                values = []
+
+            if isinstance(values, (str, dict)):
+                values = [values]
+            elif not isinstance(values, (list, tuple, set)):
+                values = [values]
+
+            result = []
+            seen = set()
+
+            for value in values:
+                character = resolve_character(value)
+                if character is None:
+                    continue
+
+                key = str(character.character_id).strip()
+                if not key or key in seen:
+                    continue
+
+                seen.add(key)
+                result.append(character)
+
+            if not result and fallback:
+                return list(fallback)
+
+            return result
+
+        scenes_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in plan.get("scenes", [])
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        valid_scene_ids = set(scenes_by_id)
+
+        for scene in plan.get("scenes", []):
+            scene["shot_ids"] = []
+
+            resolved_scene_chars = resolve_values(
+                scene.get("characters", [])
+            )
+
+            if resolved_scene_chars:
+                scene["characters"] = [
+                    character.name
+                    for character in resolved_scene_chars
+                ]
+
+        for index, raw in enumerate(
+            plan.get("shots", []),
+            start=1,
+        ):
+            if not isinstance(raw, dict):
+                continue
+
+            scene_id = str(
+                raw.get("scene_id", "") or ""
+            ).strip()
+
+            if scene_id not in valid_scene_ids:
+                continue
+
+            scene = scenes_by_id[scene_id]
+
+            explicit_values = raw.get("characters", [])
+            has_explicit = bool(
+                explicit_values
+                and (
+                    not isinstance(explicit_values, (list, tuple, set))
+                    or len(explicit_values) > 0
+                )
+            )
+
+            selected = resolve_values(explicit_values)
+
+            # Only inherit scene characters when the shot supplied no
+            # character information at all. This avoids inventing presence.
+            if not selected and not has_explicit:
+                selected = resolve_values(
+                    scene.get("characters", [])
+                )
+
+            names = [
+                character.name
+                for character in selected
+            ]
+
+            raw["characters"] = names
+
+            speaking = resolve_values(
+                raw.get("speaking_characters", [])
+            )
+
+            if not speaking and not raw.get("speaking_characters"):
+                speaking = selected
+
+            raw["speaking_characters"] = [
+                character.name
+                for character in speaking
+                if character in selected or not selected
             ]
 
             images = []
@@ -364,415 +434,182 @@ class ProductionOrchestrator:
             bindings = {}
 
             for character in selected:
-
                 character_images = (
                     character.normalized_reference_paths()
                 )
-
                 character_videos = (
                     character.normalized_video_paths()
                 )
-
                 character_audio = (
                     character.normalized_audio_paths()
                 )
 
-                bindings[
-                    character.name
-                ] = character_images
+                bindings[character.name] = character_images
 
                 for path in character_images:
                     if (
                         path not in images
-                        and len(images)
-                        < H3_MAX_REFERENCE_IMAGES
+                        and len(images) < H3_MAX_REFERENCE_IMAGES
                     ):
-                        images.append(
-                            path
-                        )
+                        images.append(path)
 
                 for path in character_videos:
                     if (
                         path not in videos
-                        and len(videos)
-                        < H3_MAX_REFERENCE_VIDEOS
+                        and len(videos) < H3_MAX_REFERENCE_VIDEOS
                     ):
-                        videos.append(
-                            path
-                        )
+                        videos.append(path)
 
                 for path in character_audio:
                     if (
                         path not in audio
-                        and len(audio)
-                        < H3_MAX_REFERENCE_AUDIO
+                        and len(audio) < H3_MAX_REFERENCE_AUDIO
                     ):
-                        audio.append(
-                            path
-                        )
+                        audio.append(path)
 
-            locks = (
-                IdentityContinuity.build_locks(
-                    selected,
-                    names,
-                )
+            locks = IdentityContinuity.build_locks(
+                selected,
+                names,
             )
 
             reference_bindings = (
-                IdentityContinuity
-                .build_reference_bindings(
+                IdentityContinuity.build_reference_bindings(
                     images,
                     bindings,
                 )
             )
 
             workflow_mode = str(
-                plan.get(
-                    "workflow_mode",
-                    WORKFLOW_AUTO,
-                )
+                plan.get("workflow_mode", WORKFLOW_AUTO)
             )
 
-            if (
-                workflow_mode
-                == WORKFLOW_AUTO
-            ):
-
-                if plan.get(
-                    "profile"
-                ) == PROFILE_TURBO:
-
-                    workflow_mode = (
-                        WORKFLOW_TURBO_REF2V
-                    )
-
+            if workflow_mode == WORKFLOW_AUTO:
+                if plan.get("profile") == PROFILE_TURBO:
+                    workflow_mode = WORKFLOW_TURBO_REF2V
                 else:
-
-                    workflow_mode = (
-                        WORKFLOW_REF2V
-                    )
+                    workflow_mode = WORKFLOW_REF2V
 
             if (
-                workflow_mode
-                == WORKFLOW_TURBO_REF2V
-                or plan.get(
-                    "profile"
-                ) == PROFILE_TURBO
+                workflow_mode == WORKFLOW_TURBO_REF2V
+                or plan.get("profile") == PROFILE_TURBO
             ):
-
                 steps = TURBO_STEPS
-
-                workflow_mode = (
-                    WORKFLOW_TURBO_REF2V
-                )
-
+                workflow_mode = WORKFLOW_TURBO_REF2V
             else:
-
                 steps = H3_STEPS
-
-                if workflow_mode not in {
-                    WORKFLOW_REF2V,
-                }:
-
-                    workflow_mode = (
-                        WORKFLOW_REF2V
-                    )
+                if workflow_mode not in {WORKFLOW_REF2V}:
+                    workflow_mode = WORKFLOW_REF2V
 
             soundscape = str(
-                raw.get(
-                    "overall_soundscape",
-                    "",
-                )
-                or ""
+                raw.get("overall_soundscape", "") or ""
             )
 
             negative = str(
-                raw.get(
-                    "negative_prompt",
-                    "",
-                )
-                or ""
+                raw.get("negative_prompt", "") or ""
             )
 
             description = str(
-                raw.get(
-                    "detailed_description",
-                    "",
-                )
-                or raw.get(
-                    "visual_prompt",
-                    "",
-                )
+                raw.get("detailed_description", "")
+                or raw.get("visual_prompt", "")
             )
 
             h3_object = Shot(
                 shot_id=str(
-                    raw.get(
-                        "shot_id",
-                        f"shot_{index:03d}",
-                    )
+                    raw.get("shot_id", f"shot_{index:03d}")
                 ),
-
-                scene_id=str(
-                    raw.get(
-                        "scene_id",
-                        "",
-                    )
-                ),
-
-                order=int(
-                    raw.get(
-                        "order",
-                        index,
-                    )
-                ),
-
+                scene_id=scene_id,
+                order=int(raw.get("order", index)),
                 duration_seconds=float(
-                    raw.get(
-                        "duration_seconds",
-                        5.2,
-                    )
+                    raw.get("duration_seconds", 5.2)
                 ),
-
                 characters=names,
-
-                location=str(
-                    raw.get(
-                        "location",
-                        "",
-                    )
-                ),
-
-                action=str(
-                    raw.get(
-                        "action",
-                        "",
-                    )
-                ),
-
-                camera_shot=str(
-                    raw.get(
-                        "camera_shot",
-                        "",
-                    )
-                ),
-
+                location=str(raw.get("location", "")),
+                action=str(raw.get("action", "")),
+                camera_shot=str(raw.get("camera_shot", "")),
                 camera_movement=str(
-                    raw.get(
-                        "camera_movement",
-                        "",
-                    )
+                    raw.get("camera_movement", "")
                 ),
-
                 lens_and_depth_of_field=str(
-                    raw.get(
-                        "lens_and_depth_of_field",
-                        "",
-                    )
-                    or ""
+                    raw.get("lens_and_depth_of_field", "")
                 ),
-
                 composition_notes=str(
-                    raw.get(
-                        "composition_notes",
-                        "",
-                    )
-                    or ""
+                    raw.get("composition_notes", "")
                 ),
-
-                lighting=str(
-                    raw.get(
-                        "lighting",
-                        "",
-                    )
-                ),
-
+                lighting=str(raw.get("lighting", "")),
                 color_temperature=str(
-                    raw.get(
-                        "color_temperature",
-                        "",
-                    )
-                    or ""
+                    raw.get("color_temperature", "")
                 ),
-
-                mood=str(
-                    raw.get(
-                        "mood",
-                        "",
-                    )
-                ),
-
+                mood=str(raw.get("mood", "")),
                 visual_prompt=str(
-                    raw.get(
-                        "visual_prompt",
-                        "",
-                    )
+                    raw.get("visual_prompt", "")
                 ),
-
                 retention_analysis=str(
-                    raw.get(
-                        "retention_analysis",
-                        "",
-                    )
+                    raw.get("retention_analysis", "")
                 ),
-
                 detailed_description=description,
-
-                overall_soundscape=(
-                    self._native_audio_policy(
-                        soundscape
-                    )
+                overall_soundscape=self._native_audio_policy(
+                    soundscape
                 ),
-
                 non_diegetic_music=str(
-                    raw.get(
-                        "non_diegetic_music",
-                        "",
-                    )
+                    raw.get("non_diegetic_music", "")
                 ),
-
                 negative_prompt=negative,
-
                 continuity_notes=str(
-                    raw.get(
-                        "continuity_notes",
-                        "",
-                    )
+                    raw.get("continuity_notes", "")
                 ),
-
                 seed=(
-                    int(
-                        raw["seed"]
-                    )
-                    if raw.get(
-                        "seed"
-                    ) is not None
-                    else (
-                        100000
-                        + index
-                    )
+                    int(raw["seed"])
+                    if raw.get("seed") is not None
+                    else 100000 + index
                 ),
-
                 reference_images=images,
                 reference_videos=videos,
-
                 reference_audio=(
-                    audio[0]
-                    if audio
-                    else None
+                    audio[0] if audio else None
                 ),
-
                 reference_audio_paths=audio,
-
                 reference_audio_by_character={
-                    name: (
-                        by_name[
-                            name.lower()
-                        ]
-                        .normalized_audio_paths()
-                    )
-                    for name in names
-                    if name.lower()
-                    in by_name
+                    character.name:
+                        character.normalized_audio_paths()
+                    for character in selected
                 },
-
                 reference_video_by_character={
-                    name: (
-                        by_name[
-                            name.lower()
-                        ]
-                        .normalized_video_paths()
-                    )
-                    for name in names
-                    if name.lower()
-                    in by_name
+                    character.name:
+                        character.normalized_video_paths()
+                    for character in selected
                 },
-
                 speaking_characters=[
-                    str(value).strip()
-                    for value in (
-                        raw.get(
-                            "speaking_characters",
-                            names,
-                        )
-                        or []
-                    )
+                    character.name
+                    for character in speaking
                     if (
-                        str(value).strip().lower()
-                        in {
-                            item.lower()
-                            for item in names
-                        }
+                        not selected
+                        or character in selected
                     )
                 ],
-
                 speech_text=str(
-                    raw.get(
-                        "speech_text",
-                        "",
-                    )
+                    raw.get("speech_text", "")
                 ),
-
-                reference_bindings=(
-                    reference_bindings
-                ),
-
+                reference_bindings=reference_bindings,
                 identity_locks=locks,
-
                 workflow_mode=workflow_mode,
-
                 keyframe_images=[],
                 keyframe_positions=[],
                 extend_take_source_video=None,
-
                 width=H3_WIDTH,
                 height=H3_HEIGHT,
                 fps=H3_FPS,
-                frames_per_shot=(
-                    H3_FRAMES_PER_SHOT
-                ),
+                frames_per_shot=H3_FRAMES_PER_SHOT,
                 steps=steps,
             )
 
-            updated = (
-                h3_object.to_dict()
-            )
-
+            updated = h3_object.to_dict()
             raw.clear()
-            raw.update(
-                updated
+            raw.update(updated)
+
+            scene.setdefault("shot_ids", []).append(
+                raw["shot_id"]
             )
 
-            for scene in plan.get(
-                "scenes",
-                [],
-            ):
-
-                if scene.get(
-                    "scene_id"
-                ) == raw.get(
-                    "scene_id"
-                ):
-
-                    scene.setdefault(
-                        "shot_ids",
-                        [],
-                    ).append(
-                        raw["shot_id"]
-                    )
-
-        plan[
-            "characters"
-        ] = [
-            character.to_dict()
-            for character
-            in characters
-        ]
-
-
-    # ========================================================
-    # CHECKPOINT / RESUME
-    # ========================================================
 
     def _new_session_id(self) -> str:
         return (
