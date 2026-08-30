@@ -4116,6 +4116,21 @@ climax: emphasize danger, decisive action, choice, and consequence.
 finale: emphasize aftermath, resolution, and the closing emotional image.
 The two shots must visibly serve the supplied obligatory_moment.
 
+SHOT / FRAMING VOCABULARY:
+framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
+
+CAMERA MOVEMENT VOCABULARY:
+movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
+
+LENS / DEPTH OF FIELD:
+wide-angle, normal, telephoto, shallow focus, deep focus, selective focus.
+
+COMPOSITION VOCABULARY:
+centered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.
+
+LIGHTING VOCABULARY:
+lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
+
 Return JSON only in exactly this structure:
 
 {
