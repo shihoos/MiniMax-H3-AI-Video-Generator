@@ -3,8 +3,8 @@ python:
   kaggle: '3.12'
 comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
-  expected_version: 0.33.0
-  revision: v0.33.0
+  expected_version: 0.34.0
+  revision: v0.34.0
 llama_cpp:
   package: llama-cpp-python
   version: 0.3.35
@@ -42,7 +42,7 @@ director:
 storyboard:
   host: 0.0.0.0
   port: 8765
-  gradio_version: 6.0.0
+  gradio_version: 6.26.0
 runtime:
   comfyui_startup_timeout_seconds: 300
   comfyui_request_timeout_seconds: 60
