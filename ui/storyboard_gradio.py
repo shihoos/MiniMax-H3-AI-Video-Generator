@@ -10,14 +10,6 @@ from datetime import datetime
 from pathlib import Path
 
 
-from planner.config import (
-    GRADIO_SHARE_ENV,
-    STORYBOARD_HOST,
-    STORYBOARD_PORT,
-    storyboard_share_enabled,
-)
-
-
 ROOT = (
     Path(__file__)
     .resolve()
@@ -29,6 +21,14 @@ if str(ROOT) not in sys.path:
         0,
         str(ROOT),
     )
+
+
+from planner.config import (
+    GRADIO_SHARE_ENV,
+    STORYBOARD_HOST,
+    STORYBOARD_PORT,
+    storyboard_share_enabled,
+)
 
 
 SESSIONS_ROOT = (
