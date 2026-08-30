@@ -45,13 +45,21 @@ class ProductionPlanner:
     """
     Dependency-free production planner.
 
-    Architectural rule:
+    Important architectural rule:
 
-    This planner is the deterministic canonical foundation for every run.
-    It owns production structure, canonical character identity, scene
-    topology, and deterministic H3 fields. The optional Qwen director may
-    enrich that plan creatively, but it must never replace canonical
-    entities or production structure.
+    When the local Qwen director is enabled, Qwen is the
+    creative authority for:
+      - story development
+      - character creation
+      - scene design
+      - cinematic shot planning
+
+    This deterministic planner then acts only as the production
+    safety/reference/H3 binding layer.
+
+    When the Qwen director is disabled, this planner remains
+    available as a deterministic fallback for CI and offline
+    operation.
 
     Character creation therefore means:
 
@@ -620,23 +628,40 @@ class ProductionPlanner:
                 name
             )
 
-        # Subject-position names: ordinary narrative prose almost
-        # never says "named Eli" -- it just uses the name as the
-        # sentence subject ("Eli walked through the ruined city").
-        # Recognize a capitalized word immediately followed by a
-        # recognized narrative verb, or immediately followed by an
-        # appositive ", who"/", which" clause, as a character name.
-        subject_verb_pattern = re.compile(
-            r"\b([A-Z][a-z]+)\s+"
-            r"(?:"
-            + "|".join(
-                sorted(
-                    self.NARRATIVE_SUBJECT_VERBS,
-                    key=len,
-                    reverse=True,
-                )
+        # Subject-position names: ordinary narrative prose often uses a
+        # character name directly as the grammatical subject (for example
+        # "Marcus Chen arrived" or "Dr. Elara Voss stood").  The old
+        # one-token expression silently reduced multi-word names to the
+        # surname immediately before the verb.  Capture the complete
+        # capitalized name, while treating an optional honorific as metadata.
+        verb_alternation = "|".join(
+            sorted(
+                self.NARRATIVE_SUBJECT_VERBS,
+                key=len,
+                reverse=True,
             )
-            + r")\b"
+        )
+
+        subject_verb_pattern = re.compile(
+            r"\b(?:"
+            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+            r")?"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
+            r"(?:" + verb_alternation + r")\b"
+        )
+
+        # Do not make the finite verb vocabulary a hard ceiling.  Short-film
+        # prose routinely contains inflected verbs that are absent from any
+        # hand-maintained list (for example "arrived" or "finished").  A
+        # conservative morphological fallback catches common -ed/-ing/-s
+        # finite/action forms, while the explicit vocabulary above remains
+        # the higher-confidence path.
+        subject_morphology_pattern = re.compile(
+            r"\b(?:"
+            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+            r")?"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
+            r"(?:[a-z]+(?:ed|ing|s))\b"
         )
 
         appositive_pattern = re.compile(
@@ -645,6 +670,7 @@ class ProductionPlanner:
 
         for pattern in (
             subject_verb_pattern,
+            subject_morphology_pattern,
             appositive_pattern,
         ):
 
@@ -655,6 +681,17 @@ class ProductionPlanner:
                 name = match.group(
                     1
                 ).strip()
+
+                # The regex intentionally permits sentence-leading
+                # capitalized words. Remove known function words without
+                # disturbing legitimate multi-word names.
+                name_tokens = name.split()
+                while (
+                    len(name_tokens) > 1
+                    and name_tokens[0] in self.COMMON_PROPER_WORDS
+                ):
+                    name_tokens.pop(0)
+                name = " ".join(name_tokens).strip()
 
                 if not name:
                     continue
@@ -1681,10 +1718,44 @@ class ProductionPlanner:
             user_input,
         )
 
-        # The deterministic planner is ALWAYS the canonical foundation.
-        # Qwen is an optional creative enrichment layer above this plan.
-        # This is intentionally independent of DIRECTOR_ENABLED so the
-        # director never receives an empty entity/scene skeleton.
+        # When Qwen is enabled, this planner supplies only a
+        # production-safe skeleton. Qwen owns the creative plan.
+        #
+        # The deterministic implementation below remains intact
+        # as the CI/offline fallback when the director is disabled.
+        if director_enabled():
+            return {
+                "story": story,
+                "story_mode": mode,
+                "profile": profile,
+                "workflow_mode": workflow_mode,
+                "preview_ready": False,
+                "director_pending": True,
+
+                "character_count": 0,
+                "scene_count": 0,
+                "shot_count": 0,
+
+                "characters": [],
+                "scenes": [],
+                "shots": [],
+                "visual_language": {},
+
+                "width": H3_WIDTH,
+                "height": H3_HEIGHT,
+                "fps": H3_FPS,
+                "frames_per_shot": (
+                    H3_FRAMES_PER_SHOT
+                ),
+                "normal_steps": H3_STEPS,
+                "turbo_steps": TURBO_STEPS,
+
+                "audio_policy": (
+                    "Use supplied reference audio when present; "
+                    "otherwise request native H3 audio generation "
+                    "from the shot soundscape/dialogue prompt."
+                ),
+            }
 
         characters = self.create_characters(
             story
