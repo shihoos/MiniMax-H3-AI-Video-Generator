@@ -10,6 +10,9 @@ from pipeline.identity_continuity import (
 from pipeline.reference_manager import (
     ReferenceManager,
 )
+from planner.entity_resolver import (
+    EntityResolver,
+)
 from planner.config import (
     AI_STORY_MODE,
     EXPAND_USER_STORY_MODE,
@@ -1440,49 +1443,101 @@ class ProductionPlanner:
         characters: list[Character],
     ) -> list[str]:
 
+        text = self._clean_text(
+            text
+        )
+
+        if not text or not characters:
+            return []
+
+        canonical_names = {
+            str(character.name).strip()
+            for character in characters
+            if str(character.name or "").strip()
+        }
+
+        if not canonical_names:
+            return []
+
+        # Resolve only references that are deterministically safe.
+        # EntityResolver creates:
+        #   "Elara Voss" -> "elara voss"
+        #   "Elara"      -> "elara voss"
+        # and refuses ambiguous aliases such as "Voss".
+        aliases = EntityResolver.build_alias_map(
+            canonical_names
+        )
+
         lower = text.lower()
+        resolved: list[str] = []
+        seen: set[str] = set()
 
-        result = []
+        # Longest aliases first so a fuller reference wins before a
+        # shorter alias. Token boundaries prevent substring matches.
+        for alias in sorted(
+            aliases,
+            key=len,
+            reverse=True,
+        ):
+            alias = str(alias).strip()
 
-        for character in characters:
-            if (
-                character.name.lower()
-                in lower
+            if not alias:
+                continue
+
+            if not re.search(
+                rf"(?<![A-Za-z0-9'_-])"
+                rf"{re.escape(alias)}"
+                rf"(?![A-Za-z0-9'_-])",
+                lower,
             ):
-                result.append(
-                    character.name
-                )
+                continue
 
-        # Role descriptors may not be referenced by full
-        # names after normalization. Match canonical role text.
-        if not result:
+            canonical = aliases[alias]
 
+            if canonical not in seen:
+                seen.add(canonical)
+                resolved.append(canonical)
+
+        # Role descriptors remain a fallback only when no deterministic
+        # name/alias was found. Never allow the generic "story character"
+        # role to bind.
+        if not resolved:
             for character in characters:
-                role = (
-                    character.role
-                    .lower()
-                )
+                role = str(
+                    character.role or ""
+                ).strip().lower()
 
                 if (
                     role
                     and role != "story character"
-                    and role in lower
-                ):
-                    result.append(
-                        character.name
+                    and re.search(
+                        rf"(?<![A-Za-z0-9'_-])"
+                        rf"{re.escape(role)}"
+                        rf"(?![A-Za-z0-9'_-])",
+                        lower,
                     )
+                ):
+                    canonical = str(
+                        character.name
+                    ).strip().lower()
 
-        # If one character exists and the segment has no
-        # explicit name, it belongs to that character.
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        resolved.append(canonical)
+
+        # A single canonical character can safely own an otherwise
+        # unnamed scene. With multiple characters, do not guess.
         if (
-            not result
+            not resolved
             and len(characters) == 1
         ):
-            result.append(
-                characters[0].name
+            resolved.append(
+                str(
+                    characters[0].name
+                ).strip().lower()
             )
 
-        return result
+        return resolved
 
     def create_scenes(
         self,
