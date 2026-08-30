@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from .entity_resolver import EntityResolver
+
 
 class CinematicCompiler:
     """
@@ -62,13 +64,29 @@ class CinematicCompiler:
         character_names: set[str] | None = None,
     ) -> None:
 
+        # `character_names` remains the public constructor contract.
+        # It is the canonical roster supplied by the deterministic
+        # production plan. EntityResolver is used only to resolve
+        # references TO this roster; it never creates new entities.
         self.character_names = {
-            str(name).strip().lower()
+            str(name).strip()
             for name in (
                 character_names or set()
             )
             if str(name).strip()
         }
+
+        self._normalized_character_names = {
+            EntityResolver.normalize(name)
+            for name in self.character_names
+            if EntityResolver.normalize(name)
+        }
+
+        self._character_aliases = (
+            EntityResolver.build_alias_map(
+                self._normalized_character_names
+            )
+        )
 
     # ============================================================
     # BASIC HELPERS
@@ -155,90 +173,126 @@ class CinematicCompiler:
     # CHARACTER CONTRACT
     # ============================================================
 
+    def _resolve_character_reference(
+        self,
+        value: Any,
+    ) -> str | None:
+
+        normalized = EntityResolver.normalize(
+            value
+        )
+
+        if not normalized:
+            return None
+
+        # Already canonical.
+        if normalized in self._normalized_character_names:
+            return normalized
+
+        # Deterministic alias resolution only. Ambiguous aliases are
+        # intentionally absent from the alias map.
+        return self._character_aliases.get(
+            normalized
+        )
+
     def _canonical_characters(
         self,
         values: Any,
         scene_characters: list[str],
+        *,
+        inherit_scene_when_empty: bool = True,
     ) -> list[str]:
 
-        allowed = dict(
-            (
-                name.lower(),
-                name,
-            )
-            for name
-            in (
-                scene_characters
-                or []
-            )
-        )
-
-        if self.character_names:
-
-            allowed.update(
-                (
-                    name,
-                    name,
-                )
-                for name
-                in self.character_names
-            )
+        raw_values = self._list(values)
 
         result: list[str] = []
         seen: set[str] = set()
 
-        for value in self._list(
-            values
-        ):
+        # Explicit shot references take precedence. Resolve them against
+        # the immutable canonical roster. Never invent a new character.
+        for value in raw_values:
 
-            key = value.lower()
-
-            canonical = (
-                allowed.get(
-                    key
-                )
+            canonical = self._resolve_character_reference(
+                value
             )
 
             if canonical is None:
                 continue
 
-            if key in seen:
+            if canonical in seen:
                 continue
 
-            seen.add(
-                key
-            )
+            seen.add(canonical)
+            result.append(canonical)
 
-            result.append(
-                canonical
-            )
+        # IMPORTANT:
+        # Inherit scene characters only when the shot gave us no character
+        # information at all. An explicit-but-unresolved reference must
+        # not silently turn into every scene character.
+        if (
+            not raw_values
+            and inherit_scene_when_empty
+        ):
 
-        if not result:
-
-            for value in (
+            for value in self._list(
                 scene_characters
-                or []
             ):
 
-                key = str(
+                canonical = self._resolve_character_reference(
                     value
-                ).strip().lower()
-
-                if not key:
-                    continue
-
-                if key in seen:
-                    continue
-
-                seen.add(
-                    key
                 )
 
-                result.append(
-                    str(
-                        value
-                    ).strip()
-                )
+                if canonical is None:
+                    continue
+
+                if canonical in seen:
+                    continue
+
+                seen.add(canonical)
+                result.append(canonical)
+
+        return result
+
+    # ============================================================
+    # DETERMINISTIC SPEAKER CONTRACT
+    # ============================================================
+
+    def _canonical_speaking_characters(
+        self,
+        values: Any,
+        shot_characters: list[str],
+    ) -> list[str]:
+
+        raw_values = self._list(values)
+
+        if not raw_values:
+            return []
+
+        allowed = set(
+            shot_characters
+        )
+
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for value in raw_values:
+
+            canonical = self._resolve_character_reference(
+                value
+            )
+
+            if canonical is None:
+                continue
+
+            # A speaker must be a character actually bound to the shot.
+            if canonical not in allowed:
+                continue
+
+            if canonical in seen:
+                continue
+
+            seen.add(canonical)
+            result.append(canonical)
 
         return result
 
@@ -601,11 +655,13 @@ class CinematicCompiler:
                     ),
                     "scene_id": scene_id,
                     "duration_seconds": 5.2,
-                    "characters": self._list(
+                    "characters": self._canonical_characters(
                         scene.get(
                             "characters",
                             [],
-                        )
+                        ),
+                        [],
+                        inherit_scene_when_empty=True,
                     ),
                     "location": location,
                     "action": description,
@@ -697,12 +753,16 @@ class CinematicCompiler:
             )
         )
 
+        raw_shot_characters = self._list(
+            shot.get(
+                "characters",
+                [],
+            )
+        )
+
         characters = (
             self._canonical_characters(
-                shot.get(
-                    "characters",
-                    [],
-                ),
+                raw_shot_characters,
                 scene_characters,
             )
         )
@@ -710,6 +770,21 @@ class CinematicCompiler:
         self._validate_characters(
             characters
         )
+
+        # If Qwen explicitly supplied character references but none could
+        # be resolved deterministically, do not manufacture scene-wide
+        # character presence. Preserve the failure for the validator.
+        if (
+            raw_shot_characters
+            and not characters
+        ):
+            raise ValueError(
+                "Cinematic shot contains no resolvable canonical "
+                "character references: "
+                + ", ".join(
+                    raw_shot_characters
+                )
+            )
 
         shot_id = self._string(
             shot.get(
@@ -883,7 +958,7 @@ class CinematicCompiler:
                 ),
 
             "speaking_characters":
-                self._canonical_characters(
+                self._canonical_speaking_characters(
                     shot.get(
                         "speaking_characters",
                         [],
