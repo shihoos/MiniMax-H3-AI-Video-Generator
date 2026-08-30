@@ -45,21 +45,13 @@ class ProductionPlanner:
     """
     Dependency-free production planner.
 
-    Important architectural rule:
+    Architectural rule:
 
-    When the local Qwen director is enabled, Qwen is the
-    creative authority for:
-      - story development
-      - character creation
-      - scene design
-      - cinematic shot planning
-
-    This deterministic planner then acts only as the production
-    safety/reference/H3 binding layer.
-
-    When the Qwen director is disabled, this planner remains
-    available as a deterministic fallback for CI and offline
-    operation.
+    This planner is the deterministic canonical foundation for every run.
+    It owns production structure, canonical character identity, scene
+    topology, and deterministic H3 fields. The optional Qwen director may
+    enrich that plan creatively, but it must never replace canonical
+    entities or production structure.
 
     Character creation therefore means:
 
@@ -1689,44 +1681,10 @@ class ProductionPlanner:
             user_input,
         )
 
-        # When Qwen is enabled, this planner supplies only a
-        # production-safe skeleton. Qwen owns the creative plan.
-        #
-        # The deterministic implementation below remains intact
-        # as the CI/offline fallback when the director is disabled.
-        if director_enabled():
-            return {
-                "story": story,
-                "story_mode": mode,
-                "profile": profile,
-                "workflow_mode": workflow_mode,
-                "preview_ready": False,
-                "director_pending": True,
-
-                "character_count": 0,
-                "scene_count": 0,
-                "shot_count": 0,
-
-                "characters": [],
-                "scenes": [],
-                "shots": [],
-                "visual_language": {},
-
-                "width": H3_WIDTH,
-                "height": H3_HEIGHT,
-                "fps": H3_FPS,
-                "frames_per_shot": (
-                    H3_FRAMES_PER_SHOT
-                ),
-                "normal_steps": H3_STEPS,
-                "turbo_steps": TURBO_STEPS,
-
-                "audio_policy": (
-                    "Use supplied reference audio when present; "
-                    "otherwise request native H3 audio generation "
-                    "from the shot soundscape/dialogue prompt."
-                ),
-            }
+        # The deterministic planner is ALWAYS the canonical foundation.
+        # Qwen is an optional creative enrichment layer above this plan.
+        # This is intentionally independent of DIRECTOR_ENABLED so the
+        # director never receives an empty entity/scene skeleton.
 
         characters = self.create_characters(
             story
