@@ -1279,7 +1279,7 @@ class QwenDirector:
                     path
                     for path
                     in nvidia_root.rglob(
-                        "libcudart.so.*"
+                        "libcudart.so.13*"
                     )
                     if path.is_file()
                     and re.match(
@@ -1292,7 +1292,7 @@ class QwenDirector:
                     path
                     for path
                     in nvidia_root.rglob(
-                        "libcublas.so.*"
+                        "libcublas.so.13*"
                     )
                     if path.is_file()
                     and re.match(
