@@ -485,7 +485,8 @@ def test_director_prompt_contract() -> None:
         "preserve_user_story"
     )
 
-    shots = director._shot_director_system()
+    # Use the batch shot prompt since per-scene prompt is removed.
+    shots = director._shot_director_batch_system()
 
     check(
         "AI STORY MODE" in ai,
@@ -621,28 +622,17 @@ def test_visual_schema_sanitization() -> None:
 
 
 def test_shot_schema_cardinality_is_grammar_constrained() -> None:
-    # Grammar-constrained (JSON Schema) decoding is already the
-    # project's chosen speed/correctness strategy for JSON calls.
-    # This locks in that the shot-count contracts are enforced at the
-    # schema level (so the model literally cannot sample an invalid
-    # shot count), not left to be caught only after generation by the
-    # retry/recovery machinery.
+    # Grammar-constrained (JSON Schema) decoding is the project's
+    # chosen speed/correctness strategy for JSON calls. This locks in
+    # that the valid shot-count contracts are enforced at the schema
+    # level; missing shots are repaired deterministically later rather
+    # than by another Qwen recovery call.
     normal = QwenDirector._shot_json_schema()
     check(
         normal["properties"]["shots"]["minItems"] == 2
         and normal["properties"]["shots"]["maxItems"] == 2,
         "Normal/retry shot schema must constrain to exactly "
         "SHOTS_PER_SCENE shots.",
-    )
-
-    recovery = QwenDirector._shot_json_schema(
-        min_items=1,
-        max_items=1,
-    )
-    check(
-        recovery["properties"]["shots"]["minItems"] == 1
-        and recovery["properties"]["shots"]["maxItems"] == 1,
-        "Recovery shot schema must constrain to exactly one shot.",
     )
 
     batch = QwenDirector._shot_batch_json_schema(
@@ -1047,33 +1037,66 @@ def test_scene_budget_semantic_repair_contract() -> None:
 def test_batch_planning_runtime_contract() -> None:
     director = QwenDirector(ROOT)
     import inspect
+
     source = inspect.getsource(director.generate)
 
     check(
-        director.MAX_SHOT_BATCH_SCENES == 2,
-        "Shot batch size must remain capped at 2 scenes.",
+        director.MAX_SHOT_BATCH_SCENES == 5,
+        "Shot batch max scenes must be 5.",
     )
+
     check(
         "_shot_director_batch_system" in source
+        and "_shot_director_batch_user" in source
         and "_normalize_batch_shot_response" in source,
         "Generate path is missing the batched shot-planning path.",
     )
-    check(
-        "_generate_scene_shots" in source,
-        "Generate path is missing the per-scene fallback path.",
-    )
 
+   
     normalized = director._normalize_batch_shot_response(
         {
             "scene_shots": [
-                {"scene_id": "scene_001", "shots": [_sample_shot("scene_001", 1), _sample_shot("scene_001", 2)]},
-                {"scene_id": "scene_002", "shots": [_sample_shot("scene_002", 1), _sample_shot("scene_002", 2)]},
+                {
+                    "scene_id": "scene_001",
+                    "shots": [
+                        _sample_shot("scene_001", 1),
+                        _sample_shot("scene_001", 2),
+                    ],
+                },
+                {
+                    "scene_id": "scene_002",
+                    "shots": [
+                        _sample_shot("scene_002", 1),
+                        _sample_shot("scene_002", 2),
+                    ],
+                },
             ]
         }
     )
-    check(set(normalized) == {"scene_001", "scene_002"}, "Batch normalization lost a scene.")
-    check(all(len(value) == 2 for value in normalized.values()), "Batch normalization lost required shots.")
 
+    check(
+        set(normalized) == {"scene_001", "scene_002"},
+        "Batch normalization lost a scene.",
+    )
+
+    check(
+        all(len(value) == 2 for value in normalized.values()),
+        "Batch normalization lost required shots.",
+    )
+
+    single = director._shot_batch_json_schema(scene_count=1)
+    check(
+        single["properties"]["scene_shots"]["minItems"] == 1
+        and single["properties"]["scene_shots"]["maxItems"] == 1,
+        "Single-scene batch schema is missing.",
+    )
+
+    five = director._shot_batch_json_schema(scene_count=5)
+    check(
+        five["properties"]["scene_shots"]["minItems"] == 5
+        and five["properties"]["scene_shots"]["maxItems"] == 5,
+        "Five-scene batch schema is missing.",
+    )
 
 def test_batch_prompt_is_compact() -> None:
     director = QwenDirector(ROOT)
@@ -1093,18 +1116,7 @@ def test_batch_prompt_is_compact() -> None:
     check("personality" not in payload and "distinctive_features" not in payload, "Batch prompt included heavyweight character descriptors.")
 
 
-def test_shot_prompt_is_compact() -> None:
-    director = QwenDirector(ROOT)
-    huge_story = " ".join(["Elias crosses the ruined city and follows the signal."] * 500)
-    payload = director._shot_director_user(
-        huge_story,
-        [{"name": "Elias", "role": "protagonist"}],
-        _sample_scene("scene_001", ["Elias"]),
-        {"genre_tone": "cinematic", "pacing": "controlled"},
-    )
-    check(len(payload) < 12000, "Per-scene shot prompt is not compact enough.")
-    check('"story_context"' in payload, "Shot prompt lost compact narrative context.")
-
+# Removed test_shot_prompt_is_compact since _shot_director_user is gone.
 
 
 def test_mult_word_character_extraction_regression() -> None:
@@ -1343,7 +1355,6 @@ def main() -> None:
         test_scene_budget_semantic_repair_contract,
         test_batch_planning_runtime_contract,
         test_batch_prompt_is_compact,
-        test_shot_prompt_is_compact,
         test_resume_does_not_rewrite_scene_ids,
     ]
 
