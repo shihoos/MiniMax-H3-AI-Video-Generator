@@ -404,31 +404,34 @@ class ProductionPlanner:
             # Protect common honorifics/abbreviations before sentence
             # splitting so names such as "Dr. Elara Voss" remain intact.
             protected = paragraph
-            abbreviation_tokens = {
-                "mr.": "mr<dot>",
-                "mrs.": "mrs<dot>",
-                "ms.": "ms<dot>",
-                "miss.": "miss<dot>",
-                "dr.": "dr<dot>",
-                "prof.": "prof<dot>",
-                "capt.": "capt<dot>",
-                "cmdr.": "cmdr<dot>",
-                "lt.": "lt<dot>",
-                "col.": "col<dot>",
-                "gen.": "gen<dot>",
-                "sgt.": "sgt<dot>",
-                "st.": "st<dot>",
-                "jr.": "jr<dot>",
-                "sr.": "sr<dot>",
-                "vs.": "vs<dot>",
-                "etc.": "etc<dot>",
-                "e.g.": "e<dot>g<dot>",
-                "i.e.": "i<dot>e<dot>",
-            }
-            for token, marker in abbreviation_tokens.items():
+            abbreviation_patterns = (
+                r"\bDr\.",
+                r"\bMr\.",
+                r"\bMrs\.",
+                r"\bMs\.",
+                r"\bMiss\.",
+                r"\bProf\.",
+                r"\bCapt\.",
+                r"\bCmdr\.",
+                r"\bLt\.",
+                r"\bCol\.",
+                r"\bGen\.",
+                r"\bSgt\.",
+                r"\bSt\.",
+                r"\bJr\.",
+                r"\bSr\.",
+                r"\bVs\.",
+                r"\bEtc\.",
+                r"\bE\.g\.",
+                r"\bI\.e\.",
+            )
+            for pattern in abbreviation_patterns:
                 protected = re.sub(
-                    rf"\b{re.escape(token)}",
-                    marker,
+                    pattern,
+                    lambda match: match.group(0).replace(
+                        ".",
+                        "<dot>",
+                    ),
                     protected,
                     flags=re.IGNORECASE,
                 )
@@ -503,7 +506,140 @@ class ProductionPlanner:
                 start=1,
             )
         ]
-    
+
+    def _rebalance_story_units(
+        self,
+        units: list[StoryUnit],
+    ) -> list[StoryUnit]:
+        """
+        Deterministically normalize story units into the production
+        scene budget when the source contains enough narrative material.
+
+        This is a topology/budget step, not a creative rewrite:
+        source text is preserved, no model call is made, and short
+        stories are never padded with invented events.
+        """
+        if not units:
+            return []
+
+        if 4 <= len(units) <= 6:
+            return [
+                StoryUnit(
+                    order=index,
+                    text=unit.text,
+                )
+                for index, unit in enumerate(
+                    units,
+                    start=1,
+                )
+            ]
+
+        pieces: list[str] = []
+
+        abbreviation_patterns = (
+            r"\bDr\.",
+            r"\bMr\.",
+            r"\bMrs\.",
+            r"\bMs\.",
+            r"\bMiss\.",
+            r"\bProf\.",
+            r"\bCapt\.",
+            r"\bCmdr\.",
+            r"\bLt\.",
+            r"\bCol\.",
+            r"\bGen\.",
+            r"\bSgt\.",
+            r"\bSt\.",
+            r"\bJr\.",
+            r"\bSr\.",
+            r"\bVs\.",
+            r"\bEtc\.",
+            r"\bE\.g\.",
+            r"\bI\.e\.",
+        )
+
+        for unit in units:
+            protected = str(
+                unit.text or ""
+            ).strip()
+
+            for pattern in abbreviation_patterns:
+                protected = re.sub(
+                    pattern,
+                    lambda match: match.group(0).replace(
+                        ".",
+                        "<dot>",
+                    ),
+                    protected,
+                    flags=re.IGNORECASE,
+                )
+
+            for sentence in re.split(
+                r"(?<=[.!?])\s+",
+                protected,
+            ):
+                sentence = (
+                    sentence
+                    .replace("<dot>", ".")
+                    .strip()
+                )
+
+                if sentence:
+                    pieces.append(sentence)
+
+        if len(pieces) < 4:
+            return [
+                StoryUnit(
+                    order=index,
+                    text=unit.text,
+                )
+                for index, unit in enumerate(
+                    units,
+                    start=1,
+                )
+            ]
+
+        # Four-to-six source sentences are preserved one-to-one.
+        if len(pieces) <= 6:
+            return [
+                StoryUnit(
+                    order=index,
+                    text=piece,
+                )
+                for index, piece in enumerate(
+                    pieces,
+                    start=1,
+                )
+            ]
+
+        # More than six source sentences are compressed into exactly six
+        # deterministic contiguous-ish groups without inventing content.
+        buckets: list[list[str]] = [
+            []
+            for _ in range(6)
+        ]
+
+        for index, piece in enumerate(pieces):
+            bucket = min(
+                5,
+                int(
+                    index * 6 / len(pieces)
+                ),
+            )
+            buckets[bucket].append(piece)
+
+        return [
+            StoryUnit(
+                order=index,
+                text=" ".join(bucket).strip(),
+            )
+            for index, bucket in enumerate(
+                buckets,
+                start=1,
+            )
+            if bucket
+        ]
+
     # ============================================================
     # STORY MODES
     # ============================================================
@@ -870,7 +1006,9 @@ class ProductionPlanner:
                 value
             )
 
-        return result
+        return self._canonicalize_character_descriptors(
+            result
+        )
 
     @staticmethod
     def _appearance_from_story(
@@ -1059,14 +1197,103 @@ class ProductionPlanner:
 
         return character
 
+    @staticmethod
+    def _canonicalize_character_descriptors(
+        descriptors: list[str],
+    ) -> list[str]:
+        """
+        Remove deterministic short-name aliases when exactly one
+        fuller canonical name owns that first-name token.
+
+        Examples:
+            Elara Voss + Elara -> Elara Voss
+            Marcus Voss + Marcus -> Marcus Voss
+
+        Ambiguous short names are retained rather than guessing.
+        """
+        cleaned: list[str] = []
+        seen: set[str] = set()
+
+        for raw in descriptors:
+            value = str(
+                raw or ""
+            ).strip()
+
+            if not value:
+                continue
+
+            key = value.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            cleaned.append(value)
+
+        honorific_pattern = re.compile(
+            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|"
+            r"captain|commander|detective|agent)\.?(?:\s+)",
+            re.IGNORECASE,
+        )
+
+        full_names_by_first: dict[
+            str,
+            list[str],
+        ] = {}
+
+        for value in cleaned:
+            normalized = honorific_pattern.sub(
+                "",
+                value,
+                count=1,
+            ).strip()
+
+            tokens = normalized.split()
+
+            if len(tokens) >= 2:
+                full_names_by_first.setdefault(
+                    tokens[0].lower(),
+                    [],
+                ).append(value)
+
+        result: list[str] = []
+
+        for value in cleaned:
+            normalized = honorific_pattern.sub(
+                "",
+                value,
+                count=1,
+            ).strip()
+
+            tokens = normalized.split()
+
+            if len(tokens) == 1:
+                matches = full_names_by_first.get(
+                    tokens[0].lower(),
+                    [],
+                )
+
+                # A bare first-name token is not strong enough to create
+                # another canonical person when a fuller name already exists
+                # with that first token. This covers both unique aliases and
+                # ambiguous first-name references safely.
+                if matches:
+                    continue
+
+            result.append(value)
+
+        return result
+
     def create_characters(
         self,
         story: str,
     ) -> list[Character]:
 
         descriptors = (
-            self.detect_character_descriptors(
-                story
+            self._canonicalize_character_descriptors(
+                self.detect_character_descriptors(
+                    story
+                )
             )
         )
 
@@ -1265,6 +1492,10 @@ class ProductionPlanner:
 
         units = self._split_story(
             story
+        )
+
+        units = self._rebalance_story_units(
+            units
         )
 
         scenes = []
