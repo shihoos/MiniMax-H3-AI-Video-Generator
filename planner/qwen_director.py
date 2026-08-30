@@ -164,7 +164,7 @@ class QwenDirector:
         self._cache_dir = self._optional_directory_env(
             "H3_DIRECTOR_CACHE_DIR"
         )
-        self._cache_namespace = "minimax-h3-qwen-schema-v1"
+        self._cache_namespace = "minimax-h3-qwen-schema-v2"
 
     @staticmethod
     def _optional_directory_env(name: str) -> Path | None:
@@ -2108,7 +2108,10 @@ Return:
         return QwenDirector._scene_json_schema()
 
     @staticmethod
-    def _shot_json_schema() -> dict:
+    def _shot_json_schema(
+        min_items: int = 2,
+        max_items: int = 2,
+    ) -> dict:
         shot_properties = {
             "shot_id": {"type": "string"},
             "scene_id": {"type": "string"},
@@ -2139,6 +2142,8 @@ Return:
             "properties": {
                 "shots": {
                     "type": "array",
+                    "minItems": min_items,
+                    "maxItems": max_items,
                     "items": {
                         "type": "object",
                         "properties": shot_properties,
@@ -2152,7 +2157,9 @@ Return:
         }
 
     @staticmethod
-    def _shot_batch_json_schema() -> dict:
+    def _shot_batch_json_schema(
+        scene_count: int = 2,
+    ) -> dict:
         shot_schema = QwenDirector._shot_json_schema()[
             "properties"
         ]["shots"]["items"]
@@ -2161,12 +2168,16 @@ Return:
             "properties": {
                 "scene_shots": {
                     "type": "array",
+                    "minItems": scene_count,
+                    "maxItems": scene_count,
                     "items": {
                         "type": "object",
                         "properties": {
                             "scene_id": {"type": "string"},
                             "shots": {
                                 "type": "array",
+                                "minItems": QwenDirector.SHOTS_PER_SCENE,
+                                "maxItems": QwenDirector.SHOTS_PER_SCENE,
                                 "items": shot_schema,
                             },
                         },
@@ -5084,7 +5095,10 @@ Return JSON only.
                     max_completion=320,
                     json_mode=True,
                     disable_thinking=True,
-                    response_schema=self._shot_json_schema(),
+                    response_schema=self._shot_json_schema(
+                        min_items=1,
+                        max_items=1,
+                    ),
                 )
 
                 recovered = self._sanitize_shots(
@@ -5711,7 +5725,9 @@ Return JSON only.
                             max_completion=1800,
                             json_mode=True,
                             disable_thinking=True,
-                            response_schema=self._shot_batch_json_schema(),
+                            response_schema=self._shot_batch_json_schema(
+                                scene_count=len(batch_scenes),
+                            ),
                         )
 
                         batch_map = (
@@ -6170,13 +6186,30 @@ Return JSON only.
             or {}
         )
 
-        if creative_visual_language:
+        # Visual language is creative metadata, not production identity.
+        # Merge field-by-field so a partial Qwen response cannot erase
+        # deterministic/default visual-language fields already present in
+        # the base plan. Qwen never gets ownership of unrelated keys.
+        base_visual_language = merged.get(
+            "visual_language",
+            {},
+        )
+        if not isinstance(base_visual_language, dict):
+            base_visual_language = {}
 
-            merged[
-                "visual_language"
-            ] = deepcopy(
-                creative_visual_language
-            )
+        if isinstance(creative_visual_language, dict):
+            for key in (
+                "genre_tone",
+                "color_palette",
+                "lighting_philosophy",
+                "camera_philosophy",
+                "pacing",
+            ):
+                value = creative_visual_language.get(key)
+                if value not in (None, "", [], {}):
+                    base_visual_language[key] = deepcopy(value)
+
+        merged["visual_language"] = base_visual_language
 
         # Canonical structure is never replaced by Qwen.
         # Characters and scene topology come from the deterministic base plan.
