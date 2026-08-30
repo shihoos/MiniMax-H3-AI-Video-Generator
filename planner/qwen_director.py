@@ -5323,101 +5323,54 @@ Return JSON only.
 
             except RuntimeError as first_error:
 
-                failure_text = str(
-                    first_error
-                )
-
                 if mode == EXPAND_USER_STORY_MODE:
-
-                    repair_events: list[str] = []
-
-                    match = re.search(
-                        r"Unmatched source events:\s*(.*)$",
-                        failure_text,
-                        flags=re.DOTALL,
+                    # Expansion failure must not trigger another expensive
+                    # Qwen call. The original user story is the deterministic
+                    # correctness fallback; downstream planning can continue.
+                    print(
+                        "[QWEN] expand_validation_failed_fallback_to_source",
+                        str(first_error),
+                        flush=True,
                     )
-
-                    if match:
-
-                        repair_events = [
-                            item.strip(" ;")
-                            for item in re.split(
-                                r"\s*;\s*",
-                                match.group(1).strip(),
-                            )
-                            if item.strip(" ;")
-                        ]
-
-                    if repair_events:
-
-                        repair_requirements = "\n".join(
-                            f"- {event}"
-                            for event in repair_events
-                        )
-
-                    else:
-
-                        repair_requirements = (
-                            "- Preserve every major source event.\n"
-                            "- Preserve every named character.\n"
-                            "- Preserve chronology, setting, and outcome."
-                        )
-
-                    retry_user = (
-                        story_user
-                        + "\n\n"
-                        "REPAIR REQUIRED — EXPAND STORY.\n"
-                        "Rewrite the COMPLETE expanded story while explicitly "
-                        "preserving the required source events below.\n\n"
-                        "REQUIRED SOURCE EVENTS:\n"
-                        + repair_requirements
-                        + "\n\n"
-                        "PREVIOUS VALIDATION FAILURE:\n"
-                        + failure_text
-                        + "\n\n"
-                        "Return ONLY the complete expanded story prose. "
-                        "Do not output JSON, labels, analysis, notes, "
-                        "camera directions, or explanations."
+                    story = self._normalize_story(
+                        user_input
                     )
-
+                    self._validate_mode_output(
+                        PRESERVE_USER_STORY_MODE,
+                        user_input,
+                        story,
+                    )
                 else:
-
+                    failure_text = str(first_error)
                     retry_user = (
                         story_user
                         + "\n\n"
                         "REPAIR REQUIRED.\n"
-                        f"Previous validation failure: {failure_text}\n"
-                        "Write the complete narrative again. "
+                        + f"Previous validation failure: {failure_text}\n"
+                        + "Write the complete narrative again. "
                         "Return ONLY the story prose. "
                         "Do not output JSON or commentary."
                     )
 
-                story = self._chat_text(
-                    story_system,
-                    retry_user,
-                    minimum_completion=350,
-                    temperature=min(
-                        0.85,
-                        max(
-                            0.70,
-                            temperature + 0.10,
+                    story = self._chat_text(
+                        story_system,
+                        retry_user,
+                        minimum_completion=350,
+                        temperature=min(
+                            0.85,
+                            max(0.70, temperature + 0.10),
                         ),
-                    ),
-                    top_p=0.92,
-                    call_name=(
-                        "ai_story_text_retry"
-                        if mode == AI_STORY_MODE
-                        else "expand_story_text_retry"
-                    ),
-                    max_completion=1600,
-                    disable_thinking=True,
-                )
+                        top_p=0.92,
+                        call_name="ai_story_text_retry",
+                        max_completion=1600,
+                        disable_thinking=True,
+                    )
 
-                self._validate_mode_output(
-                    mode,
-                    user_input,
-                    story,
-                )
+                    self._validate_mode_output(
+                        mode,
+                        user_input,
+                        story,
+                    )
 
             story_plan = {
                 "story": story,
