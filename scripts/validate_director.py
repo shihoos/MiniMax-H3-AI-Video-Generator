@@ -620,6 +620,54 @@ def test_visual_schema_sanitization() -> None:
     )
 
 
+def test_shot_schema_cardinality_is_grammar_constrained() -> None:
+    # Grammar-constrained (JSON Schema) decoding is already the
+    # project's chosen speed/correctness strategy for JSON calls.
+    # This locks in that the shot-count contracts are enforced at the
+    # schema level (so the model literally cannot sample an invalid
+    # shot count), not left to be caught only after generation by the
+    # retry/recovery machinery.
+    normal = QwenDirector._shot_json_schema()
+    check(
+        normal["properties"]["shots"]["minItems"] == 2
+        and normal["properties"]["shots"]["maxItems"] == 2,
+        "Normal/retry shot schema must constrain to exactly "
+        "SHOTS_PER_SCENE shots.",
+    )
+
+    recovery = QwenDirector._shot_json_schema(
+        min_items=1,
+        max_items=1,
+    )
+    check(
+        recovery["properties"]["shots"]["minItems"] == 1
+        and recovery["properties"]["shots"]["maxItems"] == 1,
+        "Recovery shot schema must constrain to exactly one shot.",
+    )
+
+    batch = QwenDirector._shot_batch_json_schema(
+        scene_count=2,
+    )
+    check(
+        batch["properties"]["scene_shots"]["minItems"] == 2
+        and batch["properties"]["scene_shots"]["maxItems"] == 2,
+        "Batch schema must constrain scene_shots to the actual "
+        "batch size.",
+    )
+    check(
+        batch["properties"]["scene_shots"]["items"]["properties"][
+            "shots"
+        ]["minItems"]
+        == QwenDirector.SHOTS_PER_SCENE
+        and batch["properties"]["scene_shots"]["items"]["properties"][
+            "shots"
+        ]["maxItems"]
+        == QwenDirector.SHOTS_PER_SCENE,
+        "Batch schema must constrain each scene's shots to "
+        "SHOTS_PER_SCENE.",
+    )
+
+
 def test_shot_sanitization_cinematography_fields() -> None:
 
     director = QwenDirector(
@@ -724,6 +772,208 @@ def _sample_shot(scene_id: str, ordinal: int, characters=None) -> dict:
         "speaking_characters": [],
         "speech_text": "",
     }
+
+
+def test_canonical_roster_not_overwritten_by_qwen() -> None:
+    # P0 regression guard: enrich_plan() must never let Qwen's creative
+    # output replace the deterministic canonical character roster or
+    # scene topology (scene_id / order / characters / shot_ids). This
+    # locks in the fix described in the V2.1 architecture review.
+    director = QwenDirector(ROOT)
+
+    base_plan = {
+        "story": "Elias walked into the ruined city looking for Mara.",
+        "story_mode": "preserve_user_story",
+        "characters": [
+            {
+                "character_id": "char_elias",
+                "name": "Elias",
+                "role": "protagonist",
+                "description": "",
+                "personality": "",
+            },
+            {
+                "character_id": "char_mara",
+                "name": "Mara",
+                "role": "supporting",
+                "description": "",
+                "personality": "",
+            },
+        ],
+        "scenes": [
+            _sample_scene("scene_001", ["Elias", "Mara"], 1),
+        ],
+        "shots": [],
+        "visual_language": {},
+    }
+
+    # Simulate a Qwen response that tries to invent an entirely
+    # different roster and scene topology -- this must be rejected,
+    # not merged in, regardless of what the model returns.
+    def fake_generate(
+        self,
+        *,
+        mode,
+        user_input,
+        base_plan,
+        checkpoint_session_id=None,
+        resume_state=None,
+    ):
+        return {
+            "enabled": True,
+            "plan": {
+                "story": base_plan["story"],
+                "director_notes": "creative notes",
+                "visual_language": {
+                    "genre_tone": "noir",
+                    "color_palette": "desaturated blues",
+                    "lighting_philosophy": "hard chiaroscuro",
+                    "camera_philosophy": "handheld",
+                    "pacing": "slow",
+                },
+                "characters": [
+                    {
+                        "character_id": "char_invented",
+                        "name": "Invented Stranger",
+                        "role": "protagonist",
+                        "description": "",
+                        "personality": "",
+                    }
+                ],
+                "scenes": [
+                    {
+                        "scene_id": "scene_001",
+                        "order": 99,
+                        "characters": ["Invented Stranger"],
+                        "shot_ids": ["fake_shot"],
+                        "mood": "eerie",
+                        "lighting": "moonlight",
+                    }
+                ],
+                "shots": [
+                    _sample_shot("scene_001", 1, ["Invented Stranger"]),
+                    _sample_shot("scene_001", 2, ["Invented Stranger"]),
+                ],
+            },
+        }
+
+    original_generate = QwenDirector.generate
+    QwenDirector.generate = fake_generate
+    try:
+        merged = director.enrich_plan(
+            mode="preserve_user_story",
+            user_input=base_plan["story"],
+            base_plan=base_plan,
+        )
+    finally:
+        QwenDirector.generate = original_generate
+
+    check(
+        merged["characters"] == base_plan["characters"],
+        "enrich_plan() let Qwen overwrite the canonical character roster.",
+    )
+
+    merged_scene = merged["scenes"][0]
+
+    check(
+        merged_scene["scene_id"] == "scene_001"
+        and merged_scene["order"] == 1
+        and merged_scene["characters"] == ["Elias", "Mara"],
+        "enrich_plan() let Qwen overwrite protected scene topology "
+        "(scene_id/order/characters).",
+    )
+
+    check(
+        merged_scene.get("mood") == "eerie"
+        and merged_scene.get("lighting") == "moonlight",
+        "enrich_plan() failed to apply Qwen's non-structural creative "
+        "enrichment (mood/lighting) onto the canonical scene.",
+    )
+
+    check(
+        merged["visual_language"].get("genre_tone") == "noir",
+        "enrich_plan() failed to merge the visual_language bible.",
+    )
+
+
+def test_entity_resolver_shot_rebinding() -> None:
+    # P0 regression guard: shot/scene character references must resolve
+    # through EntityResolver (aliases, honorifics) rather than exact-name
+    # matching only, and an explicit-but-unresolved character reference
+    # must never silently fall back to "all scene characters" (that
+    # would invent presence the model didn't actually establish).
+    from pipeline.production_orchestrator import ProductionOrchestrator
+    from schemas.character import Character
+
+    characters = [
+        Character(
+            character_id="char_elias",
+            name="Elias",
+            role="protagonist",
+            description="",
+            personality="",
+        ),
+        Character(
+            character_id="char_mara",
+            name="Mara",
+            role="supporting",
+            description="",
+            personality="",
+        ),
+    ]
+
+    plan = {
+        "scenes": [
+            _sample_scene("scene_001", ["Elias", "Mara"], 1),
+        ],
+        "shots": [
+            # Honorific + case variation should resolve to Elias.
+            {
+                **_sample_shot("scene_001", 1, ["Dr. elias"]),
+            },
+            # No character field at all -- must inherit scene characters.
+            {
+                k: v
+                for k, v in _sample_shot("scene_001", 2, []).items()
+                if k != "characters"
+            },
+            # Explicit reference to someone not in the roster -- must
+            # resolve to nobody, NOT fall back to the full scene cast.
+            {
+                **_sample_shot("scene_001", 3, ["Totally Unknown Person"]),
+            },
+        ],
+    }
+
+    orchestrator = ProductionOrchestrator.__new__(
+        ProductionOrchestrator
+    )
+    ProductionOrchestrator._rebind_shots(
+        orchestrator,
+        plan,
+        characters,
+    )
+
+    shots = plan["shots"]
+
+    check(
+        shots[0]["characters"] == ["Elias"],
+        "EntityResolver honorific/case normalization did not resolve "
+        "'Dr. elias' to the canonical character 'Elias'.",
+    )
+
+    check(
+        set(shots[1]["characters"]) == {"Elias", "Mara"},
+        "A shot with no character field at all should inherit the "
+        "scene's full character list.",
+    )
+
+    check(
+        shots[2]["characters"] == [],
+        "An explicit but unresolved character reference must resolve "
+        "to no characters, not silently fall back to the full scene "
+        "cast (that would invent presence the model never established).",
+    )
 
 
 def test_scene_budget_contract_and_fallback() -> None:
@@ -856,6 +1106,112 @@ def test_shot_prompt_is_compact() -> None:
     check('"story_context"' in payload, "Shot prompt lost compact narrative context.")
 
 
+
+def test_mult_word_character_extraction_regression() -> None:
+    # P0 regression guard for the ProductionPlanner character extractor.
+    # Multi-word names must remain intact and extraction cannot depend on a
+    # closed hand-maintained verb list.
+    planner = ProductionPlanner(ROOT)
+
+    story = (
+        "Marcus Chen arrived at the station just as "
+        "Dr. Elara Voss finished her readings."
+    )
+    names = planner.detect_character_descriptors(story)
+    normalized = {name.lower() for name in names}
+
+    check(
+        "marcus chen" in normalized,
+        "ProductionPlanner truncated or missed multi-word name Marcus Chen.",
+    )
+    check(
+        "elara voss" in normalized,
+        "ProductionPlanner truncated or missed honorific multi-word name Dr. Elara Voss.",
+    )
+    check(
+        "chen" not in normalized and "voss" not in normalized,
+        "ProductionPlanner reduced a multi-word character to a surname.",
+    )
+
+    suffix_story = "Ava Morgan sprinted across the bridge while Daniel Stone watched."
+    suffix_names = {
+        name.lower()
+        for name in planner.detect_character_descriptors(suffix_story)
+    }
+    check(
+        {"ava morgan", "daniel stone"}.issubset(suffix_names),
+        "ProductionPlanner morphological verb fallback missed multi-word narrative subjects.",
+    )
+
+
+def test_visual_language_partial_merge_preserves_base_fields() -> None:
+    director = QwenDirector(ROOT)
+    base_plan = {
+        "story": "Elias walks home.",
+        "characters": [],
+        "scenes": [],
+        "shots": [],
+        "visual_language": {
+            "genre_tone": "base tone",
+            "color_palette": "base palette",
+            "lighting_philosophy": "base lighting",
+            "camera_philosophy": "base camera",
+            "pacing": "base pacing",
+        },
+    }
+
+    def fake_generate(self, **kwargs):
+        return {
+            "enabled": True,
+            "plan": {
+                "story": base_plan["story"],
+                "visual_language": {
+                    "genre_tone": "qwen tone",
+                    "pacing": "",
+                },
+                "characters": [],
+                "scenes": [],
+                "shots": [],
+            },
+        }
+
+    original = QwenDirector.generate
+    QwenDirector.generate = fake_generate
+    try:
+        merged = director.enrich_plan(
+            mode="preserve_user_story",
+            user_input=base_plan["story"],
+            base_plan=base_plan,
+        )
+    finally:
+        QwenDirector.generate = original
+
+    check(
+        merged["visual_language"]["genre_tone"] == "qwen tone",
+        "Creative visual-language field was not applied.",
+    )
+    check(
+        merged["visual_language"]["camera_philosophy"] == "base camera",
+        "Partial Qwen visual-language output erased a base field.",
+    )
+    check(
+        merged["visual_language"]["pacing"] == "base pacing",
+        "Empty Qwen visual-language value erased a base field.",
+    )
+
+
+def test_final_generation_uses_compiler_before_quality_validation() -> None:
+    director = QwenDirector(ROOT)
+    import inspect
+    source = inspect.getsource(director.generate)
+    compile_pos = source.find("CinematicCompiler(")
+    quality_pos = source.find("self._validate_production_quality(")
+    check(
+        compile_pos >= 0 and quality_pos > compile_pos,
+        "Final generation validates production quality before deterministic compilation.",
+    )
+
+
 def test_resume_does_not_rewrite_scene_ids() -> None:
     director = QwenDirector(ROOT)
     import inspect
@@ -885,7 +1241,13 @@ def main() -> None:
         test_director_prompt_contract,
         test_shot_sampling_contract,
         test_visual_schema_sanitization,
+        test_shot_schema_cardinality_is_grammar_constrained,
         test_shot_sanitization_cinematography_fields,
+        test_canonical_roster_not_overwritten_by_qwen,
+        test_entity_resolver_shot_rebinding,
+        test_mult_word_character_extraction_regression,
+        test_visual_language_partial_merge_preserves_base_fields,
+        test_final_generation_uses_compiler_before_quality_validation,
         test_scene_budget_contract_and_fallback,
         test_scene_budget_semantic_repair_contract,
         test_batch_planning_runtime_contract,
