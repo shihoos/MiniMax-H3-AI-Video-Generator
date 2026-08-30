@@ -457,8 +457,9 @@ class EntityResolver:
                     raw
                 )
 
-                resolved = aliases.get(
-                    normalized
+                resolved = (
+                    aliases.get(normalized)
+                    or aliases.get(self.strip_honorific(normalized))
                 )
 
                 selected.append(
@@ -659,12 +660,10 @@ Return JSON only.
                 )
 
                 resolved = (
-                    aliases.get(
-                        normalized
-                    )
-                    or accepted.get(
-                        normalized
-                    )
+                    aliases.get(normalized)
+                    or aliases.get(self.strip_honorific(normalized))
+                    or accepted.get(normalized)
+                    or accepted.get(self.strip_honorific(normalized))
                 )
 
                 selected.append(
