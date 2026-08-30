@@ -1226,7 +1226,98 @@ def test_resume_does_not_rewrite_scene_ids() -> None:
     )
 
 
+
+def test_deterministic_foundation_when_director_enabled() -> None:
+    from planner.config import director_enabled
+
+    original = os.environ.get("H3_DIRECTOR_ENABLED")
+    try:
+        os.environ["H3_DIRECTOR_ENABLED"] = "1"
+        planner = ProductionPlanner(ROOT)
+        result = planner.build(
+            mode="preserve_user_story",
+            user_input=(
+                "Dr. Elara Voss enters the station. "
+                "Marcus Chen follows her. "
+                "They discover a hidden signal."
+            ),
+        )
+        check(
+            result["characters"],
+            "Director-enabled build returned no deterministic characters.",
+        )
+        check(
+            result["scenes"],
+            "Director-enabled build returned no deterministic scenes.",
+        )
+    finally:
+        if original is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = original
+
+
+def test_abbreviation_safe_story_split() -> None:
+    planner = ProductionPlanner(ROOT)
+    units = planner._split_story(
+        "Dr. Elara Voss entered the station. Marcus Chen followed her. "
+        "They found the signal."
+    )
+    text = " ".join(unit.text for unit in units)
+    check(
+        "dr. elara voss" in text.lower(),
+        "Abbreviation-safe splitter broke 'Dr. Elara Voss'.",
+    )
+
+
+def test_expand_failure_is_source_fallback_without_retry() -> None:
+    director = QwenDirector(ROOT)
+    source = "Eli enters the abandoned station and finds a sealed vault."
+    calls = []
+    original = director._chat_text
+    original_load = director.load
+
+    def fake_load():
+        director._llama = object()
+
+    director.load = fake_load
+
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs.get("call_name", ""))
+        if kwargs.get("call_name") == "expand_story_text_pass":
+            raise RuntimeError("forced validation failure")
+        raise RuntimeError("unexpected retry")
+
+    director._chat_text = fake_chat
+    try:
+        # Exercise only the contract: a failed expansion must not invoke a retry.
+        try:
+            director.generate(
+                mode="expand_user_story",
+                user_input=source,
+                base_plan={
+                    "story": source,
+                    "characters": [{"name": "Eli"}],
+                    "scenes": [{"scene_id": "scene_001", "order": 1, "characters": ["Eli"], "shot_ids": []}]*4,
+                    "shots": [],
+                },
+            )
+        except RuntimeError:
+            pass
+    finally:
+        director._chat_text = original
+        director.load = original_load
+        director._llama = None
+
+    check(
+        "expand_story_text_retry" not in calls,
+        "Expand mode still attempted an expensive Qwen retry.",
+    )
+
 def main() -> None:
+    test_deterministic_foundation_when_director_enabled()
+    test_abbreviation_safe_story_split()
+    test_expand_failure_is_source_fallback_without_retry()
 
     tests = [
         test_story_modes,
