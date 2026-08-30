@@ -11,6 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from planner.cinematic_compiler import CinematicCompiler
+from planner.entity_resolver import EntityResolver
 from pipeline.production_checkpoint import ProductionCheckpoint
 
 from planner.config import (
@@ -152,6 +153,7 @@ class QwenDirector:
         )
 
         self._fallback_planner = None
+        self._entity_resolver = EntityResolver(self)
         self._current_visual_language: dict = {}
 
         # Optional development diagnostics. Both are disabled unless the
@@ -471,6 +473,665 @@ class QwenDirector:
     # DETERMINISTIC FALLBACK
     # ========================================================
 
+
+    # ========================================================
+    # FINAL ARCHITECTURE HELPERS
+    # ========================================================
+
+    def _resolve_scene_character_aliases(
+        self,
+        scenes,
+        character_names,
+    ) -> list[dict]:
+        return self._entity_resolver.resolve_scene_aliases(
+            scenes,
+            character_names,
+            qwen_chat=self._chat_json,
+        )
+
+    @staticmethod
+    def _classify_scene_function(
+        scene: dict,
+        index: int,
+        total: int,
+    ) -> str:
+
+        text = " ".join(
+            [
+                str(
+                    scene.get(
+                        "title",
+                        "",
+                    )
+                    or ""
+                ),
+                str(
+                    scene.get(
+                        "description",
+                        "",
+                    )
+                    or ""
+                ),
+                str(
+                    scene.get(
+                        "scene_objective",
+                        "",
+                    )
+                    or ""
+                ),
+            ]
+        ).lower()
+
+        # ----------------------------------------------------
+        # Structural boundaries
+        # ----------------------------------------------------
+
+        if index == 0:
+            return "setup"
+
+        if index == total - 1:
+            return "finale"
+
+        # ----------------------------------------------------
+        # Narrative vocabulary
+        #
+        # IMPORTANT:
+        # Midpoint/revelation must be checked BEFORE catalyst,
+        # because words such as "learns", "discovers", and
+        # "signal" can appear inside a revelation.
+        # ----------------------------------------------------
+
+        climax_terms = (
+            "climax",
+            "final confrontation",
+            "decisive choice",
+            "must choose",
+            "must shut",
+            "collapses",
+            "collapse",
+            "explodes",
+            "final battle",
+            "last chance",
+            "saves",
+            "destroy",
+            "destroying",
+            "escape",
+        )
+
+        midpoint_terms = (
+            "midpoint",
+            "revelation",
+            "reveals the truth",
+            "reveals that",
+            "reveals",
+            "realizes the truth",
+            "realizes that",
+            "realizes",
+            "understands the truth",
+            "understands that",
+            "understands",
+            "discovers the truth",
+            "learns the truth",
+            "hidden truth",
+            "secret is revealed",
+            "truth is revealed",
+            "turning point",
+            "identity",
+            "identity is revealed",
+        )
+
+        catalyst_terms = (
+            "inciting",
+            "inciting incident",
+            "receives a warning",
+            "receives",
+            "warning",
+            "arrives",
+            "unexpected attack",
+            "attack",
+            "first discovery",
+            "initial discovery",
+            "discovers a clue",
+            "finds a clue",
+            "signal appears",
+            "signal",
+            "learns that",
+            "disruption",
+        )
+
+        # ----------------------------------------------------
+        # Highest-priority dramatic state first.
+        # ----------------------------------------------------
+
+        if any(
+            term in text
+            for term in climax_terms
+        ):
+            return "climax"
+
+        # A revelation/turning-point interpretation has higher
+        # precedence than generic discovery/catalyst language.
+        if any(
+            term in text
+            for term in midpoint_terms
+        ):
+            return "midpoint"
+
+        if any(
+            term in text
+            for term in catalyst_terms
+        ):
+            return "catalyst"
+
+        return "development"
+
+    @classmethod
+    def _annotate_scene_functions(
+        cls,
+        scenes: list[dict],
+    ) -> list[dict]:
+
+        result = []
+
+        total = len(
+            scenes
+        )
+
+        for index, raw_scene in enumerate(
+            scenes
+        ):
+
+            scene = dict(
+                raw_scene
+            )
+
+            function = (
+                cls._classify_scene_function(
+                    scene,
+                    index,
+                    total,
+                )
+            )
+
+            description = str(
+                scene.get(
+                    "description",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            objective = str(
+                scene.get(
+                    "scene_objective",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            moment = (
+                objective
+                or
+                description
+            )
+
+            moment = re.sub(
+                r"\s+",
+                " ",
+                moment,
+            ).strip()
+
+            if len(moment) > 220:
+                moment = (
+                    moment[:220]
+                    .rsplit(
+                        " ",
+                        1,
+                    )[0]
+                    .strip()
+                )
+
+            scene[
+                "scene_function"
+            ] = function
+
+            scene[
+                "obligatory_moment"
+            ] = moment
+
+            result.append(
+                scene
+            )
+
+        return result
+
+    @classmethod
+    def _scene_function_coverage(
+        cls,
+        scenes: list[dict],
+    ) -> set[str]:
+
+        return {
+            str(
+                scene.get(
+                    "scene_function",
+                    "",
+                )
+                or ""
+            ).strip().lower()
+            for scene in scenes or []
+            if isinstance(
+                scene,
+                dict,
+            )
+        }
+
+    @staticmethod
+    def _merge_scene_group(
+        group: list[dict],
+        index: int,
+    ) -> dict:
+
+        first = dict(
+            group[0]
+        )
+
+        descriptions = [
+            str(
+                item.get(
+                    "description",
+                    "",
+                )
+                or ""
+            ).strip()
+            for item in group
+        ]
+
+        descriptions = [
+            value
+            for value in descriptions
+            if value
+        ]
+
+        objectives = [
+            str(
+                item.get(
+                    "scene_objective",
+                    "",
+                )
+                or ""
+            ).strip()
+            for item in group
+        ]
+
+        objectives = [
+            value
+            for value in objectives
+            if value
+        ]
+
+        continuity = [
+            str(
+                item.get(
+                    "continuity_notes",
+                    "",
+                )
+                or ""
+            ).strip()
+            for item in group
+        ]
+
+        continuity = [
+            value
+            for value in continuity
+            if value
+        ]
+
+        env = []
+        props = []
+        chars = []
+
+        for item in group:
+
+            for value in (
+                item.get(
+                    "environment_details",
+                    [],
+                )
+                or []
+            ):
+                text = str(
+                    value
+                ).strip()
+                if text and text not in env:
+                    env.append(
+                        text
+                    )
+
+            for value in (
+                item.get(
+                    "key_props",
+                    [],
+                )
+                or []
+            ):
+                text = str(
+                    value
+                ).strip()
+                if text and text not in props:
+                    props.append(
+                        text
+                    )
+
+            for value in (
+                item.get(
+                    "characters",
+                    [],
+                )
+                or []
+            ):
+                text = str(
+                    value
+                ).strip()
+                if text and text not in chars:
+                    chars.append(
+                        text
+                    )
+
+        first[
+            "scene_id"
+        ] = str(
+            first.get(
+                "scene_id",
+                f"scene_{index:03d}",
+            )
+            or
+            f"scene_{index:03d}"
+        ).strip()
+
+        first[
+            "order"
+        ] = index
+
+        first[
+            "description"
+        ] = " ".join(
+            descriptions
+        ).strip()
+
+        first[
+            "scene_objective"
+        ] = " ".join(
+            objectives
+        ).strip()
+
+        first[
+            "continuity_notes"
+        ] = " ".join(
+            continuity
+        ).strip()
+
+        first[
+            "environment_details"
+        ] = env[:12]
+
+        first[
+            "key_props"
+        ] = props[:8]
+
+        first[
+            "characters"
+        ] = chars[:6]
+
+        return first
+
+    @classmethod
+    def _deterministic_compress_scenes(
+        cls,
+        scenes: list[dict],
+        target_count: int = 6,
+    ) -> list[dict]:
+
+        if len(scenes) <= target_count:
+            return cls._annotate_scene_functions(
+                scenes
+            )
+
+        target_count = max(
+            4,
+            min(
+                target_count,
+                len(scenes),
+            )
+        )
+
+        total = len(
+            scenes
+        )
+
+        groups = []
+
+        start = 0
+
+        for group_index in range(
+            target_count
+        ):
+
+            remaining_items = (
+                total - start
+            )
+
+            remaining_groups = (
+                target_count
+                - group_index
+            )
+
+            size = (
+                (remaining_items + remaining_groups - 1)
+                // remaining_groups
+            )
+
+            end = min(
+                total,
+                start + size,
+            )
+
+            groups.append(
+                scenes[
+                    start:end
+                ]
+            )
+
+            start = end
+
+        merged = []
+
+        for index, group in enumerate(
+            groups,
+            start=1,
+        ):
+
+            merged.append(
+                cls._merge_scene_group(
+                    group,
+                    index,
+                )
+            )
+
+        # Re-tag after merging because the structural positions changed.
+        return cls._annotate_scene_functions(
+            merged
+        )
+
+    @classmethod
+    def _deterministic_expand_scenes(
+        cls,
+        story: str,
+        existing_scenes: list[dict],
+        characters: list[dict],
+    ) -> list[dict]:
+
+        story = str(
+            story or ""
+        ).strip()
+
+        if not story:
+            return []
+
+        sentences = [
+            sentence.strip()
+            for sentence
+            in re.split(
+                r"(?<=[.!?])\s+",
+                story,
+            )
+            if sentence.strip()
+        ]
+
+        if len(sentences) < 4:
+            # If source prose itself is short, use the existing scenes
+            # and do not fabricate events.
+            return cls._annotate_scene_functions(
+                existing_scenes
+            )
+
+        target = min(
+            6,
+            max(
+                4,
+                len(existing_scenes),
+            ),
+        )
+
+        target = min(
+            target,
+            len(sentences),
+        )
+
+        groups = [
+            []
+            for _ in range(
+                target
+            )
+        ]
+
+        for index, sentence in enumerate(
+            sentences
+        ):
+
+            bucket = min(
+                target - 1,
+                int(
+                    index
+                    * target
+                    /
+                    max(
+                        1,
+                        len(sentences),
+                    )
+                ),
+            )
+
+            groups[
+                bucket
+            ].append(
+                sentence
+            )
+
+        outputs = []
+
+        fallback_characters = [
+            str(
+                item.get(
+                    "name",
+                    "",
+                )
+                or ""
+            ).strip()
+            for item in characters
+            if isinstance(
+                item,
+                dict,
+            )
+            and
+            str(
+                item.get(
+                    "name",
+                    "",
+                )
+                or ""
+            ).strip()
+        ]
+
+        for index, group in enumerate(
+            groups,
+            start=1,
+        ):
+
+            description = " ".join(
+                group
+            ).strip()
+
+            if not description:
+                continue
+
+            template = {}
+
+            if existing_scenes:
+
+                template = dict(
+                    existing_scenes[
+                        min(
+                            index - 1,
+                            len(existing_scenes) - 1,
+                        )
+                    ]
+                )
+
+            template.update(
+                {
+                    "scene_id":
+                        f"scene_{index:03d}",
+
+                    "title":
+                        str(
+                            template.get(
+                                "title",
+                                "",
+                            )
+                            or ""
+                        ).strip()
+                        or
+                        f"Story Beat {index}",
+
+                    "order":
+                        index,
+
+                    "description":
+                        description,
+
+                    "characters":
+                        fallback_characters[
+                            :6
+                        ],
+
+                    "scene_objective":
+                        "Advance the source narrative while preserving its event.",
+
+                    "continuity_notes":
+                        "Preserve chronology and character continuity.",
+                }
+            )
+
+            outputs.append(
+                template
+            )
+
+        return cls._annotate_scene_functions(
+            outputs
+        )
+
+
     def _planner(
         self,
     ):
@@ -614,18 +1275,26 @@ class QwenDirector:
                     path
                     for path
                     in nvidia_root.rglob(
-                        "libcudart.so.13*"
+                        "libcudart.so.*"
                     )
                     if path.is_file()
+                    and re.match(
+                        r"libcudart\.so\.[0-9]+(?:\.[0-9]+)*$",
+                        path.name,
+                    )
                 )
 
                 cublas.extend(
                     path
                     for path
                     in nvidia_root.rglob(
-                        "libcublas.so.13*"
+                        "libcublas.so.*"
                     )
                     if path.is_file()
+                    and re.match(
+                        r"libcublas\.so\.[0-9]+(?:\.[0-9]+)*$",
+                        path.name,
+                    )
                 )
 
             except OSError:
@@ -635,13 +1304,13 @@ class QwenDirector:
         if not cudart:
 
             raise RuntimeError(
-                "libcudart.so.13 was not found."
+                "No compatible libcudart.so runtime was found."
             )
 
         if not cublas:
 
             raise RuntimeError(
-                "libcublas.so.13 was not found."
+                "No compatible libcublas.so runtime was found."
             )
 
         cudart_lib = cudart[0]
@@ -1567,7 +2236,7 @@ clothing, state, or continuity fields in this recovery pass.
     ) -> list[dict]:
         text = str(story or "")
         patterns = [
-            r"\b(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Detective)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b",
+            r"\b(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b",
         ]
         names: list[str] = []
         seen: set[str] = set()
@@ -1813,6 +2482,10 @@ Make genuinely creative film-direction choices that fit the scene:
 Use cinematic progression across the two shots when justified:
 1. orientation / establishing or spatial setup
 2. subject / action / reaction / detail / escalation
+
+SCENE-FUNCTION DIRECTING:
+Use the supplied scene_function and obligatory_moment to motivate the two shots. Do not invent new story events.
+setup → geography/context; catalyst → discovery/reaction; development → objective/escalation; midpoint → revelation/reaction; climax → decisive action/consequence; finale → aftermath/closing image.
 
 Do not use the same framing + movement + lens combination for both shots.
 Use the supplied visual language as the production-wide style bible.
@@ -3847,6 +4520,14 @@ non_diegetic_music, negative_prompt, continuity_notes.
                         scene.get("continuity_notes", ""),
                         180,
                     ),
+                    "scene_function": str(
+                        scene.get("scene_function", "development")
+                        or "development"
+                    ).strip(),
+                    "obligatory_moment": self._limit_text(
+                        scene.get("obligatory_moment", scene.get("description", "")),
+                        220,
+                    ),
                 }
             )
 
@@ -3859,6 +4540,12 @@ Compress it into exactly 4–6 meaningful narrative scenes.
 
 Do NOT delete important story events merely to reduce the count.
 Instead MERGE adjacent or closely related beats into stronger scenes.
+
+Every source scene has a load-bearing obligatory moment.
+Treat that moment as protected narrative information.
+When merging scenes, preserve the obligatory moments of all merged beats inside the resulting scene description/objective.
+Prefer merging adjacent compatible beats rather than deleting beats.
+Never solve the budget by silently truncating the source timeline.
 
 Preserve:
 - chronological order;
@@ -3941,6 +4628,10 @@ Return JSON only:
                 character_names,
             )
 
+            compressed = self._annotate_scene_functions(
+                compressed
+            )
+
             if 4 <= len(compressed) <= self.MAX_SCENES:
                 for order, scene in enumerate(compressed, start=1):
                     scene["order"] = order
@@ -3954,22 +4645,17 @@ Return JSON only:
                 flush=True,
             )
 
-        # Deterministic safety fallback. Preserve at least four beats whenever
-        # the source contains four or more scenes; always retain the opening
-        # and closing beats and distribute the remaining selections across the
-        # interior timeline.
-        target_count = min(self.MAX_SCENES, max(4, len(scenes)))
-        if len(scenes) <= target_count:
-            reduced = list(scenes)
-        else:
-            last_index = len(scenes) - 1
-            selected_indices = {
-                round(index * last_index / (target_count - 1))
-                for index in range(target_count)
-            }
-            reduced = [scenes[index] for index in sorted(selected_indices)]
+        # Deterministic fallback preserves ALL source beats by merging
+        # adjacent groups rather than dropping scenes.
+        reduced = self._deterministic_compress_scenes(
+            scenes,
+            target_count=self.MAX_SCENES,
+        )
 
-        for order, scene in enumerate(reduced, start=1):
+        for order, scene in enumerate(
+            reduced,
+            start=1,
+        ):
             scene["order"] = order
 
         return reduced
@@ -3994,6 +4680,17 @@ Preserve:
 
 Within each scene, shot 1 and shot 2 must use meaningfully different
 framing/composition while describing the SAME narrative beat.
+
+SCENE-FUNCTION DIRECTING:
+Each supplied scene includes scene_function and obligatory_moment.
+Use them as directing constraints, not as new story events.
+setup: establish geography and protagonist context.
+catalyst: reveal the disruptive event, clue, or discovery.
+development: show objective, movement, complication, or escalation.
+midpoint: emphasize new information and changed understanding.
+climax: emphasize danger, decisive action, choice, and consequence.
+finale: emphasize aftermath, resolution, and the closing emotional image.
+The two shots must visibly serve the supplied obligatory_moment.
 
 Return JSON only in exactly this structure:
 
@@ -4186,6 +4883,14 @@ Return JSON only.
                     "continuity_notes": self._limit_text(
                         scene.get("continuity_notes", ""),
                         180,
+                    ),
+                    "scene_function": str(
+                        scene.get("scene_function", "development")
+                        or "development"
+                    ).strip(),
+                    "obligatory_moment": self._limit_text(
+                        scene.get("obligatory_moment", scene.get("description", "")),
+                        220,
                     ),
                 }
             )
@@ -4705,73 +5410,31 @@ Return JSON only.
             }
 
         # ----------------------------------------------------
-        # PASS 1B: production metadata
+        # PASS 1B: deterministic production foundation
         # ----------------------------------------------------
-
-        metadata_ready = (
-            resuming
-            and resume_stage in {
-                "metadata",
-                "shots",
-            }
-            and isinstance(
-                story_plan.get(
-                    "characters"
-                ),
-                list,
-            )
-            and isinstance(
-                story_plan.get(
-                    "scenes"
-                ),
-                list,
-            )
-            and bool(
-                story_plan.get(
-                    "scenes"
-                )
-            )
+        #
+        # The ProductionPlanner has already created the canonical
+        # characters and scene topology. Do not spend a Qwen call
+        # regenerating deterministic metadata. Qwen is only the creative
+        # enrichment layer from this point onward.
+        #
+        # This also guarantees that the Director always has canonical
+        # entities/scene IDs even when the Director is enabled.
+        base_characters = deepcopy(
+            base_plan.get("characters", [])
+            or []
         )
 
-        if not metadata_ready:
+        base_scenes = deepcopy(
+            base_plan.get("scenes", [])
+            or []
+        )
 
-            metadata_response = self._chat_json(
-                self._metadata_director_system(
-                    mode
-                ),
-                self._metadata_director_user(
-                    mode,
-                    story,
-                ),
-                minimum_completion=600,
-                temperature=(
-                    0.20
-                    if mode == PRESERVE_USER_STORY_MODE
-                    else temperature
-                ),
-                top_p=(
-                    0.82
-                    if mode == PRESERVE_USER_STORY_MODE
-                    else top_p
-                ),
-                call_name=(
-                    "preserve_metadata_pass"
-                    if mode == PRESERVE_USER_STORY_MODE
-                    else (
-                        "ai_story_metadata_pass"
-                        if mode == AI_STORY_MODE
-                        else "expand_story_metadata_pass"
-                    )
-                ),
-                max_completion=2200,
-                json_mode=True,
-                disable_thinking=True,
-                response_schema=self._metadata_json_schema(),
-            )
-
-            story_plan.update(
-                metadata_response
-            )
+        story_plan = {
+            "story": story,
+            "characters": base_characters,
+            "scenes": base_scenes,
+        }
 
         story = self._normalize_story(
             story_plan.get(
@@ -4805,146 +5468,67 @@ Return JSON only.
         )
 
         # ----------------------------------------------------
-        # CHARACTERS / SCENES
+        # CANONICAL CHARACTERS / SCENES
         # ----------------------------------------------------
-
+        #
+        # These are owned by ProductionPlanner. Never replace them with
+        # free-form Qwen entities or scene topology.
         characters = self._sanitize_characters(
-            story_plan.get(
-                "characters",
-                [],
+            deepcopy(
+                base_plan.get("characters", [])
+                or []
             )
         )
 
         if not characters:
-            characters = self._recover_characters(
-                mode,
-                story,
-            )
-
-        if not characters:
-            characters = self._sanitize_characters(
-                self._extract_obvious_character_names(story)
+            raise RuntimeError(
+                "Deterministic base plan contains no canonical characters."
             )
 
         character_names = {
-            str(
-                character.get(
-                    "name",
-                    "",
-                )
-            ).strip().lower()
+            str(character.get("name", "")).strip().lower()
             for character in characters
-            if str(
-                character.get(
-                    "name",
-                    "",
-                )
-            ).strip()
+            if isinstance(character, dict)
+            and str(character.get("name", "")).strip()
         }
 
+        if not character_names:
+            raise RuntimeError(
+                "Deterministic base plan contains no canonical character names."
+            )
+
         scenes = self._sanitize_scenes(
-            story_plan.get(
-                "scenes",
-                [],
+            deepcopy(
+                base_plan.get("scenes", [])
+                or []
             ),
             character_names,
         )
 
         if not scenes:
-            scenes = self._recover_scenes(
-                mode,
-                story,
-                characters,
-                character_names,
-            )
-
-        if not scenes:
-            fallback_characters, fallback_scenes = (
-                self._build_deterministic_fallback(
-                    story
-                )
-            )
-
-            if not characters:
-                characters = self._sanitize_characters(
-                    fallback_characters
-                )
-                character_names = {
-                    str(
-                        character.get(
-                            "name",
-                            "",
-                        )
-                    ).strip().lower()
-                    for character in characters
-                    if str(
-                        character.get(
-                            "name",
-                            "",
-                        )
-                    ).strip()
-                }
-
-            scenes = self._sanitize_scenes(
-                fallback_scenes,
-                character_names,
-            )
-
-        if not scenes:
             raise RuntimeError(
-                "Qwen director produced no usable scenes."
-            )
-
-        if len(scenes) > self.MAX_SCENES:
-            scenes = self._compress_scenes_to_budget(
-                mode,
-                story,
-                characters,
-                scenes,
-                character_names,
-            )
-
-        if not scenes:
-            raise RuntimeError(
-                "Scene-budget enforcement produced no usable scenes."
+                "Deterministic base plan contains no canonical scenes."
             )
 
         if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
-            # A second scene-recovery pass is preferable to silently inventing
-            # or deleting narrative beats at the final boundary.
-            recovered = self._recover_scenes(
-                mode,
-                story,
-                characters,
-                character_names,
-            )
-            recovered = self._sanitize_scenes(
-                recovered,
-                character_names,
-            )
-            if 4 <= len(recovered) <= self.MAX_SCENES:
-                scenes = recovered
-            elif len(scenes) > self.MAX_SCENES:
-                scenes = self._compress_scenes_to_budget(
-                    mode,
-                    story,
-                    characters,
-                    scenes,
-                    character_names,
-                )
-
-        if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
             raise RuntimeError(
-                "Qwen director could not satisfy the required 4–6 scene budget."
+                "Deterministic base plan scene count is outside "
+                f"the required 4-{self.MAX_SCENES} range: {len(scenes)}"
             )
+
+        # Preserve deterministic scene topology and only add the
+        # Director's creative scene annotations if they already exist.
+        scenes = self._annotate_scene_functions(
+            scenes
+        )
 
         director_plan = {
             "story": story,
             "story_mode": mode,
             "director_notes": director_notes,
             "visual_language": visual_language,
-            "characters": characters,
-            "scenes": scenes,
+            "characters": deepcopy(characters),
+            "scenes": deepcopy(scenes),
             "shots": prior_shots,
         }
 
@@ -4954,13 +5538,11 @@ Return JSON only.
         for shot in prior_shots:
             if not isinstance(shot, dict):
                 continue
+
             sid = str(
-                shot.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
+                shot.get("scene_id", "") or ""
             ).strip()
+
             if sid:
                 prior_by_scene.setdefault(
                     sid,
@@ -4969,13 +5551,10 @@ Return JSON only.
 
         for scene in scenes:
             sid = str(
-                scene.get(
-                    "scene_id",
-                    "",
-                )
-                or ""
+                scene.get("scene_id", "") or ""
             ).strip()
-            if len(prior_by_scene.get(sid, [])) >= 2:
+
+            if len(prior_by_scene.get(sid, [])) >= self.SHOTS_PER_SCENE:
                 completed_scene_ids.append(sid)
 
         if checkpoint_store and checkpoint_session_id:
@@ -5000,10 +5579,9 @@ Return JSON only.
         # ----------------------------------------------------
         # PASS 2: cinematography
         #
-        # Fresh scenes are planned in small batches of two scenes.
-        # This reduces repeated model-call overhead without creating
-        # an oversized context. Any incomplete/invalid batch result
-        # automatically falls back to per-scene generation.
+        # Fresh scenes are planned in small batches. Qwen supplies only
+        # creative shot direction; deterministic compilation/rebinding
+        # supplies all production identity and technical fields.
         # ----------------------------------------------------
 
         all_shots: list[dict] = []
@@ -5346,9 +5924,93 @@ Return JSON only.
 
             raise
 
+        # Deterministic shot fallback: if Qwen failed to provide enough
+        # creative shots for a scene, reuse only the corresponding canonical
+        # base-plan shots. This keeps the production structurally complete
+        # without inventing entities or making another model call.
+        base_shots_by_scene: dict[str, list[dict]] = {}
+
+        for base_shot in (
+            base_plan.get("shots", [])
+            or []
+        ):
+            if not isinstance(base_shot, dict):
+                continue
+
+            sid = str(
+                base_shot.get("scene_id", "") or ""
+            ).strip()
+
+            if sid:
+                base_shots_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(
+                    deepcopy(base_shot)
+                )
+
+        shots_by_scene: dict[str, list[dict]] = {}
+
+        for shot in all_shots:
+            if not isinstance(shot, dict):
+                continue
+
+            sid = str(
+                shot.get("scene_id", "") or ""
+            ).strip()
+
+            if sid:
+                shots_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(shot)
+
+        repaired_shots: list[dict] = []
+
+        for scene in scenes:
+            sid = str(
+                scene.get("scene_id", "") or ""
+            ).strip()
+
+            current = list(
+                shots_by_scene.get(sid, [])
+            )[: self.SHOTS_PER_SCENE]
+
+            if len(current) < self.SHOTS_PER_SCENE:
+                for fallback in base_shots_by_scene.get(sid, []):
+                    if len(current) >= self.SHOTS_PER_SCENE:
+                        break
+
+                    candidate = deepcopy(fallback)
+
+                    # Never let fallback structural identity conflict with
+                    # the canonical scene.
+                    candidate["scene_id"] = sid
+
+                    existing_ids = {
+                        str(
+                            item.get("shot_id", "")
+                        ).strip()
+                        for item in current
+                        if isinstance(item, dict)
+                    }
+
+                    candidate_id = str(
+                        candidate.get("shot_id", "")
+                    ).strip()
+
+                    if candidate_id in existing_ids:
+                        continue
+
+                    current.append(candidate)
+
+            repaired_shots.extend(current)
+
+        all_shots = repaired_shots
+
         # No Qwen-shot failure is fatal here: the deterministic compiler
-        # completes missing structural shots while preserving every valid
-        # creative shot that Qwen produced.
+        # completes production fields while preserving every valid creative
+        # shot Qwen produced.
         self._normalize_ids(
             scenes,
             all_shots,
@@ -5516,52 +6178,81 @@ Return JSON only.
                 creative_visual_language
             )
 
-        creative_characters = (
-            creative.get(
-                "characters",
-                [],
-            )
+        # Canonical structure is never replaced by Qwen.
+        # Characters and scene topology come from the deterministic base plan.
+        merged["characters"] = deepcopy(
+            base_plan.get("characters", [])
             or []
         )
 
-        if creative_characters:
-
-            merged[
-                "characters"
-            ] = deepcopy(
-                creative_characters
-            )
+        canonical_scenes = deepcopy(
+            base_plan.get("scenes", [])
+            or []
+        )
 
         creative_scenes = (
-            creative.get(
-                "scenes",
-                [],
-            )
+            creative.get("scenes", [])
             or []
         )
 
-        if creative_scenes:
+        creative_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in creative_scenes
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "") or "").strip()
+        }
 
-            merged[
-                "scenes"
-            ] = deepcopy(
-                creative_scenes
-            )
+        # Creative scene fields may enrich an existing scene, but structural
+        # identity/topology remains deterministic.
+        protected_scene_fields = {
+            "scene_id",
+            "order",
+            "characters",
+            "shot_ids",
+        }
+
+        for scene in canonical_scenes:
+            sid = str(
+                scene.get("scene_id", "") or ""
+            ).strip()
+
+            creative_scene = creative_by_id.get(sid)
+
+            if not isinstance(creative_scene, dict):
+                continue
+
+            for key, value in creative_scene.items():
+                if key in protected_scene_fields:
+                    continue
+                if value in (None, "", [], {}):
+                    continue
+                scene[key] = deepcopy(value)
+
+        merged["scenes"] = canonical_scenes
 
         creative_shots = (
-            creative.get(
-                "shots",
-                [],
-            )
+            creative.get("shots", [])
             or []
         )
 
         if creative_shots:
+            valid_scene_ids = {
+                str(scene.get("scene_id", "") or "").strip()
+                for scene in canonical_scenes
+            }
 
-            merged[
-                "shots"
-            ] = deepcopy(
-                creative_shots
+            merged["shots"] = [
+                deepcopy(shot)
+                for shot in creative_shots
+                if isinstance(shot, dict)
+                and str(
+                    shot.get("scene_id", "") or ""
+                ).strip() in valid_scene_ids
+            ]
+        else:
+            merged["shots"] = deepcopy(
+                base_plan.get("shots", [])
+                or []
             )
 
         return merged
