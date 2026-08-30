@@ -1,4 +1,5 @@
 from __future__ import annotations
+from planner.entity_resolver import EntityResolver
 
 from copy import deepcopy
 from typing import Any
@@ -161,28 +162,28 @@ class CinematicCompiler:
         scene_characters: list[str],
     ) -> list[str]:
 
-        allowed = dict(
-            (
-                name.lower(),
-                name,
-            )
-            for name
-            in (
-                scene_characters
-                or []
-            )
+        canonical_names = [
+            str(name).strip()
+            for name in (self.character_names or [])
+            if str(name).strip()
+        ]
+        for name in (scene_characters or []):
+            value = str(name).strip()
+            if value and value not in canonical_names:
+                canonical_names.append(value)
+
+        alias_map = EntityResolver.build_alias_map(
+            canonical_names
         )
 
-        if self.character_names:
+        allowed = {
+            EntityResolver.normalize(name): name
+            for name in canonical_names
+        }
 
-            allowed.update(
-                (
-                    name,
-                    name,
-                )
-                for name
-                in self.character_names
-            )
+        for alias, canonical in alias_map.items():
+            if canonical in allowed.values():
+                allowed[EntityResolver.normalize(alias)] = canonical
 
         result: list[str] = []
         seen: set[str] = set()
@@ -191,13 +192,13 @@ class CinematicCompiler:
             values
         ):
 
-            key = value.lower()
+            key = EntityResolver.normalize(value)
 
-            canonical = (
-                allowed.get(
-                    key
+            canonical = allowed.get(key)
+            if canonical is None:
+                canonical = allowed.get(
+                    EntityResolver.strip_honorific(key)
                 )
-            )
 
             if canonical is None:
                 continue
