@@ -2058,183 +2058,10 @@ Return:
     # SHOT PROMPTS
     # ========================================================
 
-    def _shot_director_system(
-        self,
-    ) -> str:
 
-        return """
-You are the CINEMATIC SHOT DIRECTOR for MiniMax H3.
-
-Create exactly 2 distinct shots for ONE scene.
-
-Use ONLY characters supplied in the scene.
-Do not create new characters. Do not invent character names.
-Never output reasoning, analysis, markdown, or <think> text.
-Keep every value concise but specific.
-Use these output budgets: action 10–30 words; visual_prompt 15–40 words; composition_notes <=18 words; lighting <=12 words; lens_and_depth_of_field <=10 words; mood <=5 words; camera_shot <=5 words; camera_movement <=5 words.
-
-Make genuinely creative film-direction choices that fit the scene:
-- framing and shot scale
-- camera movement
-- lens / depth of field
-- composition
-- lighting quality
-- color temperature
-- visual emphasis
-
-Use cinematic progression across the two shots when justified:
-1. orientation / establishing or spatial setup
-2. subject / action / reaction / detail / escalation
-
-SCENE-FUNCTION DIRECTING:
-Use the supplied scene_function and obligatory_moment to motivate the two shots. Do not invent new story events.
-setup → geography/context; catalyst → discovery/reaction; development → objective/escalation; midpoint → revelation/reaction; climax → decisive action/consequence; finale → aftermath/closing image.
-
-Do not use the same framing + movement + lens combination for both shots.
-Use the supplied visual language as the production-wide style bible.
-
-SHOT / FRAMING VOCABULARY:
-framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
-CAMERA MOVEMENT VOCABULARY:
-movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
-lens/DOF: wide-angle, normal, telephoto, shallow focus, deep focus, selective focus.
-composition: centered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.
-LIGHTING VOCABULARY:
-lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
-
-Return JSON only.
-The top-level value MUST be an object with a "shots" array.
-NEVER return a bare shot object.
-The "shots" array MUST contain exactly 2 objects.
-
-QWEN CREATIVE FIELDS ONLY:
-shot_id, scene_id, duration_seconds, characters, location, action,
-camera_shot, camera_movement, lens_and_depth_of_field,
-composition_notes, lighting, color_temperature, mood, visual_prompt,
-speaking_characters, speech_text.
-
-Do NOT output these compiler-owned fields:
-retention_analysis, detailed_description, overall_soundscape,
-non_diegetic_music, negative_prompt, continuity_notes.
-""".strip()
-
-    def _shot_director_user(
-        self,
-        story: str,
-        characters: list[dict],
-        scene: dict,
-        visual_language: dict | None = None,
-    ) -> str:
-
-        compact_characters = []
-        for item in characters:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "") or "").strip()
-            if not name:
-                continue
-            compact_characters.append(
-                {
-                    "name": name,
-                    "role": str(
-                        item.get("role", "") or ""
-                    ).strip(),
-                }
-            )
-
-        scene_payload = {
-            "scene_id": str(
-                scene.get("scene_id", "") or ""
-            ).strip(),
-            "title": str(
-                scene.get("title", "") or ""
-            ).strip(),
-            "location": str(
-                scene.get("location", "") or ""
-            ).strip(),
-            "description": self._limit_text(
-                scene.get("description", ""),
-                1100,
-            ),
-            "time_of_day": str(
-                scene.get("time_of_day", "") or ""
-            ).strip(),
-            "weather": str(
-                scene.get("weather", "") or ""
-            ).strip(),
-            "atmosphere": self._limit_text(
-                scene.get("atmosphere", ""),
-                220,
-            ),
-            "mood": str(
-                scene.get("mood", "") or ""
-            ).strip(),
-            "lighting": self._limit_text(
-                scene.get("lighting", ""),
-                220,
-            ),
-            "color_temperature": str(
-                scene.get("color_temperature", "") or ""
-            ).strip(),
-            "environment_details": self._clean_list(
-                scene.get("environment_details", []),
-                limit=4,
-            ),
-            "key_props": self._clean_list(
-                scene.get("key_props", []),
-                limit=4,
-            ),
-            "characters": self._clean_list(
-                scene.get("characters", []),
-                limit=6,
-            ),
-            "scene_objective": self._limit_text(
-                scene.get("scene_objective", ""),
-                260,
-            ),
-            "continuity_notes": self._limit_text(
-                scene.get("continuity_notes", ""),
-                220,
-            ),
-        }
-
-        language = {}
-        if isinstance(visual_language, dict):
-            for key in (
-                "genre_tone",
-                "color_palette",
-                "lighting_philosophy",
-                "camera_philosophy",
-                "pacing",
-            ):
-                value = str(
-                    visual_language.get(key, "") or ""
-                ).strip()
-                if value:
-                    language[key] = value
-
-        # The entire story is unnecessary for every shot call. Keep only a
-        # compact narrative context while retaining the scene and visual bible.
-        story_context = self._limit_text(
-            story,
-            1400,
-        )
-
-        return json.dumps(
-            {
-                "story_context": story_context,
-                "characters": compact_characters,
-                "visual_language": language,
-                "scene": scene_payload,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
 
     # ========================================================
     # JSON / TEXT HELPERS
-    # ========================================================
-
     # ========================================================
 
     @staticmethod
@@ -4545,54 +4372,6 @@ Return JSON only.
         return result
 
 
-    def _generate_scene_shots(
-        self,
-        story: str,
-        characters: list[dict],
-        scene: dict,
-        visual_language: dict,
-        character_names: set[str],
-        shot_temperature: float,
-    ) -> list[dict]:
-        """Generate creative shots for one fresh scene without recovery loops."""
-        scene_id = str(
-            scene.get("scene_id", "") or ""
-        ).strip()
-
-        response = self._chat_json(
-            self._shot_director_batch_system(),
-            self._shot_director_batch_user(
-                story,
-                characters,
-                [scene],
-                visual_language,
-            ),
-            minimum_completion=320,
-            temperature=shot_temperature,
-            top_p=self._shot_sampling()[1],
-            call_name="shot_batch:" + scene_id,
-            max_completion=700,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._shot_batch_json_schema(
-                scene_count=1,
-            ),
-        )
-
-        normalized = self._normalize_batch_shot_response(
-            response
-        )
-
-        candidate = normalized.get(
-            scene_id,
-            [],
-        )
-
-        return self._sanitize_shots(
-            candidate,
-            scene,
-            character_names,
-        )[: self.SHOTS_PER_SCENE]
 
     # ========================================================
     # GENERATE
@@ -5100,31 +4879,12 @@ Return JSON only.
                 # ------------------------------------------------
                 # CREATIVE SHOT PASS
                 # ------------------------------------------------
-                # One fresh batch call for 2–5 scenes. A single fresh
-                # remainder uses the same batch contract through the thin
-                # one-scene helper. No per-scene retry or missing-shot Qwen
-                # recovery is performed.
+                # One fresh batch call for 1–5 scenes. No per-scene retry
+                # or missing-shot Qwen recovery is performed.
                 if existing_scene_shots:
                     generated_by_scene[scene_id] = list(
                         existing_scene_shots
                     )[: self.SHOTS_PER_SCENE]
-
-                elif len(batch_scenes) == 1:
-                    only_scene = batch_scenes[0]
-                    only_id = str(
-                        only_scene.get("scene_id", "") or ""
-                    ).strip()
-
-                    generated_by_scene[only_id] = (
-                        self._generate_scene_shots(
-                            story,
-                            characters,
-                            only_scene,
-                            visual_language,
-                            character_names,
-                            shot_temperature,
-                        )
-                    )
 
                 else:
                     # Start with the largest candidate and shrink only if the
