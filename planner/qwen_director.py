@@ -1283,7 +1283,7 @@ class QwenDirector:
                     )
                     if path.is_file()
                     and re.match(
-                        r"libcudart\.so\.[0-9]+(?:\.[0-9]+)*$",
+                        r"libcudart\.so\.13(?:\.[0-9]+)*$",
                         path.name,
                     )
                 )
@@ -1296,7 +1296,7 @@ class QwenDirector:
                     )
                     if path.is_file()
                     and re.match(
-                        r"libcublas\.so\.[0-9]+(?:\.[0-9]+)*$",
+                        r"libcublas\.so\.13(?:\.[0-9]+)*$",
                         path.name,
                     )
                 )
