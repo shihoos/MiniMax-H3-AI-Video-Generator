@@ -401,19 +401,47 @@ class ProductionPlanner:
 
         for paragraph in paragraphs:
 
-            sentences = [
-                self._clean_text(
-                    sentence
+            # Protect common honorifics/abbreviations before sentence
+            # splitting so names such as "Dr. Elara Voss" remain intact.
+            protected = paragraph
+            abbreviation_tokens = {
+                "mr.": "mr<dot>",
+                "mrs.": "mrs<dot>",
+                "ms.": "ms<dot>",
+                "miss.": "miss<dot>",
+                "dr.": "dr<dot>",
+                "prof.": "prof<dot>",
+                "capt.": "capt<dot>",
+                "cmdr.": "cmdr<dot>",
+                "lt.": "lt<dot>",
+                "col.": "col<dot>",
+                "gen.": "gen<dot>",
+                "sgt.": "sgt<dot>",
+                "st.": "st<dot>",
+                "jr.": "jr<dot>",
+                "sr.": "sr<dot>",
+                "vs.": "vs<dot>",
+                "etc.": "etc<dot>",
+                "e.g.": "e<dot>g<dot>",
+                "i.e.": "i<dot>e<dot>",
+            }
+            for token, marker in abbreviation_tokens.items():
+                protected = re.sub(
+                    rf"\b{re.escape(token)}",
+                    marker,
+                    protected,
+                    flags=re.IGNORECASE,
                 )
-                for sentence
-                in re.split(
-                    r"(?<=[.!?])\s+",
-                    paragraph,
-                )
-                if self._clean_text(
-                    sentence
-                )
-            ]
+
+            sentences = []
+            for sentence in re.split(
+                r"(?<=[.!?])\s+",
+                protected,
+            ):
+                sentence = sentence.replace("<dot>", ".")
+                sentence = self._clean_text(sentence)
+                if sentence:
+                    sentences.append(sentence)
 
             if len(sentences) <= 2:
                 units.append(paragraph)
@@ -1718,45 +1746,9 @@ class ProductionPlanner:
             user_input,
         )
 
-        # When Qwen is enabled, this planner supplies only a
-        # production-safe skeleton. Qwen owns the creative plan.
-        #
-        # The deterministic implementation below remains intact
-        # as the CI/offline fallback when the director is disabled.
-        if director_enabled():
-            return {
-                "story": story,
-                "story_mode": mode,
-                "profile": profile,
-                "workflow_mode": workflow_mode,
-                "preview_ready": False,
-                "director_pending": True,
-
-                "character_count": 0,
-                "scene_count": 0,
-                "shot_count": 0,
-
-                "characters": [],
-                "scenes": [],
-                "shots": [],
-                "visual_language": {},
-
-                "width": H3_WIDTH,
-                "height": H3_HEIGHT,
-                "fps": H3_FPS,
-                "frames_per_shot": (
-                    H3_FRAMES_PER_SHOT
-                ),
-                "normal_steps": H3_STEPS,
-                "turbo_steps": TURBO_STEPS,
-
-                "audio_policy": (
-                    "Use supplied reference audio when present; "
-                    "otherwise request native H3 audio generation "
-                    "from the shot soundscape/dialogue prompt."
-                ),
-            }
-
+        # Always construct the deterministic production foundation.
+        # The Director may enrich it, but it must never be responsible for
+        # creating the canonical roster or scene topology.
         characters = self.create_characters(
             story
         )
@@ -1818,8 +1810,8 @@ class ProductionPlanner:
             "story_mode": mode,
             "profile": profile,
             "workflow_mode": workflow_mode,
-            "preview_ready": True,
-            "director_pending": False,
+            "preview_ready": not director_enabled(),
+            "director_pending": director_enabled(),
 
             "character_count": len(
                 character_dicts
