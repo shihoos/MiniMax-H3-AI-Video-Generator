@@ -1260,8 +1260,11 @@ class QwenDirector:
         except Exception:
             pass
 
+        # The pinned llama-cpp-python wheel is cu130.
+        # Never allow CUDA 12 userspace to be selected accidentally.
         cudart: list[Path] = []
         cublas: list[Path] = []
+        cublaslt: list[Path] = []
 
         for site_root in site_roots:
 
@@ -1301,6 +1304,19 @@ class QwenDirector:
                     )
                 )
 
+                cublaslt.extend(
+                    path
+                    for path
+                    in nvidia_root.rglob(
+                        "libcublasLt.so.13*"
+                    )
+                    if path.is_file()
+                    and re.match(
+                        r"libcublasLt\.so\.13(?:\.[0-9]+)*$",
+                        path.name,
+                    )
+                )
+
             except OSError:
 
                 continue
@@ -1308,13 +1324,19 @@ class QwenDirector:
         if not cudart:
 
             raise RuntimeError(
-                "No compatible libcudart.so runtime was found."
+                "No compatible libcudart.so.13 runtime was found."
             )
 
         if not cublas:
 
             raise RuntimeError(
-                "No compatible libcublas.so runtime was found."
+                "No compatible libcublas.so.13 runtime was found."
+            )
+
+        if not cublaslt:
+
+            raise RuntimeError(
+                "No compatible libcublasLt.so.13 runtime was found."
             )
 
         cudart_lib = cudart[0]
@@ -1333,12 +1355,29 @@ class QwenDirector:
             else cublas[0]
         )
 
+        matching_cublaslt = [
+            path
+            for path
+            in cublaslt
+            if path.parent
+            == cudart_lib.parent
+        ]
+
+        cublaslt_lib = (
+            matching_cublaslt[0]
+            if matching_cublaslt
+            else cublaslt[0]
+        )
+
         directories = [
             str(
                 cudart_lib.parent
             ),
             str(
                 cublas_lib.parent
+            ),
+            str(
+                cublaslt_lib.parent
             ),
         ]
 
@@ -1353,6 +1392,8 @@ class QwenDirector:
                 old_ld
             )
 
+        # Put the CUDA 13 userspace directories first so a
+        # pre-existing CUDA 12 path cannot win resolution.
         os.environ[
             "LD_LIBRARY_PATH"
         ] = ":".join(
@@ -1375,12 +1416,20 @@ class QwenDirector:
                 mode=ctypes.RTLD_GLOBAL,
             )
 
+            ctypes.CDLL(
+                str(
+                    cublaslt_lib
+                ),
+                mode=ctypes.RTLD_GLOBAL,
+            )
+
         except OSError as exc:
 
             raise RuntimeError(
-                "Unable to load NVIDIA CUDA libraries:\n"
+                "Unable to load NVIDIA CUDA 13 libraries:\n"
                 f"CUDA runtime: {cudart_lib}\n"
                 f"cuBLAS: {cublas_lib}\n"
+                f"cuBLASLt: {cublaslt_lib}\n"
                 f"{exc}"
             ) from exc
 
