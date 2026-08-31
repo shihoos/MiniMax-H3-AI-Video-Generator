@@ -441,98 +441,40 @@ class Shot:
             )
 
     def h3_prompt(self) -> str:
-        subjects = "\n".join(
-            self.identity_locks
+        """Serialize this shot using H3's structured six-section prompt format.
+
+        Internal timing, continuity, spatial constraints and reference bindings
+        remain deterministic control-plane data, while the text sent to H3 uses
+        the supported six-section structure and native dialogue markup.
+        """
+        subjects = "\n".join(self.identity_locks).strip() or (
+            "No special immutable identity constraints were provided."
         )
 
-        if not subjects:
-            subjects = (
-                "No special immutable identity "
-                "constraints were provided."
-            )
-
-        references = "\n".join(
-            self.reference_bindings
+        references = "\n".join(self.reference_bindings).strip() or (
+            "No external visual references."
         )
 
-        if not references:
-            references = (
-                "No external visual references."
-            )
-
-        dialogue = (
-            self.speech_text.strip()
-            if self.speech_text
-            else "N/A"
+        retention = (
+            self.retention_analysis.strip()
+            or "Preserve canonical character identity, required references, and locked continuity state."
         )
 
         soundscape = (
             self.overall_soundscape.strip()
-            if self.overall_soundscape
-            else "Natural scene ambience."
+            or "Natural scene ambience."
         )
 
         music = (
             self.non_diegetic_music.strip()
-            if self.non_diegetic_music
-            else "N/A"
-        )
-
-        timeline_lines = []
-        for event in self.dialogue_events:
-            if not isinstance(event, dict):
-                continue
-            speaker_id = str(event.get("speaker_id", "")).strip()
-            speaker_name = str(event.get("speaker_name", "")).strip()
-            text = str(event.get("text", ""))
-            start = float(event.get("start_seconds", 0.0) or 0.0)
-            end = float(event.get("end_seconds", 0.0) or 0.0)
-            timeline_lines.append(
-                f"{speaker_name} [{speaker_id}] {start:.3f}-{end:.3f}s: {text}"
-            )
-        dialogue_timeline = (
-            "\n".join(timeline_lines)
-            if timeline_lines
-            else "No dialogue events."
-        )
-
-        spatial_lines = []
-        for name in self.characters:
-            start_bbox = self.character_spatial_bboxes_start.get(name)
-            end_bbox = self.character_spatial_bboxes_end.get(name) or self.character_spatial_bboxes.get(name)
-            start_region = self.character_spatial_regions_start.get(name)
-            end_region = self.character_spatial_regions_end.get(name) or self.character_spatial_regions.get(name)
-            parts = []
-            if start_bbox:
-                parts.append(f"start_bbox={[round(v, 4) for v in start_bbox]}")
-            if end_bbox:
-                parts.append(f"end_bbox={[round(v, 4) for v in end_bbox]}")
-            if start_region:
-                parts.append(f"start_region={start_region}")
-            if end_region:
-                parts.append(f"end_region={end_region}")
-            if parts:
-                spatial_lines.append(f"{name}: " + ", ".join(parts))
-        spatial_contract = "\n".join(spatial_lines) if spatial_lines else "No explicit normalized spatial constraints."
-        boundary_note = (
-            "This is a scene boundary; do not carry environment, lighting, props, or previous-shot image state across the cut."
-            if self.is_scene_boundary
-            else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
-        )
-
-        continuity_start = (
-            json.dumps(self.continuity_start_state, ensure_ascii=False, sort_keys=True)
-            if self.continuity_start_state else "{}"
-        )
-        continuity_end = (
-            json.dumps(self.continuity_end_state, ensure_ascii=False, sort_keys=True)
-            if self.continuity_end_state else "{}"
+            or "N/A"
         )
 
         description = (
             self.detailed_description.strip()
             or self.visual_prompt.strip()
             or self.action.strip()
+            or "No additional visual direction provided."
         )
 
         cinematography = (
@@ -542,35 +484,143 @@ class Shot:
             f"Composition: {self.composition_notes}; "
             f"Lighting: {self.lighting}; "
             f"Color temperature: {self.color_temperature}; "
-            f"Mood: {self.mood}"
+            f"Mood: {self.mood}."
         )
 
-        return (
-            "subject_definitions:\n"
-            f"{subjects}\n\n"
-            "reference_bindings:\n"
-            f"{references}\n\n"
-            "summary:\n"
-            f"{self.action.strip()}\n\n"
-            "retention_analysis:\n"
-            f"{self.retention_analysis.strip()}\n\n"
-            "detailed_description:\n"
-            f"{description}\n"
-            f"Location: {self.location}\n"
+        boundary_note = (
+            "This is a scene boundary. Do not carry environment, lighting, props, spatial state, "
+            "or previous-shot image state across the cut; retain only canonical character identity."
+            if self.is_scene_boundary
+            else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
+        )
+
+        continuity_start = (
+            json.dumps(
+                self.continuity_start_state,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if self.continuity_start_state
+            else "{}"
+        )
+        continuity_end = (
+            json.dumps(
+                self.continuity_end_state,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            if self.continuity_end_state
+            else "{}"
+        )
+
+        spatial_lines = []
+        for name in self.characters:
+            start_bbox = self.character_spatial_bboxes_start.get(name)
+            end_bbox = (
+                self.character_spatial_bboxes_end.get(name)
+                or self.character_spatial_bboxes.get(name)
+            )
+            start_region = self.character_spatial_regions_start.get(name)
+            end_region = (
+                self.character_spatial_regions_end.get(name)
+                or self.character_spatial_regions.get(name)
+            )
+            parts = []
+            if start_bbox:
+                parts.append(
+                    f"start_bbox={[round(float(v), 4) for v in start_bbox]}"
+                )
+            if end_bbox:
+                parts.append(
+                    f"end_bbox={[round(float(v), 4) for v in end_bbox]}"
+                )
+            if start_region:
+                parts.append(f"start_region={start_region}")
+            if end_region:
+                parts.append(f"end_region={end_region}")
+            if parts:
+                spatial_lines.append(f"{name}: " + ", ".join(parts))
+        spatial_contract = (
+            "\n".join(spatial_lines)
+            if spatial_lines
+            else "No explicit normalized spatial constraints."
+        )
+
+        dialogue_lines = []
+        for event in self.dialogue_events:
+            if not isinstance(event, dict):
+                continue
+            speaker_id = (
+                str(event.get("speaker_id", "")).strip()
+                or "S?"
+            )
+            speaker_name = str(
+                event.get("speaker_name", "")
+            ).strip()
+            text = str(event.get("text", ""))
+            start_seconds = float(
+                event.get("start_seconds", 0.0) or 0.0
+            )
+            end_seconds = float(
+                event.get("end_seconds", 0.0) or 0.0
+            )
+            display_name = (
+                f"{speaker_name} ({speaker_id})"
+                if speaker_name
+                else f"({speaker_id})"
+            )
+            continuation = bool(
+                event.get("continues_to_next_shot", False)
+            )
+            continuation_text = (
+                " Continue this dialogue across the next shot."
+                if continuation
+                else ""
+            )
+            dialogue_lines.append(
+                f"At {start_seconds:.2f} seconds, {display_name} says: "
+                f"<d>[English] {text}</d> and completes by "
+                f"{end_seconds:.2f} seconds.{continuation_text}"
+            )
+
+        if dialogue_lines:
+            dialogue_text = " ".join(dialogue_lines)
+        elif self.speech_text.strip():
+            dialogue_text = (
+                f"{self.speech_text.strip()}"
+            )
+        else:
+            dialogue_text = "No dialogue."
+
+        integrated_description = (
+            f"[Shot {self.order}] {description}\n"
+            f"Location: {self.location}.\n"
             f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n"
             f"Continuity boundary policy: {boundary_note}\n"
             "continuity_start_state:\n"
-            f"{continuity_start}\n\n"
+            f"{continuity_start}\n"
             "continuity_end_state:\n"
-            f"{continuity_end}\n\n"
+            f"{continuity_end}\n"
             "Spatial constraints:\n"
-            f"{spatial_contract}\n\n"
-            "overall_soundscape:\n"
-            f"{soundscape}\n"
-            f"Dialogue: {dialogue}\n\n"
+            f"{spatial_contract}\n"
             "dialogue_timeline:\n"
-            f"{dialogue_timeline}\n\n"
+            f"{dialogue_text}"
+        )
+
+        return (
+            "subject_definitions:\n"
+            f"{subjects}\n"
+            "Reference roles and bindings:\n"
+            f"{references}\n\n"
+            "summary:\n"
+            f"{self.action.strip() or self.visual_prompt.strip()}\n\n"
+            "retention_analysis:\n"
+            f"{retention}\n\n"
+            "detailed_description:\n"
+            f"{integrated_description}\n\n"
+            "overall_soundscape:\n"
+            f"{soundscape}\n\n"
             "non_diegetic_music:\n"
             f"{music}"
         )
