@@ -24,6 +24,7 @@ from pipeline.visual_feedback import VisualFeedbackEngine
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
+from pipeline.continuity_ledger import ContinuityLedger
 from pipeline.production_checkpoint import (
     ProductionCheckpoint,
 )
@@ -1120,15 +1121,7 @@ class ProductionRunner:
             "production_id"
         ] = production_id
 
-        self.continuity = H3SceneContinuity(
-            self.project_root,
-            production_id=production_id,
-        )
-        self.identity_anchors = IdentityAnchorStore(
-            self.project_root,
-            production_id=production_id,
-        )
-
+        
         self._prepare_production_paths(production_id)
 
         checkpoint = self._load_render_checkpoint(production_id)
