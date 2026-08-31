@@ -474,16 +474,39 @@ def test_director_prompt_contract() -> None:
     expand = director._story_text_system("expand_user_story")
     shots = director._shot_director_batch_system()
 
+    # AI Story: validate behavior, not a fragile literal heading.
     check(
-        "AI STORY MODE" in ai,
-        "AI Story text prompt is missing its mode contract.",
+        "complete cinematic short-film story" in ai.lower(),
+        "AI Story text prompt does not require a complete cinematic story.",
     )
 
     check(
-        "EXPAND STORY MODE" in expand,
-        "Expand Story text prompt is missing its mode contract.",
+        "Output ONLY the story prose" in ai,
+        "AI Story text prompt does not enforce prose-only output.",
     )
 
+    check(
+        "Do not output JSON" in ai,
+        "AI Story text prompt still permits JSON output.",
+    )
+
+    # Expand Story: validate the actual expansion contract.
+    check(
+        "Expand the supplied story substantially" in expand,
+        "Expand Story text prompt does not require substantial expansion.",
+    )
+
+    check(
+        "Output ONLY the expanded story prose" in expand,
+        "Expand Story text prompt does not enforce prose-only output.",
+    )
+
+    check(
+        "Do not replace the original plot" in expand,
+        "Expand Story text prompt does not protect the original plot.",
+    )
+
+    # Preserve Story intentionally has no story-text generation pass.
     try:
         director._story_text_system("preserve_user_story")
     except ValueError:
@@ -493,21 +516,7 @@ def test_director_prompt_contract() -> None:
             "Preserve Story should not use the story-text generation pass."
         )
 
-    check(
-        "Output ONLY the story prose" in ai,
-        "AI Story text prompt does not enforce prose-only output.",
-    )
-
-    check(
-        "Output ONLY the expanded story prose" in expand,
-        "Expand Story text prompt does not enforce prose-only output.",
-    )
-
-    check(
-        "Do not output JSON" in ai,
-        "AI Story text prompt still permits JSON output.",
-    )
-
+    # Active cinematography/shot-generation contract.
     check(
         "visual-language consistency" in shots,
         "Shot prompt lost visual-language continuity requirements.",
@@ -542,6 +551,13 @@ def test_director_prompt_contract() -> None:
         "Do not create new characters" in shots,
         "Shot director does not protect character identity.",
     )
+
+    check(
+        "character_spatial_bboxes" in shots
+        and "character_spatial_regions" in shots,
+        "Shot prompt is missing spatial continuity fields.",
+    )
+    
 
 def test_shot_sampling_contract() -> None:
 
