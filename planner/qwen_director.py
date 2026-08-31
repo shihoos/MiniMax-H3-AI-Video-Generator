@@ -3979,25 +3979,13 @@ Return:
                 )
 
     @staticmethod
-    def _default_visual_language(scenes: list[dict] | None = None) -> dict:
-        """Neutral deterministic baseline used when the creative pass omits visual metadata."""
-        scenes = scenes or []
-        temperatures = []
-        for scene in scenes:
-            value = str(scene.get("color_temperature", "") or "").strip()
-            if value and value not in temperatures:
-                temperatures.append(value)
-        palette = (
-            "Coherent cinematic palette anchored to " + ", ".join(temperatures)
-            if temperatures
-            else "Natural cinematic palette with coherent scene-to-scene color continuity."
-        )
+    def _baseline_visual_language() -> dict:
         return {
-            "genre_tone": "Cinematic narrative with grounded visual realism.",
-            "color_palette": palette,
-            "lighting_philosophy": "Motivated, physically coherent lighting consistent with location and time of day.",
-            "camera_philosophy": "Deliberate cinematic framing, readable geography, controlled movement, and stable subject continuity.",
-            "pacing": "Measured progression with visual escalation toward the dramatic peak and restrained transitions.",
+            "genre_tone": "cinematic, story-led, naturalistic with controlled contrast",
+            "color_palette": "coherent palette derived from scene mood and environment",
+            "lighting_philosophy": "motivated cinematic lighting consistent within each scene",
+            "camera_philosophy": "deliberate composition with motivated movement and continuity-first coverage",
+            "pacing": "clear escalation with varied cinematic rhythm",
         }
 
     @staticmethod
@@ -4372,7 +4360,7 @@ Preserve:
 - if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response.
 - describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
-Within each scene, shot 1 and shot 2 must use meaningfully different
+Within each scene, the required shots must use meaningfully different
 framing/composition while describing the SAME narrative beat.
 
 SCENE-FUNCTION DIRECTING:
@@ -4426,14 +4414,15 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
           "character_spatial_bboxes": {},
           "character_spatial_regions": {},
           "character_spatial_bboxes_start": {},
           "character_spatial_bboxes_end": {},
           "character_spatial_regions_start": {},
-          "character_spatial_regions_end": {},
-          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
+          "character_spatial_regions_end": {}
         },
         {
           "shot_id": "scene_001_shot_002",
@@ -4453,14 +4442,15 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
           "character_spatial_bboxes": {},
           "character_spatial_regions": {},
           "character_spatial_bboxes_start": {},
           "character_spatial_bboxes_end": {},
           "character_spatial_regions_start": {},
-          "character_spatial_regions_end": {},
-          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
+          "character_spatial_regions_end": {}
         }
       ]
     }
@@ -4973,12 +4963,16 @@ Return JSON only.
                 )
             )
         )
-        baseline_visual_language = self._default_visual_language(base_scenes)
-        for key, fallback in baseline_visual_language.items():
+        baseline_visual_language = self._baseline_visual_language()
+        for key, value in baseline_visual_language.items():
             if not visual_language.get(key):
-                visual_language[key] = fallback
+                visual_language[key] = value
 
-        self._current_visual_language = dict(visual_language)
+        self._current_visual_language = (
+            dict(
+                visual_language
+            )
+        )
 
         # ----------------------------------------------------
         # CANONICAL CHARACTERS / SCENES
@@ -5558,7 +5552,6 @@ Return JSON only.
     # ========================================================
     # MERGE
     # ========================================================
-
 
     def enrich_plan(
         self,
