@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pipeline.vram_profile import VRAMProfile, resolve_vram_profile
+
 
 class H3Runtime:
     """Manage one isolated ComfyUI worker per physical GPU."""
@@ -104,6 +106,7 @@ class H3Runtime:
         lowvram: bool = True,
         cpu_vae: bool = True,
         extra_args: list[str] | None = None,
+        vram_profile: VRAMProfile | None = None,
     ):
         comfy_root = Path(comfy_root).resolve()
         main_py = comfy_root / "main.py"
@@ -124,9 +127,30 @@ class H3Runtime:
             "--port",
             str(port),
         ]
+        # ComfyUI 0.34+ uses DynamicVRAM by default on Nvidia. Explicitly keep
+        # asynchronous weight offload enabled; it is a core H3 performance path.
+        if vram_profile is None:
+            try:
+                from planner.config import RUNTIME
+                runtime_vram = dict(RUNTIME.get("runtime", {}).get("vram", {}) or {})
+                configured_cpu_vae = RUNTIME.get("runtime", {}).get("cpu_vae", cpu_vae)
+                runtime_vram["cpu_vae"] = configured_cpu_vae
+            except Exception:
+                runtime_vram = {"cpu_vae": cpu_vae}
+            profile = resolve_vram_profile(runtime_vram)
+        else:
+            profile = vram_profile
         if lowvram:
             command.append("--lowvram")
-        if cpu_vae:
+        if profile.async_offload_streams > 0:
+            command.extend(["--async-offload", str(profile.async_offload_streams)])
+        if profile.reserve_vram_gib > 0:
+            command.extend(["--reserve-vram", str(profile.reserve_vram_gib)])
+        if profile.disable_pinned_memory:
+            command.append("--disable-pinned-memory")
+        if profile.fast_disk:
+            command.append("--fast-disk")
+        if profile.cpu_vae:
             command.append("--cpu-vae")
         if extra_args:
             command.extend(str(v) for v in extra_args)
@@ -184,10 +208,19 @@ class H3Runtime:
         lowvram = H3Runtime._resolve_bool(
             os.getenv("H3_COMFY_LOWVRAM"), lowvram
         )
-        cpu_vae = H3Runtime._resolve_bool(
-            os.getenv("H3_COMFY_CPU_VAE"), cpu_vae
-        )
+        cpu_vae_env = os.getenv("H3_COMFY_CPU_VAE")
+        if cpu_vae_env is not None:
+            cpu_vae = H3Runtime._resolve_bool(cpu_vae_env, cpu_vae)
         import torch
+
+        try:
+            from planner.config import RUNTIME
+            runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+            vram_cfg = dict(runtime_cfg.get("vram", {}) or {})
+            vram_cfg["cpu_vae"] = runtime_cfg.get("cpu_vae", cpu_vae)
+        except Exception:
+            vram_cfg = {"cpu_vae": cpu_vae}
+        profile = resolve_vram_profile(vram_cfg)
 
         if not torch.cuda.is_available():
             raise RuntimeError("NVIDIA CUDA is required for the production H3 runtime.")
@@ -223,7 +256,8 @@ class H3Runtime:
                     port,
                     log_root / f"gpu_{gpu_id}.log",
                     lowvram=lowvram,
-                    cpu_vae=cpu_vae,
+                    cpu_vae=profile.cpu_vae,
+                    vram_profile=profile,
                 )
                 try:
                     cls.wait_http(
