@@ -24,6 +24,7 @@ from pipeline.quality_gate import ProductionQualityGate
 from pipeline.vlm_analyzer import VLMAnalyzer
 from pipeline.context_ir import H3ContextIRCompiler
 from pipeline.production_manifest import ProductionManifest
+from pipeline.retake_executor import RetakeExecutor
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
@@ -39,6 +40,9 @@ from planner.config import (
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
     H3_MAX_REFERENCE_IMAGES,
+    H3_AUTO_RETAKE,
+    H3_MAX_AUTO_RETAKES_PER_SHOT,
+    H3_SELECTIVE_RETAKE,
     PROFILE_BASE,
     PROFILE_TURBO,
     PROFILE_UPSCALE,
@@ -87,6 +91,7 @@ class ProductionRunner:
         self.visual_feedback = VisualFeedbackEngine(self.visual_observer, self.vlm_analyzer)
         self.context_ir = H3ContextIRCompiler()
         self.production_manifest = ProductionManifest(self.project_root)
+        self.retake_executor = RetakeExecutor(self.project_root)
         self.quality_gate = ProductionQualityGate(
             accept_score=float(os.getenv("H3_QA_ACCEPT_SCORE", "90")),
             review_score=float(os.getenv("H3_QA_REVIEW_SCORE", "75")),
@@ -978,6 +983,7 @@ class ProductionRunner:
                     workflow_mode=workflow_mode,
                     output_dir=output_dir,
                     upscale=upscale_enabled,
+                    context_ir=shot.get("h3_context_ir"),
                 )
             )
 
@@ -1064,6 +1070,63 @@ class ProductionRunner:
                     "warning": str(feedback_error),
                 }
 
+            auto_retake_count = 0
+            if (
+                H3_SELECTIVE_RETAKE
+                and H3_AUTO_RETAKE
+                and H3_MAX_AUTO_RETAKES_PER_SHOT > 0
+                and shot.get("quality_gate", {}).get("recommended_action") == "retake"
+            ):
+                try:
+                    base_result = result
+                    retake_start = float(shot.get("retake_start_seconds", 0.0) or 0.0)
+                    retake_end = float(shot.get("retake_end_seconds", shot.get("duration_seconds", 5.2)) or shot.get("duration_seconds", 5.2))
+                    shot["retake_reason"] = "; ".join(
+                        str(v) for v in (shot.get("quality_gate", {}).get("findings", []) or [])
+                    ) or "Automatic quality-gate retake"
+                    retake_result = self.retake_executor.execute(
+                        production_id=production_id,
+                        scene_id=scene_id,
+                        shot=shot,
+                        base_video=base_result,
+                        start_seconds=retake_start,
+                        end_seconds=retake_end,
+                        shot_executor=executor,
+                        workflow_mode=workflow_mode,
+                        upscale=upscale_enabled,
+                    )
+                    result = Path(retake_result["output"]).resolve()
+                    auto_retake_count = 1
+                    shot["retake_executed"] = True
+                    shot["retake_execution"] = dict(retake_result)
+                    # Re-observe and re-score the replacement. A second failed retake is
+                    # never silently accepted; it is surfaced as a hard production error.
+                    retake_anchor = self.continuity.prepare_next_shot(result, scene_id, shot_id)
+                    review_frames = []
+                    if getattr(self.visual_feedback.vision_analyzer, "available", False):
+                        review_dir = self.project_root / "data" / "production" / production_id / "qa" / self._safe_name(shot_id) / "retake"
+                        review_frames = self.visual_observer.extract_review_frames(result, review_dir, count=3)
+                    shot["visual_feedback_after_retake"] = self.visual_feedback.analyze(
+                        result,
+                        retake_anchor,
+                        expected_state,
+                        review_frames=review_frames,
+                    )
+                    shot["quality_gate_after_retake"] = self.quality_gate.evaluate(
+                        shot["visual_feedback_after_retake"],
+                        technical_ok=True,
+                    )
+                    if shot["quality_gate_after_retake"].get("recommended_action") == "retake":
+                        raise RuntimeError(
+                            f"Automatic retake did not satisfy the quality gate for {shot_id}."
+                        )
+                    anchor_frame = retake_anchor
+                    shot["quality_gate"] = shot["quality_gate_after_retake"]
+                    shot["retake_recommended"] = False
+                except Exception:
+                    shot["retake_execution_warning"] = True
+                    raise
+
             self._persist_first_appearance_anchors(
                 shot,
                 character_map,
@@ -1085,6 +1148,8 @@ class ProductionRunner:
                     "visual_feedback": dict(shot.get("visual_feedback", {}) or {}),
                     "quality_gate": dict(shot.get("quality_gate", {}) or {}),
                     "retake_recommended": bool(shot.get("retake_recommended", False)),
+                    "retake_executed": bool(shot.get("retake_executed", False)),
+                    "retake_execution": dict(shot.get("retake_execution", {}) or {}),
                     "audio_duration_seconds": shot.get("audio_duration_seconds"),
                 }
                 completed_record = dict(completed_shots[shot_id])
