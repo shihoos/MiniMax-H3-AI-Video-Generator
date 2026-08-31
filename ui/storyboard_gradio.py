@@ -627,9 +627,10 @@ class ProductionController:
 
         try:
 
-            os.environ[
-                "H3_DIRECTOR_ENABLED"
-            ] = "1"
+            os.environ.setdefault(
+                "H3_DIRECTOR_ENABLED",
+                "1",
+            )
 
             from planner.config import (
                 director_enabled,
