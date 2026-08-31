@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from pipeline.vram_profile import resolve_vram_profile
+
 
 class RuntimeDiagnostics:
     """Collect a machine-readable runtime health/fingerprint without mutating the environment."""
@@ -32,8 +34,18 @@ class RuntimeDiagnostics:
             return f"unavailable: {exc}"
 
     def collect(self, *, comfy_url: str | None = None) -> dict[str, Any]:
+        profile = resolve_vram_profile()
         report: dict[str, Any] = {
             "python": platform.python_version(),
+            "vram_profile": {
+                "name": profile.name,
+                "async_offload_streams": profile.async_offload_streams,
+                "cpu_vae": profile.cpu_vae,
+                "disable_pinned_memory": profile.disable_pinned_memory,
+                "fast_disk": profile.fast_disk,
+                "reserve_vram_gib": profile.reserve_vram_gib,
+                "reason": profile.reason,
+            },
             "platform": platform.platform(),
             "gradio": self._version("gradio"),
             "pillow": self._version("PIL"),
