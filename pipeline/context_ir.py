@@ -4,9 +4,27 @@ from typing import Any
 
 
 class H3ContextIRCompiler:
-    """Translate the richer production IR into a compact H3-compatible context representation."""
+    """Translate richer production IR into the authoritative H3 execution context."""
 
     VERSION = 1
+
+    @classmethod
+    def validate(cls, context_ir: dict[str, Any]) -> None:
+        if not isinstance(context_ir, dict):
+            raise TypeError("H3 Context-IR must be a mapping.")
+        version = int(context_ir.get("version", 0) or 0)
+        if version != cls.VERSION:
+            raise ValueError(
+                f"Unsupported H3 Context-IR version: {version}; expected {cls.VERSION}."
+            )
+        prompt = str(context_ir.get("h3_prompt", "") or "").strip()
+        if not prompt:
+            raise ValueError("H3 Context-IR contains an empty h3_prompt.")
+
+    @classmethod
+    def prompt(cls, context_ir: dict[str, Any]) -> str:
+        cls.validate(context_ir)
+        return str(context_ir["h3_prompt"]).strip()
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
         prompt = str(shot.get("h3_prompt", "") or shot.get("visual_prompt", "") or "").strip()
