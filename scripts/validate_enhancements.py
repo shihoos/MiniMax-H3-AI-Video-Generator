@@ -36,14 +36,15 @@ def main() -> None:
     gate = ProductionQualityGate().evaluate({"observed_state": {"sha256": "x"}}, technical_ok=True)
     assert gate["status"] == "accept"
     assert gate["evidence_level"] == "technical_only"
-    assert VLMAnalyzer().available is True
+    vlm = VLMAnalyzer()
+    assert vlm.enabled is True
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     assert "Pillow==12.3.0" in requirements
     assert "websocket-client==1.9.1" in requirements
     runtime = (ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")
     assert "cuda_wheel: cu130" in runtime
     assert "cuda_index: https://abetlen.github.io/llama-cpp-python/whl/cu130" in runtime
-    assert "director_critic: True" in runtime
+    assert "director_critic: true" in runtime
     assert "timeline_version: 1" in runtime
     print("Enhancement validation PASSED.")
 
