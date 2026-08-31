@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from pipeline.comfy_preview import ComfyPreviewStreamer
+from execution.execution_policy import ExecutionPolicy
 
 from planner.config import (
     H3_HEIGHT,
@@ -34,6 +35,7 @@ class ShotExecutor:
         gpu_id: int | None = None,
         metrics_path: Path | None = None,
         preview_dir: Path | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ):
 
         from execution.h3_workflow_builder import (
@@ -56,6 +58,7 @@ class ShotExecutor:
         ).resolve()
 
         self.preview_dir = Path(preview_dir).resolve() if preview_dir else None
+        self.execution_policy = execution_policy or ExecutionPolicy()
 
         self.comfy_input_root = (
             self.project_root
@@ -402,11 +405,16 @@ class ShotExecutor:
         output_dir,
         upscale=False,
         context_ir: dict | None = None,
+        execution_policy: ExecutionPolicy | None = None,
     ):
 
         output_dir = Path(
             output_dir
         )
+        policy = execution_policy or self.execution_policy
+
+        if policy.require_context_ir and context_ir is None:
+            raise RuntimeError(f"{shot.get('shot_id')}: production execution requires Ref2VA Context-IR.")
 
         output_dir.mkdir(
             parents=True,
@@ -532,7 +540,7 @@ class ShotExecutor:
                 self._record("shot_queued", shot_id=shot_id, prompt_id=prompt_id, queue_submit_seconds=queued_at - attempt_started, attempt=oom_retries + 1)
 
                 preview = None
-                if self.preview_dir is not None and H3_LIVE_PREVIEW:
+                if self.preview_dir is not None and H3_LIVE_PREVIEW and policy.live_preview and policy.mode != "diagnostic":
                     preview = ComfyPreviewStreamer(
                         self.client.base_url,
                         self.preview_dir / self._safe_name(shot_id),
