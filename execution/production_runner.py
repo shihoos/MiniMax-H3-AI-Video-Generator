@@ -91,17 +91,6 @@ class ProductionRunner:
             / "h3"
         )
 
-        self.continuity = (
-            H3SceneContinuity(
-                self.project_root
-            )
-        )
-
-        self.identity_anchors = (
-            IdentityAnchorStore(
-                self.project_root
-            )
-        )
 
     @staticmethod
     def _safe_name(
@@ -1019,7 +1008,6 @@ class ProductionRunner:
                 shot["observed_visual_state"] = dict(
                     shot["visual_feedback"].get("observed_state", {})
                 )
-                ContinuityLedger.reconcile_observed_state(shot)
             except Exception as feedback_error:
                 shot["visual_feedback"] = {
                     "deterministic_observation": False,
