@@ -97,6 +97,25 @@ class Shot:
         default_factory=list
     )
     speech_text: str = ""
+    dialogue_events: list[dict] = field(default_factory=list)
+    audio_duration_seconds: Optional[float] = None
+    audio_duration_source: str = "unvalidated"
+
+    continuity_start_state: dict = field(default_factory=dict)
+    continuity_end_state: dict = field(default_factory=dict)
+    continuity_repair_applied: bool = False
+    identity_fingerprints: dict = field(default_factory=dict)
+    is_scene_boundary: bool = False
+    character_spatial_bboxes: dict = field(default_factory=dict)
+    character_spatial_regions: dict = field(default_factory=dict)
+    character_spatial_bboxes_start: dict = field(default_factory=dict)
+    character_spatial_bboxes_end: dict = field(default_factory=dict)
+    character_spatial_regions_start: dict = field(default_factory=dict)
+    character_spatial_regions_end: dict = field(default_factory=dict)
+
+    reference_roles: list[dict] = field(default_factory=list)
+    storyboard_reference: Optional[str] = None
+    reference_role_manifest: Optional[str] = None
 
     reference_bindings: list[str] = field(
         default_factory=list
@@ -230,6 +249,93 @@ class Shot:
             "keyframe_images",
         )
 
+        if self.dialogue_events is None:
+            self.dialogue_events = []
+        if not isinstance(self.dialogue_events, list):
+            raise TypeError("dialogue_events must be a list.")
+        normalized_dialogue = []
+        for event in self.dialogue_events:
+            if not isinstance(event, dict):
+                raise TypeError("dialogue_events entries must be dictionaries.")
+            normalized_dialogue.append(dict(event))
+        self.dialogue_events = normalized_dialogue
+
+        for field_name in (
+            "continuity_start_state",
+            "continuity_end_state",
+            "identity_fingerprints",
+        ):
+            setattr(self, field_name, _mapping(getattr(self, field_name), field_name))
+
+        if self.reference_roles is None:
+            self.reference_roles = []
+        if not isinstance(self.reference_roles, list):
+            raise TypeError("reference_roles must be a list.")
+        self.reference_roles = [
+            dict(item) for item in self.reference_roles if isinstance(item, dict)
+        ]
+
+        def normalize_bboxes(value: Any, field_name: str) -> dict:
+            source = _mapping(value, field_name)
+            normalized = {}
+            for name, bbox in source.items():
+                if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+                    raise ValueError(
+                        f"{field_name} values must be [x1, y1, x2, y2]."
+                    )
+                values = [float(item) for item in bbox]
+                if any(item < 0.0 or item > 1.0 for item in values):
+                    raise ValueError(
+                        f"{field_name} coordinates must be normalized to [0, 1]."
+                    )
+                if values[2] < values[0] or values[3] < values[1]:
+                    raise ValueError(
+                        f"{field_name} must satisfy x2>=x1 and y2>=y1."
+                    )
+                normalized[str(name)] = values
+            return normalized
+
+        def normalize_regions(value: Any, field_name: str) -> dict:
+            source = _mapping(value, field_name)
+            return {
+                str(key): str(item).strip()
+                for key, item in source.items()
+                if str(item).strip()
+            }
+
+        self.character_spatial_bboxes = normalize_bboxes(
+            self.character_spatial_bboxes, "character_spatial_bboxes"
+        )
+        self.character_spatial_regions = normalize_regions(
+            self.character_spatial_regions, "character_spatial_regions"
+        )
+        self.character_spatial_bboxes_start = normalize_bboxes(
+            self.character_spatial_bboxes_start, "character_spatial_bboxes_start"
+        )
+        self.character_spatial_bboxes_end = normalize_bboxes(
+            self.character_spatial_bboxes_end, "character_spatial_bboxes_end"
+        )
+        self.character_spatial_regions_start = normalize_regions(
+            self.character_spatial_regions_start, "character_spatial_regions_start"
+        )
+        self.character_spatial_regions_end = normalize_regions(
+            self.character_spatial_regions_end, "character_spatial_regions_end"
+        )
+        if not self.character_spatial_bboxes_end and self.character_spatial_bboxes:
+            self.character_spatial_bboxes_end = dict(self.character_spatial_bboxes)
+        if not self.character_spatial_regions_end and self.character_spatial_regions:
+            self.character_spatial_regions_end = dict(self.character_spatial_regions)
+        if not self.character_spatial_bboxes and self.character_spatial_bboxes_end:
+            self.character_spatial_bboxes = dict(self.character_spatial_bboxes_end)
+        if not self.character_spatial_regions and self.character_spatial_regions_end:
+            self.character_spatial_regions = dict(self.character_spatial_regions_end)
+
+        if self.audio_duration_seconds is not None:
+            self.audio_duration_seconds = float(self.audio_duration_seconds)
+            if self.audio_duration_seconds <= 0:
+                raise ValueError("audio_duration_seconds must be greater than zero when supplied.")
+        self.audio_duration_source = str(self.audio_duration_source or "unvalidated").strip()
+
         self.reference_audio_by_character = _mapping(
             self.reference_audio_by_character,
             "reference_audio_by_character",
@@ -287,6 +393,8 @@ class Shot:
             "extend_take_source_video",
             "previous_shot",
             "next_shot",
+            "storyboard_reference",
+            "reference_role_manifest",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -343,6 +451,48 @@ class Shot:
             else "N/A"
         )
 
+        timeline_lines = []
+        for event in self.dialogue_events:
+            if not isinstance(event, dict):
+                continue
+            speaker_id = str(event.get("speaker_id", "")).strip()
+            speaker_name = str(event.get("speaker_name", "")).strip()
+            text = str(event.get("text", ""))
+            start = float(event.get("start_seconds", 0.0) or 0.0)
+            end = float(event.get("end_seconds", 0.0) or 0.0)
+            timeline_lines.append(
+                f"{speaker_name} [{speaker_id}] {start:.3f}-{end:.3f}s: {text}"
+            )
+        dialogue_timeline = (
+            "\n".join(timeline_lines)
+            if timeline_lines
+            else "No dialogue events."
+        )
+
+        spatial_lines = []
+        for name in self.characters:
+            start_bbox = self.character_spatial_bboxes_start.get(name)
+            end_bbox = self.character_spatial_bboxes_end.get(name) or self.character_spatial_bboxes.get(name)
+            start_region = self.character_spatial_regions_start.get(name)
+            end_region = self.character_spatial_regions_end.get(name) or self.character_spatial_regions.get(name)
+            parts = []
+            if start_bbox:
+                parts.append(f"start_bbox={[round(v, 4) for v in start_bbox]}")
+            if end_bbox:
+                parts.append(f"end_bbox={[round(v, 4) for v in end_bbox]}")
+            if start_region:
+                parts.append(f"start_region={start_region}")
+            if end_region:
+                parts.append(f"end_region={end_region}")
+            if parts:
+                spatial_lines.append(f"{name}: " + ", ".join(parts))
+        spatial_contract = "\n".join(spatial_lines) if spatial_lines else "No explicit normalized spatial constraints."
+        boundary_note = (
+            "This is a scene boundary; do not carry environment, lighting, props, or previous-shot image state across the cut."
+            if self.is_scene_boundary
+            else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
+        )
+
         description = (
             self.detailed_description.strip()
             or self.visual_prompt.strip()
@@ -372,10 +522,15 @@ class Shot:
             f"{description}\n"
             f"Location: {self.location}\n"
             f"{cinematography}\n"
-            f"Continuity: {self.continuity_notes}\n\n"
+            f"Continuity: {self.continuity_notes}\n"
+            f"Continuity boundary policy: {boundary_note}\n"
+            "Spatial constraints:\n"
+            f"{spatial_contract}\n\n"
             "overall_soundscape:\n"
             f"{soundscape}\n"
             f"Dialogue: {dialogue}\n\n"
+            "dialogue_timeline:\n"
+            f"{dialogue_timeline}\n\n"
             "non_diegetic_music:\n"
             f"{music}"
         )
@@ -411,6 +566,23 @@ class Shot:
             "reference_audio_by_character": self.reference_audio_by_character,
             "speaking_characters": self.speaking_characters,
             "speech_text": self.speech_text,
+            "dialogue_events": self.dialogue_events,
+            "audio_duration_seconds": self.audio_duration_seconds,
+            "audio_duration_source": self.audio_duration_source,
+            "continuity_start_state": self.continuity_start_state,
+            "continuity_end_state": self.continuity_end_state,
+            "continuity_repair_applied": self.continuity_repair_applied,
+            "identity_fingerprints": self.identity_fingerprints,
+            "is_scene_boundary": self.is_scene_boundary,
+            "character_spatial_bboxes": self.character_spatial_bboxes,
+            "character_spatial_regions": self.character_spatial_regions,
+            "character_spatial_bboxes_start": self.character_spatial_bboxes_start,
+            "character_spatial_bboxes_end": self.character_spatial_bboxes_end,
+            "character_spatial_regions_start": self.character_spatial_regions_start,
+            "character_spatial_regions_end": self.character_spatial_regions_end,
+            "reference_roles": self.reference_roles,
+            "storyboard_reference": self.storyboard_reference,
+            "reference_role_manifest": self.reference_role_manifest,
             "reference_bindings": self.reference_bindings,
             "identity_locks": self.identity_locks,
             "workflow_mode": self.workflow_mode,
