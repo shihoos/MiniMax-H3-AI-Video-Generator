@@ -1,4 +1,4 @@
-"""LTX-13B AI Video Model package."""
+"""MiniMax H3 AI Video Model package."""
 
 from schemas.character import Character
 from schemas.scene import Scene
@@ -12,3 +12,4 @@ __all__ = [
     "Shot",
     "extract_json",
 ]
+from schemas.dialogue import DialogueEvent
