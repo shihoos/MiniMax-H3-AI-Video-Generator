@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime
 from copy import deepcopy
 from pathlib import Path
@@ -84,6 +85,11 @@ class ProductionOrchestrator:
         self.director = QwenDirector(
             self.project_root
         )
+
+        # Protect shared reference-role manifest updates performed by this
+        # orchestrator instance. ProductionRunner has its own lock for render
+        # time updates; this lock covers planning-time updates.
+        self._manifest_lock = threading.RLock()
 
     # ========================================================
     # CHARACTER REBINDING
@@ -1121,41 +1127,50 @@ class ProductionOrchestrator:
         plan: dict,
         characters: list[Character],
     ) -> dict:
-        """Run deterministic contracts, repairing only continuity violations."""
-        character_dicts = [character.to_dict() for character in characters]
-        last_error = None
-        for attempt in range(4):
-            self._rebind_shots(plan, characters)
-            DialogueTimeline(character_dicts).apply_to_plan(plan)
-            ledger = ContinuityLedger(self.project_root, str(plan.get("production_id", "")))
-            try:
-                ledger.apply(plan, character_dicts)
-                return plan
-            except ContinuityViolation as exc:
-                last_error = exc
-                if attempt >= 3:
-                    # Deterministic field-level fallback: only continuity-carrying
-                    # state is repaired; the creative shot is not regenerated.
-                    return ledger.apply_field_level_fallback(plan, character_dicts)
-                shot_id = exc.shot_id
-                shots = plan.get("shots", []) or []
-                index = next((i for i, shot in enumerate(shots) if str(shot.get("shot_id", "")) == shot_id), None)
-                if index is None:
-                    raise
-                previous_shot = shots[index - 1] if index > 0 and str(shots[index - 1].get("scene_id", "")) == str(shots[index].get("scene_id", "")) else None
-                repaired = self.director.repair_continuity_violation(
-                    shot=shots[index],
-                    previous_shot=previous_shot,
-                    violation=exc.to_dict(),
+        """Run deterministic production contracts after the Qwen pass.
+
+        The director is intentionally unloaded before this method is called.
+        Continuity repair therefore MUST remain deterministic here: never call
+        the Qwen director from this stage.
+        """
+        character_dicts = [
+            character.to_dict()
+            for character in characters
+        ]
+
+        self._rebind_shots(
+            plan,
+            characters,
+        )
+
+        DialogueTimeline(
+            character_dicts
+        ).apply_to_plan(plan)
+
+        ledger = ContinuityLedger(
+            self.project_root,
+            str(
+                plan.get(
+                    "production_id",
+                    "",
                 )
-                repaired["shot_id"] = shots[index].get("shot_id")
-                repaired["scene_id"] = shots[index].get("scene_id")
-                repaired["order"] = shots[index].get("order")
-                repaired["characters"] = shots[index].get("characters", [])
-                shots[index] = repaired
-        if last_error:
-            raise last_error
-        return plan
+            ),
+        )
+
+        try:
+            ledger.apply(
+                plan,
+                character_dicts,
+            )
+            return plan
+        except ContinuityViolation:
+            # Deterministic field-level fallback only. The creative shot is
+            # never regenerated here, and the unloaded Qwen director is never
+            # called from this post-director phase.
+            return ledger.apply_field_level_fallback(
+                plan,
+                character_dicts,
+            )
 
     def create_production_plan(
         self,
@@ -1315,18 +1330,19 @@ class ProductionOrchestrator:
             shot["reference_bindings"] = _bindings_from_roles(
                 list(shot.get("reference_roles", []) or [])
             )
-            entry = StoryboardReferenceBuilder.update_manifest(
-                storyboard["manifest_path"],
-                str(shot.get("shot_id", "")),
-                list(shot.get("reference_images", []) or []),
-                list(shot.get("reference_roles", []) or []),
-                list(shot.get("reference_bindings", []) or []),
-            )
-            StoryboardReferenceBuilder.assert_manifest_invariant(
-                entry,
-                list(shot.get("reference_images", []) or []),
-                list(shot.get("reference_bindings", []) or []),
-            )
+            with self._manifest_lock:
+                entry = StoryboardReferenceBuilder.update_manifest(
+                    storyboard["manifest_path"],
+                    str(shot.get("shot_id", "")),
+                    list(shot.get("reference_images", []) or []),
+                    list(shot.get("reference_roles", []) or []),
+                    list(shot.get("reference_bindings", []) or []),
+                )
+                StoryboardReferenceBuilder.assert_manifest_invariant(
+                    entry,
+                    list(shot.get("reference_images", []) or []),
+                    list(shot.get("reference_bindings", []) or []),
+                )
             self._refresh_shot_prompt(shot)
 
         previous_by_scene = {}
