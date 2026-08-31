@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from pipeline.context_ir import H3ContextIRCompiler
 from pipeline.dialogue_duration import FFProbeMediaDurationProvider
 from pipeline.h3_scene_continuity import H3SceneContinuity
 from pipeline.retake_manager import RetakeManager
@@ -120,6 +121,11 @@ class RetakeExecutor:
         replacement["retake_start_seconds"] = start
         replacement["retake_end_seconds"] = end
         replacement["retake_request_path"] = str(request_path)
+        replacement_context_ir = H3ContextIRCompiler().compile(
+            {"production_id": production_id, "story": str(shot.get("story", "") or "")},
+            replacement,
+        )
+        replacement["h3_context_ir"] = replacement_context_ir
 
         out_dir = self.project_root / "data" / "production" / str(production_id) / "retakes" / str(shot["shot_id"])
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +134,7 @@ class RetakeExecutor:
             workflow_mode=workflow_mode,
             output_dir=out_dir,
             upscale=upscale,
+            context_ir=replacement_context_ir,
         )
         replacement_video = Path(replacement_video).resolve()
         retake_duration = self.probe.duration_seconds(replacement_video, stream_selector="v:0")
