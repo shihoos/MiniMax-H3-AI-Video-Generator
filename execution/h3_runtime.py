@@ -137,15 +137,15 @@ class H3Runtime:
                 runtime_vram["cpu_vae"] = configured_cpu_vae
             except Exception:
                 runtime_vram = {"cpu_vae": cpu_vae}
-            profile = resolve_vram_profile(runtime_vram)
+            profile = resolve_vram_profile(runtime_vram, gpu_id=gpu_id)
         else:
             profile = vram_profile
         if lowvram:
             command.append("--lowvram")
         if profile.async_offload_streams > 0:
             command.extend(["--async-offload", str(profile.async_offload_streams)])
-        if profile.reserve_vram_gib > 0:
-            command.extend(["--reserve-vram", str(profile.reserve_vram_gib)])
+        if profile.reserve_vram_gb > 0:
+            command.extend(["--reserve-vram", str(profile.reserve_vram_gb)])
         if profile.disable_pinned_memory:
             command.append("--disable-pinned-memory")
         if profile.fast_disk:
@@ -220,7 +220,14 @@ class H3Runtime:
             vram_cfg["cpu_vae"] = runtime_cfg.get("cpu_vae", cpu_vae)
         except Exception:
             vram_cfg = {"cpu_vae": cpu_vae}
-        profile = resolve_vram_profile(vram_cfg)
+        gpu_id = None
+        try:
+            visible = os.getenv("CUDA_VISIBLE_DEVICES", "").split(",")[0].strip()
+            if visible.isdigit():
+                gpu_id = int(visible)
+        except Exception:
+            gpu_id = None
+        profile = resolve_vram_profile(vram_cfg, gpu_id=gpu_id)
 
         if not torch.cuda.is_available():
             raise RuntimeError("NVIDIA CUDA is required for the production H3 runtime.")
