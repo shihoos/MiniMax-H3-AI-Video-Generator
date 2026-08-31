@@ -59,6 +59,7 @@ jobs:
               "yaml",
               "gradio",
               "PIL",
+              "websocket",
           ]
 
           for module in required_modules:
@@ -111,6 +112,12 @@ jobs:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python scripts/validate_production_scale.py
+
+      - name: Enhancement validation
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python scripts/validate_enhancements.py
 
       - name: Planner smoke tests
         env:
@@ -189,6 +196,14 @@ jobs:
               "schemas.dialogue",
               "schemas.shot",
               "schemas.character",
+              "pipeline.timeline",
+              "pipeline.vlm_analyzer",
+              "pipeline.visual_feedback",
+              "pipeline.quality_gate",
+              "pipeline.retake_manager",
+              "pipeline.runtime_diagnostics",
+              "pipeline.context_ir",
+              "pipeline.production_manifest",
               "ui.storyboard_gradio",
           ]
 
