@@ -40,6 +40,7 @@ class ProductionManifest:
             "pipeline/vlm_analyzer.py",
             "pipeline/quality_gate.py",
             "pipeline/retake_manager.py",
+            "pipeline/retake_executor.py",
             "pipeline/runtime_diagnostics.py",
             "pipeline/comfy_preview.py",
             "pipeline/visual_feedback.py",
