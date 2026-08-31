@@ -66,6 +66,8 @@ features:
   timeline_version: 1
   selective_retake: true
   director_critic: true
+  auto_retake: true
+  max_auto_retakes_per_shot: 1
   vlm_reference_analysis: true
   vlm_visual_qa: true
 assembly:
