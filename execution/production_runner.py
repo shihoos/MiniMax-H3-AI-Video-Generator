@@ -945,16 +945,24 @@ class ProductionRunner:
                     [role for _, role in final_items],
                 )
 
-            # Persist/verify the final runtime reference order even for the first
-            # shot of a scene. This makes the manifest the authoritative audit record.
-            if shot.get("reference_role_manifest"):
-                StoryboardReferenceBuilder.update_manifest(
-                    shot["reference_role_manifest"],
-                    str(shot.get("shot_id", "")),
-                    list(shot.get("reference_images", []) or []),
-                    list(shot.get("reference_roles", []) or []),
-                    list(shot.get("reference_bindings", []) or []),
-                )
+            else:
+                # First shot of a scene (or no previous video): persist and verify
+                # the final runtime reference order exactly once. For non-boundary
+                # shots, _rebuild_reference_contract() already performs the manifest
+                # update and invariant assertion.
+                if shot.get("reference_role_manifest"):
+                    entry = StoryboardReferenceBuilder.update_manifest(
+                        shot["reference_role_manifest"],
+                        str(shot.get("shot_id", "")),
+                        list(shot.get("reference_images", []) or []),
+                        list(shot.get("reference_roles", []) or []),
+                        list(shot.get("reference_bindings", []) or []),
+                    )
+                    StoryboardReferenceBuilder.assert_manifest_invariant(
+                        entry,
+                        list(shot.get("reference_images", []) or []),
+                        list(shot.get("reference_bindings", []) or []),
+                    )
 
             workflow_mode = (
                 self._workflow_for_shot(
