@@ -248,6 +248,12 @@ class ComfyClient:
         )
         return result is None or result == b"" or isinstance(result, (dict, list))
 
+    def free_and_wait(self, *, unload_models: bool = True, free_memory: bool = True) -> bool:
+        ok = self.free_memory(unload_models=unload_models, free_memory=free_memory)
+        if not ok:
+            return False
+        return self.health_check()
+
     def health_check(
         self,
     ):
