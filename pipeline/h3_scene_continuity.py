@@ -150,6 +150,36 @@ class H3SceneContinuity:
 
         return destination
 
+    def extract_frame_at(
+        self,
+        video_path: Path,
+        seconds: float,
+        *,
+        scene_id: str,
+        shot_id: str,
+        label: str,
+    ) -> Path:
+        video_path = Path(video_path).resolve()
+        if not video_path.is_file():
+            raise FileNotFoundError(video_path)
+        seconds = max(0.0, float(seconds))
+        safe_scene = self._safe(scene_id)
+        safe_shot = self._safe(shot_id)
+        safe_label = self._safe(label)
+        destination = self.root / safe_scene / f"{safe_shot}_{safe_label}_frame.png"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            "ffmpeg", "-y", "-ss", f"{seconds:.6f}", "-i", str(video_path),
+            "-frames:v", "1", "-update", "1", str(destination),
+        ]
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=30.0)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Timed out while extracting frame at {seconds:.3f}s from {video_path}.") from exc
+        if result.returncode != 0 or not destination.is_file() or destination.stat().st_size <= 0:
+            raise RuntimeError("Unable to extract requested frame:\n" + result.stderr[-5000:])
+        return destination
+
     def prepare_next_shot(
         self,
         video_path: Path,
