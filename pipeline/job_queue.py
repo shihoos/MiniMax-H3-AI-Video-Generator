@@ -107,5 +107,5 @@ class ProductionJobQueue:
         now = time.time()
         cutoff = now - float(max_age_seconds)
         with self._connect() as conn:
-            cur = conn.execute("UPDATE jobs SET status='queued', updated_at=?, worker_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL WHERE status='running' AND (lease_expires_at IS NULL AND updated_at < ? OR lease_expires_at IS NOT NULL AND lease_expires_at < ?)", (now, cutoff, now))
+            cur = conn.execute("UPDATE jobs SET status='queued', updated_at=?, worker_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL WHERE status='running' AND ((lease_expires_at IS NULL AND updated_at < ?) OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))", (now, cutoff, now))
             return int(cur.rowcount)
