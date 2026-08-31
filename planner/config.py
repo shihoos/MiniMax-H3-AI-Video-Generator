@@ -314,6 +314,7 @@ def feature_enabled(name: str, default: bool = False) -> bool:
 
 
 H3_LIVE_PREVIEW = feature_enabled("live_preview", True)
+H3_CONTEXT_IR_VERSION = int(os.getenv("H3_CONTEXT_IR_VERSION", str(RUNTIME.get("features", {}).get("context_ir_version", 2))))
 H3_VLM_ENABLED = feature_enabled("vlm_enabled", True)
 H3_QA_ENABLED = feature_enabled("qa_enabled", True)
 H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
