@@ -401,6 +401,7 @@ class ShotExecutor:
         workflow_mode,
         output_dir,
         upscale=False,
+        context_ir: dict | None = None,
     ):
 
         output_dir = Path(
@@ -412,16 +413,20 @@ class ShotExecutor:
             exist_ok=True,
         )
 
-        prompt = (
-            shot.get(
-                "h3_prompt",
-                "",
-            )
-            or shot.get(
-                "visual_prompt",
-                "",
-            )
-        ).strip()
+        if context_ir is not None:
+            from pipeline.context_ir import H3ContextIRCompiler
+            prompt = H3ContextIRCompiler.prompt(context_ir)
+        else:
+            prompt = (
+                shot.get(
+                    "h3_prompt",
+                    "",
+                )
+                or shot.get(
+                    "visual_prompt",
+                    "",
+                )
+            ).strip()
 
         if not prompt:
             raise RuntimeError(
@@ -492,6 +497,7 @@ class ShotExecutor:
                     height=height,
                     duration_seconds=duration,
                     ref_image_size=self._resolve_ref_image_size(shot),
+                    context_ir=context_ir,
                 )
             )
 
@@ -509,6 +515,7 @@ class ShotExecutor:
                 height=height,
                 duration_seconds=duration,
                 ref_image_size=self._resolve_ref_image_size(shot),
+                context_ir=context_ir,
             )
 
         shot_id = str(shot.get("shot_id") or "")
