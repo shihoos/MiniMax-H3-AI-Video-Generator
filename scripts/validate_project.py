@@ -100,6 +100,8 @@ REQUIRED_FILES = [
     "ui/storyboard_gradio.py",
     "scripts/generate_video.py",
     "scripts/validate_reference_wiring.py",
+    "scripts/validate_director.py",
+    "scripts/validate_production_continuity.py",
 
     # --------------------------------------------------------
     # WORKFLOWS
@@ -129,6 +131,9 @@ RUNTIME_IMPORTS = [
     "pipeline.continuity_ledger",
     "pipeline.storyboard_reference_builder",
     "pipeline.identity_anchor_store",
+
+    # Schemas
+    "schemas.dialogue",
 
     # Execution
     "execution.h3_workflow_builder",
@@ -297,9 +302,11 @@ MODEL_WIDGET_INDEX = {
 
 def executable_model_values(
     graph: dict,
+    workflow_name: str = "workflow",
 ) -> list[tuple[str, str]]:
-    """Extract only the documented model-selector widget from known loader nodes."""
+    """Return model-selector values and fail on malformed known loaders."""
     values: list[tuple[str, str]] = []
+    seen_known_loader = False
     for node in graph.get("nodes", []):
         if not isinstance(node, dict):
             continue
@@ -307,12 +314,22 @@ def executable_model_values(
         index = MODEL_WIDGET_INDEX.get(node_type)
         if index is None:
             continue
+        seen_known_loader = True
         widgets = node.get("widgets_values", [])
-        if not isinstance(widgets, list) or index >= len(widgets):
-            continue
+        require(
+            isinstance(widgets, list) and index < len(widgets),
+            f"{workflow_name}: {node_type} has no model-selector widget at index {index}.",
+        )
         value = widgets[index]
-        if isinstance(value, str) and value.strip():
-            values.append((node_type, value.strip()))
+        require(
+            isinstance(value, str) and value.strip(),
+            f"{workflow_name}: {node_type} has an empty model selector.",
+        )
+        values.append((node_type, value.strip()))
+    require(
+        seen_known_loader,
+        f"{workflow_name}: no supported executable model loader nodes were found.",
+    )
     return values
 
 
@@ -501,8 +518,402 @@ def validate_workflow_graph_integrity(
             fail(f"{name}: malformed workflow link {link_id}: {row!r}")
         require(source_id in nodes, f"{name}: link {link_id} references missing source node {source_id}.")
         require(target_id in nodes, f"{name}: link {link_id} references missing destination node {target_id}.")
-        require(source_slot < len(nodes[source_id].get("outputs", []) or []), f"{name}: link {link_id} has invalid source slot {source_slot}.")
-        require(target_slot < len(nodes[target_id].get("inputs", []) or []), f"{name}: link {link_id} has invalid target slot {target_slot}.")
+        require(0 <= source_slot < len(nodes[source_id].get("outputs", []) or []), f"{name}: link {link_id} has invalid source slot {source_slot}.")
+        require(0 <= target_slot < len(nodes[target_id].get("inputs", []) or []), f"{name}: link {link_id} has invalid target slot {target_slot}.")
+
+
+
+def _workflow_node_map(graph: dict, name: str) -> tuple[dict[int, dict], dict[int, list]]:
+    """Build validated node/link lookup maps for semantic workflow checks."""
+    nodes: dict[int, dict] = {}
+    for raw_node in graph.get("nodes", []):
+        require(isinstance(raw_node, dict), f"{name}: workflow node is not an object.")
+        try:
+            node_id = int(raw_node.get("id"))
+        except (TypeError, ValueError):
+            fail(f"{name}: workflow node id must be numeric.")
+        require(node_id not in nodes, f"{name}: duplicate workflow node id {node_id}.")
+        nodes[node_id] = raw_node
+    links: dict[int, list] = {}
+    for row in graph.get("links", []):
+        require(isinstance(row, list) and len(row) >= 6, f"{name}: malformed workflow link: {row!r}")
+        try:
+            link_id = int(row[0])
+        except (TypeError, ValueError):
+            fail(f"{name}: workflow link id must be numeric: {row!r}")
+        require(link_id not in links, f"{name}: duplicate workflow link id {link_id}.")
+        links[link_id] = row
+    return nodes, links
+
+
+def _linked_input_source(
+    graph: dict,
+    target_node: dict,
+    input_name: str,
+    name: str,
+) -> tuple[dict, list]:
+    """Return source node and link row for a named linked input."""
+    nodes, links = _workflow_node_map(graph, name)
+    item = next(
+        (value for value in target_node.get("inputs", []) or [] if value.get("name") == input_name),
+        None,
+    )
+    require(item is not None, f"{name}: node {target_node.get('id')} has no input {input_name!r}.")
+    link_id = item.get("link")
+    require(link_id is not None, f"{name}: node {target_node.get('id')} input {input_name!r} is not linked.")
+    try:
+        link_id = int(link_id)
+    except (TypeError, ValueError):
+        fail(f"{name}: input {input_name!r} has non-numeric link {link_id!r}.")
+    require(link_id in links, f"{name}: input {input_name!r} references missing link {link_id}.")
+    row = links[link_id]
+    try:
+        source_id = int(row[1])
+    except (TypeError, ValueError):
+        fail(f"{name}: link {link_id} has invalid source node id.")
+    require(source_id in nodes, f"{name}: link {link_id} references missing source node {source_id}.")
+    return nodes[source_id], row
+
+
+def _h3_legal_frames(seconds: float, fps: float = 24.0) -> int:
+    value = max(4.0, min(15.0, float(seconds)))
+    requested = round(value * fps)
+    n = max(0, (requested - 5 + 16) // 17)
+    return max(124, min(362, 17 * n + 5))
+
+
+def validate_h3_duration_chain() -> None:
+    """Validate the live H3 workflow's duration source→math→length chain."""
+    expected_expr_fragments = ("a * 24", "% 17", "(5 -")
+    for name in ("ref2v", "turbo_ref2v"):
+        graph = load_json(PRODUCTION_WORKFLOWS[name])
+        refs = [n for n in graph.get("nodes", []) if n.get("type") == "MiniMaxH3ReferenceToVideo"]
+        require(len(refs) == 1, f"{name}: expected exactly one MiniMaxH3ReferenceToVideo node.")
+        ref = refs[0]
+        expr, _ = _linked_input_source(graph, ref, "length", name)
+        require(expr.get("type") == "ComfyMathExpression", f"{name}: length must be driven by ComfyMathExpression.")
+        duration_source, _ = _linked_input_source(graph, expr, "values.a", name)
+        require(duration_source.get("type") == "PrimitiveFloat", f"{name}: ComfyMathExpression.a must be driven by PrimitiveFloat.")
+        expr_text = str((expr.get("widgets_values_named") or {}).get("expression") or "")
+        for fragment in expected_expr_fragments:
+            require(fragment in expr_text, f"{name}: duration expression missing {fragment!r}.")
+        print(f"PASS H3 duration chain: {name}")
+
+
+def validate_h3_resolution_selector_contract() -> None:
+    """Validate generation ResolutionSelector links and production target dimensions."""
+    for name in ("ref2v", "turbo_ref2v"):
+        graph = load_json(PRODUCTION_WORKFLOWS[name])
+        selectors = [n for n in graph.get("nodes", []) if n.get("type") == "ResolutionSelector"]
+        require(len(selectors) == 1, f"{name}: expected exactly one ResolutionSelector.")
+        selector = selectors[0]
+        widgets = selector.get("widgets_values") or []
+        require(len(widgets) >= 3, f"{name}: ResolutionSelector widgets are incomplete.")
+        require(widgets[0] == "16:9 (Widescreen)", f"{name}: ResolutionSelector aspect ratio must be 16:9 (Widescreen).")
+        require(int(widgets[2]) == 32, f"{name}: ResolutionSelector multiple must be 32.")
+        ref = next(n for n in graph.get("nodes", []) if n.get("type") == "MiniMaxH3ReferenceToVideo")
+        width_source, _ = _linked_input_source(graph, ref, "width", name)
+        height_source, _ = _linked_input_source(graph, ref, "height", name)
+        require(width_source.get("type") == "ResolutionSelector", f"{name}: width must come from ResolutionSelector.")
+        require(height_source.get("type") == "ResolutionSelector", f"{name}: height must come from ResolutionSelector.")
+        ref_widgets = ref.get("widgets_values") or []
+        require(len(ref_widgets) >= 3, f"{name}: ReferenceToVideo dimensions are incomplete.")
+        require((int(ref_widgets[1]), int(ref_widgets[2])) == (1344, 768), f"{name}: production H3 canvas must be 1344x768.")
+        print(f"PASS H3 resolution selector contract: {name}")
+
+
+def validate_h3_builder_behavior() -> None:
+    """Execute H3WorkflowBuilder's duration/resolution mutators on template copies."""
+    from copy import deepcopy
+    from execution.h3_workflow_builder import H3WorkflowBuilder
+
+    builder = H3WorkflowBuilder(ROOT, None)
+    # Duration: the PrimitiveFloat value must change; the math expression must remain unchanged.
+    for name in ("ref2v", "turbo_ref2v"):
+        workflow = builder.load(name)
+        before_expr = str(
+            next(n for n in workflow["nodes"] if n.get("type") == "ComfyMathExpression")
+            .get("widgets_values_named", {})
+            .get("expression", "")
+        )
+        builder._set_duration(workflow, 5.0)
+        expr = next(n for n in workflow["nodes"] if n.get("type") == "ComfyMathExpression")
+        after_expr = str((expr.get("widgets_values_named") or {}).get("expression", ""))
+        duration_nodes = [n for n in workflow["nodes"] if n.get("type") == "PrimitiveFloat"]
+        require(duration_nodes, f"{name}: no PrimitiveFloat duration node found.")
+        duration_node = next((n for n in duration_nodes if "Duration" in str(n.get("title", ""))), duration_nodes[0])
+        named_value = (duration_node.get("widgets_values_named") or {}).get("value")
+        widgets = duration_node.get("widgets_values") or []
+        value = named_value if named_value is not None else (widgets[0] if widgets else None)
+        require(abs(float(value) - 5.0) < 1e-9, f"{name}: _set_duration() did not update PrimitiveFloat value to requested seconds.")
+        require(after_expr == before_expr, f"{name}: _set_duration() overwrote the ComfyMathExpression formula.")
+        require(
+            next(n for n in workflow["nodes"] if n.get("type") == "MiniMaxH3ReferenceToVideo").get("widgets_values", [])[3]
+            == _h3_legal_frames(5.0),
+            f"{name}: _set_duration() did not preserve the H3 legal frame fallback value.",
+        )
+    # Resolution: supported H3 production target must produce the selector mapping used by the builder.
+    workflow = builder.load("ref2v")
+    builder._set_resolution(workflow, 1344, 768)
+    selector = next(n for n in workflow["nodes"] if n.get("type") == "ResolutionSelector")
+    widgets = selector.get("widgets_values") or []
+    require(abs(float(widgets[1]) - 0.98) < 1e-9, "H3WorkflowBuilder._set_resolution() must map 1344x768 to the selector's 0.98 MP entry.")
+    builder._set_resolution(workflow, 1920, 1088)
+    selector = next(n for n in workflow["nodes"] if n.get("type") == "ResolutionSelector")
+    widgets = selector.get("widgets_values") or []
+    require(abs(float(widgets[1]) - 2.0) < 1e-9, "H3WorkflowBuilder._set_resolution() must map 1920x1088 to the selector's 2.0 MP entry.")
+    try:
+        builder._set_resolution(deepcopy(workflow), 1280, 720)
+    except ValueError:
+        pass
+    else:
+        fail("H3WorkflowBuilder._set_resolution() must reject unsupported production resolutions.")
+    print("PASS H3WorkflowBuilder behavioral contracts")
+
+
+def validate_short_story_planner_contract() -> None:
+    """Exercise the deterministic planner's minimum four-unit behavior without loading Qwen."""
+    from planner.production_planner import ProductionPlanner, StoryUnit
+    planner = ProductionPlanner(ROOT)
+    for text in ("John enters the room.", "John enters the room and sees a light."):
+        units = planner._split_story(text)
+        rebalanced = planner._rebalance_story_units(units)
+        require(len(rebalanced) >= 4, "ProductionPlanner must create at least four planning units for non-empty short stories.")
+        joined = " ".join(unit.text for unit in rebalanced).strip()
+        original = planner._clean_text(text)
+        require(original in joined or joined in original or len(original.split()) <= 2, "Short-story rebalancing must preserve the source narrative text.")
+    print("PASS short-story planner contract")
+
+
+def validate_runtime_config_alignment() -> None:
+    """Verify planner/config.py agrees with the centralized runtime YAML."""
+    path = ROOT / "configs" / "runtime_versions.yaml"
+    require(path.is_file(), "configs/runtime_versions.yaml is missing.")
+    try:
+        import yaml
+    except ImportError as exc:
+        fail(f"PyYAML is required for runtime configuration validation: {exc}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    generation = data.get("generation") or {}
+    upscale = data.get("upscale") or {}
+    delivery = data.get("delivery") or {}
+    from planner import config as runtime
+    checks = (
+        ("H3_WIDTH", runtime.H3_WIDTH, generation.get("width")),
+        ("H3_HEIGHT", runtime.H3_HEIGHT, generation.get("height")),
+        ("H3_FPS", runtime.H3_FPS, generation.get("fps")),
+        ("H3_FRAMES_PER_SHOT", runtime.H3_FRAMES_PER_SHOT, generation.get("frames_per_shot")),
+        ("H3_STEPS", runtime.H3_STEPS, generation.get("normal_steps")),
+        ("TURBO_STEPS", runtime.TURBO_STEPS, generation.get("turbo_steps")),
+        ("H3_REF_IMAGE_SIZE", runtime.H3_REF_IMAGE_SIZE, generation.get("ref_image_size")),
+        ("UPSCALE_WIDTH", runtime.UPSCALE_WIDTH, upscale.get("width")),
+        ("UPSCALE_HEIGHT", runtime.UPSCALE_HEIGHT, upscale.get("height")),
+        ("DELIVERY_WIDTH", runtime.DELIVERY_WIDTH, delivery.get("width")),
+        ("DELIVERY_HEIGHT", runtime.DELIVERY_HEIGHT, delivery.get("height")),
+        ("DELIVERY_FPS", runtime.DELIVERY_FPS, delivery.get("fps")),
+    )
+    for key, actual, configured in checks:
+        require(configured == actual, f"Runtime config mismatch for {key}: planner/config.py={actual!r}, runtime_versions.yaml={configured!r}.")
+    print("PASS runtime configuration alignment")
+
+
+
+def validate_gradio_director_override() -> None:
+    """Ensure the Gradio entry point preserves an explicit director-enable environment value."""
+    path = ROOT / "ui" / "storyboard_gradio.py"
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text, filename=str(path))
+
+    setdefault_ok = False
+    unconditional_override = False
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr != "setdefault":
+                continue
+            receiver = node.func.value
+            if not (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "environ"
+                and isinstance(receiver.value, ast.Name)
+                and receiver.value.id == "os"
+            ):
+                continue
+            if len(node.args) != 2:
+                continue
+            if all(isinstance(arg, ast.Constant) for arg in node.args):
+                setdefault_ok = (
+                    node.args[0].value == "H3_DIRECTOR_ENABLED"
+                    and node.args[1].value == "1"
+                )
+                if setdefault_ok:
+                    break
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Subscript):
+                continue
+            receiver = target.value
+            if not (
+                isinstance(receiver, ast.Attribute)
+                and receiver.attr == "environ"
+                and isinstance(receiver.value, ast.Name)
+                and receiver.value.id == "os"
+            ):
+                continue
+            key_node = target.slice
+            if isinstance(key_node, ast.Constant) and key_node.value == "H3_DIRECTOR_ENABLED":
+                unconditional_override = True
+
+    require(
+        setdefault_ok,
+        "Gradio entry point must use os.environ.setdefault('H3_DIRECTOR_ENABLED', '1').",
+    )
+    require(
+        not unconditional_override,
+        "Gradio entry point must not unconditionally assign H3_DIRECTOR_ENABLED.",
+    )
+    print("PASS Gradio director environment contract")
+
+
+def validate_production_runtime_isolation() -> None:
+    """Verify continuity and identity artifacts are isolated by production_id."""
+    runner_path = ROOT / "execution" / "production_runner.py"
+    continuity_path = ROOT / "pipeline" / "h3_scene_continuity.py"
+    identity_path = ROOT / "pipeline" / "identity_anchor_store.py"
+
+    runner = runner_path.read_text(encoding="utf-8")
+    continuity = continuity_path.read_text(encoding="utf-8")
+    identity = identity_path.read_text(encoding="utf-8")
+
+    require(
+        "production_id=production_id" in runner,
+        "ProductionRunner must pass production_id to production-scoped stores.",
+    )
+    require(
+        "H3SceneContinuity(" in runner,
+        "ProductionRunner must initialize H3SceneContinuity.",
+    )
+    require(
+        "IdentityAnchorStore(" in runner,
+        "ProductionRunner must initialize IdentityAnchorStore.",
+    )
+    require(
+        "base / self.production_id" in continuity,
+        "H3SceneContinuity must isolate its root when production_id is supplied.",
+    )
+    require(
+        "base / self.production_id" in identity,
+        "IdentityAnchorStore must isolate its root when production_id is supplied.",
+    )
+    print("PASS production runtime isolation")
+
+
+def validate_manifest_locking() -> None:
+    """Verify every ProductionRunner storyboard manifest write is protected."""
+    path = ROOT / "execution" / "production_runner.py"
+    text = path.read_text(encoding="utf-8")
+    require(
+        "self._manifest_lock = threading.RLock()" in text,
+        "ProductionRunner must create a manifest lock.",
+    )
+
+    tree = ast.parse(text, filename=str(path))
+    update_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "update_manifest"
+    ]
+    require(update_calls, "ProductionRunner must update the storyboard reference manifest.")
+
+    protected_ranges: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.With):
+            continue
+        for item in node.items:
+            context = item.context_expr
+            if (
+                isinstance(context, ast.Attribute)
+                and context.attr == "_manifest_lock"
+                and isinstance(context.value, ast.Name)
+                and context.value.id == "self"
+            ):
+                protected_ranges.append(
+                    (node.lineno, getattr(node, "end_lineno", node.lineno))
+                )
+
+    require(protected_ranges, "ProductionRunner has no _manifest_lock context.")
+    for call in update_calls:
+        require(
+            any(start <= call.lineno <= end for start, end in protected_ranges),
+            f"ProductionRunner manifest update at line {call.lineno} is not under _manifest_lock.",
+        )
+    print("PASS manifest locking")
+
+
+def validate_ffprobe_stream_duration_semantics() -> None:
+    """Ensure A/V duration validation measures stream duration rather than container duration."""
+    path = ROOT / "pipeline" / "dialogue_duration.py"
+    text = path.read_text(encoding="utf-8")
+    require("-select_streams" in text, "FFprobe provider must select an individual stream.")
+    require("stream=duration" in text, "FFprobe provider must request stream duration.")
+    require(
+        "format=duration" not in text,
+        "FFprobe A/V sync validation must not use container format duration for stream comparisons.",
+    )
+    print("PASS FFprobe stream-duration semantics")
+
+
+def validate_production_orchestrator_contract() -> None:
+    """Ensure post-Qwen production enforcement is deterministic and occurs after unload."""
+    path = ROOT / "pipeline" / "production_orchestrator.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    enforce = _find_function(tree, "_enforce_production_contracts")
+    create = _find_function(tree, "create_production_plan")
+    require(enforce is not None, "ProductionOrchestrator._enforce_production_contracts() is missing.")
+    require(create is not None, "ProductionOrchestrator.create_production_plan() is missing.")
+
+    repair_calls = [
+        node
+        for node in ast.walk(enforce)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "repair_continuity_violation"
+    ]
+    require(
+        not repair_calls,
+        "_enforce_production_contracts must not call Qwen continuity repair after unload.",
+    )
+    require(
+        "apply_field_level_fallback" in ast.unparse(enforce),
+        "Deterministic continuity fallback is missing from _enforce_production_contracts.",
+    )
+
+    unload_lines = [
+        node.lineno
+        for node in ast.walk(create)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "unload"
+    ]
+    enforce_lines = [
+        node.lineno
+        for node in ast.walk(create)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_enforce_production_contracts"
+    ]
+    require(unload_lines, "create_production_plan() must unload the director.")
+    require(enforce_lines, "create_production_plan() must call deterministic production enforcement.")
+    require(
+        min(unload_lines) < min(enforce_lines),
+        "Qwen director must be unloaded before deterministic production enforcement.",
+    )
+    print("PASS production orchestrator deterministic contract")
 
 
 def validate_workflows() -> None:
@@ -744,7 +1155,7 @@ def validate_model_inventory() -> None:
             path
         )
 
-        values = executable_model_values(graph)
+        values = executable_model_values(graph, name)
 
         for node_type, value in values:
             basename = model_basename(value)
@@ -940,9 +1351,10 @@ def validate_plan_persistence_boundary() -> None:
     orchestrator_text = orchestrator_path.read_text(encoding="utf-8")
     cli_text = cli_path.read_text(encoding="utf-8")
 
-    require("def create_production_plan(" in orchestrator_text, "ProductionOrchestrator plan method is missing.")
-    require("return plan" in orchestrator_text, "ProductionOrchestrator must return the production plan.")
-    require("def create_cli_plan_path(" in cli_text, "CLI plan persistence helper is missing.")
+    orchestrator_tree = ast.parse(orchestrator_text, filename=str(orchestrator_path))
+    cli_tree = ast.parse(cli_text, filename=str(cli_path))
+    require(_find_function(orchestrator_tree, "create_production_plan") is not None, "ProductionOrchestrator plan method is missing.")
+    require(_find_function(cli_tree, "create_cli_plan_path") is not None, "CLI plan persistence helper is missing.")
     require("story_preview.json" in cli_text, "CLI plan filename is missing.")
     require("save_plan(" in cli_text, "CLI save_plan() call is missing.")
     require(
@@ -1066,6 +1478,10 @@ def validate_execution_integration() -> None:
 
     runner_text = runner_path.read_text(encoding="utf-8")
     require("self._completed_shots_lock = threading.RLock()" in runner_text, "ProductionRunner must protect shared completed-shot state.")
+    require("self._manifest_lock = threading.RLock()" in runner_text, "ProductionRunner must protect shared reference-role manifest updates.")
+    require("production_id=production_id" in runner_text, "ProductionRunner must pass production_id into production-scoped continuity/identity stores.")
+    require("H3SceneContinuity(" in runner_text, "ProductionRunner must initialize H3SceneContinuity.")
+    require("IdentityAnchorStore(" in runner_text, "ProductionRunner must initialize IdentityAnchorStore.")
 
     # Replace brittle whitespace-sensitive string check with AST-based call validation.
     tree = ast.parse(runner_text, filename=str(runner_path))
@@ -1218,9 +1634,19 @@ def main() -> None:
     validate_execution_runtime_contracts()
     validate_execution_integration()
     validate_gradio_ui()
+    validate_gradio_director_override()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
     validate_ui_share_configuration()
+    validate_h3_duration_chain()
+    validate_h3_resolution_selector_contract()
+    validate_h3_builder_behavior()
+    validate_short_story_planner_contract()
+    validate_production_runtime_isolation()
+    validate_manifest_locking()
+    validate_ffprobe_stream_duration_semantics()
+    validate_production_orchestrator_contract()
+    validate_runtime_config_alignment()
 
     
     print(
