@@ -12,11 +12,15 @@ from typing import Any
 from execution.assembly_manager import (
     AssemblyManager,
 )
+from execution.h3_runtime import H3Runtime
 from execution.shot_executor import (
     ShotExecutor,
 )
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from pipeline.dialogue_duration import FFProbeMediaDurationProvider
+from pipeline.seed_lineage import ensure_shot_uid, semantic_content_digest, stable_seed
+from pipeline.visual_state_observer import VisualStateObserver
+from pipeline.visual_feedback import VisualFeedbackEngine
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
@@ -73,6 +77,8 @@ class ProductionRunner:
         self._active_plan_sha256 = ""
         self._completed_shots_lock = threading.RLock()
         self._manifest_lock = threading.RLock()
+        self.visual_observer = VisualStateObserver(self.project_root)
+        self.visual_feedback = VisualFeedbackEngine(self.visual_observer)
 
         self.production_input_root = (
             self.input_root
@@ -779,12 +785,10 @@ class ProductionRunner:
 
             # Preserve any explicit user/planner seed. Only synthesize a
             # deterministic seed when the plan did not provide one.
+            ensure_shot_uid(shot, production_id)
+            shot["semantic_content_digest"] = semantic_content_digest(shot)
             if shot.get("seed") in (None, ""):
-                shot["seed"] = self._deterministic_shot_seed(
-                    production_id,
-                    str(scene_id),
-                    shot_id,
-                )
+                shot["seed"] = stable_seed(production_id, shot)
 
             # ------------------------------------------------
             # RESUME BY RECORDED OUTPUT PATH + GPU.
@@ -866,6 +870,11 @@ class ProductionRunner:
                 shot,
                 character_map,
             )
+
+            if previous_shot is not None and not bool(shot.get("is_scene_boundary", False)):
+                observed = previous_shot.get("observed_visual_state")
+                if isinstance(observed, dict) and observed:
+                    shot["observed_previous_shot_state"] = dict(observed)
 
             if previous_video is not None and not bool(shot.get("is_scene_boundary", False)):
 
@@ -1028,6 +1037,21 @@ class ProductionRunner:
                 )
             )
 
+            try:
+                shot["visual_feedback"] = self.visual_feedback.analyze(
+                    result,
+                    anchor_frame,
+                    shot.get("continuity_end_state", {}) or {},
+                )
+                shot["observed_visual_state"] = dict(
+                    shot["visual_feedback"].get("observed_state", {})
+                )
+            except Exception as feedback_error:
+                shot["visual_feedback"] = {
+                    "deterministic_observation": False,
+                    "warning": str(feedback_error),
+                }
+
             self._persist_first_appearance_anchors(
                 shot,
                 character_map,
@@ -1128,6 +1152,15 @@ class ProductionRunner:
         production_plan[
             "production_id"
         ] = production_id
+
+        self.continuity = H3SceneContinuity(
+            self.project_root,
+            production_id=production_id,
+        )
+        self.identity_anchors = IdentityAnchorStore(
+            self.project_root,
+            production_id=production_id,
+        )
 
         self._prepare_production_paths(production_id)
 
@@ -1320,6 +1353,9 @@ class ProductionRunner:
         scene_results = []
 
         try:
+            # Hard handoff: release any remotely resident ComfyUI models and
+            # clear local CUDA allocator state before concurrent H3 workers start.
+            H3Runtime.vram_handoff(self.clients, unload_models=True)
 
             scheduler = GPUScheduler(
                 gpu_ids=sorted(self.clients)
