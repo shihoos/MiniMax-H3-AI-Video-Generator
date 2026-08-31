@@ -229,11 +229,11 @@ class ContinuityLedger:
             proposed_end = self._state_for_shot(shot, "continuity_end_state")
             if is_boundary:
                 start = self._scene_reset_state(shot, self._identity_map_for_shot(shot, fingerprint_map, name_to_id))
-                repaired = bool(previous is not None)
+                repaired = bool(shot.get("continuity_repair_applied", False))
                 shot["is_scene_boundary"] = True
             else:
                 start = deepcopy(previous.get("continuity_end_state") or {}) if previous else self._state_for_shot(shot, "continuity_start_state")
-                repaired = bool(previous is not None)
+                repaired = bool(shot.get("continuity_repair_applied", False))
                 shot["is_scene_boundary"] = False
 
             shot["continuity_start_state"] = start
