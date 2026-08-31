@@ -320,6 +320,8 @@ H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
 H3_DIRECTOR_CRITIC = feature_enabled("director_critic", True)
 H3_VLM_REFERENCE_ANALYSIS = feature_enabled("vlm_reference_analysis", True)
 H3_VLM_VISUAL_QA = feature_enabled("vlm_visual_qa", True)
+H3_AUTO_RETAKE = feature_enabled("auto_retake", True)
+H3_MAX_AUTO_RETAKES_PER_SHOT = max(0, int(os.getenv("H3_MAX_AUTO_RETAKES_PER_SHOT", str(RUNTIME.get("features", {}).get("max_auto_retakes_per_shot", 1)))))
 
 
 # ============================================================
