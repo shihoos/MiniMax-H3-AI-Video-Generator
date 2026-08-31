@@ -1297,6 +1297,20 @@ class ProductionOrchestrator:
         plan = self._enforce_production_contracts(plan, characters)
         character_dicts = [character.to_dict() for character in characters]
 
+        # Finalize scene-boundary flags before building the storyboard manifest.
+        # The manifest and all downstream reference contracts must see the same
+        # final scene-boundary semantics.
+        previous_by_scene = {}
+        for shot in plan.get("shots", []):
+            scene_id = str(shot.get("scene_id", "")).strip()
+            previous = previous_by_scene.get(scene_id)
+            explicit_boundary = bool(shot.get("is_scene_boundary", False))
+            shot["is_scene_boundary"] = previous is None or explicit_boundary
+            if previous is not None:
+                shot["previous_shot"] = previous.get("shot_id")
+                previous["next_shot"] = shot.get("shot_id")
+            previous_by_scene[scene_id] = shot
+
         storyboard = StoryboardReferenceBuilder(
             self.project_root,
             production_id,
@@ -1337,6 +1351,7 @@ class ProductionOrchestrator:
                     list(shot.get("reference_images", []) or []),
                     list(shot.get("reference_roles", []) or []),
                     list(shot.get("reference_bindings", []) or []),
+                    actual_runtime_order=False,
                 )
                 StoryboardReferenceBuilder.assert_manifest_invariant(
                     entry,
@@ -1344,26 +1359,6 @@ class ProductionOrchestrator:
                     list(shot.get("reference_bindings", []) or []),
                 )
             self._refresh_shot_prompt(shot)
-
-        previous_by_scene = {}
-
-        for shot in plan.get(
-            "shots",
-            [],
-        ):
-
-            scene_id = shot["scene_id"]
-            previous = previous_by_scene.get(
-                scene_id
-            )
-
-            if previous:
-                shot["previous_shot"] = previous["shot_id"]
-                previous["next_shot"] = shot["shot_id"]
-
-            explicit_boundary = bool(shot.get("is_scene_boundary", False))
-            shot["is_scene_boundary"] = previous is None or explicit_boundary
-            previous_by_scene[scene_id] = shot
 
         scene_characters = {}
 
