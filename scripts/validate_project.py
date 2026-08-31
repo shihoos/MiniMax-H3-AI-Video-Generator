@@ -100,6 +100,7 @@ REQUIRED_FILES = [
     "ui/storyboard_gradio.py",
     "scripts/generate_video.py",
     "scripts/validate_reference_wiring.py",
+    "scripts/validate_production_scale.py",
     "scripts/validate_director.py",
     "scripts/validate_production_continuity.py",
 
@@ -131,6 +132,11 @@ RUNTIME_IMPORTS = [
     "pipeline.continuity_ledger",
     "pipeline.storyboard_reference_builder",
     "pipeline.identity_anchor_store",
+    "pipeline.seed_lineage",
+    "pipeline.visual_state_observer",
+    "pipeline.visual_feedback",
+    "pipeline.storyboard_cache",
+    "pipeline.job_queue",
 
     # Schemas
     "schemas.dialogue",
@@ -146,9 +152,6 @@ RUNTIME_IMPORTS = [
 
     # Scheduler
     "scheduler.gpu_scheduler",
-
-    # Structured schemas
-    "schemas.dialogue",
 
     # UI
     "ui.storyboard_gradio",
@@ -1173,30 +1176,6 @@ def validate_model_inventory() -> None:
     )
 
 
-def validate_h3_workflow_semantics() -> None:
-    """Verify the live H3 graph preserves the duration formula and selector mapping."""
-    from execution.h3_workflow_builder import H3WorkflowBuilder
-
-    builder = H3WorkflowBuilder(ROOT, None)
-    workflow = builder.load("ref2v")
-    expression = next(node for node in workflow["nodes"] if node.get("type") == "ComfyMathExpression")
-    original_expression = expression.get("widgets_values", [None])[0]
-    builder._set_duration(workflow, 5.0)
-    primitive = next(node for node in workflow["nodes"] if node.get("type") == "PrimitiveFloat" and node.get("title") == "Float (Duration)")
-    require(primitive.get("widgets_values", [None])[0] == 5.0, "H3 duration setter must preserve requested seconds in PrimitiveFloat.")
-    require(expression.get("widgets_values", [None])[0] == original_expression, "H3 duration setter changed the ComfyMathExpression formula.")
-
-    expected = {(1344, 768): 0.98, (1216, 672): 0.80, (1056, 608): 0.60, (1920, 1088): 2.00}
-    for (width, height), megapixels in expected.items():
-        graph = builder.load("ref2v")
-        builder._set_resolution(graph, width, height)
-        selector = builder._one(graph, "ResolutionSelector")
-        widgets = selector.get("widgets_values", [])
-        require(float(widgets[1]) == megapixels, f"H3 resolution mapping mismatch for {width}x{height}.")
-
-    print("PASS H3 workflow semantic contracts")
-
-
 def validate_config() -> None:
 
     from planner.config import (
@@ -1635,6 +1614,7 @@ def validate_execution_runtime_contracts() -> None:
     prompt = shot.h3_prompt()
     for section in (
         "subject_definitions:",
+        "Reference roles and bindings:",
         "summary:",
         "retention_analysis:",
         "detailed_description:",
@@ -1655,7 +1635,6 @@ def main() -> None:
     validate_upscale_audio_semantics()
     validate_production_templates()
     validate_model_inventory()
-    validate_h3_workflow_semantics()
     validate_config()
     validate_runtime_imports()
     validate_execution_runtime_contracts()
@@ -1665,6 +1644,8 @@ def main() -> None:
     validate_reference_wiring()
     validate_plan_persistence_boundary()
     validate_ui_share_configuration()
+    from scripts import validate_production_scale
+    validate_production_scale.main()
     validate_h3_duration_chain()
     validate_h3_resolution_selector_contract()
     validate_h3_builder_behavior()
