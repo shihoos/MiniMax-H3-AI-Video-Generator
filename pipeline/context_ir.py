@@ -126,6 +126,15 @@ class H3ContextIRCompiler:
         if not isinstance(continuity, dict):
             continuity = {}
         required = []
+        roles = [r for r in (shot.get("reference_roles", []) or []) if isinstance(r, dict)]
+        for index, role in enumerate(roles, start=1):
+            label = cls._clean(role.get("label")) or f"Picture {index}"
+            role_name = cls._clean(role.get("role")) or "visual reference"
+            relationship = "fully_preserved"
+            if role_name in {"storyboard", "visual_reference"}:
+                relationship = "partially_preserved" if role_name == "storyboard" else "fully_preserved"
+            description = cls._clean(role.get("description") or role.get("label") or role_name)
+            required.append(f"<{label}>: {relationship} - {description}.")
         for key, label in (
             ("location", "location"),
             ("lighting", "lighting"),
@@ -157,6 +166,17 @@ class H3ContextIRCompiler:
             or cls._clean(shot.get("visual_prompt"))
             or cls._clean(shot.get("action"))
         )
+        visual_analysis = plan.get("reference_visual_analysis", {}) or {}
+        if isinstance(visual_analysis, dict) and visual_analysis:
+            cues = []
+            for item in visual_analysis.values():
+                if not isinstance(item, dict):
+                    continue
+                cue_text = cls._clean(item.get("description"))
+                if cue_text:
+                    cues.append(cue_text)
+            if cues:
+                description = (description + " Reference-derived visible cues: " + "; ".join(cues[:4])).strip()
         camera = ", ".join(
             x for x in (
                 cls._clean(shot.get("camera_shot")),
@@ -221,6 +241,8 @@ class H3ContextIRCompiler:
             raise ValueError(
                 f"Unsupported H3 Context-IR version: {version}; expected {cls.VERSION}."
             )
+        if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
+            raise ValueError("H3 Context-IR mode must be ref2va for this repository.")
         prompt = str(context_ir.get("h3_prompt", "") or "").strip()
         if not prompt:
             raise ValueError("H3 Context-IR contains an empty h3_prompt.")
@@ -233,6 +255,14 @@ class H3ContextIRCompiler:
             positions.append(position)
         if positions != sorted(positions):
             raise ValueError("H3 Context-IR sections are out of order.")
+        sections = context_ir.get("sections")
+        if not isinstance(sections, dict):
+            raise ValueError("H3 Context-IR must expose its six named sections.")
+        if tuple(sections.keys()) != cls.REQUIRED_SECTIONS:
+            raise ValueError("H3 Context-IR section mapping is incomplete or out of order.")
+        for section in cls.REQUIRED_SECTIONS:
+            if not str(sections.get(section, "") or "").strip():
+                raise ValueError(f"H3 Context-IR section is empty: {section}")
 
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
@@ -240,14 +270,18 @@ class H3ContextIRCompiler:
         return str(context_ir["h3_prompt"]).strip()
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
-        prompt = "\n\n".join([
-            "subject_definitions:\n" + self._subject_definitions(plan, shot),
-            "summary:\n" + self._summary(plan, shot),
-            "retention_analysis:\n" + self._retention_analysis(shot),
-            "detailed_description:\n" + self._detailed_description(plan, shot),
-            "overall_soundscape:\n" + self._soundscape(shot),
-            "non_diegetic_music:\n" + self._music(shot),
-        ]).strip()
+        sections = {
+            "subject_definitions": self._subject_definitions(plan, shot),
+            "summary": self._summary(plan, shot),
+            "retention_analysis": self._retention_analysis(shot),
+            "detailed_description": self._detailed_description(plan, shot),
+            "overall_soundscape": self._soundscape(shot),
+            "non_diegetic_music": self._music(shot),
+        }
+        prompt = "\n\n".join(
+            f"{name}:\n{sections[name]}"
+            for name in self.REQUIRED_SECTIONS
+        ).strip()
 
         refs = []
         for index, binding in enumerate(shot.get("reference_bindings", []) or [], start=1):
@@ -264,6 +298,7 @@ class H3ContextIRCompiler:
                 "mood": self._clean(shot.get("mood")),
             },
             "h3_prompt": prompt,
+            "sections": sections,
             "shot": {
                 "shot_id": self._clean(shot.get("shot_id")),
                 "duration_seconds": float(shot.get("duration_seconds", 0.0) or 0.0),
