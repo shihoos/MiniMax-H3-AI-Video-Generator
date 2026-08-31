@@ -1,4 +1,4 @@
-"""LTX-13B AI Video Model package."""
+"""MiniMax H3 AI Video Model package."""
 
 from schemas.character import Character
 from schemas.scene import Scene
