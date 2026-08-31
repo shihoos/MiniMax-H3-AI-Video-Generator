@@ -292,19 +292,6 @@ class H3WorkflowBuilder:
         width: int,
         height: int,
     ):
-        ratio = (
-            float(width)
-            / float(height)
-        )
-
-        if abs(
-            ratio - (16.0 / 9.0)
-        ) > 0.03:
-            raise ValueError(
-                "MiniMax H3 production is locked "
-                "to 16:9 in this repository."
-            )
-
         selectors = self._find(
             workflow,
             "ResolutionSelector",
@@ -548,14 +535,11 @@ class H3WorkflowBuilder:
             "MiniMaxH3ReferenceToVideo",
         )
 
-        effective_seconds = (
-            float(frames)
-            / float(H3_FPS)
-        )
+        requested_seconds = float(duration_seconds)
 
         if self._set_duration_source(
             workflow,
-            effective_seconds,
+            requested_seconds,
         ):
             # Keep the serialized reference-node widget coherent for tooling
             # that inspects the saved graph, while the connected PrimitiveFloat
