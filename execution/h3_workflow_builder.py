@@ -286,23 +286,65 @@ class H3WorkflowBuilder:
     # 16:9
     # ============================================================
 
+    # ResolutionSelector uses a discrete megapixel table. The value is
+    # therefore NOT interchangeable with width*height/1e6: the selector
+    # may quantize to a different canvas. Keep the production dimensions
+    # explicit and fail loudly for unsupported sizes.
+    _H3_16_9_RESOLUTIONS = {
+        (736, 416): 0.30,
+        (864, 480): 0.40,
+        (960, 544): 0.50,
+        (1056, 608): 0.60,
+        (1152, 640): 0.70,
+        (1216, 672): 0.80,
+        (1280, 736): 0.90,
+        (1344, 768): 0.98,
+        (1504, 832): 1.20,
+        (1664, 928): 1.50,
+        (1920, 1088): 2.10,
+        (2560, 1440): 3.70,
+        (3840, 2160): 8.30,
+    }
+
     def _set_resolution(
         self,
         workflow: dict,
         width: int,
         height: int,
     ):
-        ratio = (
-            float(width)
-            / float(height)
+        width = int(width)
+        height = int(height)
+
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                "MiniMax H3 resolution dimensions must be positive."
+            )
+
+        megapixels = self._H3_16_9_RESOLUTIONS.get(
+            (width, height)
         )
 
-        if abs(
-            ratio - (16.0 / 9.0)
-        ) > 0.03:
+        # The selector table itself is authoritative for supported H3 canvas
+        # sizes. Some table dimensions (for example 1056x608) are the nearest
+        # 32-pixel multiples to a nominal 16:9 target, so their raw integer
+        # ratio is not exactly 16:9. Only apply the ratio guard to unsupported
+        # dimensions.
+        if megapixels is None:
+            ratio = float(width) / float(height)
+            if abs(ratio - (16.0 / 9.0)) > 0.03:
+                raise ValueError(
+                    "MiniMax H3 production is locked to 16:9 in this repository."
+                )
+
+        if megapixels is None:
             raise ValueError(
-                "MiniMax H3 production is locked "
-                "to 16:9 in this repository."
+                "Unsupported MiniMax H3 16:9 production resolution: "
+                f"{width}x{height}. Supported resolutions: "
+                + ", ".join(
+                    f"{w}x{h}"
+                    for (w, h) in self._H3_16_9_RESOLUTIONS
+                )
+                + "."
             )
 
         selectors = self._find(
@@ -317,37 +359,23 @@ class H3WorkflowBuilder:
 
         selector = selectors[0]
 
-        widgets = self._widgets(
-            selector
-        )
+        widgets = self._widgets(selector)
 
         while len(widgets) < 3:
             widgets.append(None)
 
         widgets[0] = "16:9 (Widescreen)"
-        widgets[1] = (
-            (width * height)
-            / 1_000_000
-        )
+        widgets[1] = megapixels
         widgets[2] = 32
 
         named = selector.get(
             "widgets_values_named",
         )
 
-        if isinstance(
-            named,
-            dict,
-        ):
-            named[
-                "aspect_ratio"
-            ] = "16:9 (Widescreen)"
-            named[
-                "megapixels"
-            ] = widgets[1]
-            named[
-                "multiple"
-            ] = 32
+        if isinstance(named, dict):
+            named["aspect_ratio"] = "16:9 (Widescreen)"
+            named["megapixels"] = megapixels
+            named["multiple"] = 32
 
     # ============================================================
     # REFERENCE IMAGE SIZE POLICY
@@ -390,79 +418,113 @@ class H3WorkflowBuilder:
     # LINKED DURATION
     # ============================================================
 
-    def _set_linked_expression_value(
+    @classmethod
+    def _find_link(
+        cls,
+        workflow: dict,
+        link_id: int | None,
+    ) -> list | None:
+        if link_id is None:
+            return None
+
+        for link in workflow.get("links", []) or []:
+            if not isinstance(link, list) or len(link) < 5:
+                continue
+            try:
+                if int(link[0]) == int(link_id):
+                    return link
+            except (TypeError, ValueError):
+                continue
+
+        return None
+
+    def _set_duration_source(
         self,
         workflow: dict,
-        target_node_id: int,
-        target_slot: int,
-        value: int,
-    ):
-        links = workflow.get(
-            "links",
-            [],
+        duration_seconds: float,
+    ) -> bool:
+        """Set the PrimitiveFloat feeding the H3 duration expression."""
+        ref_node = self._one(
+            workflow,
+            "MiniMaxH3ReferenceToVideo",
         )
 
-        for link in links:
+        length_link_id = None
+        for input_item in ref_node.get("inputs", []) or []:
+            if input_item.get("name") == "length":
+                length_link_id = input_item.get("link")
+                break
 
-            if not isinstance(
-                link,
-                list,
-            ) or len(link) < 5:
-                continue
+        length_link = self._find_link(
+            workflow,
+            length_link_id,
+        )
+        if length_link is None:
+            return False
 
-            try:
-                source_id = int(
-                    link[1]
-                )
-                destination_id = int(
-                    link[3]
-                )
-                destination_slot = int(
-                    link[4]
-                )
-            except (
-                TypeError,
-                ValueError,
-            ):
-                continue
+        expression_node_id = int(length_link[1])
+        expression_node = next(
+            (
+                node
+                for node in self._nodes(workflow)
+                if self._node_id(node) == expression_node_id
+            ),
+            None,
+        )
 
-            if (
-                destination_id != target_node_id
-                or destination_slot != target_slot
-            ):
-                continue
+        if (
+            expression_node is None
+            or expression_node.get("type") != "ComfyMathExpression"
+        ):
+            return False
 
-            source = next(
-                (
-                    node
-                    for node in self._nodes(
-                        workflow
-                    )
-                    if self._node_id(node)
-                    == source_id
-                ),
-                None,
-            )
+        expression_input = None
+        for item in expression_node.get("inputs", []) or []:
+            if item.get("name") in {"values.a", "a"}:
+                expression_input = item
+                break
 
-            if source is None:
-                continue
+        if expression_input is None:
+            return False
 
-            if source.get(
-                "type"
-            ) == "ComfyMathExpression":
+        duration_link = self._find_link(
+            workflow,
+            expression_input.get("link"),
+        )
+        if duration_link is None:
+            return False
 
-                widgets = self._widgets(
-                    source
-                )
+        duration_node_id = int(duration_link[1])
+        duration_node = next(
+            (
+                node
+                for node in self._nodes(workflow)
+                if self._node_id(node) == duration_node_id
+            ),
+            None,
+        )
 
-                if widgets:
-                    widgets[0] = str(
-                        int(value)
-                    )
+        if (
+            duration_node is None
+            or duration_node.get("type") != "PrimitiveFloat"
+        ):
+            return False
 
-                    return True
+        # CRITICAL: do not modify the ComfyMathExpression itself. Its expression
+        # is the H3 17*n+5 formula and must remain intact. Only update its source
+        # Float(Duration) value.
+        value = float(duration_seconds)
+        self._set_widget(
+            duration_node,
+            0,
+            value,
+        )
 
-        return False
+        named = duration_node.get("widgets_values_named")
+        if isinstance(named, dict) and "value" in named:
+            named["value"] = value
+
+        return True
 
     def _set_duration(
         self,
@@ -473,29 +535,31 @@ class H3WorkflowBuilder:
             duration_seconds
         )
 
-        ref_node = self._one(
+        if self._set_duration_source(
             workflow,
-            "MiniMaxH3ReferenceToVideo",
-        )
-
-        ref_id = self._node_id(
-            ref_node
-        )
-
-        # Current H3 production workflow:
-        # length is target input 12.
-        if not self._set_linked_expression_value(
-            workflow,
-            ref_id,
-            12,
-            frames,
+            float(duration_seconds),
         ):
-            # Keep the widget fallback coherent.
+            # Keep the serialized widget display coherent even though the actual
+            # connected length input is driven by the expression node.
+            ref_node = self._one(
+                workflow,
+                "MiniMaxH3ReferenceToVideo",
+            )
             self._set_widget(
                 ref_node,
                 3,
                 frames,
             )
+            named = ref_node.get("widgets_values_named")
+            if isinstance(named, dict) and "length" in named:
+                named["length"] = frames
+            return
+
+        raise RuntimeError(
+            "Could not locate the PrimitiveFloat duration source "
+            "feeding MiniMaxH3ReferenceToVideo.length through "
+            "ComfyMathExpression."
+        )
 
     # ============================================================
     # ULTIMATE UPSCALE TARGET
