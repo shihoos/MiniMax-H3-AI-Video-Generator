@@ -314,10 +314,12 @@ def feature_enabled(name: str, default: bool = False) -> bool:
 
 
 H3_LIVE_PREVIEW = feature_enabled("live_preview", True)
-H3_VLM_ENABLED = feature_enabled("vlm_enabled", False)
+H3_VLM_ENABLED = feature_enabled("vlm_enabled", True)
 H3_QA_ENABLED = feature_enabled("qa_enabled", True)
 H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
-H3_DIRECTOR_CRITIC = feature_enabled("director_critic", False)
+H3_DIRECTOR_CRITIC = feature_enabled("director_critic", True)
+H3_VLM_REFERENCE_ANALYSIS = feature_enabled("vlm_reference_analysis", True)
+H3_VLM_VISUAL_QA = feature_enabled("vlm_visual_qa", True)
 
 
 # ============================================================
