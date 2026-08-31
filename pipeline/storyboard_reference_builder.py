@@ -167,16 +167,63 @@ class StoryboardReferenceBuilder:
         }
         for shot in shots:
             sid = str(shot.get("shot_id", "")).strip()
-            refs = list(shot.get("reference_images", []) or [])
+            refs = [str(value).strip() for value in (shot.get("reference_images", []) or []) if str(value).strip()]
             roles = [dict(item) for item in (shot.get("reference_roles", []) or []) if isinstance(item, dict)]
+            by_path = {str(item.get("path", "")).strip(): item for item in roles if str(item.get("path", "")).strip()}
+
+            if str(path) not in refs:
+                if len(refs) >= 9:
+                    ranked = []
+                    for index, ref in enumerate(refs):
+                        role = by_path.get(ref, {"priority": 50})
+                        # Preserve canonical identity references preferentially.
+                        score = 1000 + int(role.get("priority", 50)) if role.get("role") == "character_identity" else int(role.get("priority", 50))
+                        ranked.append((score, -index, ref))
+                    _, _, dropped = min(ranked, key=lambda item: (item[0], item[1]))
+                    refs = [ref for ref in refs if ref != dropped]
+                    roles = [role for role in roles if str(role.get("path", "")).strip() != dropped]
+                refs.append(str(path))
+                roles.append({
+                    "path": str(path),
+                    "role": "storyboard",
+                    "label": "Unified storyboard for sequencing, composition and blocking; not the canonical character identity source.",
+                    "priority": 90,
+                })
+
+            # This is the initial manifest order. The runner may later add/reorder
+            # the previous-shot final frame; it will update this same manifest.
+            roles_by_path = {str(role.get("path", "")).strip(): dict(role) for role in roles if str(role.get("path", "")).strip()}
+            normalized_roles = []
+            for ref in refs[:9]:
+                role = dict(roles_by_path.get(ref, {"path": ref, "role": "visual_reference", "priority": 50}))
+                role["path"] = ref
+                normalized_roles.append(role)
+
+            shot["reference_images"] = [role["path"] for role in normalized_roles]
+            shot["reference_roles"] = normalized_roles
+            shot["storyboard_reference"] = str(path)
+            shot["reference_role_manifest"] = str(manifest_path)
+
+            bindings = []
+            for index, role in enumerate(normalized_roles, start=1):
+                kind = str(role.get("role", "")).strip().lower()
+                if kind == "storyboard":
+                    label = "Unified storyboard for sequencing, composition and blocking; not the canonical character identity source."
+                elif kind == "previous_shot_last_frame":
+                    label = "Previous shot final-frame continuity reference."
+                else:
+                    character = str(role.get("character_name", "")).strip()
+                    label = f"Canonical visual identity reference for {character}; use for stable identity only." if character else "Production visual reference."
+                bindings.append(f"<Picture {index}> = {label}")
+
             manifest["shots"][sid] = {
                 "shot_id": sid,
-                "reference_images": refs,
+                "reference_images": list(shot["reference_images"]),
                 "references": [
-                    {"picture_index": i + 1, **dict(role), "path": str(refs[i])}
-                    for i, role in enumerate(roles[:len(refs)])
+                    {"picture_index": i + 1, **dict(role), "path": str(shot["reference_images"][i])}
+                    for i, role in enumerate(normalized_roles)
                 ],
-                "picture_bindings": [],
+                "picture_bindings": bindings,
                 "actual_runtime_order": False,
                 "invariant_verified": False,
             }
@@ -237,10 +284,18 @@ class StoryboardReferenceBuilder:
         manifest_refs = [str(value) for value in manifest_entry.get("reference_images", [])]
         actual_refs = [str(value) for value in reference_images]
         manifest_bindings = list(manifest_entry.get("picture_bindings", []))
+        manifest_reference_records = list(manifest_entry.get("references", []))
         if manifest_refs != actual_refs:
             raise RuntimeError("H3 reference order != reference-role manifest.")
         if manifest_bindings != list(picture_bindings):
             raise RuntimeError("reference-role manifest != <Picture N> prompt binding.")
+        if len(manifest_reference_records) != len(actual_refs):
+            raise RuntimeError("Reference-role record count does not match H3 reference order.")
+        for index, (ref, record) in enumerate(zip(actual_refs, manifest_reference_records), start=1):
+            if str(record.get("path", "")) != str(ref):
+                raise RuntimeError(f"Manifest reference path mismatch at Picture {index}.")
+            if int(record.get("picture_index", 0)) != index:
+                raise RuntimeError(f"Manifest Picture index mismatch at Picture {index}.")
 
 
 def json_dumps(value: Any) -> str:
