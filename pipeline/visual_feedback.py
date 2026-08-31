@@ -4,7 +4,7 @@ from typing import Any
 
 from pipeline.quality_gate import ProductionQualityGate
 from pipeline.vlm_analyzer import VLMAnalyzer
-from planner.config import H3_QA_ENABLED
+from planner.config import H3_QA_ENABLED, H3_VLM_VISUAL_QA
 
 
 class VisualFeedbackEngine:
@@ -29,7 +29,7 @@ class VisualFeedbackEngine:
             "deterministic_observation": True,
             "vision_escalated": False,
         }
-        if H3_QA_ENABLED and self.vision_analyzer.available:
+        if H3_QA_ENABLED and H3_VLM_VISUAL_QA and self.vision_analyzer.available:
             try:
                 candidates = [frame_path] + list(review_frames or [])
                 unique = []
