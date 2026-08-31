@@ -5736,9 +5736,11 @@ Return JSON only.
         system_prompt = """
 You are a conservative cinematic production critic.
 Review the supplied production plan for narrative, shot-design, continuity,
-reference-binding, and dialogue/action risks. Do not rewrite the plan.
-Return only JSON matching the supplied schema. Do not invent facts that are
-not present in the plan.
+reference-binding, and dialogue/action risks. Return a conservative critique.
+When a fix is warranted, provide a minimal patch for an existing shot using
+only the explicitly allowed creative fields in the schema. Never change scene
+identity, shot identity, characters, reference bindings, timing, or continuity
+state. Do not invent facts that are not present in the plan.
 """.strip()
         compact = {
             "mode": mode,
@@ -5768,8 +5770,36 @@ not present in the plan.
                     },
                 },
                 "recommended_focus": {"type": "array", "items": {"type": "string"}},
+                "shot_patches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "shot_id": {"type": "string"},
+                            "patch": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "action": {"type": "string"},
+                                    "camera_shot": {"type": "string"},
+                                    "camera_movement": {"type": "string"},
+                                    "lens_and_depth_of_field": {"type": "string"},
+                                    "composition_notes": {"type": "string"},
+                                    "lighting": {"type": "string"},
+                                    "color_temperature": {"type": "string"},
+                                    "mood": {"type": "string"},
+                                    "visual_prompt": {"type": "string"},
+                                    "overall_soundscape": {"type": "string"},
+                                    "non_diegetic_music": {"type": "string"},
+                                },
+                            },
+                        },
+                        "required": ["shot_id", "patch"],
+                    },
+                },
             },
-            "required": ["overall_score", "status", "findings", "shot_findings", "recommended_focus"],
+            "required": ["overall_score", "status", "findings", "shot_findings", "recommended_focus", "shot_patches"],
         }
         return self._chat_json(
             system_prompt,
