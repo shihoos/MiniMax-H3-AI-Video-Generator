@@ -46,6 +46,9 @@ from planner.production_planner import (
 from planner.qwen_director import (
     QwenDirector,
 )
+from pipeline.dialogue_timeline import DialogueTimeline
+from pipeline.continuity_ledger import ContinuityLedger, ContinuityViolation
+from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from schemas.character import (
     Character,
 )
@@ -365,6 +368,7 @@ class ProductionOrchestrator:
             images = []
             videos = []
             audio = []
+            reference_roles = []
             bindings = {}
 
             for character in selected:
@@ -389,11 +393,22 @@ class ProductionOrchestrator:
                     if (
                         path not in images
                         and len(images)
-                        < H3_MAX_REFERENCE_IMAGES
+                        < max(1, H3_MAX_REFERENCE_IMAGES - 2)
                     ):
                         images.append(
                             path
                         )
+                        reference_roles.append({
+                            "path": path,
+                            "role": "character_identity",
+                            "character_name": character.name,
+                            "character_id": character.character_id,
+                            "label": (
+                                f"Canonical visual identity reference for {character.name}; "
+                                "use for face, hair, body structure and stable identity only."
+                            ),
+                            "priority": 80,
+                        })
 
                 for path in character_videos:
                     if (
@@ -659,6 +674,7 @@ class ProductionOrchestrator:
 
                 reference_images=images,
                 reference_videos=videos,
+                reference_roles=reference_roles,
 
                 reference_audio=(
                     audio[0]
@@ -715,6 +731,108 @@ class ProductionOrchestrator:
                         "speech_text",
                         "",
                     )
+                ),
+
+                dialogue_events=list(
+                    raw.get(
+                        "dialogue_events",
+                        [],
+                    )
+                    or []
+                ),
+
+                is_scene_boundary=bool(
+                    raw.get(
+                        "is_scene_boundary",
+                        False,
+                    )
+                ),
+
+                character_spatial_bboxes=dict(
+                    raw.get(
+                        "character_spatial_bboxes",
+                        {},
+                    )
+                    or {}
+                ),
+
+                character_spatial_regions=dict(
+                    raw.get(
+                        "character_spatial_regions",
+                        {},
+                    )
+                    or {}
+                ),
+
+                character_spatial_bboxes_start=dict(
+                    raw.get(
+                        "character_spatial_bboxes_start",
+                        {},
+                    )
+                    or {}
+                ),
+
+                character_spatial_bboxes_end=dict(
+                    raw.get(
+                        "character_spatial_bboxes_end",
+                        {},
+                    )
+                    or {}
+                ),
+
+                character_spatial_regions_start=dict(
+                    raw.get(
+                        "character_spatial_regions_start",
+                        {},
+                    )
+                    or {}
+                ),
+
+                character_spatial_regions_end=dict(
+                    raw.get(
+                        "character_spatial_regions_end",
+                        {},
+                    )
+                    or {}
+                ),
+
+                continuity_start_state=dict(
+                    raw.get(
+                        "continuity_start_state",
+                        {},
+                    )
+                    or {}
+                ),
+
+                continuity_end_state=dict(
+                    raw.get(
+                        "continuity_end_state",
+                        {},
+                    )
+                    or {}
+                ),
+
+                continuity_repair_applied=bool(
+                    raw.get(
+                        "continuity_repair_applied",
+                        False,
+                    )
+                ),
+
+                identity_fingerprints=dict(
+                    raw.get(
+                        "identity_fingerprints",
+                        {},
+                    )
+                    or {}
+                ),
+
+                storyboard_reference=raw.get(
+                    "storyboard_reference"
+                ),
+
+                reference_role_manifest=raw.get(
+                    "reference_role_manifest"
                 ),
 
                 reference_bindings=(
@@ -990,6 +1108,55 @@ class ProductionOrchestrator:
                     missing_ok=True
                 )
 
+    @staticmethod
+    def _refresh_shot_prompt(shot: dict) -> None:
+        from dataclasses import fields
+        field_names = {field.name for field in fields(Shot)}
+        payload = {key: value for key, value in shot.items() if key in field_names}
+        shot_obj = Shot(**payload)
+        shot["h3_prompt"] = shot_obj.h3_prompt()
+
+    def _enforce_production_contracts(
+        self,
+        plan: dict,
+        characters: list[Character],
+    ) -> dict:
+        """Run deterministic contracts, repairing only continuity violations."""
+        character_dicts = [character.to_dict() for character in characters]
+        last_error = None
+        for attempt in range(4):
+            self._rebind_shots(plan, characters)
+            DialogueTimeline(character_dicts).apply_to_plan(plan)
+            ledger = ContinuityLedger(self.project_root, str(plan.get("production_id", "")))
+            try:
+                ledger.apply(plan, character_dicts)
+                return plan
+            except ContinuityViolation as exc:
+                last_error = exc
+                if attempt >= 3:
+                    # Deterministic field-level fallback: only continuity-carrying
+                    # state is repaired; the creative shot is not regenerated.
+                    return ledger.apply_field_level_fallback(plan, character_dicts)
+                shot_id = exc.shot_id
+                shots = plan.get("shots", []) or []
+                index = next((i for i, shot in enumerate(shots) if str(shot.get("shot_id", "")) == shot_id), None)
+                if index is None:
+                    raise
+                previous_shot = shots[index - 1] if index > 0 and str(shots[index - 1].get("scene_id", "")) == str(shots[index].get("scene_id", "")) else None
+                repaired = self.director.repair_continuity_violation(
+                    shot=shots[index],
+                    previous_shot=previous_shot,
+                    violation=exc.to_dict(),
+                )
+                repaired["shot_id"] = shots[index].get("shot_id")
+                repaired["scene_id"] = shots[index].get("scene_id")
+                repaired["order"] = shots[index].get("order")
+                repaired["characters"] = shots[index].get("characters", [])
+                shots[index] = repaired
+        if last_error:
+            raise last_error
+        return plan
+
     def create_production_plan(
         self,
         mode: str,
@@ -1109,6 +1276,64 @@ class ProductionOrchestrator:
             characters,
         )
 
+        # Deterministic production-enforcement passes. Qwen remains the
+        # creative source, while timing and continuity are finalized here.
+        plan["production_id"] = production_id
+        plan = self._enforce_production_contracts(plan, characters)
+        character_dicts = [character.to_dict() for character in characters]
+
+        storyboard = StoryboardReferenceBuilder(
+            self.project_root,
+            production_id,
+        ).build(
+            plan,
+            character_dicts,
+        )
+        plan["storyboard_reference"] = storyboard["path"]
+        plan["storyboard_reference_manifest"] = storyboard["manifest_path"]
+
+        for shot in plan.get("shots", []):
+            refs = list(shot.get("reference_images", []) or [])
+            roles = list(shot.get("reference_roles", []) or [])
+            if storyboard["path"] not in refs:
+                refs.append(storyboard["path"])
+                roles.append({
+                    "path": storyboard["path"],
+                    "role": "storyboard",
+                    "label": "Unified storyboard for sequencing, composition and blocking; not canonical identity.",
+                    "priority": 90,
+                })
+            shot["reference_images"] = refs[:8]
+            shot["reference_roles"] = roles[:8]
+            shot["storyboard_reference"] = storyboard["path"]
+            storyboard_index = next(
+                (
+                    index + 1
+                    for index, role in enumerate(shot["reference_roles"])
+                    if role.get("role") == "storyboard"
+                ),
+                None,
+            )
+            bindings = [
+                str(value).strip()
+                for value in (shot.get("reference_bindings", []) or [])
+                if str(value).strip()
+            ]
+            if storyboard_index is not None:
+                bindings.append(
+                    f"<Picture {storyboard_index}> is the unified storyboard reference for shot sequencing, composition and blocking; it is not the canonical character identity source."
+                )
+            shot["reference_bindings"] = bindings
+            shot["reference_role_manifest"] = storyboard["manifest_path"]
+            StoryboardReferenceBuilder.update_manifest(
+                storyboard["manifest_path"],
+                str(shot.get("shot_id", "")),
+                shot["reference_images"],
+                shot["reference_roles"],
+                shot["reference_bindings"],
+            )
+            self._refresh_shot_prompt(shot)
+
         previous_by_scene = {}
 
         for shot in plan.get(
@@ -1125,6 +1350,10 @@ class ProductionOrchestrator:
                 shot["previous_shot"] = previous["shot_id"]
                 previous["next_shot"] = shot["shot_id"]
 
+            if previous is None:
+                shot["is_scene_boundary"] = True
+            else:
+                shot["is_scene_boundary"] = False
             previous_by_scene[scene_id] = shot
 
         scene_characters = {}
