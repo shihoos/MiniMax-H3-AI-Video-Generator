@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import hashlib
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -31,6 +32,11 @@ class VLMAnalyzer:
         self.api_key = os.getenv("H3_VLM_API_KEY", "").strip()
         self.timeout = max(5.0, float(os.getenv("H3_VLM_TIMEOUT", "90")))
         self.max_image_bytes = max(1_000_000, int(os.getenv("H3_VLM_MAX_IMAGE_BYTES", str(12 * 1024 * 1024))))
+        cache_value = os.getenv("H3_VLM_CACHE_DIR", "").strip()
+        self.cache_dir = Path(cache_value).expanduser().resolve() if cache_value else None
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cache_namespace = "minimax-h3-vlm-v1"
         # The feature may be enabled in the production manifest even when the
         # optional endpoint is not configured yet. In that case the pipeline
         # remains usable and simply reports VLM as unavailable.
@@ -126,8 +132,60 @@ class VLMAnalyzer:
                 return json.loads(match.group(0))
             return {"description": content}
 
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _cache_key(self, operation: str, image_path: Path, payload: Any) -> str:
+        material = {
+            "namespace": self._cache_namespace,
+            "operation": operation,
+            "model": self.model,
+            "image_sha256": self._file_digest(image_path),
+            "payload": payload,
+        }
+        return hashlib.sha256(
+            json.dumps(material, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def _cache_read(self, key: str) -> dict[str, Any] | None:
+        if self.cache_dir is None:
+            return None
+        path = self.cache_dir / f"{key}.json"
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _cache_write(self, key: str, value: dict[str, Any]) -> None:
+        if self.cache_dir is None:
+            return
+        path = self.cache_dir / f"{key}.json"
+        temp = path.with_name(path.name + ".tmp")
+        try:
+            temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
+            temp.replace(path)
+        except OSError:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def analyze_image(self, image_path: Path, instruction: str) -> dict[str, Any]:
-        image_data = self._encode_image(Path(image_path))
+        image_path = Path(image_path).resolve()
+        cache_key = self._cache_key("analyze_image", image_path, {"instruction": instruction})
+        cached = self._cache_read(cache_key)
+        if cached is not None:
+            return cached
+        image_data = self._encode_image(image_path)
         schema = {
             "name": "visual_analysis",
             "strict": True,
@@ -162,6 +220,7 @@ class VLMAnalyzer:
         ], json_schema=schema)
         if not isinstance(result, dict):
             raise RuntimeError("VLM image analysis was not a JSON object.")
+        self._cache_write(cache_key, result)
         return result
 
 
@@ -207,6 +266,11 @@ class VLMAnalyzer:
         return output
 
     def score_frame(self, image_path: Path, expected_state: dict[str, Any]) -> dict[str, Any]:
+        image_path = Path(image_path).resolve()
+        cache_key = self._cache_key("score_frame", image_path, {"expected_state": expected_state or {}})
+        cached = self._cache_read(cache_key)
+        if cached is not None:
+            return cached
         instruction = (
             "Compare the rendered frame against this expected production state. "
             "Return only observations about visible evidence; never invent hidden facts.\n\n"
@@ -235,4 +299,5 @@ class VLMAnalyzer:
         ], json_schema=schema)
         if not isinstance(result, dict):
             raise RuntimeError("VLM QA result was not a JSON object.")
+        self._cache_write(cache_key, result)
         return result
