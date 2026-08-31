@@ -51,6 +51,14 @@ runtime:
   comfyui_request_retries: 3
   lowvram: true
   cpu_vae: true
+features:
+  live_preview: true
+  vlm_enabled: false
+  qa_enabled: true
+  context_ir_version: 1
+  timeline_version: 1
+  selective_retake: true
+  director_critic: false
 assembly:
   video_codec: libx264
   preset: medium
