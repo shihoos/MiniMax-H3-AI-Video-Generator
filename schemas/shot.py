@@ -98,6 +98,8 @@ class Shot:
     continuity_notes: str = ""
 
     seed: Optional[int] = None
+    shot_uid: Optional[str] = None
+    semantic_content_digest: str = ""
 
     reference_images: list[str] = field(default_factory=list)
     reference_videos: list[str] = field(default_factory=list)
@@ -121,6 +123,9 @@ class Shot:
     dialogue_events: list[dict] = field(default_factory=list)
     audio_duration_seconds: Optional[float] = None
     audio_duration_source: str = "unvalidated"
+    observed_visual_state: dict = field(default_factory=dict)
+    visual_feedback: dict = field(default_factory=dict)
+    observed_previous_shot_state: dict = field(default_factory=dict)
 
     continuity_start_state: dict = field(default_factory=dict)
     continuity_end_state: dict = field(default_factory=dict)
@@ -236,6 +241,9 @@ class Shot:
                     getattr(self, field_name) or ""
                 ).strip(),
             )
+
+        self.shot_uid = str(self.shot_uid or "").strip() or None
+        self.semantic_content_digest = str(self.semantic_content_digest or "").strip()
 
         self.characters = _string_list(
             self.characters,
@@ -440,20 +448,6 @@ class Shot:
                 self.keyframe_positions or []
             )
 
-    @staticmethod
-    def _compact_state_description(state: dict) -> str:
-        if not isinstance(state, dict) or not state:
-            return "No explicit continuity state."
-        parts = []
-        for key in ("location", "lighting", "state_description", "environment", "props", "camera_side"):
-            value = state.get(key)
-            if value in (None, "", [], {}):
-                continue
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            parts.append(f"{key.replace('_', ' ')}: {value}")
-        return "; ".join(parts) or "No explicit continuity state."
-
     def h3_prompt(self) -> str:
         """Serialize this shot using H3's structured six-section prompt format.
 
@@ -508,8 +502,25 @@ class Shot:
             else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
         )
 
-        continuity_start = self._compact_state_description(self.continuity_start_state)
-        continuity_end = self._compact_state_description(self.continuity_end_state)
+        def _state_summary(state: dict) -> str:
+            if not state:
+                return "none specified"
+            parts = []
+            for key in ("location", "lighting", "environment", "camera_side", "state_description"):
+                value = state.get(key)
+                if value not in (None, "", [], {}):
+                    if isinstance(value, list):
+                        value = ", ".join(str(item) for item in value)
+                    elif isinstance(value, dict):
+                        value = ", ".join(f"{k}={v}" for k, v in value.items())
+                    parts.append(f"{key.replace('_', ' ')}: {value}")
+            props = state.get("props")
+            if props:
+                parts.append("props: " + ", ".join(str(item) for item in props))
+            return "; ".join(parts) or "none specified"
+
+        continuity_start = _state_summary(self.continuity_start_state)
+        continuity_end = _state_summary(self.continuity_end_state)
 
         spatial_lines = []
         for name in self.characters:
@@ -590,16 +601,23 @@ class Shot:
         else:
             dialogue_text = "No dialogue."
 
+        observed_state_text = (
+            f"Observed previous rendered state: {self.observed_previous_shot_state}.\n"
+            if self.observed_previous_shot_state
+            else ""
+        )
+
         integrated_description = (
             f"[Shot {self.order}] {description}\n"
             f"Location: {self.location}.\n"
             f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n"
             f"Continuity boundary policy: {boundary_note}\n"
-            f"Opening continuity state: {continuity_start}\n"
-            f"Ending continuity state: {continuity_end}\n"
-            f"Subject placement: {spatial_contract}\n"
-            f"Dialogue in playback order: {dialogue_text}"
+            f"{observed_state_text}"
+            f"Continuity start state: {continuity_start}.\n"
+            f"Continuity end state: {continuity_end}.\n"
+            f"Spatial continuity: {spatial_contract}\n"
+            f"Dialogue: {dialogue_text}"
         )
 
         return (
@@ -643,6 +661,8 @@ class Shot:
             "negative_prompt": self.negative_prompt,
             "continuity_notes": self.continuity_notes,
             "seed": self.seed,
+            "shot_uid": self.shot_uid,
+            "semantic_content_digest": self.semantic_content_digest,
             "reference_images": self.reference_images,
             "reference_videos": self.reference_videos,
             "reference_audio": self.reference_audio,
@@ -653,6 +673,9 @@ class Shot:
             "dialogue_events": self.dialogue_events,
             "audio_duration_seconds": self.audio_duration_seconds,
             "audio_duration_source": self.audio_duration_source,
+            "observed_visual_state": self.observed_visual_state,
+            "visual_feedback": self.visual_feedback,
+            "observed_previous_shot_state": self.observed_previous_shot_state,
             "continuity_start_state": self.continuity_start_state,
             "continuity_end_state": self.continuity_end_state,
             "continuity_repair_applied": self.continuity_repair_applied,
