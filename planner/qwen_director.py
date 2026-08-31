@@ -159,6 +159,7 @@ class QwenDirector:
         self._fallback_planner = None
         self._entity_resolver = EntityResolver(self)
         self._current_visual_language: dict = {}
+        self._reference_visual_context: dict[str, dict] = {}
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -181,6 +182,13 @@ class QwenDirector:
             "retries": 0,
             "cache_hits": 0,
             "deterministic_recoveries": 0,
+        }
+
+    def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
+        self._reference_visual_context = {
+            str(key): dict(value)
+            for key, value in (context or {}).items()
+            if isinstance(value, dict)
         }
 
     @staticmethod
@@ -4643,6 +4651,7 @@ Return JSON only.
         characters: list[dict],
         scenes: list[dict],
         visual_language: dict | None = None,
+        reference_visual_context: dict[str, dict] | None = None,
     ) -> str:
         compact_characters = []
 
@@ -4752,11 +4761,25 @@ Return JSON only.
                 }
             )
 
+        visual_context = {}
+        context_source = reference_visual_context or self._reference_visual_context
+        for path, analysis in context_source.items():
+            if isinstance(analysis, dict):
+                visual_context[str(path)] = {
+                    "description": str(analysis.get("description", "") or "")[:500],
+                    "identity_features": [str(v) for v in (analysis.get("identity_features", []) or [])][:6],
+                    "wardrobe": [str(v) for v in (analysis.get("wardrobe", []) or [])][:6],
+                    "environment": [str(v) for v in (analysis.get("environment", []) or [])][:6],
+                    "lighting": str(analysis.get("lighting", "") or "")[:220],
+                    "composition": str(analysis.get("composition", "") or "")[:220],
+                }
+
         return json.dumps(
             {
                 "story_context": self._compact_story_context(story, 850),
                 "characters": compact_characters,
                 "visual_language": language,
+                "reference_visual_analysis": visual_context,
                 "scenes": scene_payloads,
             },
             ensure_ascii=False,
@@ -5704,6 +5727,62 @@ Return JSON only.
     # ========================================================
     # MERGE
     # ========================================================
+
+    def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
+        """Run an optional read-only cinematic critique.
+
+        The critic may identify problems but never mutates the canonical plan.
+        """
+        system_prompt = """
+You are a conservative cinematic production critic.
+Review the supplied production plan for narrative, shot-design, continuity,
+reference-binding, and dialogue/action risks. Do not rewrite the plan.
+Return only JSON matching the supplied schema. Do not invent facts that are
+not present in the plan.
+""".strip()
+        compact = {
+            "mode": mode,
+            "story": str(user_input or "")[:5000],
+            "visual_language": plan.get("visual_language", {}) or {},
+            "scenes": plan.get("scenes", []) or [],
+            "shots": plan.get("shots", []) or [],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "overall_score": {"type": "number"},
+                "status": {"type": "string", "enum": ["pass", "review"]},
+                "findings": {"type": "array", "items": {"type": "string"}},
+                "shot_findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "shot_id": {"type": "string"},
+                            "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                            "finding": {"type": "string"},
+                        },
+                        "required": ["shot_id", "severity", "finding"],
+                    },
+                },
+                "recommended_focus": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["overall_score", "status", "findings", "shot_findings", "recommended_focus"],
+        }
+        return self._chat_json(
+            system_prompt,
+            json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
+            minimum_completion=300,
+            temperature=0.10,
+            top_p=0.75,
+            call_name="director_critique",
+            max_completion=1000,
+            json_mode=True,
+            disable_thinking=True,
+            response_schema=schema,
+        )
 
     def enrich_plan(
         self,
