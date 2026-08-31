@@ -676,8 +676,26 @@ def validate_workflows() -> None:
 def validate_upscale_audio_semantics() -> None:
     """Verify the H3 upscale graph preserves the original audio-bearing latent."""
     graph = load_json(PRODUCTION_WORKFLOWS["upscale"])
-    nodes = {int(node["id"]): node for node in graph.get("nodes", [])}
-    links = {int(row[0]): row for row in graph.get("links", []) if isinstance(row, list) and len(row) >= 6}
+
+    # Safe conversion of node/link IDs, consistent with validate_workflow_graph_integrity
+    nodes: dict[int, dict] = {}
+    for raw_node in graph.get("nodes", []):
+        raw_id = raw_node.get("id")
+        try:
+            node_id = int(raw_id)
+        except (TypeError, ValueError):
+            fail(f"Upscale workflow node id must be numeric, got {raw_id!r}.")
+        nodes[node_id] = raw_node
+
+    links: dict[int, list] = {}
+    for row in graph.get("links", []):
+        if not isinstance(row, list) or len(row) < 6:
+            continue
+        try:
+            link_id = int(row[0])
+        except (TypeError, ValueError):
+            fail(f"Upscale workflow link id must be numeric: {row!r}")
+        links[link_id] = row
 
     def find_node(node_type: str):
         for node in nodes.values():
@@ -694,7 +712,13 @@ def validate_upscale_audio_semantics() -> None:
         for item in node.get("inputs", []):
             if item.get("name") == name:
                 link_id = item.get("link")
-                return links.get(int(link_id)) if link_id is not None else None
+                if link_id is None:
+                    return None
+                try:
+                    link_id = int(link_id)
+                except (TypeError, ValueError):
+                    fail(f"Upscale workflow node has non-numeric link for {name}: {link_id!r}.")
+                return links.get(link_id)
         raise RuntimeError(f"{node.get('type')} is missing input {name}.")
 
     video_edge = input_link(video, "samples")
@@ -1042,7 +1066,22 @@ def validate_execution_integration() -> None:
 
     runner_text = runner_path.read_text(encoding="utf-8")
     require("self._completed_shots_lock = threading.RLock()" in runner_text, "ProductionRunner must protect shared completed-shot state.")
-    require("self._add_identity_anchors(\n                shot,\n                character_map,\n            )" in runner_text, "ProductionRunner identity-anchor call signature is incorrect.")
+
+    # Replace brittle whitespace-sensitive string check with AST-based call validation.
+    tree = ast.parse(runner_text, filename=str(runner_path))
+    anchor_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_add_identity_anchors"
+    ]
+    require(anchor_calls, "ProductionRunner must invoke _add_identity_anchors().")
+    for call in anchor_calls:
+        keyword_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+        positional_ok = len(call.args) == 2 and not keyword_names
+        keyword_ok = len(call.args) == 0 and {"shot", "character_map"} <= keyword_names
+        require(positional_ok or keyword_ok, "Each _add_identity_anchors call must pass shot and character_map only.")
 
     scheduler_text = scheduler_path.read_text(encoding="utf-8")
     require("class GPUScheduler" in scheduler_text, "GPUScheduler class is missing.")
