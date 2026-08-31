@@ -65,46 +65,116 @@ class FFProbeMediaDurationProvider:
     def __init__(self, ffprobe_path: str | None = None) -> None:
         self.ffprobe_path = ffprobe_path or shutil.which("ffprobe")
 
-    def duration_seconds(self, media_path: str | Path, *, stream_selector: str = "") -> float:
+    def duration_seconds(
+        self,
+        media_path: str | Path,
+        *,
+        stream_selector: str = "",
+    ) -> float:
+        """Measure the selected stream duration, never the container duration.
+
+        Some codecs do not expose a stream-level duration. In that case we
+        fall back to packet timestamps for the selected stream rather than
+        silently comparing the container duration for both audio and video.
+        """
         if not self.ffprobe_path:
-            raise RuntimeError("ffprobe is required for actual media-duration validation.")
+            raise RuntimeError(
+                "ffprobe is required for actual media-duration validation."
+            )
+
         path = Path(media_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
 
-        command = [self.ffprobe_path, "-v", "error"]
-        if stream_selector:
-            command.extend(["-select_streams", stream_selector])
-        command.extend(["-show_entries", "stream=duration", "-of", "json", str(path)])
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        selector = str(stream_selector or "").strip()
+        if not selector:
+            raise ValueError(
+                "stream_selector is required for stream-specific duration measurement."
+            )
+
+        command = [
+            self.ffprobe_path,
+            "-v", "error",
+            "-select_streams", selector,
+            "-show_entries", "stream=duration,start_time",
+            "-of", "json",
+            str(path),
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if result.returncode != 0:
-            raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[-4000:]}")
+            raise RuntimeError(
+                f"ffprobe stream-duration query failed for {path}: "
+                f"{result.stderr[-4000:]}"
+            )
 
         payload = json.loads(result.stdout or "{}")
-        value = None
-        for stream in payload.get("streams") or []:
-            candidate = (stream or {}).get("duration")
-            if candidate not in (None, "", "N/A"):
-                value = candidate
-                break
+        streams = payload.get("streams") or []
+        if streams:
+            stream = streams[0]
+            value = stream.get("duration")
+            if value not in (None, "", "N/A"):
+                seconds = float(value)
+                if seconds > 0:
+                    return seconds
 
-        if value in (None, "", "N/A"):
-            fallback = subprocess.run(
-                [self.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
-                capture_output=True,
-                text=True,
-                check=False,
+        # Fallback to packet timestamps so a missing stream.duration does not
+        # silently degrade to container duration.
+        packet_command = [
+            self.ffprobe_path,
+            "-v", "error",
+            "-select_streams", selector,
+            "-show_entries", "packet=pts_time,dts_time,duration_time",
+            "-of", "json",
+            str(path),
+        ]
+        packet_result = subprocess.run(
+            packet_command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if packet_result.returncode != 0:
+            raise RuntimeError(
+                f"ffprobe packet-duration fallback failed for {path}: "
+                f"{packet_result.stderr[-4000:]}"
             )
-            if fallback.returncode != 0:
-                raise RuntimeError(f"ffprobe returned no duration for {path}.")
-            value = (json.loads(fallback.stdout or "{}") .get("format") or {}).get("duration")
 
-        if value in (None, "", "N/A"):
-            raise RuntimeError(f"ffprobe returned no duration for {path}.")
-        seconds = float(value)
-        if seconds <= 0:
-            raise RuntimeError(f"ffprobe returned invalid duration for {path}: {seconds}")
-        return seconds
+        packets = json.loads(packet_result.stdout or "{}").get("packets") or []
+        timestamps: list[float] = []
+        final_end: float | None = None
+        for packet in packets:
+            start_value = packet.get("pts_time", packet.get("dts_time"))
+            if start_value not in (None, "N/A", ""):
+                try:
+                    start = float(start_value)
+                except (TypeError, ValueError):
+                    start = None
+                if start is not None:
+                    timestamps.append(start)
+                    duration_value = packet.get("duration_time")
+                    try:
+                        packet_duration = float(duration_value) if duration_value not in (None, "N/A", "") else 0.0
+                    except (TypeError, ValueError):
+                        packet_duration = 0.0
+                    final_end = max(
+                        final_end or 0.0,
+                        start + max(packet_duration, 0.0),
+                    )
+
+        if final_end is not None and timestamps:
+            start_time = min(timestamps)
+            seconds = final_end - start_time
+            if seconds > 0:
+                return seconds
+
+        raise RuntimeError(
+            f"ffprobe returned no usable stream duration for {selector} in {path}."
+        )
 
     def has_stream(self, media_path: str | Path, stream_type: str) -> bool:
         if not self.ffprobe_path:
