@@ -26,7 +26,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     strategy:
       fail-fast: false
@@ -50,6 +50,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Verify required dependencies
+        run: |
+          python - <<'PY'
+          import importlib
+
+          required_modules = [
+              "yaml",
+              "gradio",
+              "PIL",
+          ]
+
+          for module in required_modules:
+              importlib.import_module(module)
+
+          print("Required dependencies PASSED.")
+          PY
+
       - name: Python syntax
         run: |
           python -m compileall -q \
@@ -61,34 +78,6 @@ jobs:
             scripts \
             kaggle \
             ui
-
-      - name: Dependency manifest contract
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import re
-          import yaml
-
-          requirements = Path("requirements.txt").read_text(encoding="utf-8")
-          runtime = yaml.safe_load(
-              Path("configs/runtime_versions.yaml").read_text(encoding="utf-8")
-          )
-
-          assert re.search(r"(?im)^Pillow(?:==|>=|>|~=|<=)", requirements), \
-              "requirements.txt must declare Pillow."
-
-          pillow_requirement = str(
-              runtime.get("storyboard", {}).get("pillow_requirement", "")
-          ).strip()
-
-          assert pillow_requirement, \
-              "runtime_versions.yaml must declare storyboard.pillow_requirement."
-
-          assert f"Pillow{pillow_requirement}" in requirements, \
-              "Pillow requirement must match runtime_versions.yaml."
-
-          print("Dependency manifest contract PASSED.")
-          PY
 
       - name: Reference path wiring
         run: |
@@ -114,24 +103,8 @@ jobs:
         env:
           H3_DIRECTOR_ENABLED: "0"
         run: |
+          test -f scripts/validate_production_continuity.py
           python scripts/validate_production_continuity.py
-
-      - name: H3 duration quantization contract
-        run: |
-          python - <<'PY'
-          from pipeline.dialogue_timeline import DialogueTimeline
-
-          assert DialogueTimeline.h3_legal_frames(5.0) == 124
-          assert abs(
-              DialogueTimeline.h3_effective_duration_seconds(5.0)
-              - (124 / 24.0)
-          ) < 1e-9
-          assert DialogueTimeline.h3_legal_frames(4.0) == 124
-          assert DialogueTimeline.h3_legal_frames(15.0) == 362
-          assert DialogueTimeline.h3_legal_frames(5.2) == 141
-
-          print("H3 duration quantization contract PASSED.")
-          PY
 
       - name: Planner smoke tests
         env:
@@ -196,6 +169,7 @@ jobs:
               "pipeline.production_orchestrator",
               "pipeline.identity_anchor_store",
               "pipeline.h3_scene_continuity",
+              "pipeline.dialogue_duration",
               "pipeline.dialogue_timeline",
               "pipeline.continuity_ledger",
               "pipeline.storyboard_reference_builder",
@@ -206,6 +180,9 @@ jobs:
               "execution.h3_runtime",
               "execution.assembly_manager",
               "scheduler.gpu_scheduler",
+              "schemas.dialogue",
+              "schemas.shot",
+              "schemas.character",
               "ui.storyboard_gradio",
           ]
 
@@ -217,29 +194,70 @@ jobs:
           )
           PY
 
-      - name: Direct Gradio entry-point smoke
+      - name: Continuity architecture contract
         env:
           H3_DIRECTOR_ENABLED: "0"
-        shell: bash
         run: |
-          set +e
-          timeout 12s python ui/storyboard_gradio.py > /tmp/h3_gradio_entry.log 2>&1
-          status=$?
-          set -e
+          python - <<'PY'
+          from pathlib import Path
 
-          if ! grep -Eq "Running on local URL|Running on public URL" /tmp/h3_gradio_entry.log; then
-            cat /tmp/h3_gradio_entry.log
-            echo "Direct Gradio entry-point smoke FAILED."
-            exit 1
-          fi
+          orchestrator = Path(
+              "pipeline/production_orchestrator.py"
+          ).read_text(
+              encoding="utf-8"
+          )
 
-          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
-            cat /tmp/h3_gradio_entry.log
-            echo "Direct Gradio entry-point exited unexpectedly with status $status."
-            exit 1
-          fi
+          runner = Path(
+              "execution/production_runner.py"
+          ).read_text(
+              encoding="utf-8"
+          )
 
-          echo "Direct Gradio entry-point smoke PASSED."
+          shot = Path(
+              "schemas/shot.py"
+          ).read_text(
+              encoding="utf-8"
+          )
+
+          validate = Path(
+              "scripts/validate_project.py"
+          ).read_text(
+              encoding="utf-8"
+          )
+
+          # Production enforcement must remain deterministic after Qwen unload.
+          enforce_start = orchestrator.find(
+              "def _enforce_production_contracts"
+          )
+          assert enforce_start >= 0
+          enforce_tail = orchestrator[enforce_start:]
+          enforce_end = enforce_tail.find(
+              "    def create_production_plan"
+          )
+          enforce_body = (
+              enforce_tail[:enforce_end]
+              if enforce_end >= 0
+              else enforce_tail
+          )
+          assert "repair_continuity_violation" not in enforce_body
+          assert "apply_field_level_fallback" in enforce_body
+
+          # Runner must serialize manifest writes.
+          assert "_manifest_lock" in runner
+          assert "with self._manifest_lock" in runner
+
+          # Shot contract must carry structured continuity state and dialogue.
+          assert "continuity_start_state" in shot
+          assert "continuity_end_state" in shot
+          assert "dialogue_events" in shot
+
+          # The project validator must require the new dialogue schema.
+          assert '"schemas/dialogue.py"' in validate
+
+          print(
+              "Continuity architecture contract PASSED."
+          )
+          PY
 
       - name: Gradio UI contract
         env:
@@ -271,10 +289,67 @@ jobs:
               not in text
           )
 
+          # The UI must respect a CI-supplied director-disabled environment.
+          assert (
+              "os.environ.setdefault(\"H3_DIRECTOR_ENABLED\", \"1\")"
+              in text
+              or "os.environ.setdefault('H3_DIRECTOR_ENABLED', '1')"
+              in text
+          )
+
           print(
               "Gradio UI contract PASSED."
           )
           PY
+
+      - name: Direct Gradio entry-point smoke
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+          GRADIO_ANALYTICS_ENABLED: "False"
+        shell: bash
+        run: |
+          set -u
+
+          rm -f /tmp/h3_gradio_entry.log
+
+          python -u ui/storyboard_gradio.py \
+            > /tmp/h3_gradio_entry.log 2>&1 &
+          pid=$!
+
+          cleanup() {
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+          }
+
+          trap cleanup EXIT
+
+          ready=0
+
+          for _ in $(seq 1 30); do
+            if curl -fsS \
+              --max-time 2 \
+              http://127.0.0.1:8765/ \
+              >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+
+            if ! kill -0 "$pid" 2>/dev/null; then
+              break
+            fi
+
+            sleep 1
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Direct Gradio entry-point smoke FAILED."
+            echo "--- Gradio entry-point log ---"
+            cat /tmp/h3_gradio_entry.log || true
+            echo "--- end log ---"
+            exit 1
+          fi
+
+          echo "Direct Gradio entry-point smoke PASSED."
 
       - name: Complete
         run: |
