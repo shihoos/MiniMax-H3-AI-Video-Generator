@@ -678,6 +678,11 @@ class ProductionRunner:
         references: list[str],
         roles: list[dict],
     ) -> None:
+        if len(references) != len(roles):
+            raise RuntimeError(
+                f"Reference contract mismatch for {shot.get('shot_id', '')}: "
+                f"{len(references)} images vs {len(roles)} roles before normalization."
+            )
         normalized = []
         seen = set()
         for path, role in zip(references, roles):
