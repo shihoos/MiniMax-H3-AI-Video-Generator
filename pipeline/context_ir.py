@@ -9,6 +9,7 @@ class H3ContextIRCompiler:
     VERSION = 1
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
+        prompt = str(shot.get("h3_prompt", "") or shot.get("visual_prompt", "") or "").strip()
         return {
             "version": self.VERSION,
             "story": str(plan.get("story", "") or ""),
@@ -18,6 +19,7 @@ class H3ContextIRCompiler:
                 "time_of_day": str(shot.get("time_of_day", "") or ""),
                 "mood": str(shot.get("mood", "") or ""),
             },
+            "h3_prompt": prompt,
             "shot": {
                 "shot_id": str(shot.get("shot_id", "") or ""),
                 "duration_seconds": float(shot.get("duration_seconds", 0.0) or 0.0),
