@@ -15,6 +15,7 @@ from execution.h3_runtime import H3Runtime
 from execution.shot_executor import (
     ShotExecutor,
 )
+from execution.execution_policy import ExecutionPolicy
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from pipeline.dialogue_duration import FFProbeMediaDurationProvider
 from pipeline.seed_lineage import ensure_shot_uid, semantic_content_digest, stable_seed
@@ -248,6 +249,16 @@ class ProductionRunner:
 
         from execution.metrics import MetricsRecorder
         metrics_path = self.project_root / "data" / "production" / str(self.production_id) / "metrics.jsonl"
+        policy = ExecutionPolicy(
+            mode="production",
+            turbo=(self._active_profile == PROFILE_TURBO if hasattr(self, "_active_profile") else False),
+            upscale=False,
+            live_preview=True,
+            require_context_ir=True,
+            run_visual_qa=True,
+            auto_retake=False,
+            max_auto_retries=0,
+        )
         return ShotExecutor(
             comfy_client=self.clients[gpu_id],
             project_root=self.project_root,
@@ -259,6 +270,7 @@ class ProductionRunner:
             gpu_id=gpu_id,
             metrics_path=metrics_path,
             preview_dir=self.project_root / "data" / "production" / str(self.production_id) / "previews",
+            execution_policy=policy,
         )
 
     @staticmethod
@@ -1084,6 +1096,7 @@ class ProductionRunner:
                     shot["retake_reason"] = "; ".join(
                         str(v) for v in (shot.get("quality_gate", {}).get("findings", []) or [])
                     ) or "Automatic quality-gate retake"
+                    executor.execution_policy = executor.execution_policy.for_mode("retake")
                     retake_result = self.retake_executor.execute(
                         production_id=production_id,
                         scene_id=scene_id,
@@ -1123,8 +1136,13 @@ class ProductionRunner:
                     anchor_frame = retake_anchor
                     shot["quality_gate"] = shot["quality_gate_after_retake"]
                     shot["retake_recommended"] = False
-                except Exception:
+                except Exception as retake_error:
+                    try:
+                        executor.execution_policy = executor.execution_policy.for_mode("production")
+                    except Exception:
+                        pass
                     shot["retake_execution_warning"] = True
+                    shot["retake_execution_error"] = str(retake_error)
                     raise
 
             self._persist_first_appearance_anchors(
@@ -1237,6 +1255,7 @@ class ProductionRunner:
             "production_id"
         ] = production_id
         self._active_story = str(production_plan.get("story", "") or "")
+        self._active_profile = str(production_plan.get("profile", PROFILE_BASE) or PROFILE_BASE).strip().lower()
         try:
             self.production_manifest.write(
                 production_plan,
