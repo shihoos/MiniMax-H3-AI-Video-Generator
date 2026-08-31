@@ -14,7 +14,19 @@ def ensure_shot_uid(shot: dict[str, Any], production_id: str) -> str:
     shot_id = str(shot.get("shot_id", "") or "").strip()
     if not shot_id:
         raise ValueError("Cannot create shot_uid without shot_id.")
-    uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"minimax-h3:{production_id}:{shot_id}"))
+    # Legacy-plan fallback: derive identity from stable semantic fields instead
+    # of mutable numeric ordering wherever possible. Once persisted, shot_uid is immutable.
+    semantic = {
+        "scene_id": str(shot.get("scene_id", "") or ""),
+        "characters": list(shot.get("characters", []) or []),
+        "location": str(shot.get("location", "") or ""),
+        "action": str(shot.get("action", "") or ""),
+        "camera_shot": str(shot.get("camera_shot", "") or ""),
+        "camera_movement": str(shot.get("camera_movement", "") or ""),
+        "visual_prompt": str(shot.get("visual_prompt", "") or ""),
+    }
+    semantic_key = json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    uid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"minimax-h3:{production_id}:legacy:{hashlib.sha256(semantic_key.encode('utf-8')).hexdigest()}:{shot_id}"))
     shot["shot_uid"] = uid
     return uid
 
