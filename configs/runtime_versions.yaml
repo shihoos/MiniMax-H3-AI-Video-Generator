@@ -62,7 +62,7 @@ features:
   live_preview: true
   vlm_enabled: true
   qa_enabled: true
-  context_ir_version: 1
+  context_ir_version: 2
   timeline_version: 1
   selective_retake: true
   director_critic: true
@@ -70,6 +70,10 @@ features:
   max_auto_retakes_per_shot: 1
   vlm_reference_analysis: true
   vlm_visual_qa: true
+  preview_execution_mode: true
+  diagnostic_execution_mode: true
+  retake_execution_mode: true
+  context_ir_required: true
 assembly:
   video_codec: libx264
   preset: medium
