@@ -23,6 +23,10 @@ if str(ROOT) not in sys.path:
 
 
 from pipeline.job_queue import ProductionJobQueue
+from pipeline.timeline import ProductionTimeline
+from pipeline.runtime_diagnostics import RuntimeDiagnostics
+from pipeline.production_checkpoint import ProductionCheckpoint
+from pipeline.retake_manager import RetakeManager
 from planner.config import (
     GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
@@ -491,7 +495,10 @@ class ProductionController:
                 f"**Dialogue:** "
                 f"{shot.get('speech_text', '')}\n"
                 f"**Continuity:** "
-                f"{shot.get('continuity_notes', '')}"
+                f"{shot.get('continuity_notes', '')}\n"
+                f"**Continuity Mode:** {shot.get('continuity_mode', 'chained')}\n"
+                f"**QA:** {json.dumps(shot.get('quality_gate', {}) or {}, ensure_ascii=False)}\n"
+                f"**Retake Recommended:** {bool(shot.get('retake_recommended', False))}"
             )
             for shot
             in shots
@@ -788,6 +795,106 @@ class ProductionController:
     # ========================================================
     # PREVIEW
     # ========================================================
+
+    def latest_live_preview(self, plan_path_value: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            production_id = str(plan.get("production_id", "")).strip()
+            root = ROOT / "data" / "production" / production_id / "previews"
+            candidates = []
+            if root.is_dir():
+                for path in root.rglob("latest.*"):
+                    if path.is_file():
+                        candidates.append(path)
+            if not candidates:
+                return None, "No sampling preview is available yet."
+            path = max(candidates, key=lambda item: item.stat().st_mtime)
+            return str(path), f"Live preview: `{path.parent.name}`"
+        except Exception as exc:
+            return None, "### ERROR\n" + str(exc)
+
+    def timeline_table(self, plan_path_value: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            timeline = ProductionTimeline(plan)
+            return timeline.table(), f"### TIMELINE\n{len(plan.get('shots', []) or [])} shots · {plan.get('timeline', {}).get('total_duration_seconds', 0):.2f}s total"
+        except Exception as exc:
+            return [], "### ERROR\n" + str(exc)
+
+    def apply_timeline_edits(self, plan_path_value: str, rows):
+        try:
+            plan, plan_path = self._load_plan(plan_path_value)
+            ProductionTimeline(plan).apply_table(rows)
+            ProductionTimeline.validate(plan)
+            plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+
+            # Keep the durable planning checkpoint synchronized with any user
+            # timeline edits. Otherwise the render runner would correctly
+            # reject the edited plan as a fingerprint mismatch.
+            production_id = str(plan.get("production_id", "")).strip()
+            if production_id:
+                store = ProductionCheckpoint(ROOT)
+                try:
+                    state = store.load(production_id)
+                    if isinstance(state.get("director_plan"), dict):
+                        state["director_plan"] = plan
+                        state["plan_sha256"] = store.plan_digest(plan)
+                        state["status"] = "ready"
+                        state["stage"] = "timeline_edited"
+                        state["error"] = ""
+                        store.save(production_id, state)
+                except FileNotFoundError:
+                    pass
+
+            return ProductionTimeline(plan).table(), "### TIMELINE UPDATED\nChanges are persisted to the production plan and checkpoint.", str(plan_path)
+        except Exception as exc:
+            return [], "### ERROR\n" + str(exc), str(plan_path_value or "")
+
+    def runtime_health(self, plan_path_value: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            report = RuntimeDiagnostics(ROOT).collect()
+            report["production_id"] = plan.get("production_id", "")
+            return report, "### RUNTIME HEALTH\nDiagnostics collected."
+        except Exception as exc:
+            return {}, "### ERROR\n" + str(exc)
+
+    def create_retake_request(self, plan_path_value: str, shot_id: str, start_seconds: float, end_seconds: float, reason: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            production_id = str(plan.get("production_id", "")).strip()
+            request_path = RetakeManager(ROOT).request(
+                production_id, shot_id,
+                start_seconds=float(start_seconds or 0.0),
+                end_seconds=float(end_seconds),
+                reason=reason,
+            )
+            for shot in plan.get("shots", []) or []:
+                if str(shot.get("shot_id", "")) == str(shot_id):
+                    shot["retake_requested"] = True
+                    shot["retake_start_seconds"] = float(start_seconds or 0.0)
+                    shot["retake_end_seconds"] = float(end_seconds)
+            production_id, plan_path = self._save_session_plan(plan)
+
+            # Retake metadata is part of the semantic plan, so keep the
+            # durable checkpoint fingerprint synchronized with the edited plan.
+            if production_id:
+                store = ProductionCheckpoint(ROOT)
+                try:
+                    state = store.load(production_id)
+                    if isinstance(state.get("director_plan"), dict):
+                        state["director_plan"] = plan
+                        state["plan_sha256"] = store.plan_digest(plan)
+                        state["status"] = "ready"
+                        state["stage"] = "retake_requested"
+                        state["error"] = ""
+                        store.save(production_id, state)
+                except FileNotFoundError:
+                    pass
+
+            return f"### RETAKE REQUESTED\n`{request_path}`", str(plan_path)
+        except Exception as exc:
+            return "### ERROR\n" + str(exc), str(plan_path_value or "")
 
     def preview_saved(
         self,
@@ -1581,6 +1688,35 @@ def build_app(
 
             shots = gr.Markdown()
 
+        gr.Markdown("### Production Timeline")
+        timeline_table = gr.Dataframe(
+            headers=["Shot", "Scene", "Start (s)", "End (s)", "Duration (s)", "Continuity"],
+            datatype=["str", "str", "number", "number", "number", "str"],
+            value=[], interactive=True, row_count=(1, "dynamic"), col_count=(6, "fixed"),
+        )
+        timeline_status = gr.Markdown()
+        live_preview = gr.Image(label="Live Sampling Preview", type="filepath", height=420)
+        live_preview_status = gr.Markdown()
+        refresh_live_preview = gr.Button("Refresh Live Preview")
+        live_preview_timer = gr.Timer(value=3.0, active=True)
+        with gr.Row():
+            load_timeline = gr.Button("Load Timeline")
+            apply_timeline = gr.Button("Apply Timeline Edits")
+
+        with gr.Accordion("Runtime Diagnostics", open=False):
+            runtime_json = gr.JSON()
+            runtime_status = gr.Markdown()
+            runtime_check = gr.Button("Check Runtime Health")
+
+        with gr.Accordion("Selective Retake", open=False):
+            retake_shot_id = gr.Textbox(label="Shot ID")
+            with gr.Row():
+                retake_start = gr.Number(label="Start (s)", value=0.0, minimum=0.0)
+                retake_end = gr.Number(label="End (s)", value=1.0, minimum=0.01)
+            retake_reason = gr.Textbox(label="Reason", lines=2)
+            request_retake = gr.Button("Create Retake Request")
+            retake_status = gr.Markdown()
+
         approve = gr.Button(
             "Approve & Generate Video",
             variant="primary",
@@ -1698,6 +1834,37 @@ def build_app(
                 final_video,
                 session_plan_path,
             ],
+        )
+
+        refresh_live_preview.click(
+            fn=controller.latest_live_preview,
+            inputs=[session_plan_path],
+            outputs=[live_preview, live_preview_status],
+        )
+        live_preview_timer.tick(
+            fn=controller.latest_live_preview,
+            inputs=[session_plan_path],
+            outputs=[live_preview, live_preview_status],
+        )
+        load_timeline.click(
+            fn=controller.timeline_table,
+            inputs=[session_plan_path],
+            outputs=[timeline_table, timeline_status],
+        )
+        apply_timeline.click(
+            fn=controller.apply_timeline_edits,
+            inputs=[session_plan_path, timeline_table],
+            outputs=[timeline_table, timeline_status, session_plan_path],
+        )
+        runtime_check.click(
+            fn=controller.runtime_health,
+            inputs=[session_plan_path],
+            outputs=[runtime_json, runtime_status],
+        )
+        request_retake.click(
+            fn=controller.create_retake_request,
+            inputs=[session_plan_path, retake_shot_id, retake_start, retake_end, retake_reason],
+            outputs=[retake_status, session_plan_path],
         )
 
     return demo
