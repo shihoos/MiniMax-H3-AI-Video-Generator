@@ -513,11 +513,27 @@ def install_storyboard_runtime(
     runtime: dict,
 ) -> None:
 
-    version = runtime[
-        "storyboard"
-    ][
-        "gradio_version"
-    ]
+    storyboard = runtime["storyboard"]
+    packages = []
+
+    gradio_version = str(
+        storyboard.get("gradio_version", "")
+    ).strip()
+    pillow_version = str(
+        storyboard.get("pillow_version", "")
+    ).strip()
+
+    if gradio_version:
+        packages.append(
+            f"gradio=={gradio_version}"
+        )
+    if pillow_version:
+        packages.append(
+            f"Pillow=={pillow_version}"
+        )
+
+    if not packages:
+        return
 
     run(
         sys.executable,
@@ -526,7 +542,7 @@ def install_storyboard_runtime(
         "install",
         "-q",
         "--disable-pip-version-check",
-        f"gradio=={version}",
+        *packages,
     )
 
 
