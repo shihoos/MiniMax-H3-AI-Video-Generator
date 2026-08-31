@@ -5492,52 +5492,6 @@ Return JSON only.
     # MERGE
     # ========================================================
 
-    def repair_continuity_violation(
-        self,
-        *,
-        shot: dict,
-        previous_shot: dict | None,
-        violation: dict,
-    ) -> dict:
-        """Targeted single-shot repair; unrelated production fields stay fixed."""
-        shot_schema = self._shot_json_schema()["properties"]["shots"]["items"]
-        system = (
-            "You are a deterministic continuity repair agent. "
-            "Return JSON only. Repair only the fields implicated by the continuity rejection. "
-            "Do not change shot_id, scene_id, order, characters, dialogue text, camera, or unrelated creative fields. "
-            "Preserve canonical character identity. Never invent a wardrobe change unless explicitly required by the story."
-        )
-        previous = json.dumps(previous_shot or {}, ensure_ascii=False, indent=2)
-        current = json.dumps(shot or {}, ensure_ascii=False, indent=2)
-        error = json.dumps(violation or {}, ensure_ascii=False, indent=2)
-        user = (
-            "CONTINUITY REJECTION\n"
-            f"Previous shot:\n{previous}\n\n"
-            f"Current shot:\n{current}\n\n"
-            f"Violation:\n{error}\n\n"
-            "Return the corrected shot object only."
-        )
-        schema = {
-            "type": "object",
-            "properties": {"shot": shot_schema},
-            "required": ["shot"],
-            "additionalProperties": False,
-        }
-        response = self._chat_json(
-            system,
-            user,
-            minimum_completion=320,
-            max_completion=1800,
-            call_name=f"continuity_repair:{shot.get('shot_id', 'unknown')}",
-            response_schema=schema,
-            json_mode=True,
-            disable_thinking=True,
-        )
-        repaired = response.get("shot")
-        if not isinstance(repaired, dict):
-            raise RuntimeError("Continuity repair did not return a shot object.")
-        return repaired
-
     def enrich_plan(
         self,
         *,
