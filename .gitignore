@@ -2,6 +2,7 @@
 # PYTHON
 # ============================================================
 
+__pycache__/
 *.py[cod]
 *.pyo
 *.pyd
@@ -191,3 +192,11 @@ temp/
 
 .kaggle/
 *.ipynb_checkpoints
+
+# New production observability / review artifacts
+data/production/*/previews/*
+data/production/*/qa/*
+data/production/*/retakes/*
+data/production/*/runtime_diagnostics.json
+data/production/*/production_manifest.json
+!data/production/*/.gitkeep
