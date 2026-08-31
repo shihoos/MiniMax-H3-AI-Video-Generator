@@ -254,6 +254,12 @@ class ComfyClient:
             return False
         return self.health_check()
 
+    def get_system_stats(self) -> dict:
+        result = self._request("GET", "/system_stats", retry=True, timeout=min(self.timeout, 10))
+        if not isinstance(result, dict):
+            raise RuntimeError("Invalid /system_stats response.")
+        return result
+
     def health_check(
         self,
     ):
