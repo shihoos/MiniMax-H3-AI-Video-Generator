@@ -71,21 +71,35 @@ class FFProbeMediaDurationProvider:
         path = Path(media_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
-        command = [
-            self.ffprobe_path,
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "json",
-        ]
+
+        command = [self.ffprobe_path, "-v", "error"]
         if stream_selector:
-            command[4:4] = ["-select_streams", stream_selector]
-        command.append(str(path))
+            command.extend(["-select_streams", stream_selector])
+        command.extend(["-show_entries", "stream=duration", "-of", "json", str(path)])
         result = subprocess.run(command, capture_output=True, text=True, check=False)
         if result.returncode != 0:
             raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[-4000:]}")
+
         payload = json.loads(result.stdout or "{}")
-        value = (payload.get("format") or {}).get("duration")
-        if value in (None, ""):
+        value = None
+        for stream in payload.get("streams") or []:
+            candidate = (stream or {}).get("duration")
+            if candidate not in (None, "", "N/A"):
+                value = candidate
+                break
+
+        if value in (None, "", "N/A"):
+            fallback = subprocess.run(
+                [self.ffprobe_path, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if fallback.returncode != 0:
+                raise RuntimeError(f"ffprobe returned no duration for {path}.")
+            value = (json.loads(fallback.stdout or "{}") .get("format") or {}).get("duration")
+
+        if value in (None, "", "N/A"):
             raise RuntimeError(f"ffprobe returned no duration for {path}.")
         seconds = float(value)
         if seconds <= 0:
