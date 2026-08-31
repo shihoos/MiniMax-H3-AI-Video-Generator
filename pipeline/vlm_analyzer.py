@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from planner.config import H3_VLM_ENABLED
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VLMAnalyzer:
@@ -36,10 +40,29 @@ class VLMAnalyzer:
                 "VLM is enabled but H3_VLM_ENDPOINT/H3_VLM_MODEL are not configured; "
                 "reference analysis and semantic QA will remain inactive."
             )
+            LOGGER.warning(
+                "[VLM] %s",
+                self.configuration_warning,
+            )
+        elif self.enabled and not self._looks_like_http_endpoint(self.endpoint):
+            self.configuration_warning = (
+                "VLM is enabled but H3_VLM_ENDPOINT does not look like an HTTP(S) URL; "
+                "reference analysis and semantic QA may fail until the endpoint is corrected."
+            )
+            LOGGER.warning(
+                "[VLM] %s endpoint=%r",
+                self.configuration_warning,
+                self.endpoint,
+            )
 
     @staticmethod
     def _bool(value: Any) -> bool:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _looks_like_http_endpoint(value: str) -> bool:
+        endpoint = str(value or "").strip().lower()
+        return endpoint.startswith("http://") or endpoint.startswith("https://")
 
     @property
     def available(self) -> bool:
