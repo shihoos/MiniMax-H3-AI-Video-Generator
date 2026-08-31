@@ -268,6 +268,8 @@ class ContinuityLedger:
                 "character_spatial_regions_start": deepcopy(shot.get("character_spatial_regions_start", {}) or {}),
                 "character_spatial_regions_end": deepcopy(shot.get("character_spatial_regions_end", {}) or {}),
                 "repair_applied": repaired,
+                "observed_previous_shot_state": deepcopy(shot.get("observed_previous_shot_state", {}) or {}),
+                "observed_visual_state": deepcopy(shot.get("observed_visual_state", {}) or {}),
             }
             self.entries.append(entry)
             previous_by_scene[scene_id] = shot
