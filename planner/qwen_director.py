@@ -2044,6 +2044,66 @@ Return:
                 "items": {"type": "string"},
             },
             "speech_text": {"type": "string"},
+            "dialogue_events": {
+                "type": "array",
+                "maxItems": 6,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "speaker": {"type": "string"},
+                        "text": {"type": "string"},
+                        "continues_to_next_shot": {"type": "boolean"},
+                    },
+                    "required": [
+                        "speaker",
+                        "text",
+                        "continues_to_next_shot",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "continuity_state_start": {"type": "string"},
+            "continuity_state_end": {"type": "string"},
+            "is_scene_boundary": {"type": "boolean"},
+            "character_spatial_bboxes": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                },
+            },
+            "character_spatial_regions": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "character_spatial_bboxes_start": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                },
+            },
+            "character_spatial_bboxes_end": {
+                "type": "object",
+                "additionalProperties": {
+                    "type": "array",
+                    "minItems": 4,
+                    "maxItems": 4,
+                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                },
+            },
+            "character_spatial_regions_start": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
+            "character_spatial_regions_end": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+            },
         }
         required = list(shot_properties.keys())
         return {
@@ -3383,6 +3443,66 @@ Return:
                 limit=6,
             )
 
+            dialogue = candidate.get("dialogue_events", [])
+            if not isinstance(dialogue, list):
+                dialogue = []
+            normalized_dialogue = []
+            for event in dialogue:
+                if not isinstance(event, dict):
+                    continue
+                speaker = str(event.get("speaker", "") or "").strip()
+                text = str(event.get("text", "") or "")
+                if not speaker or not text.strip():
+                    continue
+                normalized_dialogue.append({
+                    "speaker": speaker,
+                    "text": text,
+                    "continues_to_next_shot": bool(event.get("continues_to_next_shot", False)),
+                })
+            if not normalized_dialogue:
+                legacy_speakers = candidate.get("speaking_characters", []) or []
+                legacy_text = str(candidate.get("speech_text", "") or "")
+                if legacy_text.strip() and legacy_speakers:
+                    normalized_dialogue = [{
+                        "speaker": str(legacy_speakers[0]).strip(),
+                        "text": legacy_text,
+                        "continues_to_next_shot": False,
+                    }]
+            candidate["dialogue_events"] = normalized_dialogue
+            candidate["continuity_state_start"] = str(candidate.get("continuity_state_start", "") or "").strip()
+            candidate["continuity_state_end"] = str(candidate.get("continuity_state_end", "") or "").strip()
+            candidate["is_scene_boundary"] = bool(candidate.get("is_scene_boundary", False))
+            raw_bboxes = candidate.get("character_spatial_bboxes", {}) or {}
+            normalized_bboxes = {}
+            if isinstance(raw_bboxes, dict):
+                for name, bbox in raw_bboxes.items():
+                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                        values = [float(v) for v in bbox]
+                        if all(0.0 <= v <= 1.0 for v in values) and values[2] >= values[0] and values[3] >= values[1]:
+                            normalized_bboxes[str(name).strip()] = values
+            candidate["character_spatial_bboxes"] = normalized_bboxes
+            raw_regions = candidate.get("character_spatial_regions", {}) or {}
+            candidate["character_spatial_regions"] = (
+                {str(k).strip(): str(v).strip() for k, v in raw_regions.items() if str(k).strip() and str(v).strip()}
+                if isinstance(raw_regions, dict) else {}
+            )
+            for spatial_key in ("character_spatial_bboxes_start", "character_spatial_bboxes_end"):
+                raw = candidate.get(spatial_key, {}) or {}
+                normalized = {}
+                if isinstance(raw, dict):
+                    for name, bbox in raw.items():
+                        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                            values = [float(v) for v in bbox]
+                            if all(0.0 <= v <= 1.0 for v in values) and values[2] >= values[0] and values[3] >= values[1]:
+                                normalized[str(name).strip()] = values
+                candidate[spatial_key] = normalized
+            for spatial_key in ("character_spatial_regions_start", "character_spatial_regions_end"):
+                raw = candidate.get(spatial_key, {}) or {}
+                candidate[spatial_key] = (
+                    {str(k).strip(): str(v).strip() for k, v in raw.items() if str(k).strip() and str(v).strip()}
+                    if isinstance(raw, dict) else {}
+                )
+
             result.append(
                 candidate
             )
@@ -4150,6 +4270,10 @@ Preserve:
 - location continuity;
 - emotional progression;
 - visual-language consistency.
+- exact dialogue text; never paraphrase or summarize supplied dialogue.
+- stable speaker names from the supplied character roster.
+- if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response.
+- describe the shot's required initial and ending continuity states in continuity_state_start and continuity_state_end.
 
 Within each scene, shot 1 and shot 2 must use meaningfully different
 framing/composition while describing the SAME narrative beat.
@@ -4203,7 +4327,10 @@ Return JSON only in exactly this structure:
           "mood": "...",
           "visual_prompt": "...",
           "speaking_characters": [],
-          "speech_text": ""
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_state_start": "...",
+          "continuity_state_end": "..."
         },
         {
           "shot_id": "scene_001_shot_002",
@@ -4221,7 +4348,10 @@ Return JSON only in exactly this structure:
           "mood": "...",
           "visual_prompt": "...",
           "speaking_characters": [],
-          "speech_text": ""
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_state_start": "...",
+          "continuity_state_end": "..."
         }
       ]
     }
@@ -5316,6 +5446,52 @@ Return JSON only.
     # ========================================================
     # MERGE
     # ========================================================
+
+    def repair_continuity_violation(
+        self,
+        *,
+        shot: dict,
+        previous_shot: dict | None,
+        violation: dict,
+    ) -> dict:
+        """Targeted single-shot repair; unrelated production fields stay fixed."""
+        shot_schema = self._shot_json_schema()["properties"]["shots"]["items"]
+        system = (
+            "You are a deterministic continuity repair agent. "
+            "Return JSON only. Repair only the fields implicated by the continuity rejection. "
+            "Do not change shot_id, scene_id, order, characters, dialogue text, camera, or unrelated creative fields. "
+            "Preserve canonical character identity. Never invent a wardrobe change unless explicitly required by the story."
+        )
+        previous = json.dumps(previous_shot or {}, ensure_ascii=False, indent=2)
+        current = json.dumps(shot or {}, ensure_ascii=False, indent=2)
+        error = json.dumps(violation or {}, ensure_ascii=False, indent=2)
+        user = (
+            "CONTINUITY REJECTION\n"
+            f"Previous shot:\n{previous}\n\n"
+            f"Current shot:\n{current}\n\n"
+            f"Violation:\n{error}\n\n"
+            "Return the corrected shot object only."
+        )
+        schema = {
+            "type": "object",
+            "properties": {"shot": shot_schema},
+            "required": ["shot"],
+            "additionalProperties": False,
+        }
+        response = self._chat_json(
+            system,
+            user,
+            minimum_completion=320,
+            max_completion=1800,
+            call_name=f"continuity_repair:{shot.get('shot_id', 'unknown')}",
+            response_schema=schema,
+            json_mode=True,
+            disable_thinking=True,
+        )
+        repaired = response.get("shot")
+        if not isinstance(repaired, dict):
+            raise RuntimeError("Continuity repair did not return a shot object.")
+        return repaired
 
     def enrich_plan(
         self,
