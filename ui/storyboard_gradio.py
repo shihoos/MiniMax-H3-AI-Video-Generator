@@ -1556,316 +1556,157 @@ def build_app(
             )
         )
 
+    css = """
+    .h3-shell { max-width: 1500px; margin: 0 auto; }
+    .h3-hero { padding: 20px 24px; border-radius: 18px; border: 1px solid var(--border-color-primary); background: linear-gradient(135deg, var(--background-fill-secondary), var(--background-fill-primary)); }
+    .h3-title { font-size: 28px; font-weight: 700; margin: 0 0 6px 0; }
+    .h3-subtitle { opacity: .78; margin: 0; }
+    .h3-panel { border: 1px solid var(--border-color-primary); border-radius: 14px; padding: 10px; }
+    .h3-actions button { min-height: 46px; }
+    .h3-status { min-height: 42px; }
+    .h3-preview img { object-fit: contain !important; }
+    """
+
+    try:
+        theme = gr.themes.Soft(spacing_size="sm", radius_size="md")
+    except Exception:
+        theme = None
+
     with gr.Blocks(
-        title="MiniMax H3 AI Video Generator",
+        title="MiniMax H3 Film Studio",
+        theme=theme,
+        css=css,
     ) as demo:
 
-        gr.Markdown(
-            "# MiniMax H3 AI Video Generator\n\n"
-            "Create a cinematic storyboard with Qwen3-14B, "
-            "review saved drafts, and approve the version "
-            "you want to render."
-        )
-
-        story = gr.Textbox(
-            label="Your Story",
-            value=initial_story or "",
-            placeholder=(
-                "Tell me what you want the video to be about..."
-            ),
-            lines=16,
-        )
-
-        mode = gr.Radio(
-            choices=[
-                (
-                    "AI Story",
-                    "ai_story",
-                ),
-                (
-                    "Expand Story",
-                    "expand_user_story",
-                ),
-                (
-                    "Preserve Story",
-                    "preserve_user_story",
-                ),
-            ],
-            value=(
-                initial_mode
-                if initial_mode
-                in {
-                    "ai_story",
-                    "expand_user_story",
-                    "preserve_user_story",
-                }
-                else "ai_story"
-            ),
-            label="Story Mode",
-            info=(
-                "AI Story: create a new cinematic story from your premise. "
-                "Expand Story: enrich the existing story while preserving its core. "
-                "Preserve Story: keep the supplied story unchanged and only "
-                "structure it for production."
-            ),
-        )
-
-        resume_id = gr.Textbox(
-            label="Resume Production ID (optional)",
-            value="",
-            placeholder=(
-                "Paste a production_id here to resume a "
-                "generation that stopped partway through "
-                "(e.g. after a Kaggle session died). Leave "
-                "empty to start a new production. The story "
-                "text and mode above must exactly match the "
-                "original request."
-            ),
-            lines=1,
-        )
-
-        with gr.Row():
-
-            generate = gr.Button(
-                "Generate Storyboard",
-                variant="primary",
+        with gr.Column(elem_classes=["h3-shell"]):
+            gr.HTML(
+                "<div class='h3-hero'><div class='h3-title'>MiniMax H3 Film Studio</div>"
+                "<div class='h3-subtitle'>Story → entities → Qwen Director → cinematic compiler → H3 → visual QA → retake → upscale → final film</div></div>"
             )
 
-            regenerate = gr.Button(
-                "Regenerate",
-            )
+            with gr.Tabs():
+                with gr.Tab("🎬 Studio", id="studio"):
+                    story = gr.Textbox(
+                        label="Your Story",
+                        value=initial_story or "",
+                        placeholder="Describe the story, characters, world and desired outcome…",
+                        lines=10,
+                    )
+                    with gr.Row():
+                        mode = gr.Radio(
+                            choices=[("AI Story", "ai_story"), ("Expand Story", "expand_user_story"), ("Preserve Story", "preserve_user_story")],
+                            value=initial_mode if initial_mode in {"ai_story", "expand_user_story", "preserve_user_story"} else "ai_story",
+                            label="Story Mode",
+                            info="AI Story creates from the premise. Expand enriches it. Preserve keeps the supplied story and structures it for production.",
+                        )
+                        resume_id = gr.Textbox(
+                            label="Resume Production ID (optional)",
+                            value="",
+                            placeholder="production_YYYYMMDD_…",
+                            lines=1,
+                        )
+                    with gr.Row(elem_classes=["h3-actions"]):
+                        generate = gr.Button("Generate Storyboard", variant="primary")
+                        regenerate = gr.Button("Regenerate")
+                        refresh = gr.Button("Refresh Saved Drafts")
+                    saved_draft = gr.Dropdown(
+                        choices=controller._draft_choices(),
+                        label="Saved Storyboard",
+                        value=None,
+                        interactive=True,
+                        allow_custom_value=False,
+                    )
+                    with gr.Row(elem_classes=["h3-actions"]):
+                        preview = gr.Button("Preview Selected")
+                        latest = gr.Button("Preview Latest For Mode")
+                    status = gr.Markdown("Write your story and generate a storyboard.", elem_classes=["h3-status"])
+                    with gr.Row():
+                        with gr.Column(elem_classes=["h3-panel"]):
+                            with gr.Accordion("Characters", open=True):
+                                characters = gr.Markdown()
+                        with gr.Column(elem_classes=["h3-panel"]):
+                            with gr.Accordion("Scenes", open=True):
+                                scenes = gr.Markdown()
+                    with gr.Accordion("Shots & Director Plan", open=True):
+                        shots = gr.Markdown()
 
-        gr.Markdown(
-            "### Saved Storyboards"
-        )
+                with gr.Tab("⏱ Timeline & Preview", id="timeline"):
+                    gr.Markdown("### Timeline Editor\nEdit duration and continuity mode, then apply the changes. The cinematic compiler remains the single production source of truth.")
+                    timeline_table = gr.Dataframe(
+                        headers=["Shot", "Scene", "Start (s)", "End (s)", "Duration (s)", "Continuity"],
+                        datatype=["str", "str", "number", "number", "number", "str"],
+                        value=[], interactive=True, row_count=(1, "dynamic"), col_count=(6, "fixed"),
+                    )
+                    with gr.Row(elem_classes=["h3-actions"]):
+                        load_timeline = gr.Button("Load Timeline")
+                        apply_timeline = gr.Button("Apply Timeline Edits", variant="primary")
+                    timeline_status = gr.Markdown()
+                    gr.Markdown("### Live H3 Sampling Preview\nThe preview is optional and does not replace the ComfyUI rendering backend. Refresh is safe during long renders.")
+                    live_preview = gr.Image(label="Current Sampling Preview", type="filepath", height=480, elem_classes=["h3-preview"])
+                    live_preview_status = gr.Markdown()
+                    with gr.Row(elem_classes=["h3-actions"]):
+                        refresh_live_preview = gr.Button("Refresh Live Preview", variant="primary")
+                    live_preview_timer = gr.Timer(value=3.0, active=True)
+                    gr.Markdown("### Final Output")
+                    final_video = gr.Video(label="Final Film / Latest Output")
 
-        saved_draft = gr.Dropdown(
-            choices=(
-                controller._draft_choices()
-            ),
-            label="Saved Draft",
-            value=None,
-            interactive=True,
-            allow_custom_value=False,
-        )
+                with gr.Tab("🛠 Production", id="production"):
+                    with gr.Row():
+                        runtime_status_card = gr.Markdown("**Runtime:** press Check Runtime Health", elem_classes=["h3-panel"])
+                        vlm_status_card = gr.Markdown(
+                            "**VLM:** configured automatically from `H3_VLM_ENABLED`, `H3_VLM_ENDPOINT`, and `H3_VLM_MODEL`.",
+                            elem_classes=["h3-panel"],
+                        )
+                    with gr.Accordion("Runtime Diagnostics", open=True):
+                        runtime_json = gr.JSON()
+                        runtime_status = gr.Markdown()
+                        runtime_check = gr.Button("Check Runtime Health", variant="primary")
+                    with gr.Accordion("Selective Retake", open=True):
+                        gr.Markdown("Mark only the bad range. The retake manager persists the request so the renderer can replace that range and reassemble the shot.")
+                        retake_shot_id = gr.Textbox(label="Shot ID")
+                        with gr.Row():
+                            retake_start = gr.Number(label="Start (s)", value=0.0, minimum=0.0)
+                            retake_end = gr.Number(label="End (s)", value=4.0, minimum=0.01)
+                        retake_reason = gr.Textbox(label="Why retake this range?", lines=3)
+                        request_retake = gr.Button("Create Retake Request", variant="primary")
+                        retake_status = gr.Markdown()
+                    with gr.Row(elem_classes=["h3-actions"]):
+                        approve = gr.Button("Approve & Generate Video", variant="primary", scale=2)
+                        refresh_job = gr.Button("Refresh Generation Status")
+                    result_status = gr.Markdown(elem_classes=["h3-status"])
 
-        with gr.Row():
+            session_plan_path = gr.Textbox(value="", visible=False, interactive=False)
 
-            preview = gr.Button(
-                "Preview Selected"
-            )
+            generation_outputs = [status, characters, scenes, shots, result_status, final_video, session_plan_path, saved_draft]
 
-            latest = gr.Button(
-                "Preview Latest For Mode"
-            )
+            generate.click(fn=generate_storyboard_ui, inputs=[story, mode, resume_id], outputs=generation_outputs)
+            regenerate.click(fn=regenerate_storyboard_ui, inputs=[story, mode, resume_id], outputs=generation_outputs)
+            preview.click(fn=controller.preview_saved, inputs=[saved_draft], outputs=[status, characters, scenes, shots, result_status, final_video, session_plan_path])
+            latest.click(fn=preview_latest_ui, inputs=[mode], outputs=[saved_draft, status, characters, scenes, shots, result_status, final_video, session_plan_path])
+            refresh.click(fn=refresh_saved_drafts_ui, inputs=[saved_draft], outputs=[saved_draft])
 
-            refresh = gr.Button(
-                "Refresh Saved Drafts"
-            )
+            approve.click(fn=controller.approve_and_generate, inputs=[session_plan_path], outputs=[result_status, final_video, session_plan_path])
+            refresh_job.click(fn=controller.refresh_job_status, inputs=[session_plan_path], outputs=[result_status, final_video])
+            refresh_live_preview.click(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
+            live_preview_timer.tick(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
+            load_timeline.click(fn=controller.timeline_table, inputs=[session_plan_path], outputs=[timeline_table, timeline_status])
+            apply_timeline.click(fn=controller.apply_timeline_edits, inputs=[session_plan_path, timeline_table], outputs=[timeline_table, timeline_status, session_plan_path])
+            runtime_check.click(fn=controller.runtime_health, inputs=[session_plan_path], outputs=[runtime_json, runtime_status])
+            request_retake.click(fn=controller.create_retake_request, inputs=[session_plan_path, retake_shot_id, retake_start, retake_end, retake_reason], outputs=[retake_status, session_plan_path])
 
-        status = gr.Markdown(
-            "Write your story and choose a mode."
-        )
+            def runtime_card_ui():
+                try:
+                    report = RuntimeDiagnostics(ROOT).collect()
+                    gpus = report.get("gpus", []) or []
+                    gpu_text = ", ".join(map(str, gpus)) if gpus else "unavailable"
+                    return f"**Runtime:** 🟢 {report.get('python', '')} · GPUs: {gpu_text}", (
+                        "**VLM:** 🟢 enabled/configured" if os.getenv("H3_VLM_ENDPOINT", "").strip() and os.getenv("H3_VLM_MODEL", "").strip() else
+                        "**VLM:** 🟡 enabled but endpoint/model not configured"
+                    )
+                except Exception as exc:
+                    return "**Runtime:** 🔴 diagnostics failed", f"**VLM:** status unavailable — {exc}"
 
-        with gr.Accordion(
-            "Characters",
-            open=True,
-        ):
-
-            characters = gr.Markdown()
-
-        with gr.Accordion(
-            "Scenes",
-            open=True,
-        ):
-
-            scenes = gr.Markdown()
-
-        with gr.Accordion(
-            "Shots & Director Plan",
-            open=True,
-        ):
-
-            shots = gr.Markdown()
-
-        gr.Markdown("### Production Timeline")
-        timeline_table = gr.Dataframe(
-            headers=["Shot", "Scene", "Start (s)", "End (s)", "Duration (s)", "Continuity"],
-            datatype=["str", "str", "number", "number", "number", "str"],
-            value=[], interactive=True, row_count=(1, "dynamic"), col_count=(6, "fixed"),
-        )
-        timeline_status = gr.Markdown()
-        live_preview = gr.Image(label="Live Sampling Preview", type="filepath", height=420)
-        live_preview_status = gr.Markdown()
-        refresh_live_preview = gr.Button("Refresh Live Preview")
-        live_preview_timer = gr.Timer(value=3.0, active=True)
-        with gr.Row():
-            load_timeline = gr.Button("Load Timeline")
-            apply_timeline = gr.Button("Apply Timeline Edits")
-
-        with gr.Accordion("Runtime Diagnostics", open=False):
-            runtime_json = gr.JSON()
-            runtime_status = gr.Markdown()
-            runtime_check = gr.Button("Check Runtime Health")
-
-        with gr.Accordion("Selective Retake", open=False):
-            retake_shot_id = gr.Textbox(label="Shot ID")
-            with gr.Row():
-                retake_start = gr.Number(label="Start (s)", value=0.0, minimum=0.0)
-                retake_end = gr.Number(label="End (s)", value=1.0, minimum=0.01)
-            retake_reason = gr.Textbox(label="Reason", lines=2)
-            request_retake = gr.Button("Create Retake Request")
-            retake_status = gr.Markdown()
-
-        approve = gr.Button(
-            "Approve & Generate Video",
-            variant="primary",
-        )
-
-        refresh_job = gr.Button(
-            "Refresh Generation Status",
-        )
-
-        result_status = gr.Markdown()
-
-        final_video = gr.Video(
-            label="Final Video",
-        )
-
-        session_plan_path = gr.Textbox(
-            value="",
-            visible=False,
-            interactive=False,
-        )
-
-        generation_outputs = [
-            status,
-            characters,
-            scenes,
-            shots,
-            result_status,
-            final_video,
-            session_plan_path,
-            saved_draft,
-        ]
-
-        generate.click(
-            fn=generate_storyboard_ui,
-            inputs=[
-                story,
-                mode,
-                resume_id,
-            ],
-            outputs=generation_outputs,
-        )
-
-        regenerate.click(
-            fn=regenerate_storyboard_ui,
-            inputs=[
-                story,
-                mode,
-                resume_id,
-            ],
-            outputs=generation_outputs,
-        )
-
-        preview.click(
-            fn=controller.preview_saved,
-            inputs=[
-                saved_draft,
-            ],
-            outputs=[
-                status,
-                characters,
-                scenes,
-                shots,
-                result_status,
-                final_video,
-                session_plan_path,
-            ],
-        )
-
-        latest.click(
-            fn=preview_latest_ui,
-            inputs=[
-                mode,
-            ],
-            outputs=[
-                saved_draft,
-                status,
-                characters,
-                scenes,
-                shots,
-                result_status,
-                final_video,
-                session_plan_path,
-            ],
-        )
-
-        refresh.click(
-            fn=refresh_saved_drafts_ui,
-            inputs=[
-                saved_draft,
-            ],
-            outputs=[
-                saved_draft,
-            ],
-        )
-
-        approve.click(
-            fn=controller.approve_and_generate,
-            inputs=[
-                session_plan_path,
-            ],
-            outputs=[
-                result_status,
-                final_video,
-                session_plan_path,
-            ],
-        )
-
-        refresh_job.click(
-            fn=controller.refresh_job_status,
-            inputs=[
-                session_plan_path,
-            ],
-            outputs=[
-                result_status,
-                final_video,
-                session_plan_path,
-            ],
-        )
-
-        refresh_live_preview.click(
-            fn=controller.latest_live_preview,
-            inputs=[session_plan_path],
-            outputs=[live_preview, live_preview_status],
-        )
-        live_preview_timer.tick(
-            fn=controller.latest_live_preview,
-            inputs=[session_plan_path],
-            outputs=[live_preview, live_preview_status],
-        )
-        load_timeline.click(
-            fn=controller.timeline_table,
-            inputs=[session_plan_path],
-            outputs=[timeline_table, timeline_status],
-        )
-        apply_timeline.click(
-            fn=controller.apply_timeline_edits,
-            inputs=[session_plan_path, timeline_table],
-            outputs=[timeline_table, timeline_status, session_plan_path],
-        )
-        runtime_check.click(
-            fn=controller.runtime_health,
-            inputs=[session_plan_path],
-            outputs=[runtime_json, runtime_status],
-        )
-        request_retake.click(
-            fn=controller.create_retake_request,
-            inputs=[session_plan_path, retake_shot_id, retake_start, retake_end, retake_reason],
-            outputs=[retake_status, session_plan_path],
-        )
+            runtime_check.click(fn=runtime_card_ui, inputs=[], outputs=[runtime_status_card, vlm_status_card])
 
     return demo
 
