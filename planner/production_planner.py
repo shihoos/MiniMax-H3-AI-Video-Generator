@@ -514,16 +514,13 @@ class ProductionPlanner:
         self,
         units: list[StoryUnit],
     ) -> list[StoryUnit]:
-        """Normalize source material into the deterministic 4–6 scene budget.
+        """
+        Deterministically normalize story units into the production
+        scene budget when the source contains enough narrative material.
 
-        This is deliberately non-creative: no new story events are invented.
-        When the source is shorter than four narrative units, the original text
-        is partitioned into four *structural planning beats* using sentence/word
-        boundaries. If the source is a single sentence or otherwise too short to
-        split semantically, the same source sentence is carried into the four
-        planning beats rather than being mutilated or padded with invented prose.
-        Qwen remains responsible for turning those structural beats into distinct
-        cinematic scenes.
+        This is a topology/budget step, not a creative rewrite:
+        source text is preserved, no model call is made, and short
+        stories are never padded with invented events.
         """
         if not units:
             return []
@@ -565,7 +562,9 @@ class ProductionPlanner:
         )
 
         for unit in units:
-            protected = str(unit.text or "").strip()
+            protected = str(
+                unit.text or ""
+            ).strip()
 
             for pattern in abbreviation_patterns:
                 protected = re.sub(
@@ -587,11 +586,64 @@ class ProductionPlanner:
                     .replace("<dot>", ".")
                     .strip()
                 )
+
                 if sentence:
                     pieces.append(sentence)
 
-        # Four-to-six real narrative pieces are preserved one-to-one.
-        if 4 <= len(pieces) <= 6:
+        if len(pieces) < 4:
+            # The director contract requires at least four structural scene
+            # inputs. For short source text, create four overlapping context
+            # windows from the original material rather than inventing events
+            # or cutting the source into meaningless word fragments.
+            short_source = [
+                piece for piece in pieces if piece
+            ]
+            if not short_source:
+                short_source = [
+                    str(unit.text or "").strip()
+                    for unit in units
+                    if str(unit.text or "").strip()
+                ]
+
+            if not short_source:
+                return []
+
+            if len(short_source) == 1:
+                groups = [
+                    list(short_source),
+                    list(short_source),
+                    list(short_source),
+                    list(short_source),
+                ]
+            elif len(short_source) == 2:
+                groups = [
+                    [short_source[0]],
+                    [short_source[0], short_source[1]],
+                    [short_source[1]],
+                    [short_source[0], short_source[1]],
+                ]
+            else:
+                groups = [
+                    [short_source[0]],
+                    [short_source[0], short_source[1]],
+                    [short_source[1], short_source[2]],
+                    [short_source[2]],
+                ]
+
+            return [
+                StoryUnit(
+                    order=index,
+                    text=" ".join(group).strip(),
+                )
+                for index, group in enumerate(
+                    groups,
+                    start=1,
+                )
+                if any(group)
+            ]
+
+        # Four-to-six source sentences are preserved one-to-one.
+        if len(pieces) <= 6:
             return [
                 StoryUnit(
                     order=index,
@@ -603,76 +655,19 @@ class ProductionPlanner:
                 )
             ]
 
-        if len(pieces) < 4:
-            # We need four deterministic topology slots for the production
-            # contract, but we must not invent story events or cut words in half.
-            full_text = " ".join(pieces).strip()
-            if not full_text:
-                full_text = " ".join(
-                    str(unit.text or "").strip()
-                    for unit in units
-                    if str(unit.text or "").strip()
-                ).strip()
-
-            if not full_text:
-                return []
-
-            words = full_text.split()
-
-            if len(words) >= 4:
-                # Partition by word boundaries while guaranteeing four non-empty
-                # structural units. This preserves every source word exactly once.
-                boundaries: list[int] = []
-                total = len(words)
-                for index in range(1, 4):
-                    target = round(total * index / 4)
-                    minimum = boundaries[-1] + 1 if boundaries else 1
-                    maximum = total - (4 - index)
-                    boundary = min(max(target, minimum), maximum)
-                    boundaries.append(boundary)
-
-                groups: list[list[str]] = []
-                start_word = 0
-                for boundary in boundaries + [total]:
-                    groups.append(words[start_word:boundary])
-                    start_word = boundary
-
-                return [
-                    StoryUnit(
-                        order=index,
-                        text=" ".join(group).strip(),
-                    )
-                    for index, group in enumerate(
-                        groups,
-                        start=1,
-                    )
-                    if group
-                ]
-
-            # Extremely short inputs (1–3 words) cannot be split without either
-            # losing information or fabricating content. Preserve the complete
-            # source in each structural slot; the Director owns cinematic
-            # expansion, while the source remains byte-for-byte recoverable here.
-            return [
-                StoryUnit(
-                    order=index,
-                    text=full_text,
-                )
-                for index in range(1, 5)
-            ]
-
-        # More than six source pieces: deterministically bucket contiguous source
-        # material into exactly six groups, preserving order and all source text.
+        # More than six source sentences are compressed into exactly six
+        # deterministic contiguous-ish groups without inventing content.
         buckets: list[list[str]] = [
             []
             for _ in range(6)
         ]
 
-        total = len(pieces)
         for index, piece in enumerate(pieces):
             bucket = min(
                 5,
-                int(index * 6 / total),
+                int(
+                    index * 6 / len(pieces)
+                ),
             )
             buckets[bucket].append(piece)
 
