@@ -85,10 +85,17 @@ class ProductionRunner:
             / "h3"
         )
 
-        # These production-scoped stores are created in _prepare_production_paths()
-        # once the durable production_id is known.
-        self.continuity: H3SceneContinuity | None = None
-        self.identity_anchors: IdentityAnchorStore | None = None
+        self.continuity = (
+            H3SceneContinuity(
+                self.project_root
+            )
+        )
+
+        self.identity_anchors = (
+            IdentityAnchorStore(
+                self.project_root
+            )
+        )
 
     @staticmethod
     def _safe_name(
@@ -665,14 +672,6 @@ class ProductionRunner:
             )
         return bindings
 
-    def _finalize_reference_contract(
-        self,
-        shot: dict,
-        references: list[str],
-        roles: list[dict],
-    ) -> None:
-        self._rebuild_reference_contract(shot, references, roles)
-
     def _rebuild_reference_contract(
         self,
         shot: dict,
@@ -718,7 +717,6 @@ class ProductionRunner:
                     shot["reference_images"],
                     shot["reference_roles"],
                     shot["reference_bindings"],
-                    actual_runtime_order=True,
                 )
                 StoryboardReferenceBuilder.assert_manifest_invariant(
                     entry,
@@ -869,26 +867,31 @@ class ProductionRunner:
                 character_map,
             )
 
-            # Establish the final runtime reference order exactly once.
-            # The same contract builder regenerates bindings and updates the
-            # manifest atomically, so identity-anchor insertion and previous-frame
-            # insertion cannot leave stale Picture-N bindings behind.
-            if (
-                previous_video is not None
-                and not bool(shot.get("is_scene_boundary", False))
-            ):
-                if self.continuity is None:
-                    raise RuntimeError("Production continuity store is not initialized.")
-                last_frame = self.continuity.prepare_next_shot(
-                    previous_video,
-                    scene_id,
-                    previous_shot["shot_id"],
+            if previous_video is not None and not bool(shot.get("is_scene_boundary", False)):
+
+                last_frame = (
+                    self.continuity
+                    .prepare_next_shot(
+                        previous_video,
+                        scene_id,
+                        previous_shot[
+                            "shot_id"
+                        ],
+                    )
                 )
 
-                references = list(shot.get("reference_images", []) or [])
+                references = list(
+                    shot.get(
+                        "reference_images",
+                        [],
+                    )
+                    or []
+                )
                 roles = [
                     dict(item)
-                    for item in (shot.get("reference_roles", []) or [])
+                    for item in (
+                        shot.get("reference_roles", []) or []
+                    )
                     if isinstance(item, dict)
                 ]
                 role_by_path = {
@@ -898,89 +901,73 @@ class ProductionRunner:
                 }
 
                 ordered: list[tuple[str, dict]] = []
-                seen_paths: set[str] = set()
                 for path in references:
-                    ref = str(path).strip()
-                    if not ref or ref in seen_paths:
-                        continue
-                    seen_paths.add(ref)
-                    role = dict(role_by_path.get(ref, {
-                        "path": ref,
-                        "role": "visual_reference",
-                        "priority": 50,
-                    }))
-                    role["path"] = ref
-                    ordered.append((ref, role))
+                    role = dict(
+                        role_by_path.get(
+                            str(path),
+                            {
+                                "path": str(path),
+                                "role": "visual_reference",
+                                "priority": 50,
+                            },
+                        )
+                    )
+                    ordered.append((str(path), role))
 
-                storyboard_items = [
-                    item for item in ordered
-                    if str(item[1].get("role", "")).strip().lower() == "storyboard"
+                ordered = [
+                    item
+                    for item in ordered
+                    if item[0] != str(last_frame)
                 ]
-                other_items = [
-                    item for item in ordered
-                    if str(item[1].get("role", "")).strip().lower() != "storyboard"
+                storyboard = [
+                    item
+                    for item in ordered
+                    if item[1].get("role") == "storyboard"
                 ]
-                other_items.sort(
+                identity = [
+                    item
+                    for item in ordered
+                    if item[1].get("role") != "storyboard"
+                ]
+                identity.sort(
                     key=lambda item: (
-                        0 if str(item[1].get("role", "")).strip().lower() == "character_identity" else 1,
                         -int(item[1].get("priority", 50)),
                         item[0],
                     )
                 )
-
-                last_frame_path = str(last_frame)
                 role = {
-                    "path": last_frame_path,
+                    "path": str(last_frame),
                     "role": "previous_shot_last_frame",
                     "label": (
-                        f"Exact final frame of previous shot {previous_shot['shot_id']}; "
-                        "use for temporal and visual continuity."
+                        f"Exact final frame of previous shot "
+                        f"{previous_shot['shot_id']}; use for temporal and visual continuity."
                     ),
                     "priority": 100,
                 }
-                final_items = [
-                    item for item in other_items + storyboard_items
-                    if item[0] != last_frame_path
-                ]
-                final_items.append((last_frame_path, role))
-
-                # Never discard canonical identity references; if the H3 limit
-                # is reached, discard the lowest-priority non-identity reference.
-                while len(final_items) > H3_MAX_REFERENCE_IMAGES:
-                    candidates = [
-                        (idx, item)
-                        for idx, item in enumerate(final_items)
-                        if str(item[1].get("role", "")).strip().lower() not in {
-                            "character_identity",
-                            "previous_shot_last_frame",
-                        }
-                    ]
-                    if not candidates:
-                        raise RuntimeError(
-                            f"Reference contract for {shot_id} exceeds the H3 image limit "
-                            "without a removable non-identity reference."
-                        )
-                    drop_index = min(
-                        candidates,
-                        key=lambda item: (
-                            int(item[1][1].get("priority", 50)),
-                            -item[0],
-                        ),
-                    )[0]
-                    final_items.pop(drop_index)
-
-                self._finalize_reference_contract(
-                    shot,
-                    [path for path, _ in final_items],
-                    [role for _, role in final_items],
-                )
-
+                final_items = identity + storyboard + [(str(last_frame), role)]
+                final_items = final_items[:H3_MAX_REFERENCE_IMAGES]
             else:
-                self._finalize_reference_contract(
-                    shot,
+                # First shot of a scene or an explicit scene boundary: no
+                # previous-frame relay. Identity/storyboard references remain.
+                final_items = []
+                for path, role in zip(
                     list(shot.get("reference_images", []) or []),
-                    [dict(item) for item in (shot.get("reference_roles", []) or []) if isinstance(item, dict)],
-                )
+                    list(shot.get("reference_roles", []) or []),
+                ):
+                    if isinstance(role, dict):
+                        item = dict(role)
+                        item["path"] = str(path)
+                        final_items.append((str(path), item))
+                final_items = final_items[:H3_MAX_REFERENCE_IMAGES]
+
+            # Exactly one contract rebuild per shot. This incorporates identity
+            # anchors, storyboard references, and optional last-frame continuity
+            # before the manifest is persisted and <Picture N> is rebuilt.
+            self._rebuild_reference_contract(
+                shot,
+                [path for path, _ in final_items],
+                [role for _, role in final_items],
+            )
 
             workflow_mode = (
                 self._workflow_for_shot(
