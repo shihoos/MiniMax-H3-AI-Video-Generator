@@ -60,13 +60,38 @@ class H3Runtime:
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     @staticmethod
-    def vram_handoff(clients=None, *, unload_models: bool = True) -> None:
-        """Flush remote ComfyUI models, then clear local CUDA allocators before H3 workers run."""
+    def vram_handoff(clients=None, *, unload_models: bool = True, min_free_vram_gib: float = 1.0) -> None:
+        """Flush remote ComfyUI models and verify worker health before H3 rendering."""
         for client in (clients or {}).values():
-            free = getattr(client, "free_memory", None)
-            if callable(free):
-                free(unload_models=unload_models, free_memory=True)
+            free_and_wait = getattr(client, "free_and_wait", None)
+            if callable(free_and_wait):
+                if not free_and_wait(unload_models=unload_models, free_memory=True):
+                    raise RuntimeError("ComfyUI refused the VRAM handoff request.")
+            else:
+                free = getattr(client, "free_memory", None)
+                if callable(free) and not free(unload_models=unload_models, free_memory=True):
+                    raise RuntimeError("ComfyUI refused the VRAM free request.")
         H3Runtime.clear_cuda()
+        # Controller-side CUDA memory is only a secondary signal. Worker-side
+        # /system_stats must also report healthy availability after /free.
+        for client in (clients or {}).values():
+            stats_fn = getattr(client, "get_system_stats", None)
+            if not callable(stats_fn):
+                continue
+            stats = stats_fn()
+            devices = stats.get("devices", []) if isinstance(stats, dict) else []
+            if not devices:
+                continue
+            for device in devices:
+                free = device.get("vram_free")
+                if free is None:
+                    continue
+                try:
+                    free_gib = float(free) / (1024 ** 3)
+                except (TypeError, ValueError):
+                    continue
+                if free_gib < float(min_free_vram_gib):
+                    raise RuntimeError(f"Insufficient worker free VRAM after handoff: {free_gib:.2f} GiB < {min_free_vram_gib:.2f} GiB.")
 
     @classmethod
     def launch_worker(
