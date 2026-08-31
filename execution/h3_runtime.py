@@ -59,6 +59,15 @@ class H3Runtime:
             return default
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def vram_handoff(clients=None, *, unload_models: bool = True) -> None:
+        """Flush remote ComfyUI models, then clear local CUDA allocators before H3 workers run."""
+        for client in (clients or {}).values():
+            free = getattr(client, "free_memory", None)
+            if callable(free):
+                free(unload_models=unload_models, free_memory=True)
+        H3Runtime.clear_cuda()
+
     @classmethod
     def launch_worker(
         cls,
