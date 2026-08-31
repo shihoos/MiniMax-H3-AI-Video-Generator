@@ -12,7 +12,7 @@ class VRAMProfile:
     cpu_vae: bool
     disable_pinned_memory: bool
     fast_disk: bool
-    reserve_vram_gib: float
+    reserve_vram_gb: float
     reason: str
 
 
@@ -44,26 +44,32 @@ def _system_memory_gib() -> tuple[float, float]:
     return total, available
 
 
-def _gpu_vram_gib() -> float:
+def _gpu_vram_gib(gpu_id: int | None = None) -> float:
     try:
         import torch
         if not torch.cuda.is_available():
             return 0.0
+        if gpu_id is not None:
+            if gpu_id < 0 or gpu_id >= torch.cuda.device_count():
+                raise ValueError(f"Invalid GPU id: {gpu_id}")
+            return float(torch.cuda.get_device_properties(gpu_id).total_memory) / (1024 ** 3)
         return max(
             float(torch.cuda.get_device_properties(i).total_memory) / (1024 ** 3)
             for i in range(torch.cuda.device_count())
         )
+    except ValueError:
+        raise
     except Exception:
         return 0.0
 
 
-def resolve_vram_profile(config: dict[str, Any] | None = None) -> VRAMProfile:
+def resolve_vram_profile(config: dict[str, Any] | None = None, *, gpu_id: int | None = None) -> VRAMProfile:
     cfg = dict(config or {})
     requested = str(os.getenv("H3_VRAM_PROFILE", cfg.get("profile", "auto")) or "auto").strip().lower()
     async_streams = max(1, int(os.getenv("H3_COMFY_ASYNC_OFFLOAD_STREAMS", cfg.get("async_offload_streams", 2))))
-    reserve = max(0.0, float(os.getenv("H3_COMFY_RESERVE_VRAM_GIB", cfg.get("reserve_vram_gib", 0.0))))
+    reserve = max(0.0, float(os.getenv("H3_COMFY_RESERVE_VRAM_GB", cfg.get("reserve_vram_gb", cfg.get("reserve_vram_gib", 0.0)))))
     total_ram, available_ram = _system_memory_gib()
-    gpu_vram = _gpu_vram_gib()
+    gpu_vram = _gpu_vram_gib(gpu_id)
     ram_ratio = (available_ram / total_ram) if total_ram > 0 else 1.0
 
     if requested not in {"auto", "low_vram", "balanced", "throughput"}:
@@ -107,6 +113,6 @@ def resolve_vram_profile(config: dict[str, Any] | None = None) -> VRAMProfile:
         cpu_vae=cpu_vae,
         disable_pinned_memory=disable_pinned,
         fast_disk=fast_disk,
-        reserve_vram_gib=reserve,
+        reserve_vram_gb=reserve,
         reason=reasons[requested],
     )
