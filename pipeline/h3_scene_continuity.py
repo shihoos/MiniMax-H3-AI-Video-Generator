@@ -119,13 +119,19 @@ class H3SceneContinuity:
             str(destination),
         ]
 
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=30.0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Timed out while extracting the last frame from {video_path}."
+            ) from exc
 
         if result.returncode != 0:
             raise RuntimeError(
