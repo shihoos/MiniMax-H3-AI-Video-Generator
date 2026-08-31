@@ -29,7 +29,7 @@ def main() -> None:
         check(queue.get(job_id)["status"] == "queued", "SQLite queue submit failed.")
         claimed = queue.claim_next()
         check(claimed and claimed["status"] == "running", "SQLite queue claim failed.")
-        queue.complete(job_id, {"ok": True})
+        queue.complete(job_id, {"ok": True}, worker_token=claimed["worker_token"])
         check(queue.get(job_id)["status"] == "completed", "SQLite queue completion failed.")
 
         plan = {"shots": [{"shot_id": "shot_001", "scene_id": "scene_001", "order": 1, "location": "room", "action": "enter", "characters": [], "camera_shot": "wide", "camera_movement": "static", "lens_and_depth_of_field": "normal", "composition_notes": "centered", "lighting": "soft", "color_temperature": "neutral", "mood": "calm", "visual_prompt": "A cinematic entrance."}]}
@@ -46,7 +46,7 @@ def main() -> None:
         image.write_bytes(b"png"); manifest.write_text("{}", encoding="utf-8")
         cache.store(digest, image, manifest)
         image.unlink(); manifest.unlink()
-        check(cache.restore(digest, image, manifest), "Storyboard cache restore failed.")
+        check(cache.restore(digest, image, manifest) is not None, "Storyboard cache restore failed.")
 
         observer = VisualStateObserver(root)
         check(callable(observer.observe_frame), "Visual observer is unavailable.")
