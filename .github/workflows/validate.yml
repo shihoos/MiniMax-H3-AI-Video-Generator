@@ -62,6 +62,34 @@ jobs:
             kaggle \
             ui
 
+      - name: Dependency manifest contract
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import yaml
+
+          requirements = Path("requirements.txt").read_text(encoding="utf-8")
+          runtime = yaml.safe_load(
+              Path("configs/runtime_versions.yaml").read_text(encoding="utf-8")
+          )
+
+          assert re.search(r"(?im)^Pillow(?:==|>=|>|~=|<=)", requirements), \
+              "requirements.txt must declare Pillow."
+
+          pillow_requirement = str(
+              runtime.get("storyboard", {}).get("pillow_requirement", "")
+          ).strip()
+
+          assert pillow_requirement, \
+              "runtime_versions.yaml must declare storyboard.pillow_requirement."
+
+          assert f"Pillow{pillow_requirement}" in requirements, \
+              "Pillow requirement must match runtime_versions.yaml."
+
+          print("Dependency manifest contract PASSED.")
+          PY
+
       - name: Reference path wiring
         run: |
           python scripts/validate_reference_wiring.py
@@ -81,6 +109,29 @@ jobs:
           H3_DIRECTOR_ENABLED: "0"
         run: |
           python scripts/validate_director.py
+
+      - name: Production continuity validation
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        run: |
+          python scripts/validate_production_continuity.py
+
+      - name: H3 duration quantization contract
+        run: |
+          python - <<'PY'
+          from pipeline.dialogue_timeline import DialogueTimeline
+
+          assert DialogueTimeline.h3_legal_frames(5.0) == 124
+          assert abs(
+              DialogueTimeline.h3_effective_duration_seconds(5.0)
+              - (124 / 24.0)
+          ) < 1e-9
+          assert DialogueTimeline.h3_legal_frames(4.0) == 124
+          assert DialogueTimeline.h3_legal_frames(15.0) == 362
+          assert DialogueTimeline.h3_legal_frames(5.2) == 141
+
+          print("H3 duration quantization contract PASSED.")
+          PY
 
       - name: Planner smoke tests
         env:
@@ -145,6 +196,9 @@ jobs:
               "pipeline.production_orchestrator",
               "pipeline.identity_anchor_store",
               "pipeline.h3_scene_continuity",
+              "pipeline.dialogue_timeline",
+              "pipeline.continuity_ledger",
+              "pipeline.storyboard_reference_builder",
               "execution.h3_workflow_builder",
               "execution.h3_upscaled_workflow_builder",
               "execution.shot_executor",
@@ -162,6 +216,30 @@ jobs:
               "Runtime imports PASSED."
           )
           PY
+
+      - name: Direct Gradio entry-point smoke
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+        shell: bash
+        run: |
+          set +e
+          timeout 12s python ui/storyboard_gradio.py > /tmp/h3_gradio_entry.log 2>&1
+          status=$?
+          set -e
+
+          if ! grep -Eq "Running on local URL|Running on public URL" /tmp/h3_gradio_entry.log; then
+            cat /tmp/h3_gradio_entry.log
+            echo "Direct Gradio entry-point smoke FAILED."
+            exit 1
+          fi
+
+          if [ "$status" -ne 0 ] && [ "$status" -ne 124 ]; then
+            cat /tmp/h3_gradio_entry.log
+            echo "Direct Gradio entry-point exited unexpectedly with status $status."
+            exit 1
+          fi
+
+          echo "Direct Gradio entry-point smoke PASSED."
 
       - name: Gradio UI contract
         env:
