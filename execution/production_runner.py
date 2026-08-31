@@ -20,6 +20,10 @@ from pipeline.dialogue_duration import FFProbeMediaDurationProvider
 from pipeline.seed_lineage import ensure_shot_uid, semantic_content_digest, stable_seed
 from pipeline.visual_state_observer import VisualStateObserver
 from pipeline.visual_feedback import VisualFeedbackEngine
+from pipeline.quality_gate import ProductionQualityGate
+from pipeline.vlm_analyzer import VLMAnalyzer
+from pipeline.context_ir import H3ContextIRCompiler
+from pipeline.production_manifest import ProductionManifest
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
@@ -74,11 +78,19 @@ class ProductionRunner:
         )
 
         self.production_id = None
+        self._active_story = ""
         self._active_plan_sha256 = ""
         self._completed_shots_lock = threading.RLock()
         self._manifest_lock = threading.RLock()
         self.visual_observer = VisualStateObserver(self.project_root)
-        self.visual_feedback = VisualFeedbackEngine(self.visual_observer)
+        self.vlm_analyzer = VLMAnalyzer()
+        self.visual_feedback = VisualFeedbackEngine(self.visual_observer, self.vlm_analyzer)
+        self.context_ir = H3ContextIRCompiler()
+        self.production_manifest = ProductionManifest(self.project_root)
+        self.quality_gate = ProductionQualityGate(
+            accept_score=float(os.getenv("H3_QA_ACCEPT_SCORE", "90")),
+            review_score=float(os.getenv("H3_QA_REVIEW_SCORE", "75")),
+        )
 
         self.production_input_root = (
             self.input_root
@@ -241,6 +253,7 @@ class ProductionRunner:
             ),
             gpu_id=gpu_id,
             metrics_path=metrics_path,
+            preview_dir=self.project_root / "data" / "production" / str(self.production_id) / "previews",
         )
 
     @staticmethod
@@ -692,6 +705,13 @@ class ProductionRunner:
                     shot["reference_bindings"],
                 )
 
+    @staticmethod
+    def _continuity_carries(shot: dict[str, Any]) -> bool:
+        mode = str(shot.get("continuity_mode", "chained") or "chained").strip().lower()
+        if mode in {"independent", "hard_cut", "scene_reset"}:
+            return False
+        return not bool(shot.get("is_scene_boundary", False))
+
     def _run_scene(
         self,
         gpu_id,
@@ -833,12 +853,12 @@ class ProductionRunner:
                 character_map,
             )
 
-            if previous_shot is not None and not bool(shot.get("is_scene_boundary", False)):
+            if previous_shot is not None and self._continuity_carries(shot):
                 observed = previous_shot.get("observed_visual_state")
                 if isinstance(observed, dict) and observed:
                     shot["observed_previous_shot_state"] = dict(observed)
 
-            if previous_video is not None and not bool(shot.get("is_scene_boundary", False)):
+            if previous_video is not None and self._continuity_carries(shot):
 
                 last_frame = (
                     self.continuity
@@ -947,6 +967,11 @@ class ProductionRunner:
                 )
             )
 
+            shot["h3_context_ir"] = self.context_ir.compile(
+                {"story": self._active_story},
+                shot,
+            )
+
             result = (
                 executor.execute_shot(
                     shot=shot,
@@ -1000,11 +1025,36 @@ class ProductionRunner:
             )
 
             try:
+                review_frames = []
+                if getattr(self.visual_feedback.vision_analyzer, "available", False):
+                    review_dir = self.project_root / "data" / "production" / production_id / "qa" / self._safe_name(shot_id)
+                    review_frames = self.visual_observer.extract_review_frames(result, review_dir, count=3)
+                expected_state = {
+                    "shot_id": str(shot.get("shot_id", "")),
+                    "scene_id": str(scene_id),
+                    "characters": shot.get("characters", []) or [],
+                    "character_names": shot.get("character_names", []) or [],
+                    "location": shot.get("location", ""),
+                    "time_of_day": shot.get("time_of_day", ""),
+                    "action": shot.get("action", shot.get("beat", "")),
+                    "camera": shot.get("camera", {}) or {},
+                    "composition": shot.get("composition", ""),
+                    "identity_anchors": shot.get("identity_anchors", []) or [],
+                    "continuity_start_state": shot.get("continuity_start_state", {}) or {},
+                    "continuity_end_state": shot.get("continuity_end_state", {}) or {},
+                    "h3_prompt": shot.get("h3_prompt", shot.get("prompt", "")),
+                }
                 shot["visual_feedback"] = self.visual_feedback.analyze(
                     result,
                     anchor_frame,
-                    shot.get("continuity_end_state", {}) or {},
+                    expected_state,
+                    review_frames=review_frames,
                 )
+                shot["quality_gate"] = self.quality_gate.evaluate(
+                    shot["visual_feedback"],
+                    technical_ok=True,
+                )
+                shot["retake_recommended"] = shot["quality_gate"].get("recommended_action") == "retake"
                 shot["observed_visual_state"] = dict(
                     shot["visual_feedback"].get("observed_state", {})
                 )
@@ -1033,6 +1083,8 @@ class ProductionRunner:
                     "semantic_content_digest": str(shot.get("semantic_content_digest", "")),
                     "observed_visual_state": dict(shot.get("observed_visual_state", {}) or {}),
                     "visual_feedback": dict(shot.get("visual_feedback", {}) or {}),
+                    "quality_gate": dict(shot.get("quality_gate", {}) or {}),
+                    "retake_recommended": bool(shot.get("retake_recommended", False)),
                     "audio_duration_seconds": shot.get("audio_duration_seconds"),
                 }
                 completed_record = dict(completed_shots[shot_id])
@@ -1119,6 +1171,14 @@ class ProductionRunner:
         production_plan[
             "production_id"
         ] = production_id
+        self._active_story = str(production_plan.get("story", "") or "")
+        try:
+            self.production_manifest.write(
+                production_plan,
+                self.project_root / "data" / "production" / production_id / "production_manifest.json",
+            )
+        except Exception as manifest_error:
+            print("[H3 MANIFEST] warning:", manifest_error, flush=True)
 
         
         self._prepare_production_paths(production_id)
@@ -1448,6 +1508,26 @@ class ProductionRunner:
                     "Rendered output count does not match "
                     f"planned shot count: {len(videos)} != {len(shots)}"
                 )
+
+            # Surface durable QA data back into the in-memory production plan
+            # without changing its canonical identity/topology.
+            for planned in production_plan.get("shots", []) or []:
+                sid = str(planned.get("shot_id", "") or "").strip()
+                record = completed_shots.get(sid, {})
+                if isinstance(record, dict):
+                    for key in ("quality_gate", "retake_recommended"):
+                        if key in record:
+                            planned[key] = record[key]
+
+            try:
+                diagnostics_path = self.project_root / "data" / "production" / production_id / "runtime_diagnostics.json"
+                production_plan["runtime_diagnostics"] = self.runtime_diagnostics.write(diagnostics_path)
+                self.production_manifest.write(
+                    production_plan,
+                    self.project_root / "data" / "production" / production_id / "production_manifest.json",
+                )
+            except Exception as diagnostics_error:
+                production_plan["runtime_diagnostics_warning"] = str(diagnostics_error)
 
             assembly_dir = (
                 self.project_root
