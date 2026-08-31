@@ -3,4 +3,4 @@
 # platform/CUDA-specific and are controlled by configs/runtime_versions.yaml.
 PyYAML==6.0.2
 gradio==6.26.0
-Pillow>=10.0.0
+Pillow==10.4.0
