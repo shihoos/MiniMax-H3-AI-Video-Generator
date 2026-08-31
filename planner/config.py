@@ -301,6 +301,25 @@ def storyboard_share_enabled() -> bool:
     }
 
 
+# Optional quality/UX features. Explicit environment variables override
+# manifest defaults; no Kaggle-specific detection is used.
+def feature_enabled(name: str, default: bool = False) -> bool:
+    env_name = "H3_" + str(name).upper()
+    value = os.getenv(env_name)
+    if value is None:
+        features = RUNTIME.get("features", {})
+        configured = features.get(name)
+        return bool(default if configured is None else configured)
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+H3_LIVE_PREVIEW = feature_enabled("live_preview", True)
+H3_VLM_ENABLED = feature_enabled("vlm_enabled", False)
+H3_QA_ENABLED = feature_enabled("qa_enabled", True)
+H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
+H3_DIRECTOR_CRITIC = feature_enabled("director_critic", False)
+
+
 # ============================================================
 # BASIC RUNTIME VALIDATION
 # ============================================================
