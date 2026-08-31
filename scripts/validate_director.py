@@ -473,69 +473,69 @@ def test_director_prompt_contract() -> None:
         ROOT
     )
 
-    ai = director._story_director_system(
+    # Active narrative passes.
+    ai = director._story_text_system(
         "ai_story"
     )
 
-    expand = director._story_director_system(
+    expand = director._story_text_system(
         "expand_user_story"
     )
 
-    preserve = director._story_director_system(
-        "preserve_user_story"
-    )
+    # Preserve mode intentionally skips the story-text generation pass.
+    try:
+        director._story_text_system(
+            "preserve_user_story"
+        )
+    except ValueError as exc:
+        check(
+            "Preserve Story does not use a story-text pass." in str(exc),
+            "Preserve Story returned an unexpected story-text contract error.",
+        )
+    else:
+        raise RuntimeError(
+            "Preserve Story unexpectedly exposes a story-text generation prompt."
+        )
 
-    # Use the batch shot prompt since per-scene prompt is removed.
-    shots = director._shot_director_batch_system()
-
+    # The active narrative pass is prose-only. Canonical characters/scenes
+    # and visual-language data are supplied by the deterministic foundation
+    # and finalized later by enrich_plan().
     check(
         "AI STORY MODE" in ai,
-        "AI Story prompt is missing its mode contract.",
+        "AI Story text prompt is missing its mode contract.",
     )
 
     check(
         "EXPAND STORY MODE" in expand,
-        "Expand Story prompt is missing its mode contract.",
+        "Expand Story text prompt is missing its mode contract.",
     )
 
     check(
-        "PRESERVE STORY MODE" in preserve,
-        "Preserve Story prompt is missing its mode contract.",
+        "Output ONLY the story prose." in ai,
+        "AI Story text prompt is not prose-only.",
     )
 
     check(
-        '"characters"' in ai,
-        "AI Story prompt does not request characters.",
+        "Output ONLY the expanded story prose." in expand,
+        "Expand Story text prompt is not prose-only.",
     )
 
     check(
-        '"scenes"' in ai,
-        "AI Story prompt does not request scenes.",
+        "Do not output JSON" in ai,
+        "AI Story text prompt must explicitly forbid JSON.",
     )
 
     check(
-        '"shots"' not in ai,
-        "Story pass should not request shots.",
+        "Do not output JSON" in expand,
+        "Expand Story text prompt must explicitly forbid JSON.",
     )
 
-    check(
-        "visual_language" in ai,
-        "Story prompt does not request the visual-language bible.",
-    )
+    # Active cinematography / shot pass.
+    shots = director._shot_director_batch_system()
 
     check(
-        "time_of_day" in ai,
-        "Story prompt does not request time_of_day.",
-    )
-
-    check(
-        "environment_details" in ai,
-        "Story prompt does not request environment details.",
-    )
-
-    check(
-        "color_temperature" in ai,
-        "Story prompt does not request color temperature.",
+        f"Create exactly {QwenDirector.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in shots,
+        "Batch shot prompt does not enforce the configured shot count.",
     )
 
     check(
@@ -566,6 +566,16 @@ def test_director_prompt_contract() -> None:
     check(
         "Do not create new characters" in shots,
         "Shot director does not protect character identity.",
+    )
+
+    check(
+        "character_spatial_bboxes" in shots
+        and "character_spatial_regions" in shots
+        and "character_spatial_bboxes_start" in shots
+        and "character_spatial_bboxes_end" in shots
+        and "character_spatial_regions_start" in shots
+        and "character_spatial_regions_end" in shots,
+        "Shot prompt example is missing the required spatial schema fields.",
     )
 
 
