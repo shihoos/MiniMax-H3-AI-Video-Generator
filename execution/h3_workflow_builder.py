@@ -1478,7 +1478,13 @@ class H3WorkflowBuilder:
 
         if context_ir is not None:
             from pipeline.context_ir import H3ContextIRCompiler
+            H3ContextIRCompiler.validate(context_ir)
+            if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
+                raise ValueError("Production H3 builder accepts Ref2VA Context-IR only.")
             prompt = H3ContextIRCompiler.prompt(context_ir)
+
+        if mode not in {"ref2v", "turbo_ref2v", "upscale"}:
+            raise ValueError(f"Unsupported production workflow mode: {mode}")
 
         if mode == "turbo_ref2v":
             if int(turbo_steps) != 8:
