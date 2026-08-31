@@ -20,6 +20,7 @@ from planner.config import (
     DELIVERY_FPS,
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
+    H3_DIRECTOR_CRITIC,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
     H3_HEIGHT,
@@ -51,6 +52,10 @@ from pipeline.dialogue_timeline import DialogueTimeline
 from pipeline.continuity_ledger import ContinuityLedger, ContinuityViolation
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from pipeline.seed_lineage import ensure_plan_lineage
+from pipeline.timeline import ProductionTimeline
+from pipeline.vlm_analyzer import VLMAnalyzer
+from pipeline.runtime_diagnostics import RuntimeDiagnostics
+from pipeline.production_manifest import ProductionManifest
 from schemas.character import (
     Character,
 )
@@ -86,6 +91,9 @@ class ProductionOrchestrator:
         self.director = QwenDirector(
             self.project_root
         )
+        self.vlm = VLMAnalyzer()
+        self.runtime_diagnostics = RuntimeDiagnostics(self.project_root)
+        self.manifest = ProductionManifest(self.project_root)
 
         # Protect shared reference-role manifest updates performed by this
         # orchestrator instance. ProductionRunner has its own lock for render
@@ -1251,10 +1259,40 @@ class ProductionOrchestrator:
                     + str(checkpoint_error)
                 ) from checkpoint_error
 
+        # Optional VLM context enrichment. The VLM describes visible references
+        # only; it never changes canonical characters or production topology.
+        try:
+            reference_paths: list[str] = []
+            for character in base_plan.get("characters", []) or []:
+                if not isinstance(character, dict):
+                    continue
+                for path in character.get("reference_paths", []) or []:
+                    if str(path).strip() and str(path) not in reference_paths:
+                        reference_paths.append(str(path))
+            if self.vlm.available and reference_paths:
+                raw_visual_context = self.vlm.describe_references(reference_paths[:H3_MAX_REFERENCE_IMAGES])
+                visual_context: dict[str, dict] = {}
+                for character in base_plan.get("characters", []) or []:
+                    if not isinstance(character, dict):
+                        continue
+                    character_name = str(character.get("name", "") or "").strip()
+                    for path in character.get("reference_paths", []) or []:
+                        path_text = str(path or "").strip()
+                        if not path_text or path_text not in raw_visual_context:
+                            continue
+                        analysis = dict(raw_visual_context[path_text])
+                        analysis["character_name"] = character_name
+                        analysis["reference_path"] = path_text
+                        visual_context[f"{character_name}::{path_text}"] = analysis
+                if visual_context:
+                    base_plan["reference_visual_analysis"] = visual_context
+                    self.director.set_reference_visual_context(visual_context)
+        except Exception as exc:
+            base_plan["reference_visual_analysis_warning"] = str(exc)
+
         try:
 
             try:
-
                 plan = self.director.enrich_plan(
                     mode=mode,
                     user_input=user_input,
@@ -1262,6 +1300,18 @@ class ProductionOrchestrator:
                     checkpoint_session_id=production_id,
                     resume_state=director_resume_state,
                 )
+
+                if H3_DIRECTOR_CRITIC:
+                    try:
+                        critique = self.director.critique_plan(
+                            mode=mode,
+                            user_input=user_input,
+                            plan=plan,
+                        )
+                        if isinstance(critique, dict):
+                            plan["director_critique"] = critique
+                    except Exception as critique_error:
+                        plan["director_critique_warning"] = str(critique_error)
 
             except Exception as exc:
 
@@ -1403,6 +1453,8 @@ class ProductionOrchestrator:
                 seen_characters[name] = scene_id
 
         plan["parallel_safe"] = not shared
+        ProductionTimeline(plan).build()
+        ProductionTimeline.validate(plan)
 
         plan["delivery_width"] = DELIVERY_WIDTH
         plan["delivery_height"] = DELIVERY_HEIGHT
@@ -1420,6 +1472,20 @@ class ProductionOrchestrator:
             )
         )
 
+        ProductionTimeline(plan).build()
+        ProductionTimeline.validate(plan)
+
+        try:
+            diagnostics_path = (
+                self.project_root
+                / "data" / "production" / production_id
+                / "runtime_diagnostics.json"
+            )
+            plan["runtime_diagnostics"] = self.runtime_diagnostics.write(diagnostics_path)
+        except Exception as diagnostics_error:
+            plan["runtime_diagnostics_warning"] = str(diagnostics_error)
+
+        plan["production_manifest"] = self.manifest.build(plan)
         plan["preview_ready"] = True
         plan["created_at"] = datetime.now().isoformat()
         plan["production_id"] = production_id
@@ -1445,6 +1511,7 @@ class ProductionOrchestrator:
             plan_path,
             plan,
         )
+        self.manifest.write(plan, session_dir / "production_manifest.json")
 
         # Mark the planning stage READY. Rendering is a separate persisted
         # stage owned by ProductionRunner; do not claim production completed
