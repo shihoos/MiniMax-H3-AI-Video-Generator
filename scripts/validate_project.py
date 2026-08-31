@@ -118,6 +118,10 @@ RUNTIME_IMPORTS = [
 
     # Pipeline
     "pipeline.production_orchestrator",
+    "pipeline.storyboard_reference_builder",
+    "pipeline.continuity_ledger",
+    "pipeline.dialogue_timeline",
+    "pipeline.dialogue_duration",
     "pipeline.reference_manager",
     "pipeline.identity_continuity",
     "pipeline.h3_scene_continuity",
