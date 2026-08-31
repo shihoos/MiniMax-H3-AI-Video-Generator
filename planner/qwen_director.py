@@ -3979,6 +3979,28 @@ Return:
                 )
 
     @staticmethod
+    def _default_visual_language(scenes: list[dict] | None = None) -> dict:
+        """Neutral deterministic baseline used when the creative pass omits visual metadata."""
+        scenes = scenes or []
+        temperatures = []
+        for scene in scenes:
+            value = str(scene.get("color_temperature", "") or "").strip()
+            if value and value not in temperatures:
+                temperatures.append(value)
+        palette = (
+            "Coherent cinematic palette anchored to " + ", ".join(temperatures)
+            if temperatures
+            else "Natural cinematic palette with coherent scene-to-scene color continuity."
+        )
+        return {
+            "genre_tone": "Cinematic narrative with grounded visual realism.",
+            "color_palette": palette,
+            "lighting_philosophy": "Motivated, physically coherent lighting consistent with location and time of day.",
+            "camera_philosophy": "Deliberate cinematic framing, readable geography, controlled movement, and stable subject continuity.",
+            "pacing": "Measured progression with visual escalation toward the dramatic peak and restrained transitions.",
+        }
+
+    @staticmethod
     def _sanitize_visual_language(
         value,
     ) -> dict:
@@ -4404,6 +4426,12 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {},
           "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
           "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
         },
@@ -4425,6 +4453,12 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {},
           "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
           "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
         }
@@ -4433,7 +4467,7 @@ Return JSON only in exactly this structure:
   ]
 }
 
-There must be exactly TWO shots inside every scene_shots entry and
+There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and
 exactly one entry for every supplied scene. Do not add prose outside JSON.
 
 Do NOT output compiler-owned fields.
@@ -4939,12 +4973,12 @@ Return JSON only.
                 )
             )
         )
+        baseline_visual_language = self._default_visual_language(base_scenes)
+        for key, fallback in baseline_visual_language.items():
+            if not visual_language.get(key):
+                visual_language[key] = fallback
 
-        self._current_visual_language = (
-            dict(
-                visual_language
-            )
-        )
+        self._current_visual_language = dict(visual_language)
 
         # ----------------------------------------------------
         # CANONICAL CHARACTERS / SCENES
@@ -5525,51 +5559,6 @@ Return JSON only.
     # MERGE
     # ========================================================
 
-    def repair_continuity_violation(
-        self,
-        *,
-        shot: dict,
-        previous_shot: dict | None,
-        violation: dict,
-    ) -> dict:
-        """Targeted single-shot repair; unrelated production fields stay fixed."""
-        shot_schema = self._shot_json_schema()["properties"]["shots"]["items"]
-        system = (
-            "You are a deterministic continuity repair agent. "
-            "Return JSON only. Repair only the fields implicated by the continuity rejection. "
-            "Do not change shot_id, scene_id, order, characters, dialogue text, camera, or unrelated creative fields. "
-            "Preserve canonical character identity. Never invent a wardrobe change unless explicitly required by the story."
-        )
-        previous = json.dumps(previous_shot or {}, ensure_ascii=False, indent=2)
-        current = json.dumps(shot or {}, ensure_ascii=False, indent=2)
-        error = json.dumps(violation or {}, ensure_ascii=False, indent=2)
-        user = (
-            "CONTINUITY REJECTION\n"
-            f"Previous shot:\n{previous}\n\n"
-            f"Current shot:\n{current}\n\n"
-            f"Violation:\n{error}\n\n"
-            "Return the corrected shot object only."
-        )
-        schema = {
-            "type": "object",
-            "properties": {"shot": shot_schema},
-            "required": ["shot"],
-            "additionalProperties": False,
-        }
-        response = self._chat_json(
-            system,
-            user,
-            minimum_completion=320,
-            max_completion=1800,
-            call_name=f"continuity_repair:{shot.get('shot_id', 'unknown')}",
-            response_schema=schema,
-            json_mode=True,
-            disable_thinking=True,
-        )
-        repaired = response.get("shot")
-        if not isinstance(repaired, dict):
-            raise RuntimeError("Continuity repair did not return a shot object.")
-        return repaired
 
     def enrich_plan(
         self,
