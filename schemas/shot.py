@@ -440,6 +440,20 @@ class Shot:
                 self.keyframe_positions or []
             )
 
+    @staticmethod
+    def _compact_state_description(state: dict) -> str:
+        if not isinstance(state, dict) or not state:
+            return "No explicit continuity state."
+        parts = []
+        for key in ("location", "lighting", "state_description", "environment", "props", "camera_side"):
+            value = state.get(key)
+            if value in (None, "", [], {}):
+                continue
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            parts.append(f"{key.replace('_', ' ')}: {value}")
+        return "; ".join(parts) or "No explicit continuity state."
+
     def h3_prompt(self) -> str:
         """Serialize this shot using H3's structured six-section prompt format.
 
@@ -494,24 +508,8 @@ class Shot:
             else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
         )
 
-        continuity_start = (
-            json.dumps(
-                self.continuity_start_state,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            if self.continuity_start_state
-            else "{}"
-        )
-        continuity_end = (
-            json.dumps(
-                self.continuity_end_state,
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            if self.continuity_end_state
-            else "{}"
-        )
+        continuity_start = self._compact_state_description(self.continuity_start_state)
+        continuity_end = self._compact_state_description(self.continuity_end_state)
 
         spatial_lines = []
         for name in self.characters:
@@ -598,14 +596,10 @@ class Shot:
             f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n"
             f"Continuity boundary policy: {boundary_note}\n"
-            "continuity_start_state:\n"
-            f"{continuity_start}\n"
-            "continuity_end_state:\n"
-            f"{continuity_end}\n"
-            "Spatial constraints:\n"
-            f"{spatial_contract}\n"
-            "dialogue_timeline:\n"
-            f"{dialogue_text}"
+            f"Opening continuity state: {continuity_start}\n"
+            f"Ending continuity state: {continuity_end}\n"
+            f"Subject placement: {spatial_contract}\n"
+            f"Dialogue in playback order: {dialogue_text}"
         )
 
         return (
