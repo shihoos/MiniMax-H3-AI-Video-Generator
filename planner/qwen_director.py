@@ -1751,11 +1751,7 @@ Do not output JSON, labels, analysis, notes, or explanations.
             )
         )
 
-    def _story_director_system(
-        self,
-        mode: str,
-    ) -> str:
-
+    
         return f"""
 You are the STORY DIRECTOR for MiniMax H3.
 
@@ -4372,7 +4368,7 @@ development: show objective, movement, complication, or escalation.
 midpoint: emphasize new information and changed understanding.
 climax: emphasize danger, decisive action, choice, and consequence.
 finale: emphasize aftermath, resolution, and the closing emotional image.
-The two shots must visibly serve the supplied obligatory_moment.
+Every required shots must visibly serve the supplied obligatory_moment.
 
 SHOT / FRAMING VOCABULARY:
 framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
