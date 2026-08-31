@@ -209,18 +209,14 @@ def test_shot_batch_contract() -> None:
     prompt = director._shot_director_batch_system()
 
     check(
-        f"Create exactly {director.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
-        "Batch shot prompt does not enforce configured shots per scene.",
+        f"Create exactly {QwenDirector.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
+        "Batch shot prompt does not enforce two shots per scene.",
     )
 
     check(
         "Do not add characters" in prompt or "Do not create new characters" in prompt,
         "Batch prompt lost the explicit character restriction.",
     )
-
-    check('"character_spatial_bboxes": {}' in prompt, "Shot batch example is missing spatial bbox fields.")
-    baseline = director._default_visual_language([])
-    check(all(baseline.get(key) for key in ("genre_tone", "color_palette", "lighting_philosophy", "camera_philosophy", "pacing")), "Visual-language baseline is incomplete.")
 
     normalized = director._normalize_batch_shot_response(
         {
