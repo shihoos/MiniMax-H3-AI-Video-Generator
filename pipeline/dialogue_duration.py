@@ -100,12 +100,18 @@ class FFProbeMediaDurationProvider:
             "-of", "json",
             str(path),
         ]
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15.0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ffprobe timed out while analyzing {path}. The media file may be corrupted."
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(
                 f"ffprobe stream-duration query failed for {path}: "
@@ -132,12 +138,18 @@ class FFProbeMediaDurationProvider:
             "-of", "json",
             str(path),
         ]
-        packet_result = subprocess.run(
-            packet_command,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            packet_result = subprocess.run(
+                packet_command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15.0,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"ffprobe timed out while analyzing {path}. The media file may be corrupted."
+            ) from exc
         if packet_result.returncode != 0:
             raise RuntimeError(
                 f"ffprobe packet-duration fallback failed for {path}: "
@@ -188,7 +200,16 @@ class FFProbeMediaDurationProvider:
             "-of", "csv=p=0",
             str(path),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15.0,
+            )
+        except subprocess.TimeoutExpired:
+            return False
         return result.returncode == 0 and bool(result.stdout.strip())
 
     def validate_video_audio_sync(
