@@ -15,6 +15,8 @@ from execution.assembly_manager import (
 from execution.shot_executor import (
     ShotExecutor,
 )
+from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
+from pipeline.dialogue_duration import FFProbeMediaDurationProvider
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
@@ -385,6 +387,16 @@ class ProductionRunner:
             )
             or []
         )
+        roles = [
+            dict(item)
+            for item in (shot.get("reference_roles", []) or [])
+            if isinstance(item, dict)
+        ]
+        role_by_path = {
+            str(item.get("path", "")): item
+            for item in roles
+            if str(item.get("path", "")).strip()
+        }
 
         for name in (
             shot.get(
@@ -430,16 +442,37 @@ class ProductionRunner:
                 and str(anchor)
                 not in references
             ):
-                references.insert(
-                    0,
-                    str(anchor),
-                )
+                anchor_path = str(anchor)
+                references.insert(0, anchor_path)
+                role_by_path[anchor_path] = {
+                    "path": anchor_path,
+                    "role": "character_identity",
+                    "character_name": character.get("name", name),
+                    "character_id": character_id,
+                    "label": (
+                        f"Production identity anchor for {character.get('name', name)}; "
+                        "use for stable identity only."
+                    ),
+                    "priority": 95,
+                }
 
-        shot[
-            "reference_images"
-        ] = references[
-            :H3_MAX_REFERENCE_IMAGES
-        ]
+        normalized_roles = []
+        for path in references[:H3_MAX_REFERENCE_IMAGES]:
+            role = dict(
+                role_by_path.get(
+                    str(path),
+                    {
+                        "path": str(path),
+                        "role": "visual_reference",
+                        "priority": 50,
+                    },
+                )
+            )
+            role["path"] = str(path)
+            normalized_roles.append(role)
+
+        shot["reference_images"] = [item["path"] for item in normalized_roles]
+        shot["reference_roles"] = normalized_roles
 
     def _persist_first_appearance_anchors(
         self,
@@ -617,6 +650,74 @@ class ProductionRunner:
 
         return None
 
+    @staticmethod
+    def _reference_binding_text(
+        reference_roles: list[dict],
+    ) -> list[str]:
+        bindings = []
+        for index, role in enumerate(reference_roles, start=1):
+            kind = str(role.get("role", "")).strip().lower()
+            label = str(role.get("label", "")).strip()
+            if not label:
+                if kind == "storyboard":
+                    label = "Unified storyboard for sequencing, composition and blocking."
+                elif kind == "previous_shot_last_frame":
+                    label = "Previous shot final-frame continuity reference."
+                else:
+                    character = str(role.get("character_name", "")).strip()
+                    label = f"Canonical visual identity reference for {character}." if character else "Production visual reference."
+            bindings.append(
+                f"<Picture {index}> = {label}"
+            )
+        return bindings
+
+    @classmethod
+    def _rebuild_reference_contract(
+        cls,
+        shot: dict,
+        references: list[str],
+        roles: list[dict],
+    ) -> None:
+        normalized = []
+        seen = set()
+        for path, role in zip(references, roles):
+            p = str(path).strip()
+            if not p or p in seen:
+                continue
+            seen.add(p)
+            item = dict(role)
+            item["path"] = p
+            normalized.append(item)
+        shot["reference_images"] = [item["path"] for item in normalized][:9]
+        shot["reference_roles"] = normalized[:9]
+        shot["reference_bindings"] = cls._reference_binding_text(shot["reference_roles"])
+
+        # Rebuild the stored prompt through the schema object so Picture N
+        # numbering always matches the actual runtime reference order.
+        from schemas.shot import Shot
+        field_names = {field.name for field in __import__("dataclasses").fields(Shot)}
+        payload = {key: value for key, value in shot.items() if key in field_names}
+        payload["reference_images"] = shot["reference_images"]
+        payload["reference_roles"] = shot["reference_roles"]
+        payload["reference_bindings"] = shot["reference_bindings"]
+        shot_obj = Shot(**payload)
+        shot["h3_prompt"] = shot_obj.h3_prompt()
+
+        manifest_path = shot.get("reference_role_manifest")
+        if manifest_path:
+            entry = StoryboardReferenceBuilder.update_manifest(
+                manifest_path,
+                str(shot.get("shot_id", "")),
+                shot["reference_images"],
+                shot["reference_roles"],
+                shot["reference_bindings"],
+            )
+            StoryboardReferenceBuilder.assert_manifest_invariant(
+                entry,
+                shot["reference_images"],
+                shot["reference_bindings"],
+            )
+
     def _run_scene(
         self,
         gpu_id,
@@ -760,7 +861,7 @@ class ProductionRunner:
                 character_map,
             )
 
-            if previous_video is not None:
+            if previous_video is not None and not bool(shot.get("is_scene_boundary", False)):
 
                 last_frame = (
                     self.continuity
@@ -780,21 +881,75 @@ class ProductionRunner:
                     )
                     or []
                 )
-
-                if (
-                    str(last_frame)
-                    not in references
-                ):
-                    references.insert(
-                        0,
-                        str(last_frame),
+                roles = [
+                    dict(item)
+                    for item in (
+                        shot.get("reference_roles", []) or []
                     )
-
-                shot[
-                    "reference_images"
-                ] = references[
-                    :H3_MAX_REFERENCE_IMAGES
+                    if isinstance(item, dict)
                 ]
+                role_by_path = {
+                    str(item.get("path", "")): item
+                    for item in roles
+                    if str(item.get("path", "")).strip()
+                }
+
+                ordered: list[tuple[str, dict]] = []
+                for path in references:
+                    role = dict(
+                        role_by_path.get(
+                            str(path),
+                            {
+                                "path": str(path),
+                                "role": "visual_reference",
+                                "priority": 50,
+                            },
+                        )
+                    )
+                    ordered.append((str(path), role))
+
+                # Previous-shot final frame is an explicit temporal anchor.
+                ordered = [
+                    item
+                    for item in ordered
+                    if item[0] != str(last_frame)
+                ]
+                storyboard = [
+                    item for item in ordered
+                    if item[1].get("role") == "storyboard"
+                ]
+                identity = [
+                    item for item in ordered
+                    if item[1].get("role") != "storyboard"
+                ]
+                identity.sort(key=lambda item: (-int(item[1].get("priority", 50)), item[0]))
+                role = {
+                    "path": str(last_frame),
+                    "role": "previous_shot_last_frame",
+                    "label": (
+                        f"Exact final frame of previous shot "
+                        f"{previous_shot['shot_id']}; use for temporal and visual continuity."
+                    ),
+                    "priority": 100,
+                }
+                final_items = identity + storyboard + [(str(last_frame), role)]
+                final_items = final_items[:H3_MAX_REFERENCE_IMAGES]
+                self._rebuild_reference_contract(
+                    shot,
+                    [path for path, _ in final_items],
+                    [role for _, role in final_items],
+                )
+
+            # Persist/verify the final runtime reference order even for the first
+            # shot of a scene. This makes the manifest the authoritative audit record.
+            if shot.get("reference_role_manifest"):
+                StoryboardReferenceBuilder.update_manifest(
+                    shot["reference_role_manifest"],
+                    str(shot.get("shot_id", "")),
+                    list(shot.get("reference_images", []) or []),
+                    list(shot.get("reference_roles", []) or []),
+                    list(shot.get("reference_bindings", []) or []),
+                )
 
             workflow_mode = (
                 self._workflow_for_shot(
@@ -824,6 +979,23 @@ class ProductionRunner:
                     "Shot execution returned an invalid output: "
                     f"{result}"
                 )
+
+            try:
+                av_result = FFProbeMediaDurationProvider().validate_video_audio_sync(
+                    result,
+                    tolerance_seconds=0.30,
+                )
+                if av_result.get("audio_stream_present"):
+                    shot["audio_duration_seconds"] = av_result.get("audio_duration_seconds")
+                    shot["audio_duration_source"] = "ffprobe_rendered_output"
+                elif shot.get("dialogue_events"):
+                    raise RuntimeError(
+                        f"Rendered shot {shot_id} contains dialogue events but no audio stream was detected."
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                print("[H3 A/V VALIDATION] warning:", exc, flush=True)
 
             results.append(
                 result
