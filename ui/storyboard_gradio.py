@@ -9,7 +9,6 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-
 ROOT = (
     Path(__file__)
     .resolve()
@@ -23,6 +22,7 @@ if str(ROOT) not in sys.path:
     )
 
 
+from pipeline.job_queue import ProductionJobQueue
 from planner.config import (
     GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
@@ -46,6 +46,17 @@ class ProductionController:
         self._lock = (
             threading.Lock()
         )
+        self._job_queue = ProductionJobQueue(
+            ROOT / "data" / "production" / "jobs.sqlite3"
+        )
+        self._job_queue.recover_stale(max_age_seconds=3600.0)
+        self._queue_stop = threading.Event()
+        self._queue_thread = threading.Thread(
+            target=self._queue_worker_loop,
+            name="h3-production-queue",
+            daemon=True,
+        )
+        self._queue_thread.start()
 
     @staticmethod
     def _production_id() -> str:
@@ -884,6 +895,86 @@ class ProductionController:
         self,
         plan_path_value: str,
     ):
+        """Approve a saved plan and persist a render job without tying it to the browser lifetime."""
+        try:
+            plan, plan_path = self._load_plan(plan_path_value)
+        except Exception as exc:
+            return "### ERROR\n" + str(exc), None, plan_path_value
+
+        approval = plan.get("approval", {}) or {}
+        if approval.get("status") == "completed":
+            return "### COMPLETE\nThis production has already completed.", plan.get("final_video"), plan_path_value
+
+        production_id = str(plan.get("production_id", plan_path.parent.name)).strip()
+        plan["production_id"] = production_id
+        plan["approval"] = {
+            "status": "approved",
+            "approved_at": datetime.now().isoformat(),
+        }
+        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+        job_id = self._job_queue.submit(
+            production_id,
+            plan_path,
+            {"profile": plan.get("profile", "turbo"), "upscale_enabled": bool(plan.get("upscale_enabled", False))},
+        )
+        plan["job_id"] = job_id
+        plan["job_status"] = "queued"
+        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+        return f"### QUEUED\nProduction `{production_id}` has been queued.\n\nJob ID: `{job_id}`\n\nYou can close the browser; the queue state is persisted on disk.", None, str(plan_path)
+
+    def refresh_job_status(self, plan_path_value: str):
+        try:
+            plan, plan_path = self._load_plan(plan_path_value)
+        except Exception as exc:
+            return "### ERROR\n" + str(exc), None, plan_path_value
+        job_id = str(plan.get("job_id", "") or "").strip()
+        if not job_id:
+            return "No persistent render job is attached to this storyboard.", plan.get("final_video"), str(plan_path)
+        row = self._job_queue.get(job_id)
+        if not row:
+            return "### ERROR\nPersistent render job was not found.", None, str(plan_path)
+        status = str(row.get("status", "unknown"))
+        if status == "completed" and row.get("result_json"):
+            try:
+                result = json.loads(row["result_json"])
+                final_video = result.get("final_video")
+            except Exception:
+                final_video = plan.get("final_video")
+            return f"### COMPLETE\nJob `{job_id}` completed.", final_video, str(plan_path)
+        if status == "failed":
+            return f"### FAILED\n{row.get('error', 'Unknown render failure.')}", None, str(plan_path)
+        return f"### {status.upper()}\nJob `{job_id}` is {status}.", plan.get("final_video"), str(plan_path)
+
+    def _queue_worker_loop(self):
+        while not self._queue_stop.wait(0.5):
+            job = self._job_queue.claim_next()
+            if not job:
+                continue
+            job_id = str(job["job_id"])
+            try:
+                self._execute_approved_plan(str(job["plan_path"]))
+                plan, _ = self._load_plan(str(job["plan_path"]))
+                result = {
+                    "production_id": plan.get("production_id", job.get("production_id")),
+                    "final_video": plan.get("final_video"),
+                }
+                self._job_queue.complete(job_id, result)
+                plan["job_status"] = "completed"
+                Path(job["plan_path"]).write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as exc:
+                self._job_queue.fail(job_id, str(exc))
+                try:
+                    plan, plan_path = self._load_plan(str(job["plan_path"]))
+                    plan["job_status"] = "failed"
+                    plan["job_error"] = str(exc)
+                    plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
+
+    def _execute_approved_plan(
+        self,
+        plan_path_value: str,
+    ):
 
         try:
 
@@ -1478,6 +1569,10 @@ def build_app(
             variant="primary",
         )
 
+        refresh_job = gr.Button(
+            "Refresh Generation Status",
+        )
+
         result_status = gr.Markdown()
 
         final_video = gr.Video(
@@ -1566,6 +1661,18 @@ def build_app(
 
         approve.click(
             fn=controller.approve_and_generate,
+            inputs=[
+                session_plan_path,
+            ],
+            outputs=[
+                result_status,
+                final_video,
+                session_plan_path,
+            ],
+        )
+
+        refresh_job.click(
+            fn=controller.refresh_job_status,
             inputs=[
                 session_plan_path,
             ],
