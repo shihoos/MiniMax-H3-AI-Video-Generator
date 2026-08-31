@@ -126,7 +126,7 @@ RUNTIME_IMPORTS = [
     "pipeline.identity_continuity",
     "pipeline.h3_scene_continuity",
     "pipeline.identity_anchor_store",
-
+    
     # Execution
     "execution.h3_workflow_builder",
     "execution.h3_upscaled_workflow_builder",
@@ -135,6 +135,9 @@ RUNTIME_IMPORTS = [
     "execution.h3_runtime",
     "execution.assembly_manager",
     "execution.metrics",
+
+    #schemas
+    "schemas.dialogue",
 
     # Scheduler
     "scheduler.gpu_scheduler",
