@@ -55,6 +55,12 @@ class RuntimeDiagnostics:
                 "reserve_vram_gb": profile.reserve_vram_gb,
                 "gpu_id": gpu_id,
                 "reason": profile.reason,
+                "execution_policy": {
+                    "production": True,
+                    "preview": True,
+                    "retake": True,
+                    "diagnostic": True,
+                },
             },
             "platform": platform.platform(),
             "gradio": self._version("gradio"),
