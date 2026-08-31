@@ -1,7 +1,28 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+def _continuity_state(value: Any, field_name: str) -> dict:
+    """Normalize canonical or legacy continuity state into a dictionary."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {"state_description": text}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"state_description": str(parsed)}
+    raise TypeError(f"{field_name} must be a dictionary or legacy JSON/text string.")
 
 
 VALID_WORKFLOW_MODES = {
@@ -260,12 +281,18 @@ class Shot:
             normalized_dialogue.append(dict(event))
         self.dialogue_events = normalized_dialogue
 
-        for field_name in (
+        self.continuity_start_state = _continuity_state(
+            self.continuity_start_state,
             "continuity_start_state",
+        )
+        self.continuity_end_state = _continuity_state(
+            self.continuity_end_state,
             "continuity_end_state",
+        )
+        self.identity_fingerprints = _mapping(
+            self.identity_fingerprints,
             "identity_fingerprints",
-        ):
-            setattr(self, field_name, _mapping(getattr(self, field_name), field_name))
+        )
 
         if self.reference_roles is None:
             self.reference_roles = []
@@ -493,6 +520,15 @@ class Shot:
             else "Continue the locked continuity state from the previous shot unless an explicit story event changes it."
         )
 
+        continuity_start = (
+            json.dumps(self.continuity_start_state, ensure_ascii=False, sort_keys=True)
+            if self.continuity_start_state else "{}"
+        )
+        continuity_end = (
+            json.dumps(self.continuity_end_state, ensure_ascii=False, sort_keys=True)
+            if self.continuity_end_state else "{}"
+        )
+
         description = (
             self.detailed_description.strip()
             or self.visual_prompt.strip()
@@ -524,6 +560,10 @@ class Shot:
             f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n"
             f"Continuity boundary policy: {boundary_note}\n"
+            "continuity_start_state:\n"
+            f"{continuity_start}\n\n"
+            "continuity_end_state:\n"
+            f"{continuity_end}\n\n"
             "Spatial constraints:\n"
             f"{spatial_contract}\n\n"
             "overall_soundscape:\n"
