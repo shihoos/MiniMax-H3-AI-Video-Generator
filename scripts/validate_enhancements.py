@@ -33,7 +33,18 @@ def main() -> None:
     assert plan["shots"][0]["is_scene_boundary"] is True
     plan["shots"][0]["h3_prompt"] = "A scientist crosses a dark archive."
     ctx = H3ContextIRCompiler().compile(plan, plan["shots"][0])
-    assert ctx["version"] == 1
+    assert ctx["version"] == 2
+    expected_sections = [
+        "subject_definitions:",
+        "summary:",
+        "retention_analysis:",
+        "detailed_description:",
+        "overall_soundscape:",
+        "non_diegetic_music:",
+    ]
+    prompt_text = ctx["h3_prompt"]
+    assert all(section in prompt_text for section in expected_sections)
+    assert [prompt_text.index(section) for section in expected_sections] == sorted(prompt_text.index(section) for section in expected_sections)
     assert ctx["shot"]["shot_id"] == "shot_001"
     gate = ProductionQualityGate().evaluate({"observed_state": {"sha256": "x"}}, technical_ok=True)
     assert gate["status"] == "accept"
