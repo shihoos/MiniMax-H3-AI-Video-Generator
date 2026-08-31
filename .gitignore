@@ -89,6 +89,12 @@ data/production/*/continuity/*
 data/production/*/identity/*
 !data/production/*/identity/.gitkeep
 
+# Persistent local production queue and storyboard caches
+data/production/jobs.sqlite3
+data/production/*/storyboard/storyboard_cache/*
+data/production/*/storyboard/*.lock
+!data/production/*/storyboard/storyboard_cache/.gitkeep
+
 # Generic legacy production runtime artifacts
 data/production/continuity/*
 !data/production/continuity/.gitkeep
