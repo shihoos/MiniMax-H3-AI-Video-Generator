@@ -155,33 +155,6 @@ class ProductionRunner:
         return ProductionCheckpoint.plan_digest(production_plan)
 
     @staticmethod
-    def _deterministic_shot_seed(
-        production_id: str,
-        scene_id: str,
-        shot_id: str,
-    ) -> int:
-        """Return a stable positive seed for a production/scene/shot.
-
-        Explicit shot["seed"] values always win. The derived seed makes
-        otherwise-unseeded renders reproducible across retries and resumes
-        while keeping different shots on independent random streams.
-        """
-        material = (
-            f"{production_id}\x1f"
-            f"{scene_id}\x1f"
-            f"{shot_id}"
-        ).encode("utf-8")
-
-        digest = hashlib.sha256(
-            material
-        ).digest()
-
-        return int.from_bytes(
-            digest[:8],
-            "big",
-        ) & 0x7FFFFFFFFFFFFFFF
-
-    @staticmethod
     def _validate_checkpoint_plan(
         production_plan: dict[str, Any],
         checkpoint: dict | None,
@@ -1067,6 +1040,11 @@ class ProductionRunner:
                     "scene_id": str(scene_id),
                     "output": str(result),
                     "plan_sha256": self._active_plan_sha256,
+                    "shot_uid": str(shot.get("shot_uid", "")),
+                    "semantic_content_digest": str(shot.get("semantic_content_digest", "")),
+                    "observed_visual_state": dict(shot.get("observed_visual_state", {}) or {}),
+                    "visual_feedback": dict(shot.get("visual_feedback", {}) or {}),
+                    "audio_duration_seconds": shot.get("audio_duration_seconds"),
                 }
                 completed_record = dict(completed_shots[shot_id])
 
