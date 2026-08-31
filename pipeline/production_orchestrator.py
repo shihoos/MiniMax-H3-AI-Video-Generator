@@ -50,6 +50,7 @@ from planner.qwen_director import (
 from pipeline.dialogue_timeline import DialogueTimeline
 from pipeline.continuity_ledger import ContinuityLedger, ContinuityViolation
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
+from pipeline.seed_lineage import ensure_plan_lineage
 from schemas.character import (
     Character,
 )
@@ -1295,6 +1296,7 @@ class ProductionOrchestrator:
         # creative source, while timing and continuity are finalized here.
         plan["production_id"] = production_id
         plan = self._enforce_production_contracts(plan, characters)
+        ensure_plan_lineage(plan, production_id)
         character_dicts = [character.to_dict() for character in characters]
 
         # Finalize scene-boundary flags before building the storyboard manifest.
