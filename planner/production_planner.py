@@ -617,6 +617,9 @@ class ProductionPlanner:
                     list(short_source),
                 ]
             elif len(short_source) == 2:
+                # Four structural views without inventing facts:
+                # establish the first event, preserve the complete source,
+                # focus the second event, then close on the complete source.
                 groups = [
                     [short_source[0]],
                     [short_source[0], short_source[1]],
