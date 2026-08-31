@@ -80,6 +80,7 @@ REQUIRED_FILES = [
     "schemas/character.py",
     "schemas/scene.py",
     "schemas/shot.py",
+    "schemas/dialogue.py",
     "schemas/parser.py",
 
     # --------------------------------------------------------
