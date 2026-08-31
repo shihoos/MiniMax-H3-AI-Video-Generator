@@ -42,11 +42,11 @@
   ],
   "features": {
     "live_preview": true,
-    "vlm_enabled": false,
+    "vlm_enabled": true,
     "qa_enabled": true,
     "context_ir_version": 1,
     "timeline_version": 1,
     "selective_retake": true,
-    "director_critic": false
+    "director_critic": true
   }
 }
