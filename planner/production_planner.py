@@ -36,6 +36,7 @@ from planner.config import (
 from schemas.character import Character
 from schemas.scene import Scene
 from schemas.shot import Shot
+from pipeline.seed_lineage import semantic_content_digest
 
 
 @dataclass
@@ -2103,6 +2104,7 @@ class ProductionPlanner:
         scene_shot_ids = {}
 
         for shot in shots:
+            shot.semantic_content_digest = semantic_content_digest(shot.to_dict())
             scene_shot_ids.setdefault(
                 shot.scene_id,
                 [],
