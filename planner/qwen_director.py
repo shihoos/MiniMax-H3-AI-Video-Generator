@@ -741,20 +741,26 @@ class QwenDirector:
         )
 
         descriptions = [
-            str(
-                item.get(
-                    "description",
-                    "",
-                )
-                or ""
-            ).strip()
+            str(item.get("description", "") or "").strip()
             for item in group
+            if str(item.get("description", "") or "").strip()
         ]
 
-        descriptions = [
-            value
-            for value in descriptions
-            if value
+        story_summaries = [
+            str(item.get("story_summary", "") or "").strip()
+            for item in group
+            if str(item.get("story_summary", "") or "").strip()
+        ]
+        obligatory = [
+            str(item.get("obligatory_moment", "") or "").strip()
+            for item in group
+            if str(item.get("obligatory_moment", "") or "").strip()
+        ]
+        narrative_beats = [
+            str(item.get(key, "") or "").strip()
+            for item in group
+            for key in ("narrative_beat", "key_event", "event")
+            if str(item.get(key, "") or "").strip()
         ]
 
         objectives = [
@@ -859,15 +865,18 @@ class QwenDirector:
 
         first[
             "description"
-        ] = " ".join(
-            descriptions
-        ).strip()
+        ] = " ".join(descriptions).strip()
+
+        if story_summaries:
+            first["story_summary"] = " ".join(story_summaries).strip()
+        if obligatory:
+            first["obligatory_moment"] = " ".join(obligatory).strip()
+        if narrative_beats:
+            first["narrative_beat"] = " ".join(narrative_beats).strip()
 
         first[
             "scene_objective"
-        ] = " ".join(
-            objectives
-        ).strip()
+        ] = " ".join(objectives).strip()
 
         first[
             "continuity_notes"
@@ -3405,23 +3414,29 @@ Return:
                 "scene_id"
             ] = scene_id
 
-            required = (
-                "camera_shot",
-                "camera_movement",
-                "lens_and_depth_of_field",
-                "composition_notes",
-                "lighting",
-                "color_temperature",
-                "mood",
-                "visual_prompt",
-            )
+            # Repair non-critical omissions deterministically instead of
+            # discarding a useful shot. Use scene-owned values where available.
+            scene_description = str(scene.get("description", "") or "").strip()
+            scene_lighting = str(scene.get("lighting", "") or "").strip() or "soft natural light"
+            scene_color = str(scene.get("color_temperature", "") or "").strip() or "neutral"
+            scene_mood = str(scene.get("mood", "") or "").strip() or "cinematic"
 
-            if any(
-                not str(
-                    candidate.get(field, "") or ""
-                ).strip()
-                for field in required
-            ):
+            defaults = {
+                "camera_shot": "medium wide",
+                "camera_movement": "static",
+                "lens_and_depth_of_field": "normal lens, moderate depth of field",
+                "composition_notes": "Clear subject separation with readable spatial depth.",
+                "lighting": scene_lighting,
+                "color_temperature": scene_color,
+                "mood": scene_mood,
+                "visual_prompt": scene_description or str(candidate.get("action", "") or "").strip(),
+            }
+
+            for field, fallback in defaults.items():
+                if not str(candidate.get(field, "") or "").strip():
+                    candidate[field] = fallback
+
+            if not str(candidate.get("visual_prompt", "") or "").strip():
                 continue
 
             # Character binding is production-critical. Qwen may omit the
@@ -3772,24 +3787,39 @@ Return:
                     "the premise unchanged."
                 )
 
-            # No arbitrary length multiplier.
-            # A concise but excellent story is valid.
-
-            sentences = [
-                value
-                for value
-                in re.split(
-                    r"[.!?]+",
-                    result,
-                )
-                if value.strip()
+            # Do not reject a valid one-sentence story using an arbitrary
+            # sentence-count rule. Require deterministic source preservation
+            # and some genuinely new meaningful content instead.
+            source_anchors = self._preservation_anchors(source)
+            result_lower = result.lower()
+            missing_anchors = [
+                anchor
+                for anchor in source_anchors
+                if anchor not in result_lower
             ]
-
-            if len(sentences) < 2:
-
+            if missing_anchors:
                 raise RuntimeError(
-                    "AI Story mode did not produce "
-                    "a complete narrative."
+                    "AI Story mode dropped required source anchors: "
+                    + ", ".join(missing_anchors[:8])
+                )
+
+            coverage, missing_sentences = self._preservation_coverage(
+                source,
+                result,
+                minimum_sentence_overlap=0.20,
+            )
+            if source and coverage < 0.5:
+                detail = "; ".join(missing_sentences[:3])
+                raise RuntimeError(
+                    "AI Story mode did not preserve enough of the supplied "
+                    f"premise (coverage={coverage:.2f}). {detail}".strip()
+                )
+
+            source_tokens = self._meaningful_tokens(source)
+            result_tokens = self._meaningful_tokens(result)
+            if source_tokens and not (result_tokens - source_tokens):
+                raise RuntimeError(
+                    "AI Story mode did not add meaningful narrative content."
                 )
 
             return
@@ -4304,7 +4334,7 @@ Return JSON only:
         return """
 You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
-Create exactly TWO production-ready shots for EACH supplied scene.
+Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
 
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
 Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
@@ -4410,7 +4440,10 @@ Do NOT output compiler-owned fields.
 Do NOT add scenes.
 Do NOT omit scenes.
 Return JSON only.
-""".strip()
+""".strip().replace(
+            "__SHOTS_PER_SCENE__",
+            str(self.SHOTS_PER_SCENE),
+        )
 
     @staticmethod
     def _compact_story_context(story: str, max_chars: int = 850) -> str:
@@ -5491,6 +5524,52 @@ Return JSON only.
     # ========================================================
     # MERGE
     # ========================================================
+
+    def repair_continuity_violation(
+        self,
+        *,
+        shot: dict,
+        previous_shot: dict | None,
+        violation: dict,
+    ) -> dict:
+        """Targeted single-shot repair; unrelated production fields stay fixed."""
+        shot_schema = self._shot_json_schema()["properties"]["shots"]["items"]
+        system = (
+            "You are a deterministic continuity repair agent. "
+            "Return JSON only. Repair only the fields implicated by the continuity rejection. "
+            "Do not change shot_id, scene_id, order, characters, dialogue text, camera, or unrelated creative fields. "
+            "Preserve canonical character identity. Never invent a wardrobe change unless explicitly required by the story."
+        )
+        previous = json.dumps(previous_shot or {}, ensure_ascii=False, indent=2)
+        current = json.dumps(shot or {}, ensure_ascii=False, indent=2)
+        error = json.dumps(violation or {}, ensure_ascii=False, indent=2)
+        user = (
+            "CONTINUITY REJECTION\n"
+            f"Previous shot:\n{previous}\n\n"
+            f"Current shot:\n{current}\n\n"
+            f"Violation:\n{error}\n\n"
+            "Return the corrected shot object only."
+        )
+        schema = {
+            "type": "object",
+            "properties": {"shot": shot_schema},
+            "required": ["shot"],
+            "additionalProperties": False,
+        }
+        response = self._chat_json(
+            system,
+            user,
+            minimum_completion=320,
+            max_completion=1800,
+            call_name=f"continuity_repair:{shot.get('shot_id', 'unknown')}",
+            response_schema=schema,
+            json_mode=True,
+            disable_thinking=True,
+        )
+        repaired = response.get("shot")
+        if not isinstance(repaired, dict):
+            raise RuntimeError("Continuity repair did not return a shot object.")
+        return repaired
 
     def enrich_plan(
         self,
