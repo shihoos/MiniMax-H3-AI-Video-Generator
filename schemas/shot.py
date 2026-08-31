@@ -171,6 +171,18 @@ class Shot:
     previous_shot: Optional[str] = None
     next_shot: Optional[str] = None
 
+    # User-facing production controls and post-render QA. These fields are
+    # advisory/telemetry; deterministic identity and workflow contracts remain
+    # authoritative elsewhere in the pipeline.
+    continuity_mode: str = "chained"
+    timeline_start_seconds: float = 0.0
+    timeline_end_seconds: float = 0.0
+    quality_gate: dict = field(default_factory=dict)
+    retake_recommended: bool = False
+    retake_requested: bool = False
+    retake_start_seconds: Optional[float] = None
+    retake_end_seconds: Optional[float] = None
+
     def __post_init__(self) -> None:
         self.shot_id = str(
             self.shot_id or ""
@@ -397,6 +409,19 @@ class Shot:
                 "workflow_mode must be one of: "
                 + ", ".join(sorted(VALID_WORKFLOW_MODES))
             )
+
+        self.continuity_mode = str(self.continuity_mode or "chained").strip().lower()
+        if self.continuity_mode not in {"independent", "chained", "anchored", "hard_cut", "scene_reset"}:
+            raise ValueError("continuity_mode is invalid.")
+        self.timeline_start_seconds = float(self.timeline_start_seconds or 0.0)
+        self.timeline_end_seconds = float(self.timeline_end_seconds or 0.0)
+        self.quality_gate = _mapping(self.quality_gate, "quality_gate")
+        self.retake_recommended = bool(self.retake_recommended)
+        self.retake_requested = bool(self.retake_requested)
+        if self.retake_start_seconds is not None:
+            self.retake_start_seconds = float(self.retake_start_seconds)
+        if self.retake_end_seconds is not None:
+            self.retake_end_seconds = float(self.retake_end_seconds)
 
         if self.seed is not None:
             try:
@@ -711,5 +736,13 @@ class Shot:
             "steps": self.steps,
             "previous_shot": self.previous_shot,
             "next_shot": self.next_shot,
+            "continuity_mode": self.continuity_mode,
+            "timeline_start_seconds": self.timeline_start_seconds,
+            "timeline_end_seconds": self.timeline_end_seconds,
+            "quality_gate": self.quality_gate,
+            "retake_recommended": self.retake_recommended,
+            "retake_requested": self.retake_requested,
+            "retake_start_seconds": self.retake_start_seconds,
+            "retake_end_seconds": self.retake_end_seconds,
             "h3_prompt": self.h3_prompt(),
         }
