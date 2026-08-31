@@ -411,6 +411,7 @@ class H3UpscaledWorkflowBuilder(
         height: int = H3_HEIGHT,
         duration_seconds: float = 5.2,
         ref_image_size: str | None = None,
+        context_ir: dict | None = None,
     ):
 
         if generation_mode not in {
@@ -430,6 +431,10 @@ class H3UpscaledWorkflowBuilder(
             workflow,
             generation_mode,
         )
+
+        if context_ir is not None:
+            from pipeline.context_ir import H3ContextIRCompiler
+            prompt = H3ContextIRCompiler.prompt(context_ir)
 
         if (
             generation_mode
