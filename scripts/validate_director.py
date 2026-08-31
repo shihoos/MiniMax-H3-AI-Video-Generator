@@ -764,6 +764,132 @@ def _sample_shot(scene_id: str, ordinal: int, characters=None) -> dict:
     }
 
 
+
+def test_h3_workflow_duration_updates_float_source() -> None:
+    from execution.h3_workflow_builder import H3WorkflowBuilder
+
+    builder = H3WorkflowBuilder(ROOT, None)
+    workflow = builder.load("ref2v")
+
+    expression = next(
+        node
+        for node in workflow["nodes"]
+        if node.get("type") == "ComfyMathExpression"
+    )
+    primitive = next(
+        node
+        for node in workflow["nodes"]
+        if node.get("type") == "PrimitiveFloat"
+        and node.get("title") == "Float (Duration)"
+    )
+
+    original_expression = expression["widgets_values"][0]
+    builder._set_duration(workflow, 5.0)
+
+    check(
+        expression["widgets_values"][0] == original_expression,
+        "H3 duration update modified the ComfyMathExpression formula.",
+    )
+    check(
+        primitive["widgets_values"][0] == 5.0,
+        "H3 duration update did not modify the PrimitiveFloat source.",
+    )
+    check(
+        primitive.get("widgets_values_named", {}).get("value") == 5.0,
+        "H3 duration named widget value was not updated.",
+    )
+
+    ref_node = builder._one(
+        workflow,
+        "MiniMaxH3ReferenceToVideo",
+    )
+    check(
+        ref_node["widgets_values"][3] == 124,
+        "5.0 seconds did not resolve to the H3-legal 124-frame length.",
+    )
+
+
+def test_h3_workflow_resolution_selector_mapping() -> None:
+    from execution.h3_workflow_builder import H3WorkflowBuilder
+
+    builder = H3WorkflowBuilder(ROOT, None)
+    expected = {
+        (1344, 768): 0.98,
+        (1216, 672): 0.80,
+        (1056, 608): 0.60,
+        (1920, 1088): 2.10,
+    }
+
+    for (width, height), megapixels in expected.items():
+        workflow = builder.load("ref2v")
+        builder._set_resolution(
+            workflow,
+            width,
+            height,
+        )
+        selector = builder._one(
+            workflow,
+            "ResolutionSelector",
+        )
+        widgets = selector["widgets_values"]
+
+        check(
+            widgets[0] == "16:9 (Widescreen)"
+            and float(widgets[1]) == megapixels
+            and int(widgets[2]) == 32,
+            f"Resolution selector mapping failed for {width}x{height}.",
+        )
+
+    try:
+        workflow = builder.load("ref2v")
+        builder._set_resolution(
+            workflow,
+            1400,
+            800,
+        )
+    except ValueError:
+        pass
+    else:
+        raise RuntimeError(
+            "Unsupported H3 resolution was accepted instead of failing loudly."
+        )
+
+
+def test_short_story_rebalances_to_four_units_without_losing_source_text() -> None:
+    planner = ProductionPlanner(ROOT)
+
+    source = "Eli enters the station."
+    units = planner._rebalance_story_units(
+        planner._split_story(source)
+    )
+
+    check(
+        len(units) == 4,
+        "Short story did not rebalance to four structural planning units.",
+    )
+
+    joined = " ".join(
+        unit.text
+        for unit in units
+    )
+    check(
+        "Eli" in joined and "enters" in joined and "station" in joined,
+        "Short-story rebalance lost source narrative content.",
+    )
+
+    tiny = planner._rebalance_story_units(
+        planner._split_story("Run.")
+    )
+    check(
+        len(tiny) == 4,
+        "Extremely short story did not produce four structural units.",
+    )
+    check(
+        all(unit.text == "Run." for unit in tiny),
+        "Tiny-source fallback changed the source text.",
+    )
+
+
 def test_canonical_roster_not_overwritten_by_qwen() -> None:
     # P0 regression guard: enrich_plan() must never let Qwen's creative
     # output replace the deterministic canonical character roster or
@@ -1346,6 +1472,9 @@ def main() -> None:
         test_visual_schema_sanitization,
         test_shot_schema_cardinality_is_grammar_constrained,
         test_shot_sanitization_cinematography_fields,
+        test_h3_workflow_duration_updates_float_source,
+        test_h3_workflow_resolution_selector_mapping,
+        test_short_story_rebalances_to_four_units_without_losing_source_text,
         test_canonical_roster_not_overwritten_by_qwen,
         test_entity_resolver_shot_rebinding,
         test_mult_word_character_extraction_regression,
