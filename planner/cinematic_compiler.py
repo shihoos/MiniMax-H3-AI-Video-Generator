@@ -898,6 +898,46 @@ class CinematicCompiler:
                         "speech_text"
                     )
                 ),
+
+            "dialogue_events": deepcopy(
+                shot.get("dialogue_events", []) or []
+            ),
+
+            "continuity_state_start": self._string(
+                shot.get("continuity_state_start")
+            ),
+
+            "continuity_state_end": self._string(
+                shot.get("continuity_state_end")
+            ),
+
+            "is_scene_boundary": bool(
+                shot.get("is_scene_boundary", False)
+            ),
+
+            "character_spatial_bboxes": deepcopy(
+                shot.get("character_spatial_bboxes", {}) or {}
+            ),
+
+            "character_spatial_regions": deepcopy(
+                shot.get("character_spatial_regions", {}) or {}
+            ),
+
+            "character_spatial_bboxes_start": deepcopy(
+                shot.get("character_spatial_bboxes_start", {}) or {}
+            ),
+
+            "character_spatial_bboxes_end": deepcopy(
+                shot.get("character_spatial_bboxes_end", {}) or {}
+            ),
+
+            "character_spatial_regions_start": deepcopy(
+                shot.get("character_spatial_regions_start", {}) or {}
+            ),
+
+            "character_spatial_regions_end": deepcopy(
+                shot.get("character_spatial_regions_end", {}) or {}
+            ),
         }
 
         return compiled
