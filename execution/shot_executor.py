@@ -565,3 +565,9 @@ class ShotExecutor:
                     self._record("shot_oom_recovery_free_failed", shot_id=shot_id, error=str(recovery_error)[-1000:])
                 time.sleep(min(5.0, 1.0 * (2 ** (oom_retries - 1))))
 
+
+
+    def validate_rendered_media(self, output_path):
+        """Return stream-level A/V validation for a completed shot."""
+        from pipeline.dialogue_duration import FFProbeMediaDurationProvider
+        return FFProbeMediaDurationProvider().validate_video_audio_sync(output_path)
