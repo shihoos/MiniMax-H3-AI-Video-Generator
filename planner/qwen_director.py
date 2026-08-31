@@ -170,6 +170,19 @@ class QwenDirector:
         )
         self._cache_namespace = "minimax-h3-qwen-schema-v2"
 
+        # Runtime Qwen telemetry is intentionally lightweight: keep only
+        # aggregate/per-call metrics needed to diagnose latency, token usage,
+        # retries, cache behavior, and deterministic recovery decisions.
+        self._qwen_telemetry = {
+            "calls": [],
+            "total_elapsed_seconds": 0.0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "deterministic_recoveries": 0,
+        }
+
     @staticmethod
     def _optional_directory_env(name: str) -> Path | None:
         value = os.getenv(name, "").strip()
@@ -196,6 +209,125 @@ class QwenDirector:
                 flags=re.IGNORECASE,
             )[0].strip()
         return value
+
+    def _record_qwen_call(
+        self,
+        *,
+        call_name: str,
+        elapsed: float,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        max_tokens: int = 0,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        response_format=None,
+        cache_hit: bool = False,
+        error: str = "",
+    ) -> None:
+        """Record and print bounded runtime telemetry for one Qwen call."""
+        prompt_tokens = max(0, int(prompt_tokens or 0))
+        completion_tokens = max(0, int(completion_tokens or 0))
+        elapsed = max(0.0, float(elapsed or 0.0))
+
+        record = {
+            "call_name": str(call_name or "unknown"),
+            "elapsed_seconds": elapsed,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "decode_tps": (
+                completion_tokens / elapsed
+                if elapsed > 0 and completion_tokens > 0
+                else 0.0
+            ),
+            "max_tokens": int(max_tokens or 0),
+            "temperature": temperature,
+            "top_p": top_p,
+            "response_format": (
+                "json_schema"
+                if isinstance(response_format, dict)
+                and response_format.get("type") == "json_schema"
+                else (
+                    response_format.get("type")
+                    if isinstance(response_format, dict)
+                    else None
+                )
+            ),
+            "cache_hit": bool(cache_hit),
+            "error": str(error or ""),
+        }
+
+        calls = self._qwen_telemetry.setdefault("calls", [])
+        calls.append(record)
+
+        self._qwen_telemetry["total_elapsed_seconds"] += elapsed
+        self._qwen_telemetry["prompt_tokens"] += prompt_tokens
+        self._qwen_telemetry["completion_tokens"] += completion_tokens
+        if cache_hit:
+            self._qwen_telemetry["cache_hits"] += 1
+
+        if "retry" in str(call_name).lower():
+            self._qwen_telemetry["retries"] += 1
+
+        print(
+            "[QWEN]",
+            call_name,
+            f"elapsed={elapsed:.2f}s",
+            f"prompt_tokens={prompt_tokens}",
+            f"completion_tokens={completion_tokens}",
+            f"total_tokens={prompt_tokens + completion_tokens}",
+            f"decode_tps={record['decode_tps']:.2f}",
+            f"max_tokens={int(max_tokens or 0)}",
+            (f"cache_hit={cache_hit}" if cache_hit else ""),
+            (f"error={error}" if error else ""),
+            flush=True,
+        )
+
+    def _record_recovery(
+        self,
+        recovery_type: str,
+        detail: str = "",
+    ) -> None:
+        self._qwen_telemetry["deterministic_recoveries"] += 1
+        print(
+            "[QWEN]",
+            "recovery",
+            f"type={recovery_type}",
+            (f"detail={detail}" if detail else ""),
+            flush=True,
+        )
+
+    def _print_qwen_summary(self) -> None:
+        """Print a compact production-level Qwen accounting summary."""
+        calls = list(self._qwen_telemetry.get("calls", []) or [])
+        total_elapsed = float(
+            self._qwen_telemetry.get("total_elapsed_seconds", 0.0) or 0.0
+        )
+        prompt_tokens = int(
+            self._qwen_telemetry.get("prompt_tokens", 0) or 0
+        )
+        completion_tokens = int(
+            self._qwen_telemetry.get("completion_tokens", 0) or 0
+        )
+        retries = int(self._qwen_telemetry.get("retries", 0) or 0)
+        cache_hits = int(self._qwen_telemetry.get("cache_hits", 0) or 0)
+        recoveries = int(
+            self._qwen_telemetry.get("deterministic_recoveries", 0) or 0
+        )
+
+        print("[QWEN] ==================== SUMMARY ====================", flush=True)
+        print("[QWEN] calls=" + str(len(calls)), flush=True)
+        print("[QWEN] prompt_tokens=" + str(prompt_tokens), flush=True)
+        print("[QWEN] completion_tokens=" + str(completion_tokens), flush=True)
+        print("[QWEN] total_tokens=" + str(prompt_tokens + completion_tokens), flush=True)
+        print("[QWEN] total_elapsed=" + f"{total_elapsed:.2f}s", flush=True)
+        print("[QWEN] retries=" + str(retries), flush=True)
+        print("[QWEN] cache_hits=" + str(cache_hits), flush=True)
+        print("[QWEN] deterministic_recoveries=" + str(recoveries), flush=True)
+        if calls:
+            names = ", ".join(str(item.get("call_name", "unknown")) for item in calls)
+            print("[QWEN] call_sequence=" + names, flush=True)
+        print("[QWEN] =====================================================", flush=True)
 
     def _trace_call(
         self,
@@ -2348,11 +2480,14 @@ Return:
             )
             cached = self._cache_read(cache_key)
             if cached is not None:
-                print(
-                    "[QWEN]",
-                    call_name,
-                    "cache_hit",
-                    flush=True,
+                self._record_qwen_call(
+                    call_name=call_name,
+                    elapsed=0.0,
+                    max_tokens=0,
+                    temperature=temperature,
+                    top_p=top_p,
+                    response_format={"type": "json_schema"} if json_mode else None,
+                    cache_hit=True,
                 )
                 return cached
 
@@ -2429,15 +2564,16 @@ Return:
                 else 0.0
             )
 
-            print(
-                "[QWEN]",
-                call_name,
-                f"elapsed={elapsed:.2f}s",
-                f"prompt_tokens={prompt_tokens}",
-                f"completion_tokens={completion_tokens}",
-                f"decode_tps={decode_tps:.2f}",
-                f"max_tokens={max_tokens}",
-                flush=True,
+            self._record_qwen_call(
+                call_name=call_name,
+                elapsed=elapsed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                response_format=kwargs.get("response_format"),
+                error=error_text,
             )
 
             self._trace_call(
@@ -2544,6 +2680,7 @@ Return:
 
         started = time.perf_counter()
         response = None
+        error_text = ""
 
         try:
             response = (
@@ -2554,6 +2691,9 @@ Return:
                     max_tokens=max_tokens,
                 )
             )
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}"
+            raise
         finally:
             elapsed = (
                 time.perf_counter()
@@ -2579,15 +2719,16 @@ Return:
                 if elapsed > 0 and completion_tokens > 0
                 else 0.0
             )
-            print(
-                "[QWEN]",
-                call_name,
-                f"elapsed={elapsed:.2f}s",
-                f"prompt_tokens={prompt_tokens}",
-                f"completion_tokens={completion_tokens}",
-                f"decode_tps={decode_tps:.2f}",
-                f"max_tokens={max_tokens}",
-                flush=True,
+            self._record_qwen_call(
+                call_name=call_name,
+                elapsed=elapsed,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                response_format=None,
+                error=error_text,
             )
 
         try:
@@ -4859,10 +5000,9 @@ Return JSON only.
                     # Expansion failure must not trigger another expensive
                     # Qwen call. The original user story is the deterministic
                     # correctness fallback; downstream planning can continue.
-                    print(
-                        "[QWEN] expand_validation_failed_fallback_to_source",
+                    self._record_recovery(
+                        "expand_story_source_fallback",
                         str(first_error),
-                        flush=True,
                     )
                     story = self._normalize_story(
                         user_input
@@ -5265,11 +5405,9 @@ Return JSON only.
                                 ]
 
                     except Exception as batch_error:
-                        print(
-                            "[QWEN]",
-                            "shot_batch_failed",
+                        self._record_recovery(
+                            "shot_batch_deterministic_fallback",
                             str(batch_error),
-                            flush=True,
                         )
 
                 # The deterministic repair pass after the loop owns missing
@@ -5468,6 +5606,22 @@ Return JSON only.
 
                     current.append(candidate)
 
+            # Final safety gate: deterministic fallback shots must traverse
+            # the same sanitizer as Qwen-generated shots before compilation.
+            # This prevents missing cinematography fields from reaching the
+            # strict CinematicCompiler validator.
+            current = self._sanitize_shots(
+                current,
+                scene,
+                character_names,
+            )[: self.SHOTS_PER_SCENE]
+
+            if len(current) < self.SHOTS_PER_SCENE:
+                self._record_recovery(
+                    "shot_field_sanitization_incomplete",
+                    f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
+                )
+
             repaired_shots.extend(current)
 
         all_shots = repaired_shots
@@ -5517,6 +5671,8 @@ Return JSON only.
             "scenes": scenes,
             "shots": all_shots,
         }
+
+        self._print_qwen_summary()
 
         self._save_checkpoint(
             checkpoint_store,
