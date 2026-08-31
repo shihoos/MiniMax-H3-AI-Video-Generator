@@ -239,6 +239,9 @@ class ContinuityLedger:
             shot["continuity_start_state"] = start
             shot["continuity_end_state"] = proposed_end
             shot["continuity_repair_applied"] = repaired
+            self.reconcile_observed_state(shot)
+            proposed_end = self._state_for_shot(shot, "continuity_end_state")
+            shot["continuity_end_state"] = proposed_end
             shot["identity_fingerprints"] = self._identity_map_for_shot(shot, fingerprint_map, name_to_id)
 
             if not is_boundary:
@@ -278,6 +281,30 @@ class ContinuityLedger:
         path.write_text(json.dumps({"production_id": self.production_id, "entries": self.entries}, indent=2, ensure_ascii=False), encoding="utf-8")
         plan["continuity_ledger_path"] = str(path)
         return plan
+
+    @staticmethod
+    def reconcile_observed_state(shot: dict[str, Any]) -> bool:
+        """Attach optional structured visual evidence to continuity state.
+
+        Deterministic image statistics remain telemetry. Only an explicit
+        structured ``vision_state`` may influence continuity, and it is stored
+        under ``observed`` so planned state remains auditable.
+        """
+        feedback = shot.get("visual_feedback")
+        if not isinstance(feedback, dict):
+            return False
+        vision_state = feedback.get("vision_state")
+        if not isinstance(vision_state, dict) or not vision_state:
+            return False
+        end_state = shot.get("continuity_end_state")
+        if not isinstance(end_state, dict):
+            end_state = {}
+        end_state = deepcopy(end_state)
+        end_state["observed"] = deepcopy(vision_state)
+        shot["continuity_end_state"] = end_state
+        shot["observed_continuity_state"] = deepcopy(vision_state)
+        shot["observed_state_authoritative"] = True
+        return True
 
     def apply_field_level_fallback(self, plan: dict, characters: list[dict] | list[Character]) -> dict:
         """Repair only continuity-carrying fields after bounded Qwen repair attempts."""
