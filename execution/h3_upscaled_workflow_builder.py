@@ -434,6 +434,15 @@ class H3UpscaledWorkflowBuilder(
 
         if context_ir is not None:
             from pipeline.context_ir import H3ContextIRCompiler
+            H3ContextIRCompiler.validate(context_ir)
+            from planner.config import H3_CONTEXT_IR_VERSION
+            if int(context_ir.get("version", 0) or 0) != int(H3_CONTEXT_IR_VERSION):
+                raise ValueError(
+                    f"Context-IR version mismatch: got {context_ir.get('version')}, "
+                    f"configured {H3_CONTEXT_IR_VERSION}."
+                )
+            if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
+                raise ValueError("This production inventory is Ref2VA-only; Context-IR mode must be ref2va.")
             prompt = H3ContextIRCompiler.prompt(context_ir)
 
         if (
