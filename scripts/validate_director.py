@@ -209,14 +209,18 @@ def test_shot_batch_contract() -> None:
     prompt = director._shot_director_batch_system()
 
     check(
-        "Create exactly TWO production-ready shots for EACH supplied scene." in prompt,
-        "Batch shot prompt does not enforce two shots per scene.",
+        f"Create exactly {director.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
+        "Batch shot prompt does not enforce configured shots per scene.",
     )
 
     check(
         "Do not add characters" in prompt or "Do not create new characters" in prompt,
         "Batch prompt lost the explicit character restriction.",
     )
+
+    check('"character_spatial_bboxes": {}' in prompt, "Shot batch example is missing spatial bbox fields.")
+    baseline = director._default_visual_language([])
+    check(all(baseline.get(key) for key in ("genre_tone", "color_palette", "lighting_philosophy", "camera_philosophy", "pacing")), "Visual-language baseline is incomplete.")
 
     normalized = director._normalize_batch_shot_response(
         {
@@ -817,7 +821,7 @@ def test_h3_workflow_resolution_selector_mapping() -> None:
         (1344, 768): 0.98,
         (1216, 672): 0.80,
         (1056, 608): 0.60,
-        (1920, 1088): 2.10,
+        (1920, 1088): 2.00,
     }
 
     for (width, height), megapixels in expected.items():
