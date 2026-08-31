@@ -89,6 +89,10 @@ class ProductionCheckpoint:
             "preview_ready",
             "production_id",
             "plan_sha256",
+            "runtime_diagnostics",
+            "runtime_diagnostics_warning",
+            "production_manifest",
+            "production_manifest_path",
         ):
             normalized.pop(key, None)
         return cls.digest_object(normalized)
