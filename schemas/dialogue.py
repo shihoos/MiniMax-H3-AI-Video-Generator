@@ -83,8 +83,14 @@ class DialogueEvent:
             "properties": {
                 "speaker": {"type": "string"},
                 "text": {"type": "string"},
+                "continues_from_previous_shot": {"type": "boolean"},
                 "continues_to_next_shot": {"type": "boolean"},
             },
-            "required": ["speaker", "text", "continues_to_next_shot"],
+            "required": [
+                "speaker",
+                "text",
+                "continues_from_previous_shot",
+                "continues_to_next_shot",
+            ],
             "additionalProperties": False,
         }
