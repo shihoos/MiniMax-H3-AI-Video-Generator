@@ -1453,6 +1453,7 @@ class H3WorkflowBuilder:
         height: int = H3_HEIGHT,
         duration_seconds: float = 5.2,
         ref_image_size: str | None = None,
+        context_ir: dict | None = None,
     ):
         workflow = self.load(
             mode
@@ -1474,6 +1475,10 @@ class H3WorkflowBuilder:
             workflow,
             mode,
         )
+
+        if context_ir is not None:
+            from pipeline.context_ir import H3ContextIRCompiler
+            prompt = H3ContextIRCompiler.prompt(context_ir)
 
         if mode == "turbo_ref2v":
             if int(turbo_steps) != 8:
