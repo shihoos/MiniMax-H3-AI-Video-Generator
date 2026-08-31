@@ -10,6 +10,8 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+from pipeline.storyboard_cache import StoryboardCache
+
 
 class StoryboardReferenceBuilder:
     """Build a deterministic single-image storyboard/reference sheet."""
@@ -94,7 +96,6 @@ class StoryboardReferenceBuilder:
                 "camera_movement": str(shot.get("camera_movement", "")),
                 "composition_notes": str(shot.get("composition_notes", "")),
                 "lighting": str(shot.get("lighting", "")),
-                "storyboard_reference": bool(shot.get("storyboard_reference")),
             })
         payload = {
             "characters": [
@@ -114,16 +115,32 @@ class StoryboardReferenceBuilder:
 
     def build(self, plan: dict, characters: list[dict]) -> dict[str, Any]:
         digest = self.structural_digest(plan, characters)
-        cache_dir = self.root / "storyboard_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_image = cache_dir / f"{digest}.png"
-        cache_manifest = cache_dir / f"{digest}.json"
+        cache = StoryboardCache(self.root)
         image_path = self.root / "unified_storyboard_reference.png"
         manifest_cache_path = self.root / "reference_role_manifest.json"
-        if cache_image.is_file() and cache_manifest.is_file():
-            shutil.copy2(cache_image, image_path)
-            shutil.copy2(cache_manifest, manifest_cache_path)
-            cached = json.loads(manifest_cache_path.read_text(encoding="utf-8"))
+        cached = cache.restore(digest, image_path, manifest_cache_path)
+        if cached is not None:
+            cached_shots = cached.get("shots", {}) if isinstance(cached.get("shots"), dict) else {}
+            for shot in plan.get("shots", []) or []:
+                if not isinstance(shot, dict):
+                    continue
+                sid = str(shot.get("shot_id", "")).strip()
+                entry = cached_shots.get(sid)
+                if not isinstance(entry, dict):
+                    continue
+                refs = [str(v).strip() for v in (entry.get("reference_images", []) or []) if str(v).strip()]
+                records = [dict(v) for v in (entry.get("references", []) or []) if isinstance(v, dict)]
+                roles = []
+                for index, ref in enumerate(refs):
+                    record = dict(records[index]) if index < len(records) else {"path": ref, "role": "visual_reference", "priority": 50}
+                    record["path"] = ref
+                    record["picture_index"] = index + 1
+                    roles.append(record)
+                shot["reference_images"] = refs
+                shot["reference_roles"] = roles
+                shot["reference_bindings"] = list(entry.get("picture_bindings", []) or [])
+                shot["storyboard_reference"] = str(image_path)
+                shot["reference_role_manifest"] = str(manifest_cache_path)
             return {
                 "path": str(image_path),
                 "manifest_path": str(manifest_cache_path),
@@ -307,8 +324,7 @@ class StoryboardReferenceBuilder:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(manifest_path)
-        shutil.copy2(path, cache_image)
-        shutil.copy2(manifest_path, cache_manifest)
+        cache.store(digest, path, manifest_path)
         return {"path": str(path), "manifest_path": str(manifest_path), "panels": panels, "manifest": manifest, "cache_hit": False}
 
     @staticmethod
