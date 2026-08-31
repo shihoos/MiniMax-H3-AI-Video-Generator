@@ -11,5 +11,6 @@ __all__ = [
     "Scene",
     "Shot",
     "extract_json",
+    "DialogueEvent",
 ]
 
