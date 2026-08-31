@@ -2052,18 +2052,42 @@ Return:
                     "properties": {
                         "speaker": {"type": "string"},
                         "text": {"type": "string"},
+                        "continues_from_previous_shot": {"type": "boolean"},
                         "continues_to_next_shot": {"type": "boolean"},
                     },
                     "required": [
                         "speaker",
                         "text",
+                        "continues_from_previous_shot",
                         "continues_to_next_shot",
                     ],
                     "additionalProperties": False,
                 },
             },
-            "continuity_state_start": {"type": "string"},
-            "continuity_state_end": {"type": "string"},
+            "continuity_start_state": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "lighting": {"type": "string"},
+                    "environment": {"type": "string"},
+                    "props": {"type": "array", "items": {"type": "string"}},
+                    "camera_side": {"type": "string"},
+                    "state_description": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            "continuity_end_state": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "lighting": {"type": "string"},
+                    "environment": {"type": "string"},
+                    "props": {"type": "array", "items": {"type": "string"}},
+                    "camera_side": {"type": "string"},
+                    "state_description": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
             "is_scene_boundary": {"type": "boolean"},
             "character_spatial_bboxes": {
                 "type": "object",
@@ -3457,6 +3481,7 @@ Return:
                 normalized_dialogue.append({
                     "speaker": speaker,
                     "text": text,
+                    "continues_from_previous_shot": bool(event.get("continues_from_previous_shot", False)),
                     "continues_to_next_shot": bool(event.get("continues_to_next_shot", False)),
                 })
             if not normalized_dialogue:
@@ -3466,11 +3491,31 @@ Return:
                     normalized_dialogue = [{
                         "speaker": str(legacy_speakers[0]).strip(),
                         "text": legacy_text,
+                        "continues_from_previous_shot": False,
                         "continues_to_next_shot": False,
                     }]
             candidate["dialogue_events"] = normalized_dialogue
-            candidate["continuity_state_start"] = str(candidate.get("continuity_state_start", "") or "").strip()
-            candidate["continuity_state_end"] = str(candidate.get("continuity_state_end", "") or "").strip()
+
+            def _normalize_continuity(value) -> dict:
+                if isinstance(value, dict):
+                    return dict(value)
+                text = str(value or "").strip()
+                if not text:
+                    return {}
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    return {"state_description": text}
+                return parsed if isinstance(parsed, dict) else {"state_description": str(parsed)}
+
+            candidate["continuity_start_state"] = _normalize_continuity(
+                candidate.get("continuity_start_state", candidate.get("continuity_state_start"))
+            )
+            candidate["continuity_end_state"] = _normalize_continuity(
+                candidate.get("continuity_end_state", candidate.get("continuity_state_end"))
+            )
+            candidate.pop("continuity_state_start", None)
+            candidate.pop("continuity_state_end", None)
             candidate["is_scene_boundary"] = bool(candidate.get("is_scene_boundary", False))
             raw_bboxes = candidate.get("character_spatial_bboxes", {}) or {}
             normalized_bboxes = {}
@@ -4273,7 +4318,7 @@ Preserve:
 - exact dialogue text; never paraphrase or summarize supplied dialogue.
 - stable speaker names from the supplied character roster.
 - if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response.
-- describe the shot's required initial and ending continuity states in continuity_state_start and continuity_state_end.
+- describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
 Within each scene, shot 1 and shot 2 must use meaningfully different
 framing/composition while describing the SAME narrative beat.
@@ -4329,8 +4374,8 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
-          "continuity_state_start": "...",
-          "continuity_state_end": "..."
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
         },
         {
           "shot_id": "scene_001_shot_002",
@@ -4350,8 +4395,8 @@ Return JSON only in exactly this structure:
           "speaking_characters": [],
           "speech_text": "",
           "dialogue_events": [],
-          "continuity_state_start": "...",
-          "continuity_state_end": "..."
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."}
         }
       ]
     }
