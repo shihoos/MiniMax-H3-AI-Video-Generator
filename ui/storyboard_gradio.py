@@ -1588,9 +1588,7 @@ def serve_storyboard_gradio(
     del plan_path
     del wait_for_approval
 
-    os.environ[
-        "H3_DIRECTOR_ENABLED"
-    ] = "1"
+    os.environ.setdefault("H3_DIRECTOR_ENABLED", "1")
 
     controller = (
         ProductionController()
