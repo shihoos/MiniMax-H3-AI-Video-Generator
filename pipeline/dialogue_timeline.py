@@ -78,10 +78,14 @@ class DialogueTimeline:
         if not text.strip():
             return []
         if len(speakers) == 1:
+            # Preserve legacy "Speaker: line" formatting when present, while
+            # keeping the spoken text itself exact.
+            prefix = re.match(r"^\s*([^:]{1,80}):\s*(.+?)\s*$", text)
+            spoken_text = prefix.group(2) if prefix and cls._norm(prefix.group(1)) == cls._norm(speakers[0]) else text
             return [
                 {
                     "speaker": speakers[0],
-                    "text": text,
+                    "text": spoken_text,
                     "continues_from_previous_shot": False,
                     "continues_to_next_shot": False,
                 }
@@ -118,7 +122,9 @@ class DialogueTimeline:
     def _raw_events(shot: dict) -> list[dict]:
         supplied = shot.get("dialogue_events")
         if isinstance(supplied, list) and supplied:
-            return [value for value in supplied if isinstance(value, dict)]
+            if any(not isinstance(value, dict) for value in supplied):
+                raise ValueError(f"{shot.get('shot_id', '')}: dialogue_events contains a non-object entry.")
+            return [dict(value) for value in supplied]
         return DialogueTimeline._legacy_events(shot)
 
     def _resolve_speaker(self, name_or_id: str, shot_characters: list[str]) -> dict:
@@ -318,7 +324,8 @@ class DialogueTimeline:
             shot["dialogue_events"] = events
             shot["speaking_characters"] = [event["speaker_name"] for event in events]
             shot["speech_text"] = "\n".join(
-                f"{event['speaker_name']}: {event['text']}" for event in events
+                f"({event['speaker_id']}) says: <d>[English] {event['text']}</d>"
+                for event in events
             )
 
             previous_by_scene[scene_id] = (
