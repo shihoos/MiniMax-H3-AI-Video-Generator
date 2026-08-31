@@ -5,8 +5,11 @@ import shutil
 import time
 from pathlib import Path
 
+from pipeline.comfy_preview import ComfyPreviewStreamer
+
 from planner.config import (
     H3_HEIGHT,
+    H3_LIVE_PREVIEW,
     H3_MAX_REFERENCE_AUDIO,
     H3_MAX_REFERENCE_FILES,
     H3_MAX_REFERENCE_IMAGES,
@@ -30,6 +33,7 @@ class ShotExecutor:
         comfy_input_dir,
         gpu_id: int | None = None,
         metrics_path: Path | None = None,
+        preview_dir: Path | None = None,
     ):
 
         from execution.h3_workflow_builder import (
@@ -50,6 +54,8 @@ class ShotExecutor:
         self.project_root = Path(
             project_root
         ).resolve()
+
+        self.preview_dir = Path(preview_dir).resolve() if preview_dir else None
 
         self.comfy_input_root = (
             self.project_root
@@ -518,11 +524,22 @@ class ShotExecutor:
                 queued_at = time.monotonic()
                 self._record("shot_queued", shot_id=shot_id, prompt_id=prompt_id, queue_submit_seconds=queued_at - attempt_started, attempt=oom_retries + 1)
 
-                history = self.client.wait_for_prompt(
-                    prompt_id,
-                    poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
-                    timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
-                )
+                preview = None
+                if self.preview_dir is not None and H3_LIVE_PREVIEW:
+                    preview = ComfyPreviewStreamer(
+                        self.client.base_url,
+                        self.preview_dir / self._safe_name(shot_id),
+                    )
+                    preview.start(prompt_id, self.client.client_id)
+                try:
+                    history = self.client.wait_for_prompt(
+                        prompt_id,
+                        poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
+                        timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
+                    )
+                finally:
+                    if preview is not None:
+                        preview.stop()
                 output = self._select_savevideo_output(
                     workflow,
                     history,
