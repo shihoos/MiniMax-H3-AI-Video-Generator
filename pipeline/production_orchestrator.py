@@ -396,11 +396,21 @@ class ProductionOrchestrator:
                     character.name
                 ] = character_images
 
+                # Reserve capacity for runtime storyboard and (when this is not
+                # the first shot in a scene) the previous-shot final-frame relay.
+                # First shots need one reserved slot (storyboard); continuation
+                # shots need two (storyboard + previous frame).
+                has_same_scene_previous = any(
+                    isinstance(previous, dict)
+                    and str(previous.get("scene_id", "") or "").strip() == scene_id
+                    for previous in plan.get("shots", [])[: max(0, index - 1)]
+                )
+                reserved_runtime_slots = 1 + int(has_same_scene_previous)
+                identity_capacity = max(1, H3_MAX_REFERENCE_IMAGES - reserved_runtime_slots)
                 for path in character_images:
                     if (
                         path not in images
-                        and len(images)
-                        < max(1, H3_MAX_REFERENCE_IMAGES - 2)
+                        and len(images) < identity_capacity
                     ):
                         images.append(
                             path
