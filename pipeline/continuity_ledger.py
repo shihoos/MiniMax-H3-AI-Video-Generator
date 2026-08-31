@@ -34,6 +34,21 @@ class ContinuityLedger:
 
     SPATIAL_KEYS = ("character_spatial_bboxes", "character_spatial_regions")
 
+    @staticmethod
+    def _ordered_shots(plan: dict) -> list[dict]:
+        scene_order = {
+            str(scene.get("scene_id", "")).strip(): index
+            for index, scene in enumerate(plan.get("scenes", []) or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "")).strip()
+        }
+        return sorted(
+            [shot for shot in (plan.get("shots", []) or []) if isinstance(shot, dict)],
+            key=lambda shot: (
+                scene_order.get(str(shot.get("scene_id", "")).strip(), 10**9),
+                int(shot.get("order", 0)),
+            ),
+        )
+
     def __init__(self, project_root: Path, production_id: str | None = None) -> None:
         self.project_root = Path(project_root).resolve()
         self.production_id = str(production_id or "").strip() or "default"
@@ -125,7 +140,7 @@ class ContinuityLedger:
     def validate_proposed(cls, plan: dict) -> None:
         previous_by_scene: dict[str, dict[str, Any]] = {}
         previous_by_order: dict[str, dict[str, Any]] = {}
-        for shot in sorted(plan.get("shots", []) or [], key=lambda x: (str(x.get("scene_id", "")), int(x.get("order", 0)))):
+        for shot in cls._ordered_shots(plan):
             scene_id = str(shot.get("scene_id", "")).strip()
             previous = previous_by_scene.get(scene_id)
             if cls._scene_boundary(shot, previous):
@@ -154,6 +169,17 @@ class ContinuityLedger:
                     previous_shot_id=str(previous.get("shot_id", "")),
                     details={"expected_start_state": end, "proposed_start_state": start},
                 )
+            previous_ids = previous.get("identity_fingerprints") or {}
+            current_ids = shot.get("identity_fingerprints") or {}
+            for character, fingerprint in previous_ids.items():
+                if character in current_ids and fingerprint and current_ids.get(character) != fingerprint:
+                    raise ContinuityViolation(
+                        f"Identity fingerprint mismatch for {character}: {previous.get('shot_id')} -> {shot.get('shot_id')}",
+                        shot_id=str(shot.get("shot_id", "")),
+                        previous_shot_id=str(previous.get("shot_id", "")),
+                        details={"character": character, "expected_fingerprint": fingerprint, "proposed_fingerprint": current_ids.get(character)},
+                    )
+
             previous_boxes = previous.get("character_spatial_bboxes_end") or previous.get("character_spatial_bboxes") or {}
             current_start_boxes = shot.get("character_spatial_bboxes_start") or {}
             for name, previous_box in previous_boxes.items():
@@ -196,7 +222,7 @@ class ContinuityLedger:
         previous_by_scene: dict[str, dict[str, Any] | None] = {}
         self.entries = []
 
-        for shot in sorted(plan.get("shots", []) or [], key=lambda x: (str(x.get("scene_id", "")), int(x.get("order", 0)))):
+        for shot in self._ordered_shots(plan):
             scene_id = str(shot.get("scene_id", "")).strip()
             previous = previous_by_scene.get(scene_id)
             is_boundary = self._scene_boundary(shot, previous)
@@ -253,7 +279,7 @@ class ContinuityLedger:
 
     def apply_field_level_fallback(self, plan: dict, characters: list[dict] | list[Character]) -> dict:
         """Repair only continuity-carrying fields after bounded Qwen repair attempts."""
-        shots = sorted(plan.get("shots", []) or [], key=lambda x: (str(x.get("scene_id", "")), int(x.get("order", 0))))
+        shots = self._ordered_shots(plan)
         previous_by_scene: dict[str, dict[str, Any] | None] = {}
         for shot in shots:
             scene_id = str(shot.get("scene_id", "")).strip()
@@ -269,7 +295,7 @@ class ContinuityLedger:
     @staticmethod
     def validate(plan: dict) -> None:
         previous_by_scene: dict[str, dict[str, Any]] = {}
-        for shot in sorted(plan.get("shots", []) or [], key=lambda x: (str(x.get("scene_id", "")), int(x.get("order", 0)))):
+        for shot in ContinuityLedger._ordered_shots(plan):
             scene_id = str(shot.get("scene_id", "")).strip()
             previous = previous_by_scene.get(scene_id)
             if previous is not None and not bool(shot.get("is_scene_boundary", False)):
