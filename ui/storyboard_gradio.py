@@ -27,6 +27,7 @@ from pipeline.timeline import ProductionTimeline
 from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.production_checkpoint import ProductionCheckpoint
 from pipeline.retake_manager import RetakeManager
+from ui.shot_view_model import shot_choices, render_shot_card
 from planner.config import (
     GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
@@ -791,6 +792,21 @@ class ProductionController:
         finally:
 
             self._lock.release()
+
+    def shot_options(self, plan_path_value: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            choices = shot_choices(plan)
+            return gr.update(choices=choices, value=(choices[0] if choices else None)), (render_shot_card(plan, choices[0]) if choices else "### No shots available")
+        except Exception as exc:
+            return gr.update(choices=[], value=None), "### ERROR\n" + str(exc)
+
+    def shot_detail(self, plan_path_value: str, shot_id: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            return render_shot_card(plan, shot_id)
+        except Exception as exc:
+            return "### ERROR\n" + str(exc)
 
     # ========================================================
     # PREVIEW
@@ -1629,6 +1645,10 @@ def build_app(
                                 scenes = gr.Markdown()
                     with gr.Accordion("Shots & Director Plan", open=True):
                         shots = gr.Markdown()
+                    with gr.Row():
+                        shot_selector = gr.Dropdown(label="Selected Shot", choices=[], value=None, interactive=True)
+                        shot_refresh = gr.Button("Load Shot Details")
+                    shot_detail = gr.Markdown("### Select a shot\nThe selected shot's prompt, references, continuity, critic, VLM and QA state will appear here.", elem_classes=["h3-panel"])
 
                 with gr.Tab("⏱ Timeline & Preview", id="timeline"):
                     gr.Markdown("### Timeline Editor\nEdit duration and continuity mode, then apply the changes. The cinematic compiler remains the single production source of truth.")
@@ -1690,6 +1710,9 @@ def build_app(
             refresh_live_preview.click(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             live_preview_timer.tick(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             load_timeline.click(fn=controller.timeline_table, inputs=[session_plan_path], outputs=[timeline_table, timeline_status])
+            load_timeline.click(fn=controller.shot_options, inputs=[session_plan_path], outputs=[shot_selector, shot_detail])
+            shot_selector.change(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
+            shot_refresh.click(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
             apply_timeline.click(fn=controller.apply_timeline_edits, inputs=[session_plan_path, timeline_table], outputs=[timeline_table, timeline_status, session_plan_path])
             runtime_check.click(fn=controller.runtime_health, inputs=[session_plan_path], outputs=[runtime_json, runtime_status])
             request_retake.click(fn=controller.create_retake_request, inputs=[session_plan_path, retake_shot_id, retake_start, retake_end, retake_reason], outputs=[retake_status, session_plan_path])
