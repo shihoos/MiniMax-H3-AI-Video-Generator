@@ -39,5 +39,14 @@
     "This is an example production-plan payload. The application does not load this file as a second runtime configuration source.",
     "Runtime/model/node versions remain controlled by configs/runtime_versions.yaml, configs/model_inventory.yaml, and configs/custom_nodes.yaml.",
     "Kaggle GPU/model installation is performed by kaggle/bootstrap.py from the runtime manifests."
-  ]
+  ],
+  "features": {
+    "live_preview": true,
+    "vlm_enabled": false,
+    "qa_enabled": true,
+    "context_ir_version": 1,
+    "timeline_version": 1,
+    "selective_retake": true,
+    "director_critic": false
+  }
 }
