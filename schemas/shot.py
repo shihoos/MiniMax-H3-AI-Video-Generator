@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -243,7 +244,14 @@ class Shot:
             )
 
         self.shot_uid = str(self.shot_uid or "").strip() or None
-        self.semantic_content_digest = str(self.semantic_content_digest or "").strip()
+        self.semantic_content_digest = str(
+            self.semantic_content_digest or ""
+        ).strip().lower()
+        if self.semantic_content_digest:
+            if not re.fullmatch(r"[0-9a-f]{64}", self.semantic_content_digest):
+                raise ValueError(
+                    "semantic_content_digest must be a 64-character SHA-256 hex digest when provided."
+                )
 
         self.characters = _string_list(
             self.characters,
