@@ -292,6 +292,31 @@ class H3WorkflowBuilder:
         width: int,
         height: int,
     ):
+        key = (int(width), int(height))
+        supported = {
+            (608, 352): 0.20,
+            (736, 416): 0.30,
+            (864, 480): 0.40,
+            (960, 544): 0.50,
+            (1056, 608): 0.60,
+            (1152, 640): 0.70,
+            (1216, 672): 0.80,
+            (1280, 736): 0.90,
+            (1344, 768): 0.98,
+            (1376, 768): 1.00,
+            (1504, 832): 1.20,
+            (1664, 928): 1.50,
+            (1824, 1024): 1.80,
+            (1920, 1088): 2.00,
+        }
+
+        if key not in supported:
+            ratio = float(width) / float(height)
+            if abs(ratio - (16.0 / 9.0)) > 0.03:
+                raise ValueError(
+                    "MiniMax H3 production is locked to 16:9 in this repository."
+                )
+
         selectors = self._find(
             workflow,
             "ResolutionSelector",
@@ -311,24 +336,6 @@ class H3WorkflowBuilder:
         while len(widgets) < 3:
             widgets.append(None)
 
-        supported = {
-            (608, 352): 0.20,
-            (736, 416): 0.30,
-            (864, 480): 0.40,
-            (960, 544): 0.50,
-            (1056, 608): 0.60,
-            (1152, 640): 0.70,
-            (1216, 672): 0.80,
-            (1280, 736): 0.90,
-            (1344, 768): 0.98,
-            (1376, 768): 1.00,
-            (1504, 832): 1.20,
-            (1664, 928): 1.50,
-            (1824, 1024): 1.80,
-            (1920, 1088): 2.00,
-        }
-
-        key = (int(width), int(height))
         if key not in supported:
             raise ValueError(
                 "Unsupported H3 16:9 generation resolution: "
@@ -535,11 +542,9 @@ class H3WorkflowBuilder:
             "MiniMaxH3ReferenceToVideo",
         )
 
-        requested_seconds = float(duration_seconds)
-
         if self._set_duration_source(
             workflow,
-            requested_seconds,
+            float(duration_seconds),
         ):
             # Keep the serialized reference-node widget coherent for tooling
             # that inspects the saved graph, while the connected PrimitiveFloat
