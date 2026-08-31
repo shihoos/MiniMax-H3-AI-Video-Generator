@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.vram_profile import resolve_vram_profile
+from planner.config import RUNTIME
 
 
 class RuntimeDiagnostics:
@@ -34,7 +35,15 @@ class RuntimeDiagnostics:
             return f"unavailable: {exc}"
 
     def collect(self, *, comfy_url: str | None = None) -> dict[str, Any]:
-        profile = resolve_vram_profile()
+        runtime_vram = dict(RUNTIME.get("runtime", {}).get("vram", {}) or {})
+        gpu_id = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                gpu_id = torch.cuda.current_device()
+        except Exception:
+            gpu_id = None
+        profile = resolve_vram_profile(runtime_vram, gpu_id=gpu_id)
         report: dict[str, Any] = {
             "python": platform.python_version(),
             "vram_profile": {
@@ -43,7 +52,8 @@ class RuntimeDiagnostics:
                 "cpu_vae": profile.cpu_vae,
                 "disable_pinned_memory": profile.disable_pinned_memory,
                 "fast_disk": profile.fast_disk,
-                "reserve_vram_gib": profile.reserve_vram_gib,
+                "reserve_vram_gb": profile.reserve_vram_gb,
+                "gpu_id": gpu_id,
                 "reason": profile.reason,
             },
             "platform": platform.platform(),
