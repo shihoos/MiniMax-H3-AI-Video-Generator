@@ -43,7 +43,7 @@ storyboard:
   host: 0.0.0.0
   port: 8765
   gradio_version: 6.26.0
-  pillow_version: 10.4.0
+  pillow_version: 12.3.0
 runtime:
   comfyui_startup_timeout_seconds: 300
   comfyui_request_timeout_seconds: 60
