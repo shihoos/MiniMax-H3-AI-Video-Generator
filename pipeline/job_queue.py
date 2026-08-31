@@ -20,7 +20,16 @@ class ProductionJobQueue:
             conn.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY, production_id TEXT NOT NULL, plan_path TEXT NOT NULL,
                 status TEXT NOT NULL, payload_json TEXT NOT NULL, result_json TEXT, error TEXT,
-                created_at REAL NOT NULL, updated_at REAL NOT NULL)""")
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                worker_token TEXT, lease_expires_at REAL, heartbeat_at REAL)""")
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+            for name, ddl in ((
+                "worker_token", "ALTER TABLE jobs ADD COLUMN worker_token TEXT"),
+                ("lease_expires_at", "ALTER TABLE jobs ADD COLUMN lease_expires_at REAL"),
+                ("heartbeat_at", "ALTER TABLE jobs ADD COLUMN heartbeat_at REAL"),
+            ):
+                if name not in columns:
+                    conn.execute(ddl)
 
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
@@ -33,7 +42,7 @@ class ProductionJobQueue:
         job_id = str(uuid.uuid4())
         now = time.time()
         with self._lock, self._connect() as conn:
-            conn.execute("INSERT INTO jobs VALUES (?, ?, ?, 'queued', ?, NULL, NULL, ?, ?)", (job_id, str(production_id), str(Path(plan_path).resolve()), json.dumps(payload or {}, ensure_ascii=False), now, now))
+            conn.execute("INSERT INTO jobs (job_id, production_id, plan_path, status, payload_json, result_json, error, created_at, updated_at, worker_token, lease_expires_at, heartbeat_at) VALUES (?, ?, ?, 'queued', ?, NULL, NULL, ?, ?, NULL, NULL, NULL)", (job_id, str(production_id), str(Path(plan_path).resolve()), json.dumps(payload or {}, ensure_ascii=False), now, now))
         return job_id
 
     def get(self, job_id: str) -> dict[str, Any] | None:
@@ -41,25 +50,62 @@ class ProductionJobQueue:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
         return dict(row) if row else None
 
-    def claim_next(self) -> dict[str, Any] | None:
+    def claim_next(self, lease_seconds: float = 21600.0) -> dict[str, Any] | None:
+        worker_token = str(uuid.uuid4())
+        now = time.time()
         with self._lock, self._connect() as conn:
-            row = conn.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1").fetchone()
-            if row is None:
-                return None
-            now = time.time()
-            conn.execute("UPDATE jobs SET status='running', updated_at=? WHERE job_id=? AND status='queued'", (now, row['job_id']))
-            return dict(conn.execute("SELECT * FROM jobs WHERE job_id=?", (row['job_id'],)).fetchone())
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT * FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if row is None:
+                    conn.execute("COMMIT")
+                    return None
+                cur = conn.execute(
+                    "UPDATE jobs SET status='running', updated_at=?, heartbeat_at=?, lease_expires_at=?, worker_token=? WHERE job_id=? AND status='queued'",
+                    (now, now, now + float(lease_seconds), worker_token, row['job_id']),
+                )
+                if cur.rowcount != 1:
+                    conn.execute("ROLLBACK")
+                    return None
+                claimed = conn.execute("SELECT * FROM jobs WHERE job_id=?", (row['job_id'],)).fetchone()
+                conn.execute("COMMIT")
+                return dict(claimed) if claimed else None
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
-    def complete(self, job_id: str, result: dict[str, Any]) -> None:
+    def heartbeat(self, job_id: str, worker_token: str, lease_seconds: float = 21600.0) -> bool:
+        now = time.time()
         with self._connect() as conn:
-            conn.execute("UPDATE jobs SET status='completed', result_json=?, updated_at=? WHERE job_id=?", (json.dumps(result, ensure_ascii=False), time.time(), job_id))
+            cur = conn.execute(
+                "UPDATE jobs SET updated_at=?, heartbeat_at=?, lease_expires_at=? WHERE job_id=? AND status='running' AND worker_token=?",
+                (now, now, now + float(lease_seconds), job_id, worker_token),
+            )
+            return cur.rowcount == 1
 
-    def fail(self, job_id: str, error: str) -> None:
+    def complete(self, job_id: str, result: dict[str, Any], worker_token: str | None = None) -> None:
         with self._connect() as conn:
-            conn.execute("UPDATE jobs SET status='failed', error=?, updated_at=? WHERE job_id=?", (str(error), time.time(), job_id))
+            if worker_token:
+                cur = conn.execute("UPDATE jobs SET status='completed', result_json=?, updated_at=?, lease_expires_at=NULL WHERE job_id=? AND status='running' AND worker_token=?", (json.dumps(result, ensure_ascii=False), time.time(), job_id, worker_token))
+            else:
+                cur = conn.execute("UPDATE jobs SET status='completed', result_json=?, updated_at=?, lease_expires_at=NULL WHERE job_id=?", (json.dumps(result, ensure_ascii=False), time.time(), job_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(f"Could not complete job {job_id}; lease ownership was lost.")
 
-    def recover_stale(self, max_age_seconds: float = 3600.0) -> int:
-        cutoff = time.time() - float(max_age_seconds)
+    def fail(self, job_id: str, error: str, worker_token: str | None = None) -> None:
         with self._connect() as conn:
-            cur = conn.execute("UPDATE jobs SET status='queued', updated_at=? WHERE status='running' AND updated_at < ?", (time.time(), cutoff))
+            if worker_token:
+                cur = conn.execute("UPDATE jobs SET status='failed', error=?, updated_at=?, lease_expires_at=NULL WHERE job_id=? AND status='running' AND worker_token=?", (str(error), time.time(), job_id, worker_token))
+            else:
+                cur = conn.execute("UPDATE jobs SET status='failed', error=?, updated_at=?, lease_expires_at=NULL WHERE job_id=?", (str(error), time.time(), job_id))
+            if cur.rowcount != 1:
+                raise RuntimeError(f"Could not fail job {job_id}; lease ownership was lost.")
+
+    def recover_stale(self, max_age_seconds: float = 21600.0) -> int:
+        now = time.time()
+        cutoff = now - float(max_age_seconds)
+        with self._connect() as conn:
+            cur = conn.execute("UPDATE jobs SET status='queued', updated_at=?, worker_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL WHERE status='running' AND (lease_expires_at IS NULL AND updated_at < ? OR lease_expires_at IS NOT NULL AND lease_expires_at < ?)", (now, cutoff, now))
             return int(cur.rowcount)
