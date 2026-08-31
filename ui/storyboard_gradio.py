@@ -49,7 +49,7 @@ class ProductionController:
         self._job_queue = ProductionJobQueue(
             ROOT / "data" / "production" / "jobs.sqlite3"
         )
-        self._job_queue.recover_stale(max_age_seconds=3600.0)
+        self._job_queue.recover_stale(max_age_seconds=21600.0)
         self._queue_stop = threading.Event()
         self._queue_thread = threading.Thread(
             target=self._queue_worker_loop,
@@ -951,18 +951,34 @@ class ProductionController:
             if not job:
                 continue
             job_id = str(job["job_id"])
+            worker_token = str(job.get("worker_token", "") or "")
+            heartbeat_stop = threading.Event()
+            heartbeat_thread = None
             try:
-                self._execute_approved_plan(str(job["plan_path"]))
+                def _heartbeat():
+                    while not heartbeat_stop.wait(30.0):
+                        if not self._job_queue.heartbeat(job_id, worker_token):
+                            break
+                heartbeat_thread = threading.Thread(target=_heartbeat, name=f"h3-job-heartbeat-{job_id[:8]}", daemon=True)
+                heartbeat_thread.start()
+
+                status_message, final_video, plan_path_value = self._execute_approved_plan(str(job["plan_path"]))
+                if not str(status_message).startswith("### VIDEO GENERATION COMPLETE"):
+                    raise RuntimeError(str(status_message))
                 plan, _ = self._load_plan(str(job["plan_path"]))
                 result = {
                     "production_id": plan.get("production_id", job.get("production_id")),
-                    "final_video": plan.get("final_video"),
+                    "final_video": final_video or plan.get("final_video"),
                 }
-                self._job_queue.complete(job_id, result)
+                self._job_queue.complete(job_id, result, worker_token=worker_token)
+                heartbeat_stop.set()
                 plan["job_status"] = "completed"
                 Path(job["plan_path"]).write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
             except Exception as exc:
-                self._job_queue.fail(job_id, str(exc))
+                try:
+                    self._job_queue.fail(job_id, str(exc), worker_token=worker_token)
+                except Exception:
+                    pass
                 try:
                     plan, plan_path = self._load_plan(str(job["plan_path"]))
                     plan["job_status"] = "failed"
@@ -970,6 +986,7 @@ class ProductionController:
                     plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
                 except Exception:
                     pass
+                heartbeat_stop.set()
 
     def _execute_approved_plan(
         self,
