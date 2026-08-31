@@ -111,13 +111,54 @@ class DialogueTimeline:
             )
         return estimate
 
+    @staticmethod
+    def h3_legal_frames(duration_seconds: float, fps: float = 24.0) -> int:
+        """Return the exact frame count used by the repository H3 workflow.
+
+        This mirrors execution.h3_workflow_builder.H3WorkflowBuilder._legal_frames:
+        duration is clamped to the production 4..15 second range, converted to
+        frames at 24 FPS (or the supplied runtime FPS), snapped upward to the
+        H3 VAE 17*n+5 frame grid, and clamped to the production 124..362 frame
+        range. Keeping the same calculation here prevents the dialogue timeline
+        from using a different duration than the renderer.
+        """
+        seconds = float(duration_seconds)
+        if seconds < 4.0:
+            seconds = 4.0
+        if seconds > 15.0:
+            seconds = 15.0
+
+        requested = round(seconds * float(fps))
+        n = max(0, (requested - 5 + 16) // 17)
+        frames = 17 * n + 5
+        frames = max(124, frames)
+        frames = min(362, frames)
+        return frames
+
+    @classmethod
+    def h3_effective_duration_seconds(
+        cls,
+        requested_duration: float,
+        fps: float = 24.0,
+    ) -> float:
+        frames = cls.h3_legal_frames(requested_duration, fps=fps)
+        return frames / float(fps)
+
     def schedule_shot(
         self,
         shot: dict,
         *,
         previous_dialogue: DialogueEvent | None = None,
     ) -> list[dict]:
-        duration = float(shot.get("duration_seconds", 5.2) or 5.2)
+        requested_duration = float(shot.get("duration_seconds", 5.2) or 5.2)
+        fps = float(shot.get("fps", 24.0) or 24.0)
+        effective_frames = self.h3_legal_frames(
+            requested_duration,
+            fps=fps,
+        )
+        duration = effective_frames / float(fps)
+        shot["h3_effective_duration_seconds"] = duration
+        shot["h3_effective_frames"] = effective_frames
         shot_characters = list(shot.get("characters", []) or [])
         raw_events = self._raw_events(shot)
         if not raw_events:
