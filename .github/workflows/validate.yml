@@ -87,6 +87,7 @@ jobs:
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_project.py
 
@@ -97,12 +98,14 @@ jobs:
       - name: Director validation
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_director.py
 
       - name: Production continuity validation
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           test -f scripts/validate_production_continuity.py
           python scripts/validate_production_continuity.py
@@ -110,18 +113,21 @@ jobs:
       - name: Production scale validation
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_production_scale.py
 
       - name: Enhancement validation
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_enhancements.py
 
       - name: Planner smoke tests
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -174,6 +180,7 @@ jobs:
       - name: Runtime import integration
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           modules = [
@@ -218,6 +225,7 @@ jobs:
       - name: Continuity architecture contract
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -283,6 +291,7 @@ jobs:
       - name: Gradio UI contract
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -326,6 +335,7 @@ jobs:
       - name: Direct Gradio entry-point smoke
         env:
           H3_DIRECTOR_ENABLED: "0"
+              H3_GRADIO_SHARE: "0"
           GRADIO_ANALYTICS_ENABLED: "False"
         shell: bash
         run: |
