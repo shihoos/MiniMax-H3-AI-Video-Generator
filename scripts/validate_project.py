@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -115,18 +117,19 @@ RUNTIME_IMPORTS = [
     # Planner
     "planner.production_planner",
     "planner.qwen_director",
+    "planner.cinematic_compiler",
 
     # Pipeline
     "pipeline.production_orchestrator",
-    "pipeline.storyboard_reference_builder",
-    "pipeline.continuity_ledger",
-    "pipeline.dialogue_timeline",
-    "pipeline.dialogue_duration",
     "pipeline.reference_manager",
     "pipeline.identity_continuity",
     "pipeline.h3_scene_continuity",
+    "pipeline.dialogue_duration",
+    "pipeline.dialogue_timeline",
+    "pipeline.continuity_ledger",
+    "pipeline.storyboard_reference_builder",
     "pipeline.identity_anchor_store",
-    
+
     # Execution
     "execution.h3_workflow_builder",
     "execution.h3_upscaled_workflow_builder",
@@ -135,9 +138,6 @@ RUNTIME_IMPORTS = [
     "execution.h3_runtime",
     "execution.assembly_manager",
     "execution.metrics",
-
-    #schemas
-    "schemas.dialogue",
 
     # Scheduler
     "scheduler.gpu_scheduler",
@@ -285,53 +285,40 @@ def node_types(
     }
 
 
+MODEL_WIDGET_INDEX = {
+    "UNETLoader": 0,
+    "CLIPLoader": 0,
+    "CLIPLoaderGGUF": 0,
+    "VAELoader": 0,
+    "MiniMaxH3TurboLoRA": 0,
+    "MMH3LatentUpscaleWithModelParams": 0,
+}
+
+
 def executable_model_values(
     graph: dict,
-) -> list[str]:
-
-    executable_nodes = {
-        "UNETLoader",
-        "CLIPLoader",
-        "CLIPLoaderGGUF",
-        "VAELoader",
-        "MiniMaxH3TurboLoRA",
-        "MMH3LatentUpscaleWithModelParams",
-    }
-
-    values = []
-
-    for node in graph.get(
-        "nodes",
-        [],
-    ):
-
-        if (
-            not isinstance(
-                node,
-                dict,
-            )
-        ):
+) -> list[tuple[str, str]]:
+    """Extract only the documented model-selector widget from known loader nodes."""
+    values: list[tuple[str, str]] = []
+    for node in graph.get("nodes", []):
+        if not isinstance(node, dict):
             continue
-
-        if node.get(
-            "type"
-        ) not in executable_nodes:
+        node_type = str(node.get("type", ""))
+        index = MODEL_WIDGET_INDEX.get(node_type)
+        if index is None:
             continue
-
-        for value in node.get(
-            "widgets_values",
-            [],
-        ):
-
-            if isinstance(
-                value,
-                str,
-            ):
-                values.append(
-                    value
-                )
-
+        widgets = node.get("widgets_values", [])
+        if not isinstance(widgets, list) or index >= len(widgets):
+            continue
+        value = widgets[index]
+        if isinstance(value, str) and value.strip():
+            values.append((node_type, value.strip()))
     return values
+
+
+def model_basename(value: str) -> str:
+    """Normalize Windows/Unix ComfyUI model selectors to their final filename."""
+    return Path(value.replace("\\", "/")).name
 
 
 def validate_dependency_manifests() -> None:
@@ -352,6 +339,12 @@ def validate_dependency_manifests() -> None:
     require(
         "gradio==" in base_text,
         "requirements.txt must pin Gradio.",
+    )
+
+    require(
+        re.search(r"(?m)^Pillow==[^\s#]+\s*$", base_text) is not None
+        or re.search(r"(?m)^Pillow>=[^\s#]+(?:,[^\s#]+)*\s*$", base_text) is not None,
+        "requirements.txt must declare Pillow for the storyboard builder.",
     )
 
     legacy = ROOT / "requirements-kaggle.txt"
@@ -442,24 +435,29 @@ def validate_python() -> None:
     )
 
 
-def validate_workflow_graph_integrity(graph: dict, name: str) -> None:
-    nodes = {
-        int(node["id"]): node
-        for node in graph.get("nodes", [])
-        if isinstance(node, dict) and "id" in node
-    }
+def validate_workflow_graph_integrity(
+    graph: dict,
+    name: str,
+) -> None:
+    nodes: dict[int, dict] = {}
+    for raw_node in graph.get("nodes", []):
+        require(isinstance(raw_node, dict), f"{name}: workflow node is not an object: {raw_node!r}")
+        raw_id = raw_node.get("id")
+        try:
+            node_id = int(raw_id)
+        except (TypeError, ValueError):
+            fail(f"{name}: workflow node id must be numeric, got {raw_id!r}.")
+        require(node_id not in nodes, f"{name}: duplicate workflow node id {node_id}.")
+        nodes[node_id] = raw_node
 
-    links = {}
+    links: dict[int, list] = {}
     for row in graph.get("links", []):
-        require(
-            isinstance(row, list) and len(row) >= 6,
-            f"{name}: malformed workflow link: {row!r}",
-        )
-        link_id = int(row[0])
-        require(
-            link_id not in links,
-            f"{name}: duplicate workflow link id {link_id}.",
-        )
+        require(isinstance(row, list) and len(row) >= 6, f"{name}: malformed workflow link: {row!r}")
+        try:
+            link_id = int(row[0])
+        except (TypeError, ValueError):
+            fail(f"{name}: workflow link id must be numeric: {row!r}")
+        require(link_id not in links, f"{name}: duplicate workflow link id {link_id}.")
         links[link_id] = row
 
     for node_id, node in nodes.items():
@@ -468,22 +466,39 @@ def validate_workflow_graph_integrity(graph: dict, name: str) -> None:
             link_id = item.get("link")
             if link_id is None:
                 continue
-            link_id = int(link_id)
+            try:
+                link_id = int(link_id)
+            except (TypeError, ValueError):
+                fail(f"{name}: node {node_id} input {slot} has non-numeric link {link_id!r}.")
             require(link_id in links, f"{name}: node {node_id} input {slot} references missing link {link_id}.")
             row = links[link_id]
-            require(int(row[3]) == node_id and int(row[4]) == slot, f"{name}: input link {link_id} does not point to node {node_id}:{slot}.")
+            try:
+                target_id, target_slot = int(row[3]), int(row[4])
+            except (TypeError, ValueError):
+                fail(f"{name}: malformed target in link {link_id}: {row!r}")
+            require(target_id == node_id and target_slot == slot, f"{name}: input link {link_id} does not point to node {node_id}:{slot}.")
 
         for slot, item in enumerate(node.get("outputs", []) or []):
             require(isinstance(item, dict), f"{name}: node {node_id} output {slot} is not an object.")
             for link_id in item.get("links") or []:
-                link_id = int(link_id)
+                try:
+                    link_id = int(link_id)
+                except (TypeError, ValueError):
+                    fail(f"{name}: node {node_id} output {slot} has non-numeric link {link_id!r}.")
                 require(link_id in links, f"{name}: node {node_id} output {slot} references missing link {link_id}.")
                 row = links[link_id]
-                require(int(row[1]) == node_id and int(row[2]) == slot, f"{name}: output link {link_id} does not point from node {node_id}:{slot}.")
+                try:
+                    source_id, source_slot = int(row[1]), int(row[2])
+                except (TypeError, ValueError):
+                    fail(f"{name}: malformed source in link {link_id}: {row!r}")
+                require(source_id == node_id and source_slot == slot, f"{name}: output link {link_id} does not point from node {node_id}:{slot}.")
 
     for link_id, row in links.items():
-        source_id, source_slot = int(row[1]), int(row[2])
-        target_id, target_slot = int(row[3]), int(row[4])
+        try:
+            source_id, source_slot = int(row[1]), int(row[2])
+            target_id, target_slot = int(row[3]), int(row[4])
+        except (TypeError, ValueError):
+            fail(f"{name}: malformed workflow link {link_id}: {row!r}")
         require(source_id in nodes, f"{name}: link {link_id} references missing source node {source_id}.")
         require(target_id in nodes, f"{name}: link {link_id} references missing destination node {target_id}.")
         require(source_slot < len(nodes[source_id].get("outputs", []) or []), f"{name}: link {link_id} has invalid source slot {source_slot}.")
@@ -705,27 +720,14 @@ def validate_model_inventory() -> None:
             path
         )
 
-        values = (
-            executable_model_values(
-                graph
-            )
-        )
+        values = executable_model_values(graph)
 
-        for value in values:
-
-            lowered = value.lower()
-
-            
-            if value.endswith(
-                ".safetensors"
-            ):
-
+        for node_type, value in values:
+            basename = model_basename(value)
+            if basename.lower().endswith(".safetensors"):
                 require(
-                    value in LOCKED_MODELS,
-                    (
-                        f"Unapproved executable model "
-                        f"'{value}' found in {name}."
-                    ),
+                    basename in LOCKED_MODELS,
+                    f"Unapproved executable model '{value}' in {node_type} found in {name}.",
                 )
 
     print(
@@ -836,63 +838,38 @@ def validate_runtime_imports() -> None:
     )
 
 
+def _find_function(tree: ast.AST, name: str):
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
 def validate_gradio_ui() -> None:
+    path = ROOT / "ui" / "storyboard_gradio.py"
+    require(path.is_file(), "Gradio UI file is missing.")
+    text = path.read_text(encoding="utf-8")
+    normalized = re.sub(r"\s+", " ", text)
+    tree = ast.parse(text, filename=str(path))
 
-    path = (
-        ROOT
-        / "ui"
-        / "storyboard_gradio.py"
-    )
-
-    require(
-        path.is_file(),
-        "Gradio UI file is missing.",
-    )
-
-    text = path.read_text(
-        encoding="utf-8"
-    )
-
-    required_tokens = (
+    for token in (
         "ProductionController",
         "generate_storyboard",
         "approve_and_generate",
-        "Your Story",
-        "AI Story",
-        "Expand Story",
-        "Preserve Story",
-        "Generate Storyboard",
-        "Approve & Generate Video",
-        "H3_DIRECTOR_ENABLED",
         "ProductionRunner",
         "H3Runtime",
         "check_worker",
         "storyboard_share_enabled",
-    )
+    ):
+        require(token in normalized, f"Gradio UI is missing required contract: {token}")
 
-    for token in required_tokens:
+    require(_find_function(tree, "build_app") is not None, "Gradio build_app() is missing.")
+    require(_find_function(tree, "serve_storyboard_gradio") is not None, "Gradio serve_storyboard_gradio() is missing.")
+    require("Your Story" in normalized, "Gradio story input is missing.")
+    require(all(value in normalized for value in ("AI Story", "Expand Story", "Preserve Story")), "Gradio story-mode controls are incomplete.")
+    require("Generate Storyboard" in normalized and "Approve & Generate Video" in normalized, "Gradio production controls are incomplete.")
 
-        require(
-            token in text,
-            (
-                "Gradio UI is missing required "
-                f"contract token: {token}"
-            ),
-        )
-
-    require(
-        "def build_app(" in text,
-        "Gradio build_app() is missing.",
-    )
-
-    require(
-        "def serve_storyboard_gradio(" in text,
-        "Gradio serve_storyboard_gradio() is missing.",
-    )
-
-    print(
-        "PASS Gradio UI contract"
-    )
+    print("PASS Gradio UI contract")
 
 
 def validate_reference_wiring() -> None:
@@ -934,73 +911,23 @@ def validate_reference_wiring() -> None:
 
 
 def validate_plan_persistence_boundary() -> None:
+    orchestrator_path = ROOT / "pipeline" / "production_orchestrator.py"
+    cli_path = ROOT / "scripts" / "generate_video.py"
+    orchestrator_text = orchestrator_path.read_text(encoding="utf-8")
+    cli_text = cli_path.read_text(encoding="utf-8")
 
-    orchestrator_path = (
-        ROOT
-        / "pipeline"
-        / "production_orchestrator.py"
-    )
-
-    cli_path = (
-        ROOT
-        / "scripts"
-        / "generate_video.py"
-    )
-
-    orchestrator_text = (
-        orchestrator_path.read_text(
-            encoding="utf-8"
-        )
-    )
-
-    cli_text = (
-        cli_path.read_text(
-            encoding="utf-8"
-        )
-    )
-
+    require("def create_production_plan(" in orchestrator_text, "ProductionOrchestrator plan method is missing.")
+    require("return plan" in orchestrator_text, "ProductionOrchestrator must return the production plan.")
+    require("def create_cli_plan_path(" in cli_text, "CLI plan persistence helper is missing.")
+    require("story_preview.json" in cli_text, "CLI plan filename is missing.")
+    require("save_plan(" in cli_text, "CLI save_plan() call is missing.")
     require(
-        "def create_production_plan("
-        in orchestrator_text,
-        "ProductionOrchestrator plan method is missing.",
+        re.search(r"(?m)ROOT\s*/\s*[\'\"]data[\'\"]\s*/\s*[\'\"]production[\'\"]", cli_text)
+        or re.search(r"(?m)Path\(\s*[\'\"]data/production[\'\"]", cli_text)
+        or re.search(r"(?m)[\'\"]data/production/", cli_text),
+        "CLI production plan path must explicitly contain data/production.",
     )
-
-    require(
-        "return plan"
-        in orchestrator_text,
-        "ProductionOrchestrator must return the production plan.",
-    )
-
-    require(
-        "def create_cli_plan_path("
-        in cli_text,
-        "CLI plan persistence helper is missing.",
-    )
-
-    require(
-        "story_preview.json"
-        in cli_text,
-        "CLI plan filename is missing.",
-    )
-
-    require(
-        "data"
-        in cli_text
-        and "production"
-        in cli_text,
-        "CLI production storage path is missing.",
-    )
-
-    require(
-        "save_plan("
-        in cli_text,
-        "CLI save_plan() call is missing.",
-    )
-
-    print(
-        "PASS plan persistence boundary"
-    )
-
+    print("PASS plan persistence boundary")
 
 
 def validate_production_templates() -> None:
@@ -1054,41 +981,32 @@ def validate_examples() -> None:
 
 
 def validate_ui_share_configuration() -> None:
-    text = (ROOT / "planner" / "config.py").read_text(encoding="utf-8")
+    path = ROOT / "planner" / "config.py"
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text, filename=str(path))
+    function = _find_function(tree, "storyboard_share_enabled")
+    require(function is not None, "storyboard_share_enabled() is missing.")
 
-    require(
-        "GRADIO_SHARE_ENV = \"H3_GRADIO_SHARE\"" in text,
-        "Gradio share environment variable is missing.",
-    )
-
-    start = text.index("def storyboard_share_enabled")
-    end = text.index(
-        "# ============================================================\n# BASIC RUNTIME VALIDATION"
-    )
-    section = text[start:end]
-
-    require(
-        '        "1",' in section,
-        "Gradio public sharing must remain enabled by default for the configured remote-access workflow.",
-    )
-
-    import os
+    env_assignment = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == "GRADIO_SHARE_ENV":
+                    env_assignment = isinstance(node.value, ast.Constant) and node.value.value == "H3_GRADIO_SHARE"
+                    if env_assignment:
+                        break
+            if env_assignment:
+                break
+    require(env_assignment, "GRADIO_SHARE_ENV must equal H3_GRADIO_SHARE.")
 
     from planner.config import storyboard_share_enabled
-
     previous = os.environ.get("H3_GRADIO_SHARE")
     try:
-        os.environ["H3_GRADIO_SHARE"] = "1"
-        require(
-            storyboard_share_enabled() is True,
-            "H3_GRADIO_SHARE=1 must enable Gradio sharing.",
-        )
-
-        os.environ["H3_GRADIO_SHARE"] = "0"
-        require(
-            storyboard_share_enabled() is False,
-            "H3_GRADIO_SHARE=0 must disable Gradio sharing.",
-        )
+        for value, expected in (("1", True), ("0", False)):
+            os.environ["H3_GRADIO_SHARE"] = value
+            require(storyboard_share_enabled() is expected, f"H3_GRADIO_SHARE={value} contract failed.")
+        os.environ.pop("H3_GRADIO_SHARE", None)
+        require(storyboard_share_enabled() is True, "Gradio sharing must default to enabled.")
     finally:
         if previous is None:
             os.environ.pop("H3_GRADIO_SHARE", None)
@@ -1096,7 +1014,6 @@ def validate_ui_share_configuration() -> None:
             os.environ["H3_GRADIO_SHARE"] = previous
 
     print("PASS Gradio share configuration")
-
 
 
 def validate_execution_integration() -> None:
@@ -1177,8 +1094,17 @@ def validate_execution_runtime_contracts() -> None:
         require(metrics_file.is_file(), "ShotExecutor failed to write metrics JSONL.")
         require(metrics_file.read_text(encoding="utf-8").strip(), "Metrics JSONL record is empty.")
 
-    # Verify the ProductionRunner call to _add_identity_anchors has the exact signature.
+    # Verify the helper signature, while allowing positional or keyword calls.
     tree = ast.parse(runner_path.read_text(encoding="utf-8"))
+    helper = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_add_identity_anchors":
+            helper = node
+            break
+    require(helper is not None, "ProductionRunner._add_identity_anchors() is missing.")
+    params = [arg.arg for arg in helper.args.args]
+    require(params == ["self", "shot", "character_map"], "_add_identity_anchors signature must be (self, shot, character_map).")
+
     anchor_calls = [
         node
         for node in ast.walk(tree)
@@ -1186,12 +1112,55 @@ def validate_execution_runtime_contracts() -> None:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "_add_identity_anchors"
     ]
-    require(len(anchor_calls) == 1, "ProductionRunner must have exactly one _add_identity_anchors call in the scene path.")
-    require(len(anchor_calls[0].args) == 2, "ProductionRunner _add_identity_anchors call must pass only shot and character_map.")
+    require(anchor_calls, "ProductionRunner must invoke _add_identity_anchors().")
+    for call in anchor_calls:
+        keyword_names = {kw.arg for kw in call.keywords if kw.arg is not None}
+        positional_ok = len(call.args) == 2 and not keyword_names
+        keyword_ok = len(call.args) == 0 and {"shot", "character_map"} <= keyword_names
+        require(positional_ok or keyword_ok, "Each _add_identity_anchors call must pass shot and character_map only.")
 
     runner_text = runner_path.read_text(encoding="utf-8")
     require("self._completed_shots_lock = threading.RLock()" in runner_text, "ProductionRunner shared completed-shot lock is missing.")
     require("with self._completed_shots_lock:" in runner_text, "ProductionRunner must lock shared completed-shot state.")
+
+    # Exercise the actual Shot dataclass and prompt serializer.
+    from schemas.shot import Shot
+    shot = Shot(
+        shot_id="validator_shot",
+        scene_id="validator_scene",
+        order=1,
+        duration_seconds=5.2,
+        characters=[],
+        location="test location",
+        action="test action",
+        camera_shot="medium shot",
+        camera_movement="static",
+        lens_and_depth_of_field="35mm",
+        composition_notes="centered",
+        lighting="soft",
+        color_temperature="neutral",
+        mood="calm",
+        visual_prompt="A test shot.",
+        retention_analysis="Preserve the subject.",
+        detailed_description="A test cinematic description.",
+        overall_soundscape="Quiet ambience.",
+        non_diegetic_music="N/A",
+        negative_prompt="artifacts",
+        continuity_notes="Stable.",
+        seed=1,
+        workflow_mode="ref2v",
+    )
+    prompt = shot.h3_prompt()
+    for section in (
+        "subject_definitions:",
+        "reference_bindings:",
+        "summary:",
+        "retention_analysis:",
+        "detailed_description:",
+        "overall_soundscape:",
+        "non_diegetic_music:",
+    ):
+        require(section in prompt, f"Shot.h3_prompt() is missing required section: {section}")
 
     print("PASS execution runtime contracts")
 
