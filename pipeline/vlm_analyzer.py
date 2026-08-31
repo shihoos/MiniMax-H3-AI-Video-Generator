@@ -27,8 +27,15 @@ class VLMAnalyzer:
         self.api_key = os.getenv("H3_VLM_API_KEY", "").strip()
         self.timeout = max(5.0, float(os.getenv("H3_VLM_TIMEOUT", "90")))
         self.max_image_bytes = max(1_000_000, int(os.getenv("H3_VLM_MAX_IMAGE_BYTES", str(12 * 1024 * 1024))))
+        # The feature may be enabled in the production manifest even when the
+        # optional endpoint is not configured yet. In that case the pipeline
+        # remains usable and simply reports VLM as unavailable.
+        self.configuration_warning = ""
         if self.enabled and (not self.endpoint or not self.model):
-            raise RuntimeError("H3_VLM_ENABLED=1 requires H3_VLM_ENDPOINT and H3_VLM_MODEL.")
+            self.configuration_warning = (
+                "VLM is enabled but H3_VLM_ENDPOINT/H3_VLM_MODEL are not configured; "
+                "reference analysis and semantic QA will remain inactive."
+            )
 
     @staticmethod
     def _bool(value: Any) -> bool:
