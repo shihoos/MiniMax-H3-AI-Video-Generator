@@ -19,13 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-
   validate:
-
     name: H3 Production Validation (Python ${{ matrix.python-version }})
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 25
 
     strategy:
@@ -34,7 +30,6 @@ jobs:
         python-version: ["3.11", "3.12"]
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -87,7 +82,7 @@ jobs:
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_project.py
 
@@ -98,14 +93,14 @@ jobs:
       - name: Director validation
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_director.py
 
       - name: Production continuity validation
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           test -f scripts/validate_production_continuity.py
           python scripts/validate_production_continuity.py
@@ -113,21 +108,21 @@ jobs:
       - name: Production scale validation
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_production_scale.py
 
       - name: Enhancement validation
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_enhancements.py
 
       - name: Planner smoke tests
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -156,7 +151,6 @@ jobs:
           ]
 
           for mode, story in cases:
-
               plan = planner.build(
                   mode=mode,
                   user_input=story,
@@ -164,23 +158,17 @@ jobs:
                   profile="base",
               )
 
-              assert isinstance(
-                  plan,
-                  dict,
-              )
-
+              assert isinstance(plan, dict)
               assert "scenes" in plan
               assert "shots" in plan
 
-          print(
-              "Planner smoke tests PASSED."
-          )
+          print("Planner smoke tests PASSED.")
           PY
 
       - name: Runtime import integration
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           modules = [
@@ -217,15 +205,13 @@ jobs:
           for module in modules:
               __import__(module)
 
-          print(
-              "Runtime imports PASSED."
-          )
+          print("Runtime imports PASSED.")
           PY
 
       - name: Continuity architecture contract
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -258,18 +244,32 @@ jobs:
           enforce_start = orchestrator.find(
               "def _enforce_production_contracts"
           )
+
           assert enforce_start >= 0
-          enforce_tail = orchestrator[enforce_start:]
+
+          enforce_tail = orchestrator[
+              enforce_start:
+          ]
+
           enforce_end = enforce_tail.find(
               "    def create_production_plan"
           )
+
           enforce_body = (
               enforce_tail[:enforce_end]
               if enforce_end >= 0
               else enforce_tail
           )
-          assert "repair_continuity_violation" not in enforce_body
-          assert "apply_field_level_fallback" in enforce_body
+
+          assert (
+              "repair_continuity_violation"
+              not in enforce_body
+          )
+
+          assert (
+              "apply_field_level_fallback"
+              in enforce_body
+          )
 
           # Runner must serialize manifest writes.
           assert "_manifest_lock" in runner
@@ -280,7 +280,7 @@ jobs:
           assert "continuity_end_state" in shot
           assert "dialogue_events" in shot
 
-          # The project validator must require the new dialogue schema.
+          # Project validator must require the new dialogue schema.
           assert '"schemas/dialogue.py"' in validate
 
           print(
@@ -291,7 +291,7 @@ jobs:
       - name: Gradio UI contract
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -321,9 +321,10 @@ jobs:
 
           # The UI must respect a CI-supplied director-disabled environment.
           assert (
-              "os.environ.setdefault(\"H3_DIRECTOR_ENABLED\", \"1\")"
+              'os.environ.setdefault("H3_DIRECTOR_ENABLED", "1")'
               in text
-              or "os.environ.setdefault('H3_DIRECTOR_ENABLED', '1')"
+              or
+              "os.environ.setdefault('H3_DIRECTOR_ENABLED', '1')"
               in text
           )
 
@@ -335,7 +336,7 @@ jobs:
       - name: Direct Gradio entry-point smoke
         env:
           H3_DIRECTOR_ENABLED: "0"
-              H3_GRADIO_SHARE: "0"
+          H3_GRADIO_SHARE: "0"
           GRADIO_ANALYTICS_ENABLED: "False"
         shell: bash
         run: |
@@ -345,6 +346,7 @@ jobs:
 
           python -u ui/storyboard_gradio.py \
             > /tmp/h3_gradio_entry.log 2>&1 &
+
           pid=$!
 
           cleanup() {
