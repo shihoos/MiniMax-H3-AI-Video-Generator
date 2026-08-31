@@ -26,6 +26,7 @@ class AssemblyManager:
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            timeout=30.0,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -64,6 +65,7 @@ class AssemblyManager:
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            timeout=60.0,
         )
         if result.returncode != 0:
             raise RuntimeError(
@@ -235,7 +237,19 @@ class AssemblyManager:
             ]
 
         try:
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=1800.0,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    "FFmpeg assembly timed out after 1800 seconds."
+                ) from exc
             if result.returncode != 0 and stream_copy:
                 vf = (
                     f"fps={int(fps)},scale={int(width)}:{int(height)}:force_original_aspect_ratio=increase,"
@@ -254,7 +268,19 @@ class AssemblyManager:
                     "-pix_fmt", "yuv420p", "-c:a", audio_codec,
                     "-b:a", audio_bitrate, "-movflags", "+faststart", str(temp_output),
                 ]
-                result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+                try:
+                    result = subprocess.run(
+                        command,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                        timeout=1800.0,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        "FFmpeg assembly timed out after 1800 seconds."
+                    ) from exc
             if result.returncode != 0:
                 raise RuntimeError("FFmpeg assembly failed:\n" + result.stderr[-5000:])
             if not temp_output.is_file() or temp_output.stat().st_size <= 0:
