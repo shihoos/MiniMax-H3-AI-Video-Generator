@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import hashlib
 import os
+import shutil
 from contextlib import contextmanager
 from typing import Any
 
@@ -68,7 +70,68 @@ class StoryboardReferenceBuilder:
             lines.append(current)
         return lines
 
+    @staticmethod
+    def structural_digest(plan: dict, characters: list[dict]) -> str:
+        """Hash only storyboard-defining structure; dialogue/checkpoint state is excluded."""
+        scenes = []
+        scene_order = {
+            str(scene.get("scene_id", "")): index
+            for index, scene in enumerate(plan.get("scenes", []) or [], start=1)
+            if isinstance(scene, dict)
+        }
+        for shot in sorted(
+            [item for item in (plan.get("shots", []) or []) if isinstance(item, dict)],
+            key=lambda item: (scene_order.get(str(item.get("scene_id", "")), 10**9), int(item.get("order", 0))),
+        ):
+            scenes.append({
+                "scene_id": str(shot.get("scene_id", "")),
+                "order": int(shot.get("order", 0)),
+                "shot_id": str(shot.get("shot_id", "")),
+                "characters": list(shot.get("characters", []) or []),
+                "location": str(shot.get("location", "")),
+                "action": str(shot.get("action", "")),
+                "camera_shot": str(shot.get("camera_shot", "")),
+                "camera_movement": str(shot.get("camera_movement", "")),
+                "composition_notes": str(shot.get("composition_notes", "")),
+                "lighting": str(shot.get("lighting", "")),
+                "storyboard_reference": bool(shot.get("storyboard_reference")),
+            })
+        payload = {
+            "characters": [
+                {
+                    "character_id": str(item.get("character_id", "")),
+                    "name": str(item.get("name", "")),
+                    "appearance": item.get("appearance", {}) or {},
+                    "reference_paths": item.get("reference_paths", []) or [],
+                }
+                for item in characters if isinstance(item, dict)
+            ],
+            "shots": scenes,
+        }
+        return hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
     def build(self, plan: dict, characters: list[dict]) -> dict[str, Any]:
+        digest = self.structural_digest(plan, characters)
+        cache_dir = self.root / "storyboard_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_image = cache_dir / f"{digest}.png"
+        cache_manifest = cache_dir / f"{digest}.json"
+        image_path = self.root / "unified_storyboard_reference.png"
+        manifest_cache_path = self.root / "reference_role_manifest.json"
+        if cache_image.is_file() and cache_manifest.is_file():
+            shutil.copy2(cache_image, image_path)
+            shutil.copy2(cache_manifest, manifest_cache_path)
+            cached = json.loads(manifest_cache_path.read_text(encoding="utf-8"))
+            return {
+                "path": str(image_path),
+                "manifest_path": str(manifest_cache_path),
+                "panels": cached.get("storyboard", {}).get("panels", []),
+                "manifest": cached,
+                "cache_hit": True,
+            }
+
         scene_order = {
             str(scene.get("scene_id", "")).strip(): index
             for index, scene in enumerate(plan.get("scenes", []) or [])
@@ -170,6 +233,7 @@ class StoryboardReferenceBuilder:
             "storyboard": {
                 "path": str(path),
                 "role": "storyboard",
+                "structural_digest": digest,
                 "description": "Unified storyboard for shot sequencing, composition and blocking; not the canonical character identity source.",
                 "panels": panels,
             },
@@ -243,7 +307,9 @@ class StoryboardReferenceBuilder:
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(manifest_path)
-        return {"path": str(path), "manifest_path": str(manifest_path), "panels": panels, "manifest": manifest}
+        shutil.copy2(path, cache_image)
+        shutil.copy2(manifest_path, cache_manifest)
+        return {"path": str(path), "manifest_path": str(manifest_path), "panels": panels, "manifest": manifest, "cache_hit": False}
 
     @staticmethod
     @contextmanager
