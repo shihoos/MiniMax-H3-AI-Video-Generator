@@ -1019,6 +1019,7 @@ class ProductionRunner:
                 shot["observed_visual_state"] = dict(
                     shot["visual_feedback"].get("observed_state", {})
                 )
+                ContinuityLedger.reconcile_observed_state(shot)
             except Exception as feedback_error:
                 shot["visual_feedback"] = {
                     "deterministic_observation": False,
