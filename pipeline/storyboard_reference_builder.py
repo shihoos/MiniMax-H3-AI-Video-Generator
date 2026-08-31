@@ -417,7 +417,3 @@ class StoryboardReferenceBuilder:
             if int(record.get("picture_index", 0)) != index:
                 raise RuntimeError(f"Manifest Picture index mismatch at Picture {index}.")
 
-
-def json_dumps(value: Any) -> str:
-    import json
-    return json.dumps(value, indent=2, ensure_ascii=False)
