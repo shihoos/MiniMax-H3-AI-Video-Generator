@@ -21,9 +21,9 @@ class ProductionQualityGate:
         vlm = feedback.get("vision_state") if isinstance(feedback.get("vision_state"), dict) else {}
         observed = feedback.get("observed_state") if isinstance(feedback.get("observed_state"), dict) else {}
         technical = 100.0 if technical_ok and not observed.get("observer_warning") else 70.0
-        identity = self._score(vlm.get("identity_score"), 100.0 if not vlm else 70.0)
-        continuity = self._score(vlm.get("continuity_score"), 100.0 if not vlm else 70.0)
-        prompt = self._score(vlm.get("prompt_compliance_score"), 100.0 if not vlm else 70.0)
+        identity = self._score(vlm.get("identity_score"), 100.0)
+        continuity = self._score(vlm.get("continuity_score"), 100.0)
+        prompt = self._score(vlm.get("prompt_compliance_score"), 100.0)
         overall = round((technical * 0.25) + (identity * 0.30) + (continuity * 0.25) + (prompt * 0.20), 2)
         status = "accept" if overall >= self.accept_score else "review" if overall >= self.review_score else "retake"
         findings = list(vlm.get("findings", []) or []) if isinstance(vlm.get("findings"), list) else []
