@@ -21,6 +21,7 @@ from planner.config import (
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
     H3_DIRECTOR_CRITIC,
+    H3_VLM_REFERENCE_ANALYSIS,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
     H3_HEIGHT,
@@ -65,6 +66,42 @@ from schemas.shot import (
 
 
 class ProductionOrchestrator:
+
+    @staticmethod
+    def _apply_director_critic_patches(plan: dict, critique: dict) -> dict:
+        """Apply only a strict, non-structural subset of critic suggestions."""
+        if not isinstance(plan, dict) or not isinstance(critique, dict):
+            return plan
+        allowed = {
+            "action",
+            "camera_shot",
+            "camera_movement",
+            "lens_and_depth_of_field",
+            "composition_notes",
+            "lighting",
+            "color_temperature",
+            "mood",
+            "visual_prompt",
+            "overall_soundscape",
+            "non_diegetic_music",
+        }
+        shots = {str(s.get("shot_id", "")).strip(): s for s in plan.get("shots", []) or [] if isinstance(s, dict)}
+        changes = critique.get("shot_patches", []) or []
+        applied = []
+        if isinstance(changes, list):
+            for item in changes:
+                if not isinstance(item, dict):
+                    continue
+                shot = shots.get(str(item.get("shot_id", "")).strip())
+                patch = item.get("patch", {})
+                if shot is None or not isinstance(patch, dict):
+                    continue
+                for key, value in patch.items():
+                    if key in allowed and isinstance(value, str) and value.strip():
+                        shot[key] = value.strip()
+                        applied.append({"shot_id": shot["shot_id"], "field": key})
+        plan["director_critique_applied"] = applied
+        return plan
 
     def __init__(
         self,
@@ -1269,7 +1306,7 @@ class ProductionOrchestrator:
                 for path in character.get("reference_paths", []) or []:
                     if str(path).strip() and str(path) not in reference_paths:
                         reference_paths.append(str(path))
-            if self.vlm.available and reference_paths:
+            if H3_VLM_REFERENCE_ANALYSIS and self.vlm.available and reference_paths:
                 raw_visual_context = self.vlm.describe_references(reference_paths[:H3_MAX_REFERENCE_IMAGES])
                 visual_context: dict[str, dict] = {}
                 for character in base_plan.get("characters", []) or []:
@@ -1310,6 +1347,16 @@ class ProductionOrchestrator:
                         )
                         if isinstance(critique, dict):
                             plan["director_critique"] = critique
+                            plan = self._apply_director_critic_patches(plan, critique)
+                            # Recompile only after bounded, whitelisted creative edits.
+                            from planner.cinematic_compiler import CinematicCompiler
+                            plan["shots"] = CinematicCompiler(
+                                character_names={
+                                    str(c.get("name", "")).strip()
+                                    for c in plan.get("characters", []) or []
+                                    if isinstance(c, dict) and str(c.get("name", "")).strip()
+                                }
+                            ).compile_all(plan.get("scenes", []) or [], plan.get("shots", []) or [])
                     except Exception as critique_error:
                         plan["director_critique_warning"] = str(critique_error)
 
