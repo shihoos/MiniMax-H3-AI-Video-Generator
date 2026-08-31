@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
+from contextlib import contextmanager
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -67,9 +69,17 @@ class StoryboardReferenceBuilder:
         return lines
 
     def build(self, plan: dict, characters: list[dict]) -> dict[str, Any]:
+        scene_order = {
+            str(scene.get("scene_id", "")).strip(): index
+            for index, scene in enumerate(plan.get("scenes", []) or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "")).strip()
+        }
         shots = sorted(
             [s for s in (plan.get("shots", []) or []) if isinstance(s, dict)],
-            key=lambda s: (str(s.get("scene_id", "")), int(s.get("order", 0))),
+            key=lambda s: (
+                scene_order.get(str(s.get("scene_id", "")).strip(), 10**9),
+                int(s.get("order", 0)),
+            ),
         )
         image = Image.new("RGB", (self.WIDTH, self.HEIGHT), "white")
         draw = ImageDraw.Draw(image)
@@ -227,8 +237,29 @@ class StoryboardReferenceBuilder:
                 "actual_runtime_order": False,
                 "invariant_verified": False,
             }
-        manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        temporary = manifest_path.with_name(f".{manifest_path.name}.{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+        with temporary.open("r+b") as handle:
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(manifest_path)
         return {"path": str(path), "manifest_path": str(manifest_path), "panels": panels, "manifest": manifest}
+
+    @staticmethod
+    @contextmanager
+    def _manifest_file_lock(path: Path):
+        lock_path = path.with_name(f".{path.name}.lock")
+        handle = lock_path.open("a+")
+        try:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            handle.close()
 
     @staticmethod
     def update_manifest(
@@ -237,43 +268,50 @@ class StoryboardReferenceBuilder:
         reference_images: list[str],
         reference_roles: list[dict],
         picture_bindings: list[str],
+        *,
+        actual_runtime_order: bool = True,
     ) -> dict[str, Any]:
         path = Path(manifest_path).resolve()
         if not path.is_file():
             raise FileNotFoundError(path)
-        manifest = json.loads(path.read_text(encoding="utf-8"))
-        shots = manifest.setdefault("shots", {})
-        sid = str(shot_id).strip()
-        refs = [str(value).strip() for value in reference_images if str(value).strip()]
-        roles = [dict(role) for role in reference_roles]
-        if len(refs) != len(roles):
-            raise RuntimeError(
-                f"Reference manifest mismatch for {sid}: {len(refs)} images vs {len(roles)} roles."
-            )
-        if len(refs) != len(picture_bindings):
-            raise RuntimeError(
-                f"Picture binding mismatch for {sid}: {len(refs)} refs vs {len(picture_bindings)} bindings."
-            )
-        normalized_roles = []
-        for index, (ref, role) in enumerate(zip(refs, roles), start=1):
-            item = dict(role)
-            item["path"] = ref
-            item["picture_index"] = index
-            normalized_roles.append(item)
-        entry = shots.setdefault(sid, {})
-        entry.update({
-            "shot_id": sid,
-            "reference_images": refs,
-            "references": normalized_roles,
-            "picture_bindings": list(picture_bindings),
-            "actual_runtime_order": True,
-            "invariant_verified": True,
-        })
-        manifest["shots"] = shots
-        temporary = path.with_name(f".{path.name}.tmp")
-        temporary.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(path)
-        return entry
+        with StoryboardReferenceBuilder._manifest_file_lock(path):
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            shots = manifest.setdefault("shots", {})
+            sid = str(shot_id).strip()
+            refs = [str(value).strip() for value in reference_images if str(value).strip()]
+            roles = [dict(role) for role in reference_roles]
+            bindings = [str(value) for value in picture_bindings]
+            if len(refs) != len(roles):
+                raise RuntimeError(
+                    f"Reference manifest mismatch for {sid}: {len(refs)} images vs {len(roles)} roles."
+                )
+            if len(refs) != len(bindings):
+                raise RuntimeError(
+                    f"Picture binding mismatch for {sid}: {len(refs)} refs vs {len(bindings)} bindings."
+                )
+            normalized_roles = []
+            for index, (ref, role) in enumerate(zip(refs, roles), start=1):
+                item = dict(role)
+                item["path"] = ref
+                item["picture_index"] = index
+                normalized_roles.append(item)
+            entry = shots.setdefault(sid, {})
+            entry.update({
+                "shot_id": sid,
+                "reference_images": refs,
+                "references": normalized_roles,
+                "picture_bindings": bindings,
+                "actual_runtime_order": bool(actual_runtime_order),
+                "invariant_verified": False,
+            })
+            manifest["shots"] = shots
+            temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+            with temporary.open("r+b") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            temporary.replace(path)
+            return dict(entry)
 
     @staticmethod
     def assert_manifest_invariant(
