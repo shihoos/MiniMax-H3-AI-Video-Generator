@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional
+import hashlib
+import json
 
 
 VALID_REFERENCE_MODES = {
@@ -283,6 +285,24 @@ class Character:
 
         return self.story_state_profile
 
+    @property
+    def identity_fingerprint(self) -> str:
+        payload = {
+            "character_id": self.character_id,
+            "name": self.name,
+            "appearance": self.appearance,
+            "distinctive_features": self.distinctive_features,
+        }
+        canonical = json.dumps(
+            payload,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(
+            canonical.encode("utf-8")
+        ).hexdigest()
+
     def identity_lock_text(self) -> str:
         identity = self.build_identity_profile()
 
@@ -381,4 +401,5 @@ class Character:
             "story_state_profile": self.story_state_profile,
             "identity_lock": self.identity_lock_text(),
             "story_state_lock": self.story_state_text(),
+            "identity_fingerprint": self.identity_fingerprint,
         }
