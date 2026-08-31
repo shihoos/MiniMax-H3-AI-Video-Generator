@@ -118,8 +118,14 @@ def main() -> None:
     assert isinstance(shot_obj.continuity_start_state, dict)
     assert isinstance(shot_obj.continuity_end_state, dict)
     assert '"We have to go now."' in shot_obj.h3_prompt()
-    assert "dialogue_timeline:" in shot_obj.h3_prompt()
-    assert "continuity_start_state:" in shot_obj.h3_prompt()
+    prompt_text = shot_obj.h3_prompt()
+    assert "<d>[English]" in prompt_text
+    assert "subject_definitions:" in prompt_text
+    assert "summary:" in prompt_text
+    assert "retention_analysis:" in prompt_text
+    assert "detailed_description:" in prompt_text
+    assert "overall_soundscape:" in prompt_text
+    assert "non_diegetic_music:" in prompt_text
 
     second_qwen = qwen_shot(
         "scene_001",
@@ -249,5 +255,109 @@ def main() -> None:
     print("PRODUCTION CONTINUITY VALIDATION PASSED")
 
 
+
+def validate_production_isolation(root: Path) -> None:
+    from pipeline.h3_scene_continuity import H3SceneContinuity
+    from pipeline.identity_anchor_store import IdentityAnchorStore
+
+    a = H3SceneContinuity(root, "production_A")
+    b = H3SceneContinuity(root, "production_B")
+    assert a.root != b.root
+    assert str(a.root).endswith("production_A")
+    assert str(b.root).endswith("production_B")
+
+    ia = IdentityAnchorStore(root, production_id="production_A")
+    ib = IdentityAnchorStore(root, production_id="production_B")
+    assert ia.root != ib.root
+
+
+def validate_reference_manifest_semantics(root: Path) -> None:
+    from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
+
+    builder = StoryboardReferenceBuilder(root, "manifest_test")
+    manifest_path = builder.root / "reference_role_manifest.json"
+    payload = {
+        "manifest_version": 2,
+        "production_id": "manifest_test",
+        "storyboard": {},
+        "shots": {},
+    }
+    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    refs = ["/tmp/identity.png", "/tmp/storyboard.png"]
+    roles = [
+        {"path": refs[0], "role": "character_identity", "priority": 95},
+        {"path": refs[1], "role": "storyboard", "priority": 90},
+    ]
+    bindings = ["<Picture 1> = identity", "<Picture 2> = storyboard"]
+    entry = StoryboardReferenceBuilder.update_manifest(
+        manifest_path, "shot_001", refs, roles, bindings, actual_runtime_order=False
+    )
+    assert entry["actual_runtime_order"] is False
+    StoryboardReferenceBuilder.assert_manifest_invariant(entry, refs, bindings)
+    entry = StoryboardReferenceBuilder.update_manifest(
+        manifest_path, "shot_001", list(reversed(refs)), list(reversed(roles)),
+        ["<Picture 1> = storyboard", "<Picture 2> = identity"],
+        actual_runtime_order=True,
+    )
+    assert entry["actual_runtime_order"] is True
+    StoryboardReferenceBuilder.assert_manifest_invariant(
+        entry, list(reversed(refs)), ["<Picture 1> = storyboard", "<Picture 2> = identity"]
+    )
+
+
+def validate_ffprobe_stream_duration() -> None:
+    import shutil
+    import subprocess
+    import tempfile
+    from pipeline.dialogue_duration import FFProbeMediaDurationProvider
+
+    ffmpeg = shutil.which("ffmpeg")
+    ffprobe = shutil.which("ffprobe")
+    if not ffmpeg or not ffprobe:
+        print("ffprobe stream-duration regression skipped: ffmpeg/ffprobe unavailable.")
+        return
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        video = root / "test.mp4"
+        command = [
+            ffmpeg, "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:r=24:d=2.0",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=2.0",
+            "-t", "2.0",
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(video),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr[-2000:])
+
+        # Create a second file whose video is 2 seconds and audio only 1 second.
+        mismatch = root / "mismatch.mp4"
+        command = [
+            ffmpeg, "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=64x64:r=24:d=2.0",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:d=1.0",
+            "-t", "2.0",
+            "-map", "0:v", "-map", "1:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(mismatch),
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr[-2000:])
+
+        provider = FFProbeMediaDurationProvider(ffprobe)
+        video_seconds = provider.duration_seconds(mismatch, stream_selector="v:0")
+        audio_seconds = provider.duration_seconds(mismatch, stream_selector="a:0")
+        assert video_seconds > audio_seconds + 0.4, (video_seconds, audio_seconds)
+
+
 if __name__ == "__main__":
     main()
+    # P0/P1/P2 regression gates.
+    validate_production_isolation(ROOT)
+    validate_reference_manifest_semantics(ROOT)
+    validate_ffprobe_stream_duration()
+    print("P0/P1/P2 regression gates PASSED.")
