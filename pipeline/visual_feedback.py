@@ -29,7 +29,8 @@ class VisualFeedbackEngine:
             "deterministic_observation": True,
             "vision_escalated": False,
         }
-        if H3_QA_ENABLED and H3_VLM_VISUAL_QA and self.vision_analyzer.available:
+        vlm_requested = bool(H3_QA_ENABLED and H3_VLM_VISUAL_QA)
+        if vlm_requested and self.vision_analyzer.available:
             try:
                 candidates = [frame_path] + list(review_frames or [])
                 unique = []
@@ -47,5 +48,11 @@ class VisualFeedbackEngine:
                 feedback["vision_escalated"] = True
             except Exception as exc:
                 feedback["vision_warning"] = str(exc)
+        elif vlm_requested and not self.vision_analyzer.available:
+            feedback["vision_warning"] = getattr(
+                self.vision_analyzer,
+                "configuration_warning",
+                "VLM visual QA is enabled but the configured VLM runtime is unavailable.",
+            )
         feedback["quality_gate"] = self.quality_gate.evaluate(feedback, technical_ok=True)
         return feedback
