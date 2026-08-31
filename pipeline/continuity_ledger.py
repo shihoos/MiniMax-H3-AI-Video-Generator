@@ -95,7 +95,7 @@ class ContinuityLedger:
                 "camera_side": str(shot.get("camera_side", "") or ""),
                 "props": deepcopy(shot.get("props", []) or []),
                 "state_description": str(
-                    shot.get("continuity_state_start" if prefix.endswith("start_state") else "continuity_state_end", "") or ""
+                    shot.get("continuity_start_state" if prefix.endswith("start_state") else "continuity_end_state", "") or ""
                 ).strip(),
                 "character_spatial_bboxes": deepcopy(shot.get("character_spatial_bboxes", {}) or {}),
                 "character_spatial_regions": deepcopy(shot.get("character_spatial_regions", {}) or {}),
@@ -131,6 +131,20 @@ class ContinuityLedger:
             if cls._scene_boundary(shot, previous):
                 previous_by_scene[scene_id] = shot
                 continue
+            if not isinstance(shot.get("continuity_start_state") or {}, dict):
+                raise ContinuityViolation(
+                    f"{shot.get('shot_id', '')}: continuity_start_state must be a dictionary.",
+                    shot_id=str(shot.get("shot_id", "")),
+                    previous_shot_id=str(previous.get("shot_id", "") if previous else ""),
+                    details={"field": "continuity_start_state"},
+                )
+            if not isinstance(previous.get("continuity_end_state") or {}, dict):
+                raise ContinuityViolation(
+                    f"{previous.get('shot_id', '')}: continuity_end_state must be a dictionary.",
+                    shot_id=str(shot.get("shot_id", "")),
+                    previous_shot_id=str(previous.get("shot_id", "")),
+                    details={"field": "continuity_end_state"},
+                )
             start = deepcopy(shot.get("continuity_start_state") or {})
             end = deepcopy(previous.get("continuity_end_state") or {})
             if start and end and start != end:
