@@ -1292,45 +1292,40 @@ class ProductionOrchestrator:
         plan["storyboard_reference"] = storyboard["path"]
         plan["storyboard_reference_manifest"] = storyboard["manifest_path"]
 
+        def _bindings_from_roles(reference_roles: list[dict]) -> list[str]:
+            bindings = []
+            for index, role in enumerate(reference_roles, start=1):
+                kind = str(role.get("role", "")).strip().lower()
+                if kind == "storyboard":
+                    label = "Unified storyboard for sequencing, composition and blocking; not the canonical character identity source."
+                elif kind == "previous_shot_last_frame":
+                    label = "Previous shot final-frame continuity reference."
+                else:
+                    character = str(role.get("character_name", "")).strip()
+                    label = (
+                        f"Canonical visual identity reference for {character}; use for face, hair, body structure and stable identity only."
+                        if character else "Production visual reference."
+                    )
+                bindings.append(f"<Picture {index}> = {label}")
+            return bindings
+
         for shot in plan.get("shots", []):
-            refs = list(shot.get("reference_images", []) or [])
-            roles = list(shot.get("reference_roles", []) or [])
-            if storyboard["path"] not in refs:
-                refs.append(storyboard["path"])
-                roles.append({
-                    "path": storyboard["path"],
-                    "role": "storyboard",
-                    "label": "Unified storyboard for sequencing, composition and blocking; not canonical identity.",
-                    "priority": 90,
-                })
-            shot["reference_images"] = refs[:8]
-            shot["reference_roles"] = roles[:8]
             shot["storyboard_reference"] = storyboard["path"]
-            storyboard_index = next(
-                (
-                    index + 1
-                    for index, role in enumerate(shot["reference_roles"])
-                    if role.get("role") == "storyboard"
-                ),
-                None,
-            )
-            bindings = [
-                str(value).strip()
-                for value in (shot.get("reference_bindings", []) or [])
-                if str(value).strip()
-            ]
-            if storyboard_index is not None:
-                bindings.append(
-                    f"<Picture {storyboard_index}> is the unified storyboard reference for shot sequencing, composition and blocking; it is not the canonical character identity source."
-                )
-            shot["reference_bindings"] = bindings
             shot["reference_role_manifest"] = storyboard["manifest_path"]
-            StoryboardReferenceBuilder.update_manifest(
+            shot["reference_bindings"] = _bindings_from_roles(
+                list(shot.get("reference_roles", []) or [])
+            )
+            entry = StoryboardReferenceBuilder.update_manifest(
                 storyboard["manifest_path"],
                 str(shot.get("shot_id", "")),
-                shot["reference_images"],
-                shot["reference_roles"],
-                shot["reference_bindings"],
+                list(shot.get("reference_images", []) or []),
+                list(shot.get("reference_roles", []) or []),
+                list(shot.get("reference_bindings", []) or []),
+            )
+            StoryboardReferenceBuilder.assert_manifest_invariant(
+                entry,
+                list(shot.get("reference_images", []) or []),
+                list(shot.get("reference_bindings", []) or []),
             )
             self._refresh_shot_prompt(shot)
 
@@ -1350,10 +1345,8 @@ class ProductionOrchestrator:
                 shot["previous_shot"] = previous["shot_id"]
                 previous["next_shot"] = shot["shot_id"]
 
-            if previous is None:
-                shot["is_scene_boundary"] = True
-            else:
-                shot["is_scene_boundary"] = False
+            explicit_boundary = bool(shot.get("is_scene_boundary", False))
+            shot["is_scene_boundary"] = previous is None or explicit_boundary
             previous_by_scene[scene_id] = shot
 
         scene_characters = {}
