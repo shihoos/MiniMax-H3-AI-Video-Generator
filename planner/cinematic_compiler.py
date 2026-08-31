@@ -1,6 +1,7 @@
 from __future__ import annotations
 from planner.entity_resolver import EntityResolver
 
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -389,6 +390,25 @@ class CinematicCompiler:
             )
 
         return cls.DEFAULT_MUSIC
+
+    @classmethod
+    def _continuity_state(
+        cls,
+        value: Any,
+        field_name: str,
+    ) -> dict:
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return deepcopy(value)
+        text = str(value).strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {"state_description": text}
+        return parsed if isinstance(parsed, dict) else {"state_description": str(parsed)}
 
     @classmethod
     def _derive_continuity(
@@ -902,15 +922,15 @@ class CinematicCompiler:
             "dialogue_events": deepcopy(
                 shot.get("dialogue_events", []) or []
             ),
-
-            "continuity_state_start": self._string(
-                shot.get("continuity_state_start")
+            "continuity_start_state": self._continuity_state(
+                shot.get("continuity_start_state", shot.get("continuity_state_start")),
+                "continuity_start_state",
             ),
 
-            "continuity_state_end": self._string(
-                shot.get("continuity_state_end")
+            "continuity_end_state": self._continuity_state(
+                shot.get("continuity_end_state", shot.get("continuity_state_end")),
+                "continuity_end_state",
             ),
-
             "is_scene_boundary": bool(
                 shot.get("is_scene_boundary", False)
             ),
