@@ -50,15 +50,24 @@ runtime:
   comfyui_job_timeout_seconds: 14400
   comfyui_request_retries: 3
   lowvram: true
-  cpu_vae: true
+  cpu_vae: auto
+  vram:
+    profile: auto
+    async_offload_streams: 2
+    reserve_vram_gib: 0.0
+    disable_pinned_memory: auto
+    fast_disk: false
+    ram_available_floor: 0.18
 features:
   live_preview: true
-  vlm_enabled: false
+  vlm_enabled: true
   qa_enabled: true
   context_ir_version: 1
   timeline_version: 1
   selective_retake: true
-  director_critic: false
+  director_critic: true
+  vlm_reference_analysis: true
+  vlm_visual_qa: true
 assembly:
   video_codec: libx264
   preset: medium
