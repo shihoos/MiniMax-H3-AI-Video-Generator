@@ -20,13 +20,17 @@ class StoryboardCache:
     def paths(self, digest: str) -> tuple[Path, Path]:
         return self.cache_dir / f"{digest}.png", self.cache_dir / f"{digest}.json"
 
-    def restore(self, digest: str, image_path: Path, manifest_path: Path) -> bool:
+    def restore(self, digest: str, image_path: Path, manifest_path: Path) -> dict[str, Any] | None:
         cached_image, cached_manifest = self.paths(digest)
         if not cached_image.is_file() or not cached_manifest.is_file():
-            return False
+            return None
         shutil.copy2(cached_image, image_path)
         shutil.copy2(cached_manifest, manifest_path)
-        return True
+        try:
+            payload = json.loads(cached_manifest.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def store(self, digest: str, image_path: Path, manifest_path: Path) -> None:
         cached_image, cached_manifest = self.paths(digest)
