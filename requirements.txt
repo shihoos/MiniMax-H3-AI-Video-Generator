@@ -4,3 +4,4 @@
 PyYAML==6.0.2
 gradio==6.26.0
 Pillow==12.3.0
+websocket-client==1.9.1
