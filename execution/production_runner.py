@@ -1089,66 +1089,114 @@ class ProductionRunner:
                 }
 
             auto_retake_count = 0
+            max_auto_retries = max(0, int(executor.execution_policy.max_auto_retries))
             if (
                 executor.execution_policy.auto_retake
-                and executor.execution_policy.max_auto_retries > 0
+                and max_auto_retries > 0
                 and shot.get("quality_gate", {}).get("recommended_action") == "retake"
             ):
-                try:
-                    base_result = result
-                    retake_start = float(shot.get("retake_start_seconds", 0.0) or 0.0)
-                    retake_end = float(shot.get("retake_end_seconds", shot.get("duration_seconds", 5.2)) or shot.get("duration_seconds", 5.2))
-                    shot["retake_reason"] = "; ".join(
-                        str(v) for v in (shot.get("quality_gate", {}).get("findings", []) or [])
-                    ) or "Automatic quality-gate retake"
-                    executor.execution_policy = executor.execution_policy.for_mode("retake")
-                    retake_result = self.retake_executor.execute(
-                        production_id=production_id,
-                        scene_id=scene_id,
-                        shot=shot,
-                        base_video=base_result,
-                        start_seconds=retake_start,
-                        end_seconds=retake_end,
-                        shot_executor=executor,
-                        workflow_mode=workflow_mode,
-                        upscale=upscale_enabled,
-                    )
-                    result = Path(retake_result["output"]).resolve()
-                    auto_retake_count = 1
-                    shot["retake_executed"] = True
-                    shot["retake_execution"] = dict(retake_result)
-                    # Re-observe and re-score the replacement. A second failed retake is
-                    # never silently accepted; it is surfaced as a hard production error.
-                    retake_anchor = self.continuity.prepare_next_shot(result, scene_id, shot_id)
-                    review_frames = []
-                    if getattr(self.visual_feedback.vision_analyzer, "available", False):
-                        review_dir = self.project_root / "data" / "production" / production_id / "qa" / self._safe_name(shot_id) / "retake"
-                        review_frames = self.visual_observer.extract_review_frames(result, review_dir, count=3)
-                    shot["visual_feedback_after_retake"] = self.visual_feedback.analyze(
-                        result,
-                        retake_anchor,
-                        expected_state,
-                        review_frames=review_frames,
-                    )
-                    shot["quality_gate_after_retake"] = self.quality_gate.evaluate(
-                        shot["visual_feedback_after_retake"],
-                        technical_ok=True,
-                    )
-                    if shot["quality_gate_after_retake"].get("recommended_action") == "retake":
-                        raise RuntimeError(
-                            f"Automatic retake did not satisfy the quality gate for {shot_id}."
-                        )
-                    anchor_frame = retake_anchor
-                    shot["quality_gate"] = shot["quality_gate_after_retake"]
-                    shot["retake_recommended"] = False
-                except Exception as retake_error:
+                base_result = result
+                current_anchor = anchor_frame
+                while (
+                    auto_retake_count < max_auto_retries
+                    and shot.get("quality_gate", {}).get("recommended_action") == "retake"
+                ):
+                    attempt_number = auto_retake_count + 1
                     try:
-                        executor.execution_policy = executor.execution_policy.for_mode("production")
-                    except Exception:
-                        pass
-                    shot["retake_execution_warning"] = True
-                    shot["retake_execution_error"] = str(retake_error)
-                    raise
+                        retake_start = float(shot.get("retake_start_seconds", 0.0) or 0.0)
+                        retake_end = float(
+                            shot.get(
+                                "retake_end_seconds",
+                                shot.get("duration_seconds", 5.2),
+                            )
+                            or shot.get("duration_seconds", 5.2)
+                        )
+                        shot["retake_reason"] = "; ".join(
+                            str(v)
+                            for v in (
+                                shot.get("quality_gate", {}).get("findings", [])
+                                or []
+                            )
+                        ) or "Automatic quality-gate retake"
+
+                        production_policy = executor.execution_policy
+                        executor.execution_policy = production_policy.for_mode("retake")
+                        try:
+                            retake_result = self.retake_executor.execute(
+                                production_id=production_id,
+                                scene_id=scene_id,
+                                shot=shot,
+                                base_video=base_result,
+                                start_seconds=retake_start,
+                                end_seconds=retake_end,
+                                shot_executor=executor,
+                                workflow_mode=workflow_mode,
+                                upscale=upscale_enabled,
+                            )
+                        finally:
+                            executor.execution_policy = production_policy
+
+                        result = Path(retake_result["output"]).resolve()
+                        auto_retake_count += 1
+                        shot["retake_executed"] = True
+                        shot["retake_execution"] = dict(retake_result)
+                        shot["retake_execution"]["attempt"] = attempt_number
+                        shot["retake_execution"]["max_attempts"] = max_auto_retries
+
+                        retake_anchor = self.continuity.prepare_next_shot(
+                            result,
+                            scene_id,
+                            shot_id,
+                        )
+                        review_frames = []
+                        if getattr(self.visual_feedback.vision_analyzer, "available", False):
+                            review_dir = (
+                                self.project_root
+                                / "data"
+                                / "production"
+                                / production_id
+                                / "qa"
+                                / self._safe_name(shot_id)
+                                / f"retake_{attempt_number}"
+                            )
+                            review_frames = self.visual_observer.extract_review_frames(
+                                result,
+                                review_dir,
+                                count=3,
+                            )
+
+                        shot["visual_feedback_after_retake"] = self.visual_feedback.analyze(
+                            result,
+                            retake_anchor,
+                            expected_state,
+                            review_frames=review_frames,
+                        )
+                        shot["quality_gate_after_retake"] = self.quality_gate.evaluate(
+                            shot["visual_feedback_after_retake"],
+                            technical_ok=True,
+                        )
+                        shot["quality_gate"] = shot["quality_gate_after_retake"]
+                        shot["retake_recommended"] = (
+                            shot["quality_gate"].get("recommended_action") == "retake"
+                        )
+                        current_anchor = retake_anchor
+                        base_result = result
+
+                        if shot["quality_gate"].get("recommended_action") != "retake":
+                            anchor_frame = current_anchor
+                            break
+                    except Exception as retake_error:
+                        shot["retake_execution_warning"] = True
+                        shot["retake_execution_error"] = str(retake_error)
+                        raise
+
+                if shot.get("quality_gate", {}).get("recommended_action") == "retake":
+                    raise RuntimeError(
+                        f"Automatic retake budget exhausted for {shot_id}: "
+                        f"{auto_retake_count}/{max_auto_retries} attempts failed the quality gate."
+                    )
+                shot["retake_attempts"] = auto_retake_count
+                anchor_frame = current_anchor
 
             self._persist_first_appearance_anchors(
                 shot,
