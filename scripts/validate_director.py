@@ -759,7 +759,7 @@ def test_h3_workflow_duration_updates_float_source() -> None:
     from execution.h3_workflow_builder import H3WorkflowBuilder
 
     builder = H3WorkflowBuilder(ROOT, None)
-    workflow = builder.load("ref2v")
+    workflow = builder.load("ref2va")
 
     expression = next(
         node
@@ -811,7 +811,7 @@ def test_h3_workflow_resolution_selector_mapping() -> None:
     }
 
     for (width, height), megapixels in expected.items():
-        workflow = builder.load("ref2v")
+        workflow = builder.load("ref2va")
         builder._set_resolution(
             workflow,
             width,
@@ -831,7 +831,7 @@ def test_h3_workflow_resolution_selector_mapping() -> None:
         )
 
     try:
-        workflow = builder.load("ref2v")
+        workflow = builder.load("ref2va")
         builder._set_resolution(
             workflow,
             1400,
