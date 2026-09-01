@@ -11,7 +11,7 @@ from pipeline.seed_lineage import semantic_content_digest, stable_seed
 
 
 class RetakeExecutor:
-    """Execute a bounded selective retake using the current H3 Ref2V production path.
+    """Execute a bounded selective retake using the current H3 Ref2VA production path.
 
     H3's official FL2VA task is the ideal primitive for a boundary-anchored retake,
     but this repository deliberately has an exact Ref2VA production inventory. Until
