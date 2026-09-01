@@ -154,7 +154,7 @@ jobs:
               plan = planner.build(
                   mode=mode,
                   user_input=story,
-                  workflow_mode="ref2v",
+                  workflow_mode="ref2va",
                   profile="base",
               )
 
