@@ -264,6 +264,34 @@ class H3ContextIRCompiler:
             if not str(sections.get(section, "") or "").strip():
                 raise ValueError(f"H3 Context-IR section is empty: {section}")
 
+        # Every declared picture/video/audio label must be canonical and every
+        # angle-bracket reference used anywhere in the six sections must refer
+        # to one of those declarations. This prevents silent reference drift.
+        reference_labels = []
+        for item in context_ir.get("references", []) or []:
+            if not isinstance(item, dict):
+                raise ValueError("H3 Context-IR reference entries must be objects.")
+            index = int(item.get("index", 0) or 0)
+            if index <= 0:
+                raise ValueError("H3 Context-IR reference index must be positive.")
+            label = f"<Picture {index}>"
+            if label in reference_labels:
+                raise ValueError(f"Duplicate Context-IR reference label: {label}")
+            reference_labels.append(label)
+
+        declared = set(reference_labels)
+        tokens = set(re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", prompt))
+        unknown = sorted(tokens - declared)
+        if unknown:
+            raise ValueError(
+                "H3 Context-IR contains undeclared reference labels: "
+                + ", ".join(unknown)
+            )
+        if reference_labels:
+            for label in reference_labels:
+                if label not in prompt:
+                    raise ValueError(f"Declared Context-IR reference is never used: {label}")
+
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
         cls.validate(context_ir)
