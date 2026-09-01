@@ -1749,7 +1749,7 @@ def build_app(
                     live_preview_status = gr.Markdown()
                     with gr.Row(elem_classes=["h3-actions"]):
                         refresh_live_preview = gr.Button("Refresh Live Preview", variant="primary")
-                    live_preview_timer = gr.Timer(value=3.0, active=True)
+                    live_preview_timer = gr.Timer(value=3.0, active=False)
                     gr.Markdown("### Final Output")
                     final_video = gr.Video(label="Final Film / Latest Output")
 
