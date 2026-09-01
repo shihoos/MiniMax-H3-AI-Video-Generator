@@ -42,6 +42,9 @@ from planner.config import (
     DELIVERY_WIDTH,
     H3_MAX_REFERENCE_IMAGES,
     H3_AUTO_RETAKE,
+    H3_QA_ENABLED,
+    H3_VLM_ENABLED,
+    H3_VLM_VISUAL_QA,
     H3_MAX_AUTO_RETAKES_PER_SHOT,
     H3_SELECTIVE_RETAKE,
     PROFILE_BASE,
@@ -96,6 +99,7 @@ class ProductionRunner:
         self.quality_gate = ProductionQualityGate(
             accept_score=float(os.getenv("H3_QA_ACCEPT_SCORE", "90")),
             review_score=float(os.getenv("H3_QA_REVIEW_SCORE", "75")),
+            semantic_required=bool(H3_QA_ENABLED and H3_VLM_ENABLED and H3_VLM_VISUAL_QA),
         )
 
         self.production_input_root = (
@@ -249,15 +253,11 @@ class ProductionRunner:
 
         from execution.metrics import MetricsRecorder
         metrics_path = self.project_root / "data" / "production" / str(self.production_id) / "metrics.jsonl"
-        policy = ExecutionPolicy(
+        policy = ExecutionPolicy.from_runtime(
             mode="production",
             turbo=(self._active_profile == PROFILE_TURBO if hasattr(self, "_active_profile") else False),
             upscale=False,
-            live_preview=True,
-            require_context_ir=True,
-            run_visual_qa=True,
-            auto_retake=False,
-            max_auto_retries=0,
+            gpu_id=gpu_id,
         )
         return ShotExecutor(
             comfy_client=self.clients[gpu_id],
@@ -745,6 +745,12 @@ class ProductionRunner:
             gpu_id,
             scene_id,
         )
+        executor.execution_policy = ExecutionPolicy.from_runtime(
+            mode="production",
+            turbo=(str(profile).strip().lower() == PROFILE_TURBO),
+            upscale=bool(upscale_enabled),
+            gpu_id=gpu_id,
+        )
 
         output_dir = (
             self.output_root
@@ -1084,9 +1090,8 @@ class ProductionRunner:
 
             auto_retake_count = 0
             if (
-                H3_SELECTIVE_RETAKE
-                and H3_AUTO_RETAKE
-                and H3_MAX_AUTO_RETAKES_PER_SHOT > 0
+                executor.execution_policy.auto_retake
+                and executor.execution_policy.max_auto_retries > 0
                 and shot.get("quality_gate", {}).get("recommended_action") == "retake"
             ):
                 try:
