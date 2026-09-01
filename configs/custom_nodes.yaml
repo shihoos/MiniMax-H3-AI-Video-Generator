@@ -1,40 +1,42 @@
 custom_nodes:
   required:
-    - name: "Comfyui_Minimax_h3_latent_Upscaler"
-      repository: "https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git"
-      revision: "6a4b191e8af583b7c097f564690325f91d18c2e2"
-      purpose: "Native MiniMax H3 latent 2D/3D neural upscaling"
-      required_variant: "3D"
-      model_directory: "latent_upscale_models"
-      required: true
-
-    - name: "Comfyui-MMH3-UltimateUpscale"
-      repository: "https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale.git"
-      revision: "2553ad1b66ee0956df02e9146dd78b93395f9f69"
-      purpose: "VRAM-bounded H3 temporal chunking, spatial tiling, latent upscaling, refinement and stitching"
-      depends_on:
-        - "Comfyui_Minimax_h3_latent_Upscaler"
-      required: true
-
-    - name: "ComfyUI-MiniMax-H3-Turbo"
-      repository: "https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git"
-      revision: "4274783a23afcfdbea3b4876cb79effd6c510785"
-      purpose: "MiniMax H3 Turbo LoRA and audio-video Turbo sampler"
-      depends_on: []
-      required: true
-    - name: "ComfyUI-Workflow-To-API-Converter"
-      repository: "https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint.git"
-      revision: "bc8538278f82053b3ca10a44d62d02596f8e1a37"
-      purpose: "Convert ComfyUI graph-format workflows to API prompt format"
-      required: true
-
+  - name: Comfyui_Minimax_h3_latent_Upscaler
+    repository: https://github.com/LBH-123-AI/Comfyui_Minimax_h3_latent_Upscaler.git
+    revision: 6a4b191e8af583b7c097f564690325f91d18c2e2
+    purpose: Native MiniMax H3 latent 2D/3D neural upscaling
+    required_variant: 3D
+    model_directory: latent_upscale_models
+    required: true
+  - name: Comfyui-MMH3-UltimateUpscale
+    repository: https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale.git
+    revision: 2553ad1b66ee0956df02e9146dd78b93395f9f69
+    purpose: VRAM-bounded H3 temporal chunking, spatial tiling, latent upscaling,
+      refinement and stitching
+    depends_on:
+    - Comfyui_Minimax_h3_latent_Upscaler
+    required: true
+  - name: ComfyUI-MiniMax-H3-Turbo
+    repository: https://github.com/Larryvrh/ComfyUI-MiniMax-H3-Turbo.git
+    revision: 4274783a23afcfdbea3b4876cb79effd6c510785
+    purpose: MiniMax H3 Turbo LoRA and audio-video Turbo sampler
+    depends_on: []
+    required: true
+  - name: ComfyUI-Workflow-To-API-Converter
+    repository: https://github.com/SethRobinson/comfyui-workflow-to-api-converter-endpoint.git
+    revision: bc8538278f82053b3ca10a44d62d02596f8e1a37
+    purpose: Convert ComfyUI graph-format workflows to API prompt format
+    required: true
+  - name: H3-Optimizations
+    repository: https://github.com/Zironic/H3-Optimizations.git
+    revision: 379f9c7922b3d7831dd93ae069ba0cb82cf4cf36
+    purpose: Production H3 memory/QKV/MLP optimization for T4-safe execution
+    required: true
   supporting:
-    - name: "ComfyUI-VideoHelperSuite"
-      repository: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git"
-      revision: "4ee72c065db22c9d96c2427954dc69e7b908444b"
-      purpose: "Video loading, saving and assembly support"
-      required: true
-
+  - name: ComfyUI-VideoHelperSuite
+    repository: https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git
+    revision: 4ee72c065db22c9d96c2427954dc69e7b908444b
+    purpose: Video loading, saving and assembly support
+    required: true
 policy:
   vendor_source_code: false
   clone_at_runtime: true
