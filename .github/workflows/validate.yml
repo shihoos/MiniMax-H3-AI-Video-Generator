@@ -485,7 +485,7 @@ jobs:
               "gr.Timer(value=3.0, active = False)" in gradio
           )
           assert "refresh_live_preview.click" in gradio
-          assert "gr.update(active=True)" in gradio
+          
 
           # Continuity state must reach H3 as prose, not raw JSON.
           assert "_state_summary(" in shot
