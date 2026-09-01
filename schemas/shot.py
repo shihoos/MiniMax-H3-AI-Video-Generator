@@ -28,8 +28,8 @@ def _continuity_state(value: Any, field_name: str) -> dict:
 
 VALID_WORKFLOW_MODES = {
     "auto",
-    "ref2v",
-    "turbo_ref2v",
+    "ref2va",
+    "turbo_ref2va",
     "upscale",
 }
 
