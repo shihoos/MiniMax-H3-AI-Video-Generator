@@ -34,8 +34,8 @@ from planner.config import (
     PROFILE_TURBO,
     TURBO_STEPS,
     WORKFLOW_AUTO,
-    WORKFLOW_REF2V,
-    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_REF2VA,
+    WORKFLOW_TURBO_REF2VA,
     ensure_directories,
     PRESERVE_USER_STORY_MODE,
     UPSCALE_HEIGHT,
@@ -524,18 +524,18 @@ class ProductionOrchestrator:
                 ) == PROFILE_TURBO:
 
                     workflow_mode = (
-                        WORKFLOW_TURBO_REF2V
+                        WORKFLOW_TURBO_REF2VA
                     )
 
                 else:
 
                     workflow_mode = (
-                        WORKFLOW_REF2V
+                        WORKFLOW_REF2VA
                     )
 
             if (
                 workflow_mode
-                == WORKFLOW_TURBO_REF2V
+                == WORKFLOW_TURBO_REF2VA
                 or plan.get(
                     "profile"
                 ) == PROFILE_TURBO
@@ -544,7 +544,7 @@ class ProductionOrchestrator:
                 steps = TURBO_STEPS
 
                 workflow_mode = (
-                    WORKFLOW_TURBO_REF2V
+                    WORKFLOW_TURBO_REF2VA
                 )
 
             else:
@@ -552,11 +552,11 @@ class ProductionOrchestrator:
                 steps = H3_STEPS
 
                 if workflow_mode not in {
-                    WORKFLOW_REF2V,
+                    WORKFLOW_REF2VA,
                 }:
 
                     workflow_mode = (
-                        WORKFLOW_REF2V
+                        WORKFLOW_REF2VA
                     )
 
             soundscape = str(
