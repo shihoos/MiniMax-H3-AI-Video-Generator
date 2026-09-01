@@ -27,7 +27,7 @@ from pipeline.timeline import ProductionTimeline
 from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.production_checkpoint import ProductionCheckpoint
 from pipeline.retake_manager import RetakeManager
-from ui.shot_view_model import shot_choices, render_shot_card, shot_preview_path
+from ui.shot_view_model import shot_choices, render_shot_card
 from planner.config import (
     GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
@@ -797,16 +797,55 @@ class ProductionController:
         try:
             plan, _ = self._load_plan(plan_path_value)
             choices = shot_choices(plan)
-            return gr.update(choices=choices, value=(choices[0] if choices else None)), (render_shot_card(plan, choices[0]) if choices else "### No shots available"), (shot_preview_path(plan, choices[0]) if choices else None)
+            return gr.update(choices=choices, value=(choices[0] if choices else None)), (render_shot_card(plan, choices[0]) if choices else "### No shots available")
         except Exception as exc:
             return gr.update(choices=[], value=None), "### ERROR\n" + str(exc)
 
     def shot_detail(self, plan_path_value: str, shot_id: str):
         try:
             plan, _ = self._load_plan(plan_path_value)
-            return render_shot_card(plan, shot_id), shot_preview_path(plan, shot_id)
+            return render_shot_card(plan, shot_id)
         except Exception as exc:
-            return "### ERROR\n" + str(exc), None
+            return "### ERROR\n" + str(exc)
+
+    def shot_preview(self, plan_path_value: str, shot_id: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            wanted = str(shot_id or "").strip()
+            shot = next((s for s in (plan.get("shots", []) or []) if isinstance(s, dict) and str(s.get("shot_id", "")).strip() == wanted), None)
+            if not shot:
+                return None, "No shot selected."
+            candidates = []
+            for key in ("preview_path", "preview_file", "output_video", "video_path", "rendered_video"):
+                value = str(shot.get(key, "") or "").strip()
+                if value:
+                    path = Path(value)
+                    if path.is_file():
+                        candidates.append(path)
+            production_id = str(plan.get("production_id", "")).strip()
+            preview_root = ROOT / "data" / "production" / production_id / "previews"
+            if preview_root.is_dir():
+                candidates.extend(p for p in preview_root.rglob("latest.*") if p.is_file())
+            if not candidates:
+                return None, "No visual preview is available for this shot yet."
+            path = max(candidates, key=lambda item: item.stat().st_mtime)
+            return str(path), f"Preview: `{path.name}`"
+        except Exception as exc:
+            return None, "### ERROR\n" + str(exc)
+
+    def shot_retake_defaults(self, plan_path_value: str, shot_id: str):
+        try:
+            plan, _ = self._load_plan(plan_path_value)
+            wanted = str(shot_id or "").strip()
+            shot = next((s for s in (plan.get("shots", []) or []) if isinstance(s, dict) and str(s.get("shot_id", "")).strip() == wanted), None)
+            if not shot:
+                return "", 0.0, 4.0, ""
+            duration = max(4.0, min(15.0, float(shot.get("duration_seconds", 4.0) or 4.0)))
+            q = shot.get("quality_gate", {}) or {}
+            reason = str(q.get("decision_reason") or "Selective quality retake")
+            return wanted, 0.0, duration, reason
+        except Exception:
+            return str(shot_id or ""), 0.0, 4.0, "Selective quality retake"
 
     # ========================================================
     # PREVIEW
@@ -1581,6 +1620,17 @@ def build_app(
     .h3-actions button { min-height: 46px; }
     .h3-status { min-height: 42px; }
     .h3-preview img { object-fit: contain !important; }
+    .h3-shot-card { border: 1px solid var(--border-color-primary); border-radius: 16px; padding: 16px; background: var(--background-fill-secondary); }
+    .h3-shot-title { font-size: 1.15rem; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .h3-shot-meta { margin: 10px 0; display: flex; gap: 6px; flex-wrap: wrap; }
+    .h3-shot-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; }
+    .h3-shot-grid section { min-width: 0; }
+    .h3-shot-grid pre { white-space: pre-wrap; max-height: 260px; overflow: auto; padding: 10px; border-radius: 10px; }
+    .h3-badge { display: inline-block; border: 1px solid var(--border-color-primary); border-radius: 999px; padding: 3px 8px; margin: 2px; font-size: 0.78rem; }
+    .h3-good { border-color: #3b8f5f; }
+    .h3-warn { border-color: #c48a2b; }
+    .h3-bad { border-color: #bd4a4a; }
+    @media (max-width: 1000px) { .h3-shot-grid { grid-template-columns: 1fr; } }
     """
 
     try:
@@ -1649,7 +1699,14 @@ def build_app(
                         shot_selector = gr.Dropdown(label="Selected Shot", choices=[], value=None, interactive=True)
                         shot_refresh = gr.Button("Load Shot Details")
                     shot_detail = gr.Markdown("### Select a shot\nThe selected shot's prompt, references, continuity, critic, VLM and QA state will appear here.", elem_classes=["h3-panel"])
-                    shot_preview = gr.Video(label="Selected Shot Preview", interactive=False, height=360, elem_classes=["h3-preview"])
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            shot_visual = gr.Image(label="Selected Shot Preview", type="filepath", height=360, elem_classes=["h3-preview"])
+                            shot_visual_status = gr.Markdown()
+                        with gr.Column(scale=1, elem_classes=["h3-panel"]):
+                            gr.Markdown("### Shot Actions")
+                            shot_load_retake = gr.Button("Use Selected Shot for Retake", variant="primary")
+                            gr.Markdown("Select a shot above; the retake controls are populated automatically from its duration and current QA reason.")
 
                 with gr.Tab("⏱ Timeline & Preview", id="timeline"):
                     gr.Markdown("### Timeline Editor\nEdit duration and continuity mode, then apply the changes. The cinematic compiler remains the single production source of truth.")
@@ -1711,9 +1768,11 @@ def build_app(
             refresh_live_preview.click(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             live_preview_timer.tick(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             load_timeline.click(fn=controller.timeline_table, inputs=[session_plan_path], outputs=[timeline_table, timeline_status])
-            load_timeline.click(fn=controller.shot_options, inputs=[session_plan_path], outputs=[shot_selector, shot_detail, shot_preview])
-            shot_selector.change(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail, shot_preview])
-            shot_refresh.click(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail, shot_preview])
+            load_timeline.click(fn=controller.shot_options, inputs=[session_plan_path], outputs=[shot_selector, shot_detail])
+            shot_selector.change(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
+            shot_refresh.click(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
+            shot_selector.change(fn=controller.shot_preview, inputs=[session_plan_path, shot_selector], outputs=[shot_visual, shot_visual_status])
+            shot_load_retake.click(fn=controller.shot_retake_defaults, inputs=[session_plan_path, shot_selector], outputs=[retake_shot_id, retake_start, retake_end, retake_reason])
             apply_timeline.click(fn=controller.apply_timeline_edits, inputs=[session_plan_path, timeline_table], outputs=[timeline_table, timeline_status, session_plan_path])
             runtime_check.click(fn=controller.runtime_health, inputs=[session_plan_path], outputs=[runtime_json, runtime_status])
             request_retake.click(fn=controller.create_retake_request, inputs=[session_plan_path, retake_shot_id, retake_start, retake_end, retake_reason], outputs=[retake_status, session_plan_path])
