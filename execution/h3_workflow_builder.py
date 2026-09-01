@@ -144,17 +144,108 @@ class H3WorkflowBuilder:
     def _peek_next_graph_id(workflow: dict) -> int:
         return int(workflow.get("last_node_id", 0)) + 1
 
+    @staticmethod
+    def _apply_memory_optimization_config(
+        node: dict,
+    ) -> None:
+        """
+        Synchronize an existing H3MemoryOptimization node with
+        the current runtime configuration.
+
+        The workflow graph itself is preserved; only optimizer
+        settings are updated.
+        """
+        try:
+            from planner.config import RUNTIME
+            cfg = dict(
+                RUNTIME.get("h3_optimization", {}) or {}
+            )
+        except Exception:
+            cfg = {}
+
+        chunk_rows = int(
+            cfg.get("chunk_rows", 4096) or 4096
+        )
+
+        precision_mode = str(
+            cfg.get("precision_mode", "Auto") or "Auto"
+        )
+
+        qkv_streaming_mode = str(
+            cfg.get("qkv_streaming_mode", "Auto")
+            or "Auto"
+        )
+
+        attention_memory_mode = str(
+            cfg.get("attention_memory_mode", "Standard")
+            or "Standard"
+        )
+
+        version = str(
+            cfg.get("version", "0.2.41")
+            or "0.2.41"
+        )
+
+        node["properties"] = dict(
+            node.get("properties") or {}
+        )
+
+        node["properties"][
+            "cnr_id"
+        ] = "h3-optimizations"
+
+        node["properties"][
+            "ver"
+        ] = version
+
+        node["properties"][
+            "Node name for S&R"
+        ] = "H3MemoryOptimization"
+
+        node["widgets_values"] = [
+            "auto",
+            "auto",
+            chunk_rows,
+            True,
+            precision_mode,
+            qkv_streaming_mode,
+            "Auto",
+            attention_memory_mode,
+        ]
+
+        node["widgets_values_named"] = {
+            "fused_qkv": "auto",
+            "mlp_memory": "auto",
+            "chunk_rows": chunk_rows,
+            "preserve_precision": True,
+            "precision_mode": precision_mode,
+            "qkv_streaming_mode": qkv_streaming_mode,
+            "embedding_memory_mode": "Auto",
+            "kitchen_v_memory_mode": attention_memory_mode,
+        }
+
     # ============================================================
     # H3 MEMORY OPTIMIZATION
     # ============================================================
 
     def _inject_memory_optimization(self, workflow: dict, *, source_node_type: str = "UNETLoader") -> None:
         """Insert the upstream H3MemoryOptimization node between the H3 model producer and its MODEL consumers."""
-        existing = self._find(workflow, "H3MemoryOptimization")
-        if existing:
-            if len(existing) != 1:
-                raise RuntimeError("Workflow contains multiple H3MemoryOptimization nodes.")
-            return
+            existing = self._find(
+                workflow,
+                "H3MemoryOptimization",
+            )
+        
+            if existing:
+                if len(existing) != 1:
+                    raise RuntimeError(
+                        "Workflow contains multiple H3MemoryOptimization nodes."
+                    )
+        
+                self._apply_memory_optimization_config(
+                    existing[0]
+                )
+        
+                return
 
         source = self._one(workflow, source_node_type)
         source_id = self._node_id(source)
