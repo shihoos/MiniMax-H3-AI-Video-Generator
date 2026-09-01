@@ -3,12 +3,21 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from pipeline.vram_profile import VRAMProfile, resolve_vram_profile
+
 ExecutionMode = Literal["production", "preview", "retake", "diagnostic"]
+
+
+def _feature(config: dict, name: str, default: bool) -> bool:
+    value = config.get(name, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    """Single execution contract shared by normal, preview, retake and diagnostic runs."""
+    """Single immutable execution contract for every H3 execution mode."""
 
     mode: ExecutionMode = "production"
     turbo: bool = False
@@ -16,17 +25,63 @@ class ExecutionPolicy:
     live_preview: bool = True
     require_context_ir: bool = True
     run_visual_qa: bool = True
-    auto_retake: bool = False
+    auto_retake: bool = True
     max_auto_retries: int = 1
+    vram_profile: VRAMProfile | None = None
+    allow_preview_mode: bool = True
+    allow_diagnostic_mode: bool = True
+    allow_retake_mode: bool = True
+
+    @classmethod
+    def from_runtime(
+        cls,
+        *,
+        mode: ExecutionMode = "production",
+        turbo: bool = False,
+        upscale: bool = False,
+        gpu_id: int | None = None,
+    ) -> "ExecutionPolicy":
+        from planner.config import RUNTIME
+
+        features = dict(RUNTIME.get("features", {}) or {})
+        max_retries = max(0, int(features.get("max_auto_retakes_per_shot", 1) or 0))
+        auto_retake = (
+            _feature(features, "auto_retake", True)
+            and _feature(features, "selective_retake", True)
+            and _feature(features, "qa_enabled", True)
+        )
+        runtime_vram = dict(RUNTIME.get("runtime", {}).get("vram", {}) or {})
+        runtime_vram["cpu_vae"] = RUNTIME.get("runtime", {}).get("cpu_vae", "auto")
+        vram_profile = resolve_vram_profile(runtime_vram, gpu_id=gpu_id)
+        return cls(
+            mode=mode,
+            turbo=bool(turbo),
+            upscale=bool(upscale),
+            live_preview=_feature(features, "live_preview", True),
+            require_context_ir=_feature(features, "context_ir_required", True),
+            run_visual_qa=_feature(features, "vlm_visual_qa", True) and _feature(features, "qa_enabled", True),
+            auto_retake=auto_retake,
+            max_auto_retries=max_retries if auto_retake else 0,
+            vram_profile=vram_profile,
+            allow_preview_mode=_feature(features, "preview_execution_mode", True),
+            allow_diagnostic_mode=_feature(features, "diagnostic_execution_mode", True),
+            allow_retake_mode=_feature(features, "retake_execution_mode", True),
+        ).for_mode(mode)
 
     def for_mode(self, mode: ExecutionMode) -> "ExecutionPolicy":
-        mode = str(mode)  # type: ignore[assignment]
-        if mode not in {"production", "preview", "retake", "diagnostic"}:
-            raise ValueError(f"Unsupported execution mode: {mode!r}")
-        if mode == "preview":
-            return replace(self, mode=mode, upscale=False, auto_retake=False)
-        if mode == "diagnostic":
-            return replace(self, mode=mode, upscale=False, live_preview=False, run_visual_qa=False, auto_retake=False)
-        if mode == "retake":
-            return replace(self, mode=mode, auto_retake=False, max_auto_retries=0)
-        return replace(self, mode=mode)
+        requested = str(mode)
+        if requested not in {"production", "preview", "retake", "diagnostic"}:
+            raise ValueError(f"Unsupported execution mode: {requested!r}")
+        if requested == "preview" and not self.allow_preview_mode:
+            raise RuntimeError("Preview execution mode is disabled by runtime configuration.")
+        if requested == "diagnostic" and not self.allow_diagnostic_mode:
+            raise RuntimeError("Diagnostic execution mode is disabled by runtime configuration.")
+        if requested == "retake" and not self.allow_retake_mode:
+            raise RuntimeError("Retake execution mode is disabled by runtime configuration.")
+        if requested == "preview":
+            return replace(self, mode="preview", upscale=False, auto_retake=False, max_auto_retries=0)
+        if requested == "diagnostic":
+            return replace(self, mode="diagnostic", upscale=False, live_preview=False, run_visual_qa=False, auto_retake=False, max_auto_retries=0)
+        if requested == "retake":
+            return replace(self, mode="retake", auto_retake=False, max_auto_retries=0)
+        return replace(self, mode="production")
