@@ -419,14 +419,14 @@ VALID_STORY_MODES = {
 # ============================================================
 
 WORKFLOW_AUTO = "auto"
-WORKFLOW_REF2V = "ref2v"
-WORKFLOW_TURBO_REF2V = "turbo_ref2v"
+WORKFLOW_REF2VA = "ref2va"
+WORKFLOW_TURBO_REF2VA = "turbo_ref2va"
 WORKFLOW_UPSCALE = "upscale"
 
 ALL_WORKFLOW_MODES = {
     WORKFLOW_AUTO,
-    WORKFLOW_REF2V,
-    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_REF2VA,
+    WORKFLOW_TURBO_REF2VA,
     WORKFLOW_UPSCALE,
 }
 
