@@ -541,6 +541,9 @@ class H3UpscaledWorkflowBuilder(
                 prompt,
             )
 
+        if bool(__import__("planner.config", fromlist=["RUNTIME"]).RUNTIME.get("h3_optimization", {}).get("memory_optimization", True)):
+            self._inject_memory_optimization(workflow, source_node_type="UNETLoader")
+
         generation_nodes = (
             self._find_generation_nodes(
                 workflow
@@ -569,14 +572,17 @@ class H3UpscaledWorkflowBuilder(
             "MMH3SpatialSplitParams"
         ]
 
-        # Existing generation model.
+        # Existing generation model. Use the shared H3 memory optimizer output
+        # when enabled so generation and upscale refinement consume the same
+        # optimized MODEL lineage.
+        model_source = generation_nodes["UNETLoader"]
+        optimizer_nodes = self._find(workflow, "H3MemoryOptimization")
+        if optimizer_nodes:
+            model_source = optimizer_nodes[0]
+
         self._connect_graph(
             workflow,
-            self._node_id(
-                generation_nodes[
-                    "UNETLoader"
-                ]
-            ),
+            self._node_id(model_source),
             0,
             ultimate_id,
             "model",
