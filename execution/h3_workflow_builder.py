@@ -31,15 +31,15 @@ class H3WorkflowBuilder:
     MODES = {
         "ref2va": (
             Path("generation"),
-            "H3_Ref2Va_Production.json",
+            "H3_Ref2VA_Production.json",
         ),
         "turbo_ref2va": (
             Path("generation"),
-            "H3_Turbo_Ref2Va_Production.json",
+            "H3_Turbo_Ref2VA_Production.json",
         ),
         "upscale": (
             Path("postprocess"),
-            "H3_Ref2Va_UltimateUpscale_Production.json",
+            "H3_Ref2VA_UltimateUpscale_Production.json",
         ),
     }
 
