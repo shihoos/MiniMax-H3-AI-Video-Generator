@@ -31,15 +31,15 @@ class H3WorkflowBuilder:
     MODES = {
         "ref2va": (
             Path("generation"),
-            "H3_Ref2VA_Production.json",
+            "H3_Ref2Va_Production.json",
         ),
         "turbo_ref2va": (
             Path("generation"),
-            "H3_Turbo_Ref2VA_Production.json",
+            "H3_Turbo_Ref2Va_Production.json",
         ),
         "upscale": (
             Path("postprocess"),
-            "H3_Ref2VA_UltimateUpscale_Production.json",
+            "H3_Ref2Va_UltimateUpscale_Production.json",
         ),
     }
 
@@ -144,61 +144,29 @@ class H3WorkflowBuilder:
     def _apply_memory_optimization_config(
         node: dict,
     ) -> None:
-        """
-        Synchronize an existing H3MemoryOptimization node with
-        the current runtime configuration.
-
-        The workflow graph itself is preserved; only optimizer
-        settings are updated.
-        """
+        """Synchronize an existing H3MemoryOptimization node with runtime config."""
         try:
             from planner.config import RUNTIME
-            cfg = dict(
-                RUNTIME.get("h3_optimization", {}) or {}
-            )
+            cfg = dict(RUNTIME.get("h3_optimization", {}) or {})
         except Exception:
             cfg = {}
 
-        chunk_rows = int(
-            cfg.get("chunk_rows", 4096) or 4096
-        )
-
-        precision_mode = str(
-            cfg.get("precision_mode", "Auto") or "Auto"
-        )
-
+        chunk_rows = int(cfg.get("chunk_rows", 4096) or 4096)
+        precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
         qkv_streaming_mode = str(
-            cfg.get("qkv_streaming_mode", "Auto")
-            or "Auto"
+            cfg.get("qkv_streaming_mode", "Auto") or "Auto"
         )
-
         attention_memory_mode = str(
-            cfg.get("attention_memory_mode", "Standard")
-            or "Standard"
+            cfg.get("attention_memory_mode", "Standard") or "Standard"
         )
+        version = str(cfg.get("version", "0.2.41") or "0.2.41")
 
-        version = str(
-            cfg.get("version", "0.2.41")
-            or "0.2.41"
-        )
+        node["properties"] = dict(node.get("properties") or {})
+        node["properties"]["cnr_id"] = "h3-optimizations"
+        node["properties"]["ver"] = version
+        node["properties"]["Node name for S&R"] = "H3MemoryOptimization"
 
-        node["properties"] = dict(
-            node.get("properties") or {}
-        )
-
-        node["properties"][
-            "cnr_id"
-        ] = "h3-optimizations"
-
-        node["properties"][
-            "ver"
-        ] = version
-
-        node["properties"][
-            "Node name for S&R"
-        ] = "H3MemoryOptimization"
-
-        node["widgets_values"] = [
+        values = [
             "auto",
             "auto",
             chunk_rows,
@@ -208,7 +176,7 @@ class H3WorkflowBuilder:
             "Auto",
             attention_memory_mode,
         ]
-
+        node["widgets_values"] = values
         node["widgets_values_named"] = {
             "fused_qkv": "auto",
             "mlp_memory": "auto",
@@ -226,38 +194,35 @@ class H3WorkflowBuilder:
         *,
         source_node_type: str = "UNETLoader",
     ) -> None:
-        """Insert H3MemoryOptimization between the model producer and MODEL consumers."""
-        existing = self._find(
-            workflow,
-            "H3MemoryOptimization",
-        )
-
+        """Ensure one H3MemoryOptimization node owns the H3 MODEL fan-out."""
+        existing = self._find(workflow, "H3MemoryOptimization")
         if existing:
             if len(existing) != 1:
                 raise RuntimeError(
                     "Workflow contains multiple H3MemoryOptimization nodes."
                 )
-
-            self._apply_memory_optimization_config(
-                existing[0]
-            )
-
+            self._apply_memory_optimization_config(existing[0])
             return
 
         source = self._one(workflow, source_node_type)
         source_id = self._node_id(source)
         model_edges = [
-            list(row) for row in workflow.get("links", [])
-            if isinstance(row, list) and len(row) >= 6
-            and int(row[1]) == source_id
-            and str(row[5]).upper() == "MODEL"
+            list(row)
+            for row in workflow.get("links", [])
+            if (
+                isinstance(row, list)
+                and len(row) >= 6
+                and int(row[1]) == source_id
+                and str(row[5]).upper() == "MODEL"
+            )
         ]
         if not model_edges:
-            raise RuntimeError(f"{source_node_type} has no MODEL consumers to optimize.")
+            raise RuntimeError(
+                f"{source_node_type} has no MODEL consumers to optimize."
+            )
 
         node_id = self._next_id(workflow)
         pos = source.get("pos", [0, 0])
-
         node = {
             "id": node_id,
             "type": "H3MemoryOptimization",
@@ -276,7 +241,6 @@ class H3WorkflowBuilder:
             "widgets_values": [],
             "widgets_values_named": {},
         }
-
         self._apply_memory_optimization_config(node)
 
         # Connect producer -> optimizer.
@@ -288,24 +252,39 @@ class H3WorkflowBuilder:
 
         old_ids = {int(row[0]) for row in model_edges}
         workflow["links"] = [
-            row for row in workflow.get("links", [])
-            if not (isinstance(row, list) and len(row) >= 1 and int(row[0]) in old_ids)
+            row
+            for row in workflow.get("links", [])
+            if not (
+                isinstance(row, list)
+                and len(row) >= 1
+                and int(row[0]) in old_ids
+            )
         ]
         for output in source.get("outputs", []):
             if isinstance(output.get("links"), list):
-                output["links"] = [x for x in output["links"] if int(x) not in old_ids]
+                output["links"] = [
+                    x for x in output["links"] if int(x) not in old_ids
+                ]
 
         for row in model_edges:
             new_link = self._next_link_id(workflow)
+            target_id = int(row[3])
+            target_slot = int(row[4])
             workflow["links"].append(
-                [new_link, node_id, 0, int(row[3]), int(row[4]), "MODEL"]
+                [new_link, node_id, 0, target_id, target_slot, "MODEL"]
             )
             target = next(
-                (n for n in self._nodes(workflow) if self._node_id(n) == int(row[3])),
+                (
+                    n
+                    for n in self._nodes(workflow)
+                    if self._node_id(n) == target_id
+                ),
                 None,
             )
             if target is None:
-                raise RuntimeError(f"Missing MODEL consumer node {row[3]} after optimizer insertion.")
+                raise RuntimeError(
+                    f"Missing MODEL consumer node {target_id} after optimizer insertion."
+                )
             replaced = False
             for inp in target.get("inputs", []):
                 if isinstance(inp, dict) and inp.get("link") == int(row[0]):
@@ -313,14 +292,16 @@ class H3WorkflowBuilder:
                     replaced = True
                     break
             if not replaced:
-                raise RuntimeError(f"Could not replace MODEL link {row[0]} on node {row[3]}.")
+                raise RuntimeError(
+                    f"Could not replace MODEL link {row[0]} on node {target_id}."
+                )
             node["outputs"][0]["links"].append(new_link)
 
         workflow.setdefault("nodes", []).append(node)
-        workflow["last_node_id"] = max(int(workflow.get("last_node_id", node_id)), node_id)
-
         if not node["outputs"][0]["links"]:
-            raise RuntimeError("H3MemoryOptimization produced no downstream MODEL links.")
+            raise RuntimeError(
+                "H3MemoryOptimization produced no downstream MODEL links."
+            )
 
     # ============================================================
     # LOAD
@@ -1760,14 +1741,10 @@ class H3WorkflowBuilder:
                 prompt_prefix + prompt,
             )
 
-                
         from planner.config import RUNTIME
 
         if bool(
-            RUNTIME.get(
-                "h3_optimization",
-                {},
-            ).get(
+            RUNTIME.get("h3_optimization", {}).get(
                 "memory_optimization",
                 True,
             )
@@ -1777,7 +1754,6 @@ class H3WorkflowBuilder:
                 if mode == "turbo_ref2va"
                 else "UNETLoader"
             )
-
             self._inject_memory_optimization(
                 workflow,
                 source_node_type=source_type,
