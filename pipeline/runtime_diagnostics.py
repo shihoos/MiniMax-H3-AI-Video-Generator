@@ -44,8 +44,25 @@ class RuntimeDiagnostics:
         except Exception:
             gpu_id = None
         profile = resolve_vram_profile(runtime_vram, gpu_id=gpu_id)
+        features = dict(RUNTIME.get("features", {}) or {})
         report: dict[str, Any] = {
             "python": platform.python_version(),
+            "features": {
+                "live_preview": bool(features.get("live_preview", True)),
+                "qa_enabled": bool(features.get("qa_enabled", True)),
+                "vlm_enabled": bool(features.get("vlm_enabled", True)),
+                "vlm_reference_analysis": bool(features.get("vlm_reference_analysis", True)),
+                "vlm_visual_qa": bool(features.get("vlm_visual_qa", True)),
+                "director_critic": bool(features.get("director_critic", True)),
+                "selective_retake": bool(features.get("selective_retake", True)),
+                "auto_retake": bool(features.get("auto_retake", True)),
+                "max_auto_retakes_per_shot": int(features.get("max_auto_retakes_per_shot", 1) or 0),
+                "context_ir_version": int(features.get("context_ir_version", 2) or 0),
+                "preview_execution_mode": bool(features.get("preview_execution_mode", True)),
+                "diagnostic_execution_mode": bool(features.get("diagnostic_execution_mode", True)),
+                "retake_execution_mode": bool(features.get("retake_execution_mode", True)),
+                "context_ir_required": bool(features.get("context_ir_required", True)),
+            },
             "vram_profile": {
                 "name": profile.name,
                 "async_offload_streams": profile.async_offload_streams,
