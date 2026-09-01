@@ -1188,12 +1188,18 @@ class ProductionController:
                 plan_path_value,
             )
 
-        if not self._lock.acquire(
-            blocking=False
-        ):
+        # Queue workers must wait for an active storyboard-planning operation
+        # instead of converting normal lock contention into a permanent job
+        # failure. Keep the timeout bounded so a genuinely wedged controller
+        # cannot block the persistent queue forever.
+        lock_acquired = self._lock.acquire(
+            timeout=3600.0
+        )
+
+        if not lock_acquired:
 
             return (
-                "### BUSY\nA production job is already running.",
+                "### ERROR\nLock acquisition timed out after 1 hour.",
                 None,
                 plan_path_value,
             )
@@ -1464,7 +1470,8 @@ class ProductionController:
 
                     traceback.print_exc()
 
-            self._lock.release()
+            if lock_acquired:
+                self._lock.release()
 
 
 def build_app(
