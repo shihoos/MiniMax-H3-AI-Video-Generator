@@ -40,35 +40,43 @@ class H3ContextIRCompiler:
         return "; ".join(values)
 
     @classmethod
-    def _reference_definitions(cls, shot: dict[str, Any]) -> tuple[list[str], list[str]]:
-        bindings = []
-        for raw in shot.get("reference_bindings", []) or []:
-            text = cls._clean(raw)
-            if text:
-                bindings.append(text)
-
+    def _canonical_reference_entries(cls, shot: dict[str, Any]) -> list[dict[str, Any]]:
         roles = [x for x in (shot.get("reference_roles", []) or []) if isinstance(x, dict)]
-        if roles:
-            labels = []
-            for index, role in enumerate(roles, start=1):
-                label = cls._clean(role.get("label"))
-                kind = cls._clean(role.get("role")) or "visual reference"
-                path = cls._clean(role.get("path"))
-                if not label:
-                    label = f"Picture {index}"
-                if label.lower().startswith("picture"):
-                    ref_label = f"<{label}>"
-                elif label.lower().startswith(("video ", "audio ")):
-                    ref_label = f"<{label}>"
-                else:
-                    ref_label = f"<Picture {index}>"
-                detail = f"{ref_label} is used as {kind}"
-                if path:
-                    detail += f" from {path}"
-                labels.append(detail + ".")
-            return labels, bindings
+        bindings = [cls._clean(x) for x in (shot.get("reference_bindings", []) or []) if cls._clean(x)]
+        entries: list[dict[str, Any]] = []
+        for index, role in enumerate(roles, start=1):
+            raw_label = cls._clean(role.get("label"))
+            raw_role = cls._clean(role.get("role")) or "visual reference"
+            path = cls._clean(role.get("path"))
+            if raw_label.lower().startswith("picture ") or raw_label.lower().startswith("video ") or raw_label.lower().startswith("audio "):
+                label = raw_label
+            else:
+                label = f"Picture {index}"
+            ref_label = f"<{label}>"
+            binding = bindings[index - 1] if index - 1 < len(bindings) else f"{ref_label} = {raw_role}"
+            entries.append({"index": index, "label": label, "ref_label": ref_label, "role": raw_role, "path": path, "binding": binding})
+        # Legacy plans may have bindings but no roles. Preserve those labels deterministically.
+        if not entries:
+            for index, binding in enumerate(bindings, start=1):
+                match = re.search(r"<(Picture|Video|Audio)\s+\d+>", binding, flags=re.IGNORECASE)
+                label = match.group(0)[1:-1] if match else f"Picture {index}"
+                entries.append({"index": index, "label": label, "ref_label": f"<{label}>", "role": "visual reference", "path": "", "binding": binding})
+        return entries
 
-        return [], bindings
+    @classmethod
+    def _reference_definitions(cls, shot: dict[str, Any]) -> tuple[list[str], list[str]]:
+        entries = cls._canonical_reference_entries(shot)
+        definitions = []
+        bindings = []
+        for entry in entries:
+            detail = f"{entry['ref_label']} is used as {entry['role']}"
+            if entry.get("path"):
+                detail += f" from {entry['path']}"
+            definitions.append(detail + ".")
+            binding = cls._clean(entry.get("binding"))
+            if binding and binding not in bindings:
+                bindings.append(binding)
+        return definitions, bindings
 
     @classmethod
     def _subject_definitions(cls, plan: dict[str, Any], shot: dict[str, Any]) -> str:
@@ -126,15 +134,11 @@ class H3ContextIRCompiler:
         if not isinstance(continuity, dict):
             continuity = {}
         required = []
-        roles = [r for r in (shot.get("reference_roles", []) or []) if isinstance(r, dict)]
-        for index, role in enumerate(roles, start=1):
-            label = cls._clean(role.get("label")) or f"Picture {index}"
-            role_name = cls._clean(role.get("role")) or "visual reference"
-            relationship = "fully_preserved"
-            if role_name in {"storyboard", "visual_reference"}:
-                relationship = "partially_preserved" if role_name == "storyboard" else "fully_preserved"
-            description = cls._clean(role.get("description") or role.get("label") or role_name)
-            required.append(f"<{label}>: {relationship} - {description}.")
+        for entry in cls._canonical_reference_entries(shot):
+            role_name = str(entry.get("role", "visual reference"))
+            relationship = "partially_preserved" if role_name == "storyboard" else "fully_preserved"
+            description = cls._clean(entry.get("binding") or role_name)
+            required.append(f"{entry['ref_label']}: {relationship} - {description}.")
         for key, label in (
             ("location", "location"),
             ("lighting", "lighting"),
@@ -208,6 +212,9 @@ class H3ContextIRCompiler:
         )
         if lighting:
             lines.append(f"Lighting: {lighting}.")
+        ref_entries = cls._canonical_reference_entries(shot)
+        if ref_entries:
+            lines.append("References: " + "; ".join(f"{e['ref_label']} ({e['role']})" for e in ref_entries) + ".")
         dialogue = []
         for event in shot.get("dialogue_events", []) or []:
             if not isinstance(event, dict):
@@ -291,6 +298,12 @@ class H3ContextIRCompiler:
             for label in reference_labels:
                 if label not in prompt:
                     raise ValueError(f"Declared Context-IR reference is never used: {label}")
+            sections = context_ir.get("sections", {}) if isinstance(context_ir.get("sections"), dict) else {}
+            semantic_sections = ("subject_definitions", "retention_analysis", "detailed_description")
+            for label in reference_labels:
+                missing_sections = [name for name in semantic_sections if label not in str(sections.get(name, ""))]
+                if missing_sections:
+                    raise ValueError(f"Context-IR reference {label} is not consistently bound in semantic sections: {', '.join(missing_sections)}")
 
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
@@ -312,8 +325,14 @@ class H3ContextIRCompiler:
         ).strip()
 
         refs = []
-        for index, binding in enumerate(shot.get("reference_bindings", []) or [], start=1):
-            refs.append({"index": index, "binding": self._clean(binding)})
+        for entry in self._canonical_reference_entries(shot):
+            refs.append({
+                "index": int(entry["index"]),
+                "label": entry["ref_label"],
+                "binding": self._clean(entry.get("binding")),
+                "role": self._clean(entry.get("role")),
+                "path": self._clean(entry.get("path")),
+            })
 
         result = {
             "version": self.VERSION,
