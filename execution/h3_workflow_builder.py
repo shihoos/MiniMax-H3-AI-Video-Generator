@@ -135,6 +135,130 @@ class H3WorkflowBuilder:
     ) -> int:
         return int(node["id"])
 
+
+    # ============================================================
+    # H3 MEMORY OPTIMIZATION
+    # ============================================================
+
+    @staticmethod
+    def _peek_next_graph_id(workflow: dict) -> int:
+        return int(workflow.get("last_node_id", 0)) + 1
+
+    # ============================================================
+    # H3 MEMORY OPTIMIZATION
+    # ============================================================
+
+    def _inject_memory_optimization(self, workflow: dict, *, source_node_type: str = "UNETLoader") -> None:
+        """Insert the upstream H3MemoryOptimization node between the H3 model producer and its MODEL consumers."""
+        existing = self._find(workflow, "H3MemoryOptimization")
+        if existing:
+            if len(existing) != 1:
+                raise RuntimeError("Workflow contains multiple H3MemoryOptimization nodes.")
+            return
+
+        source = self._one(workflow, source_node_type)
+        source_id = self._node_id(source)
+        model_edges = [
+            list(row) for row in workflow.get("links", [])
+            if isinstance(row, list) and len(row) >= 6
+            and int(row[1]) == source_id
+            and str(row[5]).upper() == "MODEL"
+        ]
+        if not model_edges:
+            raise RuntimeError(f"{source_node_type} has no MODEL consumers to optimize.")
+
+        try:
+            from planner.config import RUNTIME
+            cfg = dict(RUNTIME.get("h3_optimization", {}) or {})
+        except Exception:
+            cfg = {}
+
+        node_id = self._next_id(workflow)
+        pos = source.get("pos", [0, 0])
+        chunk_rows = int(cfg.get("chunk_rows", 2048) or 2048)
+        precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
+        qkv_streaming_mode = str(cfg.get("qkv_streaming_mode", "Auto") or "Auto")
+        attention_memory_mode = str(cfg.get("attention_memory_mode", "Standard") or "Standard")
+        version = str(cfg.get("version", "0.2.41") or "0.2.41")
+
+        node = {
+            "id": node_id,
+            "type": "H3MemoryOptimization",
+            "pos": [float(pos[0]) + 720.0, float(pos[1])],
+            "size": [390, 270],
+            "flags": {},
+            "order": int(source.get("order", 0)) + 1,
+            "mode": 0,
+            "inputs": [
+                {"name": "model", "type": "MODEL", "link": None},
+            ],
+            "outputs": [
+                {"name": "MODEL", "type": "MODEL", "links": []},
+            ],
+            "properties": {
+                "cnr_id": "h3-optimizations",
+                "ver": version,
+                "Node name for S&R": "H3MemoryOptimization",
+            },
+            "widgets_values": [
+                "auto", "auto", chunk_rows, True,
+                precision_mode, qkv_streaming_mode, "Auto", attention_memory_mode,
+            ],
+            "widgets_values_named": {
+                "fused_qkv": "auto",
+                "mlp_memory": "auto",
+                "chunk_rows": chunk_rows,
+                "preserve_precision": True,
+                "precision_mode": precision_mode,
+                "qkv_streaming_mode": qkv_streaming_mode,
+                "embedding_memory_mode": "Auto",
+                "kitchen_v_memory_mode": attention_memory_mode,
+            },
+        }
+
+        # Connect producer -> optimizer.
+        input_link = self._next_link_id(workflow)
+        node["inputs"][0]["link"] = input_link
+        workflow.setdefault("links", []).append(
+            [input_link, source_id, 0, node_id, 0, "MODEL"]
+        )
+
+        old_ids = {int(row[0]) for row in model_edges}
+        workflow["links"] = [
+            row for row in workflow.get("links", [])
+            if not (isinstance(row, list) and len(row) >= 1 and int(row[0]) in old_ids)
+        ]
+        for output in source.get("outputs", []):
+            if isinstance(output.get("links"), list):
+                output["links"] = [x for x in output["links"] if int(x) not in old_ids]
+
+        for row in model_edges:
+            new_link = self._next_link_id(workflow)
+            workflow["links"].append(
+                [new_link, node_id, 0, int(row[3]), int(row[4]), "MODEL"]
+            )
+            target = next(
+                (n for n in self._nodes(workflow) if self._node_id(n) == int(row[3])),
+                None,
+            )
+            if target is None:
+                raise RuntimeError(f"Missing MODEL consumer node {row[3]} after optimizer insertion.")
+            replaced = False
+            for inp in target.get("inputs", []):
+                if isinstance(inp, dict) and inp.get("link") == int(row[0]):
+                    inp["link"] = new_link
+                    replaced = True
+                    break
+            if not replaced:
+                raise RuntimeError(f"Could not replace MODEL link {row[0]} on node {row[3]}.")
+            node["outputs"][0]["links"].append(new_link)
+
+        workflow.setdefault("nodes", []).append(node)
+        workflow["last_node_id"] = max(int(workflow.get("last_node_id", node_id)), node_id)
+
+        if not node["outputs"][0]["links"]:
+            raise RuntimeError("H3MemoryOptimization produced no downstream MODEL links.")
+
     # ============================================================
     # LOAD
     # ============================================================
@@ -1572,6 +1696,10 @@ class H3WorkflowBuilder:
                 workflow,
                 prompt_prefix + prompt,
             )
+
+        if bool(__import__("planner.config", fromlist=["RUNTIME"]).RUNTIME.get("h3_optimization", {}).get("memory_optimization", True)):
+            source_type = "UNETLoader"
+            self._inject_memory_optimization(workflow, source_node_type=source_type)
 
         return self.client.convert_workflow(
             workflow
