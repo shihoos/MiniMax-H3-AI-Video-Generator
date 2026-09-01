@@ -84,6 +84,48 @@ def main() -> None:
     assert widgets and str(widgets[0]) == ctx["h3_prompt"]
     assert H3ContextIRCompiler.prompt(ctx) == ctx["h3_prompt"]
     print("PASS: context_ir builder consumption")
+    from execution.execution_policy import ExecutionPolicy
+    production_policy = ExecutionPolicy.from_runtime(mode="production", gpu_id=None)
+    assert production_policy.require_context_ir is True
+    assert production_policy.auto_retake is True
+    assert production_policy.max_auto_retries >= 1
+    assert production_policy.vram_profile is not None
+    print("PASS: execution policy runtime alignment")
+
+    unavailable_gate = ProductionQualityGate(semantic_required=True).evaluate(
+        {"observed_state": {"sha256": "x"}, "vision_warning": "VLM unavailable"},
+        technical_ok=True,
+    )
+    assert unavailable_gate["status"] == "review"
+    assert unavailable_gate["evidence_level"] == "technical_only"
+    assert unavailable_gate["identity_score"] is None
+    print("PASS: VLM-required quality degradation policy")
+
+    ui_source = (ROOT / "ui" / "storyboard_gradio.py").read_text(encoding="utf-8")
+    assert "outputs=[result_status, final_video, session_plan_path]" in ui_source
+    print("PASS: Gradio refresh callback arity")
+
+    reference_plan = {
+        "production_id": "validation",
+        "story": "A scientist enters an archive.",
+        "characters": [{"name": "Alex", "role": "protagonist", "description": "adult scientist", "appearance": {}, "clothing": {}, "continuity_rules": []}],
+        "scenes": [{"scene_id": "scene_001", "location": "archive", "mood": "tense", "atmosphere": "quiet"}],
+    }
+    reference_shot = {
+        "shot_id": "shot_001", "scene_id": "scene_001", "duration_seconds": 5.2,
+        "characters": ["Alex"], "location": "archive", "time_of_day": "night",
+        "action": "Alex enters the archive", "camera_shot": "medium shot",
+        "camera_movement": "slow dolly", "reference_roles": [
+            {"path": "alex.png", "role": "identity", "description": "Alex identity reference", "media_type": "picture"}
+        ],
+        "continuity_start_state": {},
+    }
+    reference_ctx = H3ContextIRCompiler().compile(reference_plan, reference_shot)
+    H3ContextIRCompiler.validate(reference_ctx)
+    assert "<Picture 1>" in reference_ctx["sections"]["subject_definitions"]
+    assert "<Picture 1>" in reference_ctx["sections"]["retention_analysis"]
+    print("PASS: Context-IR canonical reference labels")
+
     print("Enhancement validation PASSED.")
 
 
