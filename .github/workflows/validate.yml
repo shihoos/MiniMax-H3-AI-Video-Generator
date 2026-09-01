@@ -96,70 +96,83 @@ jobs:
           import json
           from pathlib import Path
 
-          ROOT = Path(".")
-
           def load(path):
               return json.loads(
-                  (ROOT / path).read_text(encoding="utf-8")
+                  Path(path).read_text(encoding="utf-8")
               )
 
-          def nodes_map(graph):
-              return {
-                  int(node["id"]): node
-                  for node in graph.get("nodes", [])
-              }
+          def node_types(graph, kind):
+              return [
+                  n for n in graph.get("nodes", [])
+                  if n.get("type") == kind
+              ]
 
-          def linked_target_types(graph, source_id):
-              nodes = nodes_map(graph)
+          def outgoing_targets(graph, source_id):
+              nodes = {
+                  int(n["id"]): n
+                  for n in graph.get("nodes", [])
+              }
               targets = []
-              for link in graph.get("links", []):
-                  if not (
-                      isinstance(link, list)
-                      and len(link) >= 6
-                  ):
+              for row in graph.get("links", []):
+                  if not isinstance(row, list) or len(row) < 5:
                       continue
-                  if int(link[1]) != int(source_id):
+                  if int(row[1]) != int(source_id):
                       continue
-                  target = nodes.get(int(link[3]))
+                  target = nodes.get(int(row[3]))
                   if target is not None:
-                      targets.append(target.get("type"))
-              return set(targets)
+                      targets.append(target)
+              return targets
 
           turbo = load(
               "workflows/generation/H3_Turbo_Ref2VA_Production.json"
           )
-          turbo_lora = [
-              n for n in turbo["nodes"]
-              if n.get("type") == "MiniMaxH3TurboLoRA"
-          ]
-          turbo_opt = [
-              n for n in turbo["nodes"]
-              if n.get("type") == "H3MemoryOptimization"
-          ]
+          lora = node_types(turbo, "MiniMaxH3TurboLoRA")
+          optimizer = node_types(turbo, "H3MemoryOptimization")
 
-          assert len(turbo_lora) == 1
-          assert len(turbo_opt) == 1
+          assert len(lora) == 1, "Turbo must contain exactly one TurboLoRA."
+          assert len(optimizer) == 1, "Turbo must contain exactly one H3MemoryOptimization."
 
-          turbo_targets = linked_target_types(
+          lora_targets = outgoing_targets(turbo, lora[0]["id"])
+          assert any(
+              n.get("type") == "H3MemoryOptimization"
+              for n in lora_targets
+          ), "TurboLoRA must feed H3MemoryOptimization."
+
+          optimizer_targets = outgoing_targets(
               turbo,
-              turbo_lora[0]["id"],
+              optimizer[0]["id"],
           )
-          assert "H3MemoryOptimization" in turbo_targets, (
-              "TurboLoRA must feed H3MemoryOptimization."
-          )
+          optimizer_target_types = {
+              n.get("type")
+              for n in optimizer_targets
+          }
+          assert "BasicScheduler" in optimizer_target_types
+          assert "BasicGuider" in optimizer_target_types
 
           upscale = load(
               "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json"
           )
-          upscale_opt = [
-              n for n in upscale["nodes"]
-              if n.get("type") == "H3MemoryOptimization"
-          ]
-          assert len(upscale_opt) == 1
-
-          print(
-              "H3 semantic workflow topology PASSED."
+          upscale_optimizer = node_types(
+              upscale,
+              "H3MemoryOptimization",
           )
+          assert len(upscale_optimizer) == 1, (
+              "Upscale must contain exactly one H3MemoryOptimization."
+          )
+
+          upscale_targets = outgoing_targets(
+              upscale,
+              upscale_optimizer[0]["id"],
+          )
+          upscale_target_types = {
+              n.get("type")
+              for n in upscale_targets
+          }
+          assert "BasicScheduler" in upscale_target_types
+          assert "BasicGuider" in upscale_target_types
+          assert "MMH3UltimateUpscale" in upscale_target_types
+
+          print("H3 semantic workflow topology PASSED.")
           PY
 
       - name: Runtime install contract
@@ -308,6 +321,7 @@ jobs:
               job_id = queue.submit(
                   production_id="validator-production",
                   plan_path=plan_path,
+                  payload={},
               )
 
               claimed = queue.claim_next()
@@ -332,6 +346,7 @@ jobs:
               thread = threading.Thread(
                   target=heartbeat,
                   name="validator-heartbeat",
+                  daemon=True,
               )
               thread.start()
               thread.join(timeout=10)
@@ -339,9 +354,7 @@ jobs:
               assert not thread.is_alive()
               assert not errors, errors
 
-          print(
-              "SQLite heartbeat threading regression PASSED."
-          )
+          print("SQLite heartbeat threading regression PASSED.")
           PY
 
       - name: Continuity architecture contract
@@ -350,140 +363,119 @@ jobs:
           H3_GRADIO_SHARE: "0"
         run: |
           python - <<'PY'
+          import ast
+          import re
           from pathlib import Path
 
           orchestrator = Path(
               "pipeline/production_orchestrator.py"
-          ).read_text(
-              encoding="utf-8"
-          )
+          ).read_text(encoding="utf-8")
 
           runner = Path(
               "execution/production_runner.py"
-          ).read_text(
-              encoding="utf-8"
-          )
+          ).read_text(encoding="utf-8")
 
           shot = Path(
               "schemas/shot.py"
-          ).read_text(
-              encoding="utf-8"
-          )
+          ).read_text(encoding="utf-8")
 
           gradio = Path(
               "ui/storyboard_gradio.py"
-          ).read_text(
-              encoding="utf-8"
-          )
+          ).read_text(encoding="utf-8")
 
           queue = Path(
               "pipeline/job_queue.py"
-          ).read_text(
-              encoding="utf-8"
-          )
+          ).read_text(encoding="utf-8")
 
           validate = Path(
               "scripts/validate_project.py"
-          ).read_text(
-              encoding="utf-8"
+          ).read_text(encoding="utf-8")
+
+          def find_function(tree, name):
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.FunctionDef) and node.name == name:
+                      return node
+              return None
+
+          # Deterministic enforcement after Qwen unload.
+          orchestrator_tree = ast.parse(
+              orchestrator,
+              filename="pipeline/production_orchestrator.py",
           )
-
-          # Production enforcement must remain deterministic after Qwen unload.
-          enforce_start = orchestrator.find(
-              "def _enforce_production_contracts"
+          enforce = find_function(
+              orchestrator_tree,
+              "_enforce_production_contracts",
           )
+          assert enforce is not None
+          enforce_body = ast.unparse(enforce)
+          assert "repair_continuity_violation" not in enforce_body
+          assert "apply_field_level_fallback" in enforce_body
 
-          assert enforce_start >= 0
-
-          enforce_tail = orchestrator[
-              enforce_start:
-          ]
-
-          enforce_end = enforce_tail.find(
-              "    def create_production_plan"
-          )
-
-          enforce_body = (
-              enforce_tail[:enforce_end]
-              if enforce_end >= 0
-              else enforce_tail
-          )
-
-          assert (
-              "repair_continuity_violation"
-              not in enforce_body
-          )
-
-          assert (
-              "apply_field_level_fallback"
-              in enforce_body
-          )
-
-          # Runner must serialize manifest writes.
-          assert "_manifest_lock" in runner
+          # Manifest writes remain locked.
+          assert "self._manifest_lock = threading.RLock()" in runner
           assert "with self._manifest_lock" in runner
 
-          # Shot contract must carry structured continuity state and dialogue.
+          # Structured Shot continuity/dialogue contract.
           assert "continuity_start_state" in shot
           assert "continuity_end_state" in shot
           assert "dialogue_events" in shot
 
-          # Project validator must require the H3 memory optimizer in
-          # both production workflow contracts.
-          assert '"H3MemoryOptimization"' in validate
+          # Validator must explicitly require the optimizer in both contracts.
           turbo_start = validate.find("turbo_required")
-          turbo_end = validate.find("upscale_required")
-          assert turbo_start >= 0 and turbo_end > turbo_start
-          assert '"H3MemoryOptimization"' in validate[turbo_start:turbo_end]
-          assert '"H3MemoryOptimization"' in validate[turbo_end:]
-
-          # Project validator must require the new dialogue schema.
+          upscale_start = validate.find("upscale_required")
+          assert turbo_start >= 0
+          assert upscale_start > turbo_start
+          assert '"H3MemoryOptimization"' in validate[turbo_start:upscale_start]
+          assert '"H3MemoryOptimization"' in validate[upscale_start:]
           assert '"schemas/dialogue.py"' in validate
 
-          # Queue heartbeat must use per-operation SQLite connections rather
-          # than sharing a connection across threads.
+          # SQLite uses operation-scoped connections. Never suppress
+          # sqlite's cross-thread protection to hide connection sharing.
           assert "def _connect(self):" in queue
           assert "sqlite3.connect(" in queue
           assert "check_same_thread=False" not in queue
 
-          # Background production execution must wait for controller lock
-          # contention instead of converting normal contention into a job
-          # failure. Require a bounded timeout and a guarded release.
-          # Queue execution must wait for lock contention and release only
-          # when acquisition actually succeeded.
-          assert "def _execute_approved_plan" in gradio
-          assert "lock_acquired = self._lock.acquire(" in gradio
-          assert "timeout=3600.0" in gradio
-          assert "if not lock_acquired:" in gradio
-          assert "if lock_acquired:" in gradio
-          assert "blocking=False" not in gradio[
-              gradio.find("def _execute_approved_plan"):
-          ]
+          # Production execution waits on the controller lock and only
+          # releases it when the current call acquired it.
+          gradio_tree = ast.parse(
+              gradio,
+              filename="ui/storyboard_gradio.py",
+          )
+          execute_fn = find_function(
+              gradio_tree,
+              "_execute_approved_plan",
+          )
+          assert execute_fn is not None
+          execute_body = ast.unparse(execute_fn)
+          assert "lock_acquired = self._lock.acquire(timeout=3600.0)" in execute_body
+          assert "if not lock_acquired:" in execute_body
+          assert "if lock_acquired:" in execute_body
+          assert "blocking=False" not in execute_body
 
-          # Live preview must not poll the filesystem while the UI is idle.
-          # The current implementation exposes explicit manual refresh plus
-          # a timer hook; the timer starts disabled.
+          # Live preview is supported but automatic polling starts disabled.
           assert re.search(
               r"gr\.Timer\(\s*value\s*=\s*3\.0\s*,\s*active\s*=\s*False\s*\)",
               gradio,
           )
-          assert "refresh_live_preview.click" in gradio
-          assert "live_preview_timer.tick" in gradio
-
-          # Live preview remains a supported feature; only automatic
-          # polling is disabled at startup.
+          assert "refresh_live_preview.click(" in gradio
+          assert "live_preview_timer.tick(" in gradio
           assert "Live H3 Sampling Preview" in gradio
           assert "Refresh Live Preview" in gradio
-          assert "live_preview_timer = gr.Timer" in gradio
 
-          # Continuity state must reach H3 as prose, not raw JSON.
+          # H3 continuity state is prose-formatted, not direct JSON dumps.
           assert "_state_summary(" in shot
-          assert 'json.dumps(self.continuity_start_state' not in shot
-          assert 'json.dumps(\n                self.continuity_start_state' not in shot
-
-          print(
-              "Continuity architecture contract PASSED."
+          assert not re.search(
+              r"json\.dumps\(\s*self\.continuity_start_state\b",
+              shot,
+              flags=re.DOTALL,
           )
+          assert not re.search(
+              r"json\.dumps\(\s*self\.continuity_end_state\b",
+              shot,
+              flags=re.DOTALL,
+          )
+
+          print("Continuity architecture contract PASSED.")
           PY
 
       - name: Gradio UI contract
