@@ -220,14 +220,6 @@ class H3Runtime:
             vram_cfg["cpu_vae"] = runtime_cfg.get("cpu_vae", cpu_vae)
         except Exception:
             vram_cfg = {"cpu_vae": cpu_vae}
-        gpu_id = None
-        try:
-            visible = os.getenv("CUDA_VISIBLE_DEVICES", "").split(",")[0].strip()
-            if visible.isdigit():
-                gpu_id = int(visible)
-        except Exception:
-            gpu_id = None
-        profile = resolve_vram_profile(vram_cfg, gpu_id=gpu_id)
 
         if not torch.cuda.is_available():
             raise RuntimeError("NVIDIA CUDA is required for the production H3 runtime.")
@@ -254,6 +246,10 @@ class H3Runtime:
         try:
             for offset, gpu_id in enumerate(normalized_gpu_ids):
                 port = int(base_port) + offset
+                # Resolve VRAM policy against the actual worker GPU. This avoids
+                # accidentally using the largest GPU's profile on a smaller GPU
+                # in heterogeneous multi-GPU hosts.
+                profile = resolve_vram_profile(vram_cfg, gpu_id=gpu_id)
                 if port in used_ports or not cls.port_is_free(port):
                     raise RuntimeError(f"Cannot allocate free ComfyUI port {port} for GPU {gpu_id}.")
                 used_ports.add(port)
