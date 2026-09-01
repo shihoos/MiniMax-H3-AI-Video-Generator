@@ -51,8 +51,8 @@ from planner.config import (
     PROFILE_BASE,
     PROFILE_TURBO,
     PROFILE_UPSCALE,
-    WORKFLOW_REF2V,
-    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_REF2VA,
+    WORKFLOW_TURBO_REF2VA,
 )
 from scheduler.gpu_scheduler import (
     GPUScheduler,
@@ -325,15 +325,15 @@ class ProductionRunner:
         ).strip()
 
         if explicit in {
-            WORKFLOW_REF2V,
-            WORKFLOW_TURBO_REF2V,
+            WORKFLOW_REF2VA,
+            WORKFLOW_TURBO_REF2VA,
         }:
             return explicit
 
         if profile == PROFILE_TURBO:
-            return WORKFLOW_TURBO_REF2V
+            return WORKFLOW_TURBO_REF2VA
 
-        return WORKFLOW_REF2V
+        return WORKFLOW_REF2VA
 
     @staticmethod
     def _sort_shots(
