@@ -1788,8 +1788,10 @@ class H3WorkflowBuilder:
                 prompt_prefix + prompt,
             )
 
+                
         if bool(__import__("planner.config", fromlist=["RUNTIME"]).RUNTIME.get("h3_optimization", {}).get("memory_optimization", True)):
-            source_type = "UNETLoader"
+            if mode == "turbo_ref2va": source_type = "MiniMaxH3TurboLoRA"
+            else: source_type = "UNETLoader"
             self._inject_memory_optimization(workflow, source_node_type=source_type)
 
         return self.client.convert_workflow(
