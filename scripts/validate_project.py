@@ -1051,6 +1051,7 @@ def validate_workflows() -> None:
         "MMH3TemporalSplitParams",
         "MMH3SpatialSplitParams",
         "MMH3UltimateUpscale",
+        "H3MemoryOptimization",
     }
 
     missing = (
