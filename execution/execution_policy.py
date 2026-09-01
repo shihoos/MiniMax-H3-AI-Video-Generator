@@ -85,3 +85,27 @@ class ExecutionPolicy:
         if requested == "retake":
             return replace(self, mode="retake", auto_retake=False, max_auto_retries=0)
         return replace(self, mode="production")
+
+    def as_dict(self) -> dict:
+        """Return the resolved immutable execution contract for diagnostics/manifests."""
+        profile = self.vram_profile
+        return {
+            "mode": self.mode,
+            "turbo": self.turbo,
+            "upscale": self.upscale,
+            "live_preview": self.live_preview,
+            "require_context_ir": self.require_context_ir,
+            "run_visual_qa": self.run_visual_qa,
+            "auto_retake": self.auto_retake,
+            "max_auto_retries": self.max_auto_retries,
+            "allow_preview_mode": self.allow_preview_mode,
+            "allow_diagnostic_mode": self.allow_diagnostic_mode,
+            "allow_retake_mode": self.allow_retake_mode,
+            "vram_profile": ({
+                "name": profile.name,
+                "cpu_vae": profile.cpu_vae,
+                "async_offload_streams": profile.async_offload_streams,
+                "disable_pinned_memory": profile.disable_pinned_memory,
+                "fast_disk": profile.fast_disk,
+            } if profile is not None else None),
+        }
