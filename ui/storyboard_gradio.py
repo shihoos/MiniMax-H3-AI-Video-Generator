@@ -1633,6 +1633,7 @@ def build_app(
     .h3-shot-grid section { min-width: 0; }
     .h3-shot-grid pre { white-space: pre-wrap; max-height: 260px; overflow: auto; padding: 10px; border-radius: 10px; }
     .h3-badge { display: inline-block; border: 1px solid var(--border-color-primary); border-radius: 999px; padding: 3px 8px; margin: 2px; font-size: 0.78rem; }
+    .h3-shot-inspector-hint { padding: 10px 12px; border: 1px solid var(--border-color-primary); border-radius: 10px; margin: 8px 0; opacity: 0.82; }
     .h3-good { border-color: #3b8f5f; }
     .h3-warn { border-color: #c48a2b; }
     .h3-bad { border-color: #bd4a4a; }
@@ -1705,6 +1706,7 @@ def build_app(
                         shot_selector = gr.Dropdown(label="Selected Shot", choices=[], value=None, interactive=True)
                         shot_refresh = gr.Button("Load Shot Details")
                     shot_detail = gr.Markdown("### Select a shot\nThe selected shot's prompt, references, continuity, critic, VLM and QA state will appear here.", elem_classes=["h3-panel"])
+                    shot_inspector_hint = gr.Markdown("Select a shot to inspect its visual result, quality decision, and retake controls.", elem_classes=["h3-shot-inspector-hint"])
                     with gr.Row():
                         with gr.Column(scale=2):
                             shot_visual = gr.Image(label="Selected Shot Preview", type="filepath", height=360, elem_classes=["h3-preview"])
@@ -1778,6 +1780,7 @@ def build_app(
             shot_selector.change(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
             shot_refresh.click(fn=controller.shot_detail, inputs=[session_plan_path, shot_selector], outputs=[shot_detail])
             shot_selector.change(fn=controller.shot_preview, inputs=[session_plan_path, shot_selector], outputs=[shot_visual, shot_visual_status])
+            shot_selector.change(fn=controller.shot_retake_defaults, inputs=[session_plan_path, shot_selector], outputs=[retake_shot_id, retake_start, retake_end, retake_reason])
             shot_load_retake.click(fn=controller.shot_retake_defaults, inputs=[session_plan_path, shot_selector], outputs=[retake_shot_id, retake_start, retake_end, retake_reason])
             apply_timeline.click(fn=controller.apply_timeline_edits, inputs=[session_plan_path, timeline_table], outputs=[timeline_table, timeline_status, session_plan_path])
             runtime_check.click(fn=controller.runtime_health, inputs=[session_plan_path], outputs=[runtime_json, runtime_status])
