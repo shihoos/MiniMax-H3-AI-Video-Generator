@@ -1,8 +1,8 @@
 {
   "id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
   "revision": 0,
-  "last_node_id": 148,
-  "last_link_id": 295,
+  "last_node_id": 149,
+  "last_link_id": 299,
   "nodes": [
     {
       "id": 92,
@@ -345,7 +345,7 @@
         {
           "name": "SAMPLER",
           "type": "SAMPLER",
-          "links": []
+          "links": null
         }
       ],
       "properties": {
@@ -378,7 +378,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 294
+          "link": 298
         },
         {
           "name": "steps",
@@ -494,7 +494,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 293
+          "link": 299
         },
         {
           "name": "conditioning",
@@ -537,7 +537,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            292
+            296
           ]
         }
       ],
@@ -1023,7 +1023,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 292
+          "link": 296
         }
       ],
       "outputs": [
@@ -1031,8 +1031,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            293,
-            294
+            297
           ]
         }
       ],
@@ -1071,6 +1070,127 @@
       ],
       "properties": {
         "Node name for S&R": "MiniMaxH3TurboSampler"
+      }
+    },
+    {
+      "id": 149,
+      "type": "H3MemoryOptimization",
+      "pos": [
+        -650,
+        4970
+      ],
+      "size": [
+        390,
+        330
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 297
+        },
+        {
+          "name": "fused_qkv",
+          "type": "COMBO",
+          "widget": {
+            "name": "fused_qkv"
+          },
+          "link": null
+        },
+        {
+          "name": "mlp_memory",
+          "type": "COMBO",
+          "widget": {
+            "name": "mlp_memory"
+          },
+          "link": null
+        },
+        {
+          "name": "chunk_rows",
+          "type": "INT",
+          "widget": {
+            "name": "chunk_rows"
+          },
+          "link": null
+        },
+        {
+          "name": "preserve_precision",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "preserve_precision"
+          },
+          "link": null
+        },
+        {
+          "name": "precision_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "precision_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "qkv_streaming_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "qkv_streaming_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "embedding_memory_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "embedding_memory_mode"
+          },
+          "link": null
+        },
+        {
+          "name": "kitchen_v_memory_mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "kitchen_v_memory_mode"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            298,
+            299
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "h3-optimizations",
+        "ver": "0.2.41",
+        "Node name for S&R": "H3MemoryOptimization"
+      },
+      "widgets_values": [
+        "auto",
+        "auto",
+        4096,
+        true,
+        "Auto",
+        "Auto",
+        "Auto",
+        "Standard"
+      ],
+      "widgets_values_named": {
+        "fused_qkv": "auto",
+        "mlp_memory": "auto",
+        "chunk_rows": 4096,
+        "preserve_precision": true,
+        "precision_mode": "Auto",
+        "qkv_streaming_mode": "Auto",
+        "embedding_memory_mode": "Auto",
+        "kitchen_v_memory_mode": "Standard"
       }
     }
   ],
@@ -1236,7 +1356,15 @@
       "LATENT"
     ],
     [
-      292,
+      295,
+      148,
+      0,
+      125,
+      2,
+      "SAMPLER"
+    ],
+    [
+      296,
       127,
       0,
       147,
@@ -1244,28 +1372,28 @@
       "MODEL"
     ],
     [
-      293,
+      297,
       147,
       0,
-      126,
+      149,
       0,
       "MODEL"
     ],
     [
-      294,
-      147,
+      298,
+      149,
       0,
       124,
       0,
       "MODEL"
     ],
     [
-      295,
-      148,
+      299,
+      149,
       0,
-      125,
-      2,
-      "SAMPLER"
+      126,
+      0,
+      "MODEL"
     ]
   ],
   "groups": [
