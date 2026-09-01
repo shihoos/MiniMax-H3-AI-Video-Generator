@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 import re
 
 
@@ -40,42 +41,139 @@ class H3ContextIRCompiler:
         return "; ".join(values)
 
     @classmethod
-    def _canonical_reference_entries(cls, shot: dict[str, Any]) -> list[dict[str, Any]]:
-        roles = [x for x in (shot.get("reference_roles", []) or []) if isinstance(x, dict)]
-        bindings = [cls._clean(x) for x in (shot.get("reference_bindings", []) or []) if cls._clean(x)]
-        entries: list[dict[str, Any]] = []
-        for index, role in enumerate(roles, start=1):
-            raw_label = cls._clean(role.get("label"))
-            raw_role = cls._clean(role.get("role")) or "visual reference"
-            path = cls._clean(role.get("path"))
-            if raw_label.lower().startswith("picture ") or raw_label.lower().startswith("video ") or raw_label.lower().startswith("audio "):
-                label = raw_label
-            else:
-                label = f"Picture {index}"
-            ref_label = f"<{label}>"
-            binding = bindings[index - 1] if index - 1 < len(bindings) else f"{ref_label} = {raw_role}"
-            entries.append({"index": index, "label": label, "ref_label": ref_label, "role": raw_role, "path": path, "binding": binding})
-        # Legacy plans may have bindings but no roles. Preserve those labels deterministically.
-        if not entries:
-            for index, binding in enumerate(bindings, start=1):
-                match = re.search(r"<(Picture|Video|Audio)\s+\d+>", binding, flags=re.IGNORECASE)
-                label = match.group(0)[1:-1] if match else f"Picture {index}"
-                entries.append({"index": index, "label": label, "ref_label": f"<{label}>", "role": "visual reference", "path": "", "binding": binding})
-        return entries
+    def _reference_kind(cls, role: dict[str, Any], path: str) -> str:
+        raw = cls._clean(
+            role.get("media_type")
+            or role.get("type")
+            or role.get("kind")
+        ).lower()
+        if raw in {"video", "movie", "mp4", "mov", "webm", "mkv", "avi"}:
+            return "Video"
+        if raw in {"audio", "sound", "wav", "mp3", "m4a", "aac", "flac", "ogg"}:
+            return "Audio"
+        suffix = Path(path).suffix.lower()
+        if suffix in {".mp4", ".mov", ".webm", ".mkv", ".avi"}:
+            return "Video"
+        if suffix in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}:
+            return "Audio"
+        return "Picture"
 
     @classmethod
-    def _reference_definitions(cls, shot: dict[str, Any]) -> tuple[list[str], list[str]]:
-        entries = cls._canonical_reference_entries(shot)
-        definitions = []
-        bindings = []
-        for entry in entries:
-            detail = f"{entry['ref_label']} is used as {entry['role']}"
-            if entry.get("path"):
-                detail += f" from {entry['path']}"
+    def _canonical_references(cls, shot: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return one deterministic reference registry for the shot.
+
+        ``reference_roles`` is the authoritative modern contract.
+        ``reference_bindings`` is retained as a legacy compatibility source only
+        when roles are absent; it can never renumber an authoritative role list.
+        Labels are media-specific (Picture/Video/Audio) and counted independently,
+        matching the Ref2VA reference-label convention.
+        """
+        roles = [
+            role for role in (shot.get("reference_roles", []) or [])
+            if isinstance(role, dict)
+        ]
+        bindings = [
+            cls._clean(raw)
+            for raw in (shot.get("reference_bindings", []) or [])
+            if cls._clean(raw)
+        ]
+
+        refs: list[dict[str, Any]] = []
+        counters = {"Picture": 0, "Video": 0, "Audio": 0}
+        seen_paths: set[str] = set()
+
+        for role in roles:
+            path = cls._clean(
+                role.get("path")
+                or role.get("source")
+                or ""
+            )
+            if path and path in seen_paths:
+                continue
+            if path:
+                seen_paths.add(path)
+
+            media_kind = cls._reference_kind(role, path)
+            counters[media_kind] += 1
+            label = f"<{media_kind} {counters[media_kind]}>"
+            role_name = cls._clean(role.get("role")) or "visual reference"
+            description = cls._clean(
+                role.get("description")
+                or role.get("label")
+                or role_name
+            )
+
+            refs.append({
+                "index": len(refs) + 1,
+                "label": label,
+                "media_type": media_kind.lower(),
+                "path": path,
+                "role": role_name,
+                "description": description,
+                "priority": int(role.get("priority", 0) or 0),
+            })
+
+        # Legacy plans may contain only textual bindings. Preserve them without
+        # inventing a conflicting modern role list. Parse an existing canonical
+        # media label when present; otherwise retain the historical Picture label.
+        if not refs and bindings:
+            counters = {"Picture": 0, "Video": 0, "Audio": 0}
+            for binding in bindings:
+                match = re.search(
+                    r"<(Picture|Video|Audio)\s+(\d+)>\s*=",
+                    binding,
+                    flags=re.IGNORECASE,
+                )
+                if match:
+                    media_kind = match.group(1).capitalize()
+                    counters[media_kind] = max(
+                        counters[media_kind],
+                        int(match.group(2)),
+                    )
+                else:
+                    media_kind = "Picture"
+                    counters[media_kind] += 1
+                if match:
+                    label = f"<{media_kind} {int(match.group(2))}>"
+                else:
+                    label = f"<{media_kind} {counters[media_kind]}>"
+                refs.append({
+                    "index": len(refs) + 1,
+                    "label": label,
+                    "media_type": media_kind.lower(),
+                    "path": "",
+                    "role": "visual reference",
+                    "description": binding,
+                    "priority": 0,
+                })
+
+        # Prevent duplicate canonical labels from malformed legacy bindings while
+        # retaining the first deterministic declaration.
+        unique: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        for ref in refs:
+            if ref["label"] in seen_labels:
+                continue
+            seen_labels.add(ref["label"])
+            unique.append(ref)
+        return unique
+
+    @classmethod
+    def _reference_definitions(
+        cls,
+        shot: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        definitions: list[str] = []
+        bindings: list[str] = []
+        refs = cls._canonical_references(shot)
+        for ref in refs:
+            detail = f"{ref['label']} is used as {ref['role']}"
+            if ref.get("description") and ref["description"] != ref["role"]:
+                detail += f": {ref['description']}"
+            if ref.get("path"):
+                detail += f" from {ref['path']}"
             definitions.append(detail + ".")
-            binding = cls._clean(entry.get("binding"))
-            if binding and binding not in bindings:
-                bindings.append(binding)
+            bindings.append(f"{ref['label']} = {ref['role']}")
         return definitions, bindings
 
     @classmethod
@@ -134,11 +232,16 @@ class H3ContextIRCompiler:
         if not isinstance(continuity, dict):
             continuity = {}
         required = []
-        for entry in cls._canonical_reference_entries(shot):
-            role_name = str(entry.get("role", "visual reference"))
-            relationship = "partially_preserved" if role_name == "storyboard" else "fully_preserved"
-            description = cls._clean(entry.get("binding") or role_name)
-            required.append(f"{entry['ref_label']}: {relationship} - {description}.")
+        for ref in cls._canonical_references(shot):
+            relationship = (
+                "partially_preserved"
+                if ref["role"] == "storyboard"
+                else "fully_preserved"
+            )
+            description = ref["description"] or ref["role"]
+            required.append(
+                f"{ref['label']}: {relationship} - {description}."
+            )
         for key, label in (
             ("location", "location"),
             ("lighting", "lighting"),
@@ -212,9 +315,16 @@ class H3ContextIRCompiler:
         )
         if lighting:
             lines.append(f"Lighting: {lighting}.")
-        ref_entries = cls._canonical_reference_entries(shot)
+        ref_entries = cls._canonical_references(shot)
         if ref_entries:
-            lines.append("References: " + "; ".join(f"{e['ref_label']} ({e['role']})" for e in ref_entries) + ".")
+            lines.append(
+                "References: "
+                + "; ".join(
+                    f"{entry['label']} ({entry['role']})"
+                    for entry in ref_entries
+                )
+                + "."
+            )
         dialogue = []
         for event in shot.get("dialogue_events", []) or []:
             if not isinstance(event, dict):
@@ -271,40 +381,74 @@ class H3ContextIRCompiler:
             if not str(sections.get(section, "") or "").strip():
                 raise ValueError(f"H3 Context-IR section is empty: {section}")
 
-        # Every declared picture/video/audio label must be canonical and every
-        # angle-bracket reference used anywhere in the six sections must refer
-        # to one of those declarations. This prevents silent reference drift.
-        reference_labels = []
-        for item in context_ir.get("references", []) or []:
+        # Every declared reference must use a canonical media-specific label,
+        # and every canonical label used by the six-section prompt must be declared
+        # exactly once in the structured registry.
+        references = context_ir.get("references", []) or []
+        if not isinstance(references, list):
+            raise ValueError("H3 Context-IR references must be a list.")
+
+        declared: dict[str, dict[str, Any]] = {}
+        expected_pattern = re.compile(r"^<(Picture|Video|Audio)\s+(\d+)>$")
+        for item in references:
             if not isinstance(item, dict):
                 raise ValueError("H3 Context-IR reference entries must be objects.")
-            index = int(item.get("index", 0) or 0)
-            if index <= 0:
-                raise ValueError("H3 Context-IR reference index must be positive.")
-            label = f"<Picture {index}>"
-            if label in reference_labels:
-                raise ValueError(f"Duplicate Context-IR reference label: {label}")
-            reference_labels.append(label)
+            label = self_label = cls._clean(item.get("label"))
+            match = expected_pattern.fullmatch(label)
+            if not match:
+                raise ValueError(
+                    f"Invalid canonical reference label: {label!r}"
+                )
+            media_kind = match.group(1).lower()
+            if label in declared:
+                raise ValueError(
+                    f"Duplicate Context-IR reference label: {label}"
+                )
+            item_type = cls._clean(item.get("media_type"))
+            if item_type and item_type != media_kind:
+                raise ValueError(
+                    f"Context-IR reference type mismatch for {label}: "
+                    f"media_type={item_type!r}."
+                )
+            declared[label] = item
 
-        declared = set(reference_labels)
-        tokens = set(re.findall(r"<(?:Picture|Video|Audio)\s+\d+>", prompt))
-        unknown = sorted(tokens - declared)
+        prompt = str(context_ir.get("h3_prompt", "") or "")
+        used = set(
+            re.findall(
+                r"<(?:Picture|Video|Audio)\s+\d+>",
+                prompt,
+            )
+        )
+        unknown = sorted(used - set(declared))
+        missing = sorted(set(declared) - used)
         if unknown:
             raise ValueError(
                 "H3 Context-IR contains undeclared reference labels: "
                 + ", ".join(unknown)
             )
-        if reference_labels:
-            for label in reference_labels:
-                if label not in prompt:
-                    raise ValueError(f"Declared Context-IR reference is never used: {label}")
-            sections = context_ir.get("sections", {}) if isinstance(context_ir.get("sections"), dict) else {}
-            semantic_sections = ("subject_definitions", "retention_analysis", "detailed_description")
-            for label in reference_labels:
-                missing_sections = [name for name in semantic_sections if label not in str(sections.get(name, ""))]
-                if missing_sections:
-                    raise ValueError(f"Context-IR reference {label} is not consistently bound in semantic sections: {', '.join(missing_sections)}")
+        if missing:
+            raise ValueError(
+                "H3 Context-IR declares references never used: "
+                + ", ".join(missing)
+            )
 
+        sections = context_ir.get("sections", {})
+        semantic_sections = (
+            "subject_definitions",
+            "retention_analysis",
+            "detailed_description",
+        )
+        for label in declared:
+            missing_sections = [
+                name
+                for name in semantic_sections
+                if label not in str(sections.get(name, "") or "")
+            ]
+            if missing_sections:
+                raise ValueError(
+                    f"Context-IR reference {label} is missing from required "
+                    f"section(s): {', '.join(missing_sections)}."
+                )
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
         cls.validate(context_ir)
@@ -325,13 +469,16 @@ class H3ContextIRCompiler:
         ).strip()
 
         refs = []
-        for entry in self._canonical_reference_entries(shot):
+        for ref in self._canonical_references(shot):
             refs.append({
-                "index": int(entry["index"]),
-                "label": entry["ref_label"],
-                "binding": self._clean(entry.get("binding")),
-                "role": self._clean(entry.get("role")),
-                "path": self._clean(entry.get("path")),
+                "index": int(ref["index"]),
+                "label": ref["label"],
+                "media_type": ref["media_type"],
+                "binding": f"{ref['label']} = {ref['role']}",
+                "role": ref["role"],
+                "path": ref["path"],
+                "description": ref["description"],
+                "priority": int(ref["priority"]),
             })
 
         result = {
