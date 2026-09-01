@@ -370,6 +370,16 @@ class ProductionController:
         )
 
     @staticmethod
+    def _safe_name(value: str) -> str:
+        """Sanitize a string for safe use as a filesystem directory name."""
+        text = str(value or "").strip()
+        cleaned = "".join(
+            char if (char.isalnum() or char in "._-") else "_"
+            for char in text
+        )
+        return cleaned[:96] or "production"
+
+    @staticmethod
     def _render_plan(
         plan: dict,
         plan_path: Path,
