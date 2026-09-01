@@ -35,6 +35,7 @@ class ProductionManifest:
             "execution/h3_upscaled_workflow_builder.py",
             "execution/production_runner.py",
             "execution/shot_executor.py",
+            "execution/execution_policy.py",
             "pipeline/timeline.py",
             "pipeline/context_ir.py",
             "pipeline/vlm_analyzer.py",
@@ -46,6 +47,8 @@ class ProductionManifest:
             "pipeline/visual_feedback.py",
             "pipeline/visual_state_observer.py",
             "pipeline/production_checkpoint.py",
+            "ui/storyboard_gradio.py",
+            "ui/shot_view_model.py",
         ):
             files[rel] = self._file_hash(self.project_root / rel)
         manifest = {
@@ -58,6 +61,11 @@ class ProductionManifest:
             "models": plan.get("model_manifest", plan.get("models", {})) or {},
             "runtime": plan.get("runtime_diagnostics", {}) or {},
             "timeline_version": (plan.get("timeline", {}) or {}).get("version", 1),
+            "execution": {
+                "mode": str(plan.get("execution_mode", "production") or "production"),
+                "context_ir_version": (plan.get("features", {}) or {}).get("context_ir_version", 2),
+                "profile": str(plan.get("profile", "base") or "base"),
+            },
         }
         manifest["manifest_sha256"] = hashlib.sha256(
             json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
