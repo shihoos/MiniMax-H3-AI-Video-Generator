@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from pathlib import Path
-import json
 
 
 def shot_choices(plan: dict[str, Any]) -> list[str]:
