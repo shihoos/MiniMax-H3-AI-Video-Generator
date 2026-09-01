@@ -825,11 +825,17 @@ class ProductionController:
             production_id = str(plan.get("production_id", "")).strip()
             preview_root = ROOT / "data" / "production" / production_id / "previews"
             if preview_root.is_dir():
-                candidates.extend(p for p in preview_root.rglob("latest.*") if p.is_file())
+                shot_preview_root = preview_root / self._safe_name(wanted)
+                if shot_preview_root.is_dir():
+                    candidates.extend(
+                        path
+                        for path in shot_preview_root.rglob("latest.*")
+                        if path.is_file()
+                    )
             if not candidates:
-                return None, "No visual preview is available for this shot yet."
+                return None, f"No visual preview is available for `{wanted}` yet."
             path = max(candidates, key=lambda item: item.stat().st_mtime)
-            return str(path), f"Preview: `{path.name}`"
+            return str(path), f"Preview: `{path.name}` · Shot `{wanted}`"
         except Exception as exc:
             return None, "### ERROR\n" + str(exc)
 
