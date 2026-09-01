@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from pathlib import Path
+import json
 
 
 def shot_choices(plan: dict[str, Any]) -> list[str]:
