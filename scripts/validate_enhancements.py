@@ -66,7 +66,7 @@ def main() -> None:
             return workflow
     builder = H3WorkflowBuilder(ROOT, FakeClient())
     built = builder.build(
-        mode="ref2v",
+        mode="ref2va",
         prompt="this must be replaced by Context-IR",
         seed=1,
         reference_images=[],
