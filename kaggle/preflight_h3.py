@@ -49,19 +49,19 @@ PRODUCTION_WORKFLOWS = [
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Ref2V_Production.json"
+        / "H3_Ref2VA_Production.json"
     ),
     (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Turbo_Ref2V_Production.json"
+        / "H3_Turbo_Ref2VA_Production.json"
     ),
     (
         ROOT
         / "workflows"
         / "postprocess"
-        / "H3_Ref2V_UltimateUpscale_Production.json"
+        / "H3_Ref2VA_UltimateUpscale_Production.json"
     ),
 ]
 
