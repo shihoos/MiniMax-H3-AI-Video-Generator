@@ -1047,11 +1047,11 @@ def validate_workflows() -> None:
     )
 
     upscale_required = {
+        "H3MemoryOptimization",
         "MMH3LatentUpscaleWithModelParams",
         "MMH3TemporalSplitParams",
         "MMH3SpatialSplitParams",
         "MMH3UltimateUpscale",
-        "H3MemoryOptimization",
     }
 
     missing = (
