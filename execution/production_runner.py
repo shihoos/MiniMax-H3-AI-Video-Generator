@@ -25,6 +25,7 @@ from pipeline.quality_gate import ProductionQualityGate
 from pipeline.vlm_analyzer import VLMAnalyzer
 from pipeline.context_ir import H3ContextIRCompiler
 from pipeline.production_manifest import ProductionManifest
+from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.retake_executor import RetakeExecutor
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
@@ -112,6 +113,8 @@ class ProductionRunner:
             / "production"
             / "h3"
         )
+
+        self.runtime_diagnostics = RuntimeDiagnostics(self.project_root)
 
 
     @staticmethod
