@@ -541,8 +541,20 @@ class H3UpscaledWorkflowBuilder(
                 prompt,
             )
 
-        if bool(__import__("planner.config", fromlist=["RUNTIME"]).RUNTIME.get("h3_optimization", {}).get("memory_optimization", True)):
-            self._inject_memory_optimization(workflow, source_node_type="UNETLoader")
+        if bool(
+            __import__("planner.config", fromlist=["RUNTIME"])
+            .RUNTIME.get("h3_optimization", {})
+            .get("memory_optimization", True)
+        ):
+            source_type = (
+                "MiniMaxH3TurboLoRA"
+                if generation_mode == "turbo_ref2va"
+                else "UNETLoader"
+            )
+            self._inject_memory_optimization(
+                workflow,
+                source_node_type=source_type,
+            )
 
         generation_nodes = (
             self._find_generation_nodes(
@@ -578,6 +590,11 @@ class H3UpscaledWorkflowBuilder(
         model_source = generation_nodes["UNETLoader"]
         optimizer_nodes = self._find(workflow, "H3MemoryOptimization")
         if optimizer_nodes:
+            if len(optimizer_nodes) != 1:
+                raise RuntimeError(
+                    "Combined H3 upscale graph must contain exactly one "
+                    "H3MemoryOptimization node."
+                )
             model_source = optimizer_nodes[0]
 
         self._connect_graph(
