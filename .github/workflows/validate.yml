@@ -45,6 +45,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Verify installed dependency consistency
+        run: |
+          python -m pip check
+
       - name: Verify required dependencies
         run: |
           python - <<'PY'
@@ -85,6 +89,103 @@ jobs:
           H3_GRADIO_SHARE: "0"
         run: |
           python scripts/validate_project.py
+
+      - name: H3 semantic workflow topology
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          ROOT = Path(".")
+
+          def load(path):
+              return json.loads(
+                  (ROOT / path).read_text(encoding="utf-8")
+              )
+
+          def nodes_by_type(graph, node_type):
+              return [
+                  node
+                  for node in graph.get("nodes", [])
+                  if node.get("type") == node_type
+              ]
+
+          def outgoing_model_targets(graph, source_id):
+              nodes = {
+                  int(node["id"]): node
+                  for node in graph.get("nodes", [])
+              }
+              targets = []
+              for link in graph.get("links", []):
+                  if (
+                      isinstance(link, list)
+                      and len(link) >= 6
+                      and int(link[1]) == int(source_id)
+                      and str(link[5]).upper() == "MODEL"
+                  ):
+                      target = nodes.get(int(link[3]))
+                      if target is not None:
+                          targets.append(target)
+              return targets
+
+          turbo = load(
+              "workflows/generation/H3_Turbo_Ref2VA_Production.json"
+          )
+          turbo_lora = nodes_by_type(
+              turbo,
+              "MiniMaxH3TurboLoRA",
+          )
+          turbo_opt = nodes_by_type(
+              turbo,
+              "H3MemoryOptimization",
+          )
+
+          assert len(turbo_lora) == 1
+          assert len(turbo_opt) == 1
+
+          turbo_lora_targets = outgoing_model_targets(
+              turbo,
+              turbo_lora[0]["id"],
+          )
+          assert any(
+              node.get("type") == "H3MemoryOptimization"
+              for node in turbo_lora_targets
+          ), "TurboLoRA must feed H3MemoryOptimization."
+
+          turbo_opt_targets = outgoing_model_targets(
+              turbo,
+              turbo_opt[0]["id"],
+          )
+          turbo_target_types = {
+              node.get("type")
+              for node in turbo_opt_targets
+          }
+          assert "BasicScheduler" in turbo_target_types
+          assert "BasicGuider" in turbo_target_types
+
+          upscale = load(
+              "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json"
+          )
+          upscale_opt = nodes_by_type(
+              upscale,
+              "H3MemoryOptimization",
+          )
+          assert len(upscale_opt) == 1
+
+          upscale_targets = outgoing_model_targets(
+              upscale,
+              upscale_opt[0]["id"],
+          )
+          upscale_target_types = {
+              node.get("type")
+              for node in upscale_targets
+          }
+          assert "BasicScheduler" in upscale_target_types
+          assert "BasicGuider" in upscale_target_types
+          assert "MMH3UltimateUpscale" in upscale_target_types
+
+          print("H3 semantic workflow topology PASSED.")
+          PY
 
       - name: Runtime install contract
         run: |
@@ -208,6 +309,66 @@ jobs:
           print("Runtime imports PASSED.")
           PY
 
+      - name: SQLite heartbeat threading regression
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+          H3_GRADIO_SHARE: "0"
+        run: |
+          python - <<'PY'
+          import tempfile
+          import threading
+          from pathlib import Path
+
+          from pipeline.job_queue import ProductionJobQueue
+
+          with tempfile.TemporaryDirectory(prefix="h3-jobqueue-") as td:
+              root = Path(td)
+              plan_path = root / "plan.json"
+              plan_path.write_text("{}", encoding="utf-8")
+
+              queue = ProductionJobQueue(
+                  root / "jobs.sqlite3"
+              )
+
+              job_id = queue.submit(
+                  production_id="validator-production",
+                  plan_path=plan_path,
+              )
+
+              claimed = queue.claim_next()
+              assert claimed is not None
+              assert claimed["job_id"] == job_id
+
+              worker_token = str(
+                  claimed["worker_token"]
+              )
+
+              errors = []
+
+              def heartbeat():
+                  try:
+                      assert queue.heartbeat(
+                          job_id,
+                          worker_token,
+                      )
+                  except Exception as exc:
+                      errors.append(exc)
+
+              thread = threading.Thread(
+                  target=heartbeat,
+                  name="validator-heartbeat",
+              )
+              thread.start()
+              thread.join(timeout=10)
+
+              assert not thread.is_alive()
+              assert not errors, errors
+
+          print(
+              "SQLite heartbeat threading regression PASSED."
+          )
+          PY
+
       - name: Continuity architecture contract
         env:
           H3_DIRECTOR_ENABLED: "0"
@@ -230,6 +391,18 @@ jobs:
 
           shot = Path(
               "schemas/shot.py"
+          ).read_text(
+              encoding="utf-8"
+          )
+
+          gradio = Path(
+              "ui/storyboard_gradio.py"
+          ).read_text(
+              encoding="utf-8"
+          )
+
+          queue = Path(
+              "pipeline/job_queue.py"
           ).read_text(
               encoding="utf-8"
           )
@@ -282,6 +455,42 @@ jobs:
 
           # Project validator must require the new dialogue schema.
           assert '"schemas/dialogue.py"' in validate
+
+          # Queue heartbeat must use per-operation SQLite connections rather
+          # than sharing a connection across threads.
+          assert "def _connect(self):" in queue
+          assert "sqlite3.connect(" in queue
+          assert "check_same_thread=False" not in queue
+
+          # Background production execution must wait for controller lock
+          # contention instead of converting normal contention into a job
+          # failure. Require a bounded timeout and a guarded release.
+          assert "def _execute_approved_plan" in gradio
+          execute_body = gradio[
+              gradio.find("def _execute_approved_plan"):
+          ]
+          assert "blocking=False" not in execute_body[
+              : execute_body.find("def ", 1)
+              if execute_body.find("def ", 1) >= 0
+              else len(execute_body)
+          ]
+          assert "timeout=" in execute_body
+          assert "lock_acquired" in execute_body
+          assert "if lock_acquired:" in execute_body
+
+          # Live preview must be opt-in, not a permanent 3-second idle poll.
+          assert (
+              "gr.Timer(value=3.0, active=False)" in gradio
+              or
+              "gr.Timer(value=3.0, active = False)" in gradio
+          )
+          assert "refresh_live_preview.click" in gradio
+          assert "gr.update(active=True)" in gradio
+
+          # Continuity state must reach H3 as prose, not raw JSON.
+          assert "_state_summary(" in shot
+          assert 'json.dumps(self.continuity_start_state' not in shot
+          assert 'json.dumps(\n                self.continuity_start_state' not in shot
 
           print(
               "Continuity architecture contract PASSED."
