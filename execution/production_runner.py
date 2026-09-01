@@ -1090,6 +1090,8 @@ class ProductionRunner:
 
             auto_retake_count = 0
             max_auto_retries = max(0, int(executor.execution_policy.max_auto_retries))
+            shot["retake_attempts"] = 0
+            shot["max_auto_retries"] = max_auto_retries
             if (
                 executor.execution_policy.auto_retake
                 and max_auto_retries > 0
@@ -1138,6 +1140,7 @@ class ProductionRunner:
 
                         result = Path(retake_result["output"]).resolve()
                         auto_retake_count += 1
+                        shot["retake_attempts"] = auto_retake_count
                         shot["retake_executed"] = True
                         shot["retake_execution"] = dict(retake_result)
                         shot["retake_execution"]["attempt"] = attempt_number
