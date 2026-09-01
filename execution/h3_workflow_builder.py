@@ -141,10 +141,6 @@ class H3WorkflowBuilder:
     # ============================================================
 
     @staticmethod
-    def _peek_next_graph_id(workflow: dict) -> int:
-        return int(workflow.get("last_node_id", 0)) + 1
-
-    @staticmethod
     def _apply_memory_optimization_config(
         node: dict,
     ) -> None:
@@ -224,28 +220,24 @@ class H3WorkflowBuilder:
             "kitchen_v_memory_mode": attention_memory_mode,
         }
 
-    # ============================================================
-    # H3 MEMORY OPTIMIZATION
-    # ============================================================
-
     def _inject_memory_optimization(self, workflow: dict, *, source_node_type: str = "UNETLoader") -> None:
         """Insert the upstream H3MemoryOptimization node between the H3 model producer and its MODEL consumers."""
-            existing = self._find(
-                workflow,
-                "H3MemoryOptimization",
-            )
-        
-            if existing:
-                if len(existing) != 1:
-                    raise RuntimeError(
-                        "Workflow contains multiple H3MemoryOptimization nodes."
-                    )
-        
-                self._apply_memory_optimization_config(
-                    existing[0]
+        existing = self._find(
+            workflow,
+            "H3MemoryOptimization",
+        )
+
+        if existing:
+            if len(existing) != 1:
+                raise RuntimeError(
+                    "Workflow contains multiple H3MemoryOptimization nodes."
                 )
-        
-                return
+
+            self._apply_memory_optimization_config(
+                existing[0]
+            )
+
+            return
 
         source = self._one(workflow, source_node_type)
         source_id = self._node_id(source)
@@ -266,7 +258,7 @@ class H3WorkflowBuilder:
 
         node_id = self._next_id(workflow)
         pos = source.get("pos", [0, 0])
-        chunk_rows = int(cfg.get("chunk_rows", 2048) or 2048)
+        chunk_rows = int(cfg.get("chunk_rows", 4096) or 4096)
         precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
         qkv_streaming_mode = str(cfg.get("qkv_streaming_mode", "Auto") or "Auto")
         attention_memory_mode = str(cfg.get("attention_memory_mode", "Standard") or "Standard")
@@ -1789,10 +1781,27 @@ class H3WorkflowBuilder:
             )
 
                 
-        if bool(__import__("planner.config", fromlist=["RUNTIME"]).RUNTIME.get("h3_optimization", {}).get("memory_optimization", True)):
-            if mode == "turbo_ref2va": source_type = "MiniMaxH3TurboLoRA"
-            else: source_type = "UNETLoader"
-            self._inject_memory_optimization(workflow, source_node_type=source_type)
+        from planner.config import RUNTIME
+
+        if bool(
+            RUNTIME.get(
+                "h3_optimization",
+                {},
+            ).get(
+                "memory_optimization",
+                True,
+            )
+        ):
+            source_type = (
+                "MiniMaxH3TurboLoRA"
+                if mode == "turbo_ref2va"
+                else "UNETLoader"
+            )
+
+            self._inject_memory_optimization(
+                workflow,
+                source_node_type=source_type,
+            )
 
         return self.client.convert_workflow(
             workflow
