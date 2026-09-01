@@ -27,9 +27,9 @@ def main() -> int:
         raise RuntimeError("Missing ComfyUI runtime fields: " + ", ".join(missing))
 
     workflows = [
-        ROOT / "workflows/generation/H3_Ref2V_Production.json",
-        ROOT / "workflows/generation/H3_Turbo_Ref2V_Production.json",
-        ROOT / "workflows/postprocess/H3_Ref2V_UltimateUpscale_Production.json",
+        ROOT / "workflows/generation/H3_Ref2VA_Production.json",
+        ROOT / "workflows/generation/H3_Turbo_Ref2VA_Production.json",
+        ROOT / "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json",
     ]
     for workflow in workflows:
         data = json.loads(workflow.read_text(encoding="utf-8"))
