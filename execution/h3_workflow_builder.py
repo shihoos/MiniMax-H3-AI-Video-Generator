@@ -29,17 +29,17 @@ from planner.config import (
 class H3WorkflowBuilder:
 
     MODES = {
-        "ref2v": (
+        "ref2va": (
             Path("generation"),
-            "H3_Ref2V_Production.json",
+            "H3_Ref2Va_Production.json",
         ),
-        "turbo_ref2v": (
+        "turbo_ref2va": (
             Path("generation"),
-            "H3_Turbo_Ref2V_Production.json",
+            "H3_Turbo_Ref2Va_Production.json",
         ),
         "upscale": (
             Path("postprocess"),
-            "H3_Ref2V_UltimateUpscale_Production.json",
+            "H3_Ref2Va_UltimateUpscale_Production.json",
         ),
     }
 
@@ -1519,7 +1519,7 @@ class H3WorkflowBuilder:
             mode,
         )
 
-        if mode == "turbo_ref2v":
+        if mode == "turbo_ref2va":
             lora = self._one(
                 workflow,
                 "MiniMaxH3TurboLoRA",
@@ -1607,10 +1607,10 @@ class H3WorkflowBuilder:
                 raise ValueError("Production H3 builder accepts Ref2VA Context-IR only.")
             prompt = H3ContextIRCompiler.prompt(context_ir)
 
-        if mode not in {"ref2v", "turbo_ref2v", "upscale"}:
+        if mode not in {"ref2va", "turbo_ref2va", "upscale"}:
             raise ValueError(f"Unsupported production workflow mode: {mode}")
 
-        if mode == "turbo_ref2v":
+        if mode == "turbo_ref2va":
             if int(turbo_steps) != 8:
                 raise ValueError(
                     "Production Turbo is locked to 8 steps."
