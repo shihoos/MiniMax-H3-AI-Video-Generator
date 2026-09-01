@@ -29,8 +29,8 @@ from planner.config import (
     TURBO_STEPS,
     VALID_STORY_MODES,
     WORKFLOW_AUTO,
-    WORKFLOW_REF2V,
-    WORKFLOW_TURBO_REF2V,
+    WORKFLOW_REF2VA,
+    WORKFLOW_TURBO_REF2VA,
     director_enabled,
 )
 from schemas.character import Character
@@ -1873,16 +1873,16 @@ class ProductionPlanner:
 
             if (
                 workflow_mode
-                == WORKFLOW_TURBO_REF2V
+                == WORKFLOW_TURBO_REF2VA
                 or profile == "turbo"
             ):
                 selected_workflow = (
-                    WORKFLOW_TURBO_REF2V
+                    WORKFLOW_TURBO_REF2VA
                 )
                 steps = TURBO_STEPS
             else:
                 selected_workflow = (
-                    WORKFLOW_REF2V
+                    WORKFLOW_REF2VA
                 )
                 steps = H3_STEPS
 
