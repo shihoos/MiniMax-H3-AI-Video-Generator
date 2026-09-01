@@ -220,8 +220,13 @@ class H3WorkflowBuilder:
             "kitchen_v_memory_mode": attention_memory_mode,
         }
 
-    def _inject_memory_optimization(self, workflow: dict, *, source_node_type: str = "UNETLoader") -> None:
-        """Insert the upstream H3MemoryOptimization node between the H3 model producer and its MODEL consumers."""
+    def _inject_memory_optimization(
+        self,
+        workflow: dict,
+        *,
+        source_node_type: str = "UNETLoader",
+    ) -> None:
+        """Insert H3MemoryOptimization between the model producer and MODEL consumers."""
         existing = self._find(
             workflow,
             "H3MemoryOptimization",
@@ -250,19 +255,8 @@ class H3WorkflowBuilder:
         if not model_edges:
             raise RuntimeError(f"{source_node_type} has no MODEL consumers to optimize.")
 
-        try:
-            from planner.config import RUNTIME
-            cfg = dict(RUNTIME.get("h3_optimization", {}) or {})
-        except Exception:
-            cfg = {}
-
         node_id = self._next_id(workflow)
         pos = source.get("pos", [0, 0])
-        chunk_rows = int(cfg.get("chunk_rows", 4096) or 4096)
-        precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
-        qkv_streaming_mode = str(cfg.get("qkv_streaming_mode", "Auto") or "Auto")
-        attention_memory_mode = str(cfg.get("attention_memory_mode", "Standard") or "Standard")
-        version = str(cfg.get("version", "0.2.41") or "0.2.41")
 
         node = {
             "id": node_id,
@@ -278,26 +272,12 @@ class H3WorkflowBuilder:
             "outputs": [
                 {"name": "MODEL", "type": "MODEL", "links": []},
             ],
-            "properties": {
-                "cnr_id": "h3-optimizations",
-                "ver": version,
-                "Node name for S&R": "H3MemoryOptimization",
-            },
-            "widgets_values": [
-                "auto", "auto", chunk_rows, True,
-                precision_mode, qkv_streaming_mode, "Auto", attention_memory_mode,
-            ],
-            "widgets_values_named": {
-                "fused_qkv": "auto",
-                "mlp_memory": "auto",
-                "chunk_rows": chunk_rows,
-                "preserve_precision": True,
-                "precision_mode": precision_mode,
-                "qkv_streaming_mode": qkv_streaming_mode,
-                "embedding_memory_mode": "Auto",
-                "kitchen_v_memory_mode": attention_memory_mode,
-            },
+            "properties": {},
+            "widgets_values": [],
+            "widgets_values_named": {},
         }
+
+        self._apply_memory_optimization_config(node)
 
         # Connect producer -> optimizer.
         input_link = self._next_link_id(workflow)
