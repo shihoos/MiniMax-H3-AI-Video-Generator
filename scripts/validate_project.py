@@ -108,9 +108,9 @@ REQUIRED_FILES = [
     # WORKFLOWS
     # --------------------------------------------------------
 
-    "workflows/generation/H3_Ref2V_Production.json",
-    "workflows/generation/H3_Turbo_Ref2V_Production.json",
-    "workflows/postprocess/H3_Ref2V_UltimateUpscale_Production.json",
+    "workflows/generation/H3_Ref2VA_Production.json",
+    "workflows/generation/H3_Turbo_Ref2VA_Production.json",
+    "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json",
     "workflows/sources/H3_Turbo_Reference_Source.json",
     "workflows/sources/H3_LatentUpscaler_Source.json",
 ]
@@ -159,23 +159,23 @@ RUNTIME_IMPORTS = [
 
 
 PRODUCTION_WORKFLOWS = {
-    "ref2v": (
+    "ref2va": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Ref2V_Production.json"
+        / "H3_Ref2VA_Production.json"
     ),
-    "turbo_ref2v": (
+    "turbo_ref2va": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Turbo_Ref2V_Production.json"
+        / "H3_Turbo_Ref2VA_Production.json"
     ),
     "upscale": (
         ROOT
         / "workflows"
         / "postprocess"
-        / "H3_Ref2V_UltimateUpscale_Production.json"
+        / "H3_Ref2VA_UltimateUpscale_Production.json"
     ),
 }
 
@@ -591,7 +591,7 @@ def _h3_legal_frames(seconds: float, fps: float = 24.0) -> int:
 def validate_h3_duration_chain() -> None:
     """Validate the live H3 workflow's duration source→math→length chain."""
     expected_expr_fragments = ("a * 24", "% 17", "(5 -")
-    for name in ("ref2v", "turbo_ref2v"):
+    for name in ("ref2va", "turbo_ref2va"):
         graph = load_json(PRODUCTION_WORKFLOWS[name])
         refs = [n for n in graph.get("nodes", []) if n.get("type") == "MiniMaxH3ReferenceToVideo"]
         require(len(refs) == 1, f"{name}: expected exactly one MiniMaxH3ReferenceToVideo node.")
@@ -608,7 +608,7 @@ def validate_h3_duration_chain() -> None:
 
 def validate_h3_resolution_selector_contract() -> None:
     """Validate generation ResolutionSelector links and production target dimensions."""
-    for name in ("ref2v", "turbo_ref2v"):
+    for name in ("ref2va", "turbo_ref2va"):
         graph = load_json(PRODUCTION_WORKFLOWS[name])
         selectors = [n for n in graph.get("nodes", []) if n.get("type") == "ResolutionSelector"]
         require(len(selectors) == 1, f"{name}: expected exactly one ResolutionSelector.")
@@ -632,7 +632,7 @@ def validate_h3_builder_behavior() -> None:
 
     builder = H3WorkflowBuilder(ROOT, None)
     # Duration: the PrimitiveFloat value must change; the math expression must remain unchanged.
-    for name in ("ref2v", "turbo_ref2v"):
+    for name in ("ref2va", "turbo_ref2va"):
         workflow = builder.load(name)
         before_expr = str(
             next(n for n in workflow["nodes"] if n.get("type") == "ComfyMathExpression")
@@ -656,7 +656,7 @@ def validate_h3_builder_behavior() -> None:
             f"{name}: _set_duration() did not preserve the H3 legal frame fallback value.",
         )
     # Resolution: supported H3 production target must produce the selector mapping used by the builder.
-    workflow = builder.load("ref2v")
+    workflow = builder.load("ref2va")
     builder._set_resolution(workflow, 1344, 768)
     selector = next(n for n in workflow["nodes"] if n.get("type") == "ResolutionSelector")
     widgets = selector.get("widgets_values") or []
@@ -940,16 +940,16 @@ def validate_workflows() -> None:
         )
 
     # --------------------------------------------------------
-    # REF2V
+    # REF2VA
     # --------------------------------------------------------
 
-    ref2v = load_json(
+    ref2va = load_json(
         PRODUCTION_WORKFLOWS[
-            "ref2v"
+            "ref2va"
         ]
     )
 
-    ref2v_required = {
+    ref2va_required = {
         "UNETLoader",
         "CLIPLoader",
         "MiniMaxH3ReferenceToVideo",
@@ -963,15 +963,15 @@ def validate_workflows() -> None:
     }
 
     missing = (
-        ref2v_required
+        ref2va_required
         - node_types(
-            ref2v
+            ref2va
         )
     )
 
     require(
         not missing,
-        "Ref2V workflow is missing nodes:\n"
+        "Ref2VA workflow is missing nodes:\n"
         + "\n".join(
             sorted(
                 missing
@@ -980,12 +980,12 @@ def validate_workflows() -> None:
     )
 
     # --------------------------------------------------------
-    # TURBO REF2V
+    # TURBO REF2VA
     # --------------------------------------------------------
 
     turbo = load_json(
         PRODUCTION_WORKFLOWS[
-            "turbo_ref2v"
+            "turbo_ref2va"
         ]
     )
 
@@ -1392,7 +1392,7 @@ def validate_examples() -> None:
     for key in ("story_mode", "workflow_mode", "profile", "upscale_enabled", "story"):
         require(key in data, f"Production example is missing {key}.")
     require(data["story_mode"] in {"ai_story", "expand_user_story", "preserve_user_story"}, "Example story_mode is invalid.")
-    require(data["workflow_mode"] in {"auto", "ref2v", "turbo_ref2v", "upscale"}, "Example workflow_mode is invalid.")
+    require(data["workflow_mode"] in {"auto", "ref2va", "turbo_ref2va", "upscale"}, "Example workflow_mode is invalid.")
     require(data["profile"] in {"base", "turbo", "upscale"}, "Example profile is invalid.")
     require(isinstance(data["upscale_enabled"], bool), "Example upscale_enabled must be boolean.")
     require(bool(str(data["story"]).strip()), "Example story cannot be empty.")
@@ -1603,7 +1603,7 @@ def validate_execution_runtime_contracts() -> None:
         negative_prompt="artifacts",
         continuity_notes="Stable.",
         seed=1,
-        workflow_mode="ref2v",
+        workflow_mode="ref2va",
     )
     prompt = shot.h3_prompt()
     for section in (
