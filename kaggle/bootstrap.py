@@ -271,6 +271,115 @@ def install_base_requirements() -> None:
     )
 
 
+
+def install_pytorch_runtime(runtime: dict) -> None:
+    """Install and verify the project-locked PyTorch CUDA build last.
+
+    ComfyUI and custom-node requirements are allowed to install their own
+    compatible dependencies first. PyTorch is re-asserted only after all of
+    those dependency installs so a transitive requirement cannot silently
+    leave the worker on a different CUDA build.
+    """
+    config = dict(runtime.get("pytorch", {}) or {})
+    version = str(config.get("version", "") or "").strip()
+    cuda = str(config.get("cuda", "") or "").strip().lower()
+    index = str(config.get("index", "") or "").strip()
+    torchvision_version = str(config.get("torchvision_version", "") or "").strip()
+    torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
+
+    if not all((version, cuda, index, torchvision_version, torchaudio_version)):
+        raise RuntimeError("runtime_versions.yaml pytorch configuration is incomplete.")
+    if cuda != "cu130":
+        raise RuntimeError(f"This Ref2VA project is locked to cu130, got {cuda!r}.")
+
+    print("=" * 80)
+    print("INSTALLING LOCKED PYTORCH RUNTIME")
+    print("=" * 80)
+
+    run(
+        sys.executable,
+        "-m", "pip", "install", "-q",
+        "--disable-pip-version-check",
+        "--no-cache-dir",
+        "--index-url", index,
+        f"torch=={version}",
+        f"torchvision=={torchvision_version}",
+        f"torchaudio=={torchaudio_version}",
+    )
+
+    verify = subprocess.run(
+        [
+            sys.executable, "-c",
+            (
+                "import torch; "
+                f"assert torch.__version__ == '2.10.0+{cuda}'; "
+                "assert torch.version.cuda == '13.0'; "
+                "print(torch.__version__); "
+                "print(torch.version.cuda)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise RuntimeError(
+            "Locked PyTorch runtime verification failed.\n"
+            + (verify.stdout or "")
+            + (verify.stderr or "")
+        )
+    print("[PYTORCH]", (verify.stdout or "").strip().replace("\n", " | "))
+
+
+def patch_t4_h3_value_clone(runtime: dict) -> None:
+    """Apply the narrowly-scoped T4 H3 v-clone workaround to the locked ComfyUI.
+
+    ComfyUI 0.34.0's MiniMax H3 Attention copies the large V tensor before
+    wrapping it in AttentionTensorContainer. On 16-GB-class GPUs that can
+    add about a gigabyte of peak memory and severely degrade throughput.
+    The workaround is applied only when the exact upstream 0.34.0 source
+    pattern is present and only on SM75 GPUs. If the source changes, fail
+    loudly instead of silently patching the wrong code.
+    """
+    enabled = bool(
+        runtime.get("comfyui", {}).get("h3_t4_value_clone_workaround", True)
+    )
+    if not enabled:
+        print("[H3 T4 PATCH] disabled by runtime configuration")
+        return
+
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            print("[H3 T4 PATCH] skipped: CUDA unavailable")
+            return
+        major, minor = torch.cuda.get_device_capability(0)
+        if (major, minor) != (7, 5):
+            print(f"[H3 T4 PATCH] skipped: GPU SM{major}{minor} is not SM75")
+            return
+    except Exception as exc:
+        raise RuntimeError(f"Cannot determine GPU capability for H3 T4 patch: {exc}") from exc
+
+    target = COMFY / "comfy" / "ldm" / "minimax" / "model.py"
+    if not target.is_file():
+        raise RuntimeError(f"H3 model source not found: {target}")
+
+    text = target.read_text(encoding="utf-8")
+    marker = "# H3-T4-WORKAROUND: removed redundant V clone for SM75"
+    if marker in text:
+        print("[H3 T4 PATCH] already applied")
+        return
+
+    exact = "        v = v.clone()\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
+    replacement = "        " + marker + "\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
+    if exact not in text:
+        raise RuntimeError(
+            "Refusing to apply the H3 T4 workaround because ComfyUI's expected "
+            "0.34.0 Attention pattern was not found."
+        )
+    target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
+    print("[H3 T4 PATCH] applied to", target)
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -850,6 +959,13 @@ def main():
     )
 
     install_nodes()
+
+    # Re-assert the locked PyTorch CUDA build after every package that can
+    # mutate the Python runtime has been installed.
+    install_pytorch_runtime(runtime)
+
+    # Apply only on SM75/T4 and only against the exact locked ComfyUI source.
+    patch_t4_h3_value_clone(runtime)
 
     install_models()
 
