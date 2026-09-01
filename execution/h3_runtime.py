@@ -41,6 +41,7 @@ class H3Runtime:
             "expandable_segments:True",
         )
         env["PYTHONUNBUFFERED"] = "1"
+        env["H3_LOCKED_TORCH_RUNTIME"] = "2.10.0+cu130"
         if extra_env:
             env.update({str(k): str(v) for k, v in extra_env.items()})
         return env
@@ -212,6 +213,26 @@ class H3Runtime:
         if cpu_vae_env is not None:
             cpu_vae = H3Runtime._resolve_bool(cpu_vae_env, cpu_vae)
         import torch
+
+        # Fail closed before launching any worker if the live interpreter does
+        # not match the project-locked CUDA build. This prevents another long
+        # H3 run on a silently downgraded cu128 environment.
+        try:
+            from planner.config import RUNTIME
+            pytorch_cfg = dict(RUNTIME.get("pytorch", {}) or {})
+            expected_version = str(pytorch_cfg.get("version", "2.10.0") or "2.10.0").strip()
+            expected_cuda = str(pytorch_cfg.get("cuda", "cu130") or "cu130").strip().lower()
+            expected_torch = f"{expected_version}+{expected_cuda}"
+            if torch.__version__ != expected_torch or torch.version.cuda != "13.0":
+                raise RuntimeError(
+                    "H3 worker refused to start because the live PyTorch runtime "
+                    f"does not match the locked project runtime: got {torch.__version__} / "
+                    f"CUDA {torch.version.cuda}, expected {expected_torch} / CUDA 13.0."
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to validate locked PyTorch runtime: {exc}") from exc
 
         try:
             from planner.config import RUNTIME
