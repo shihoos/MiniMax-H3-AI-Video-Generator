@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from pathlib import Path
 
 
 def shot_choices(plan: dict[str, Any]) -> list[str]:
@@ -27,3 +28,17 @@ def render_shot_card(plan: dict[str, Any], shot_id: str | None) -> str:
         f"**Findings:** {'; '.join(findings) if findings else 'None.'}\n\n"
         f"**VLM warning:** {vf.get('vision_warning','None.')}\n"
     )
+
+
+def shot_preview_path(plan: dict[str, Any], shot_id: str | None) -> str | None:
+    wanted = str(shot_id or "").strip()
+    shot = next((s for s in (plan.get("shots", []) or []) if isinstance(s, dict) and str(s.get("shot_id", "")).strip() == wanted), None)
+    if not shot:
+        return None
+    candidates = [shot.get("output"), shot.get("final_video"), shot.get("retake_execution", {}).get("output") if isinstance(shot.get("retake_execution"), dict) else None]
+    for raw in candidates:
+        if raw:
+            path = Path(str(raw))
+            if path.is_file():
+                return str(path.resolve())
+    return None
