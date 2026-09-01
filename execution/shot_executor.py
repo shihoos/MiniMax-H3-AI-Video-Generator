@@ -484,12 +484,12 @@ class ShotExecutor:
         if upscale:
 
             if workflow_mode not in {
-                "ref2v",
-                "turbo_ref2v",
+                "ref2va",
+                "turbo_ref2va",
             }:
                 raise RuntimeError(
                     "Combined upscale requires "
-                    "ref2v or turbo_ref2v generation mode."
+                    "ref2va or turbo_ref2va generation mode."
                 )
 
             workflow = (
