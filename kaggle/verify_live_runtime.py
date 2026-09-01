@@ -15,23 +15,23 @@ ROOT = (
 
 
 PRODUCTION = {
-    "ref2v": (
+    "ref2va": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Ref2V_Production.json"
+        / "H3_Ref2VA_Production.json"
     ),
-    "turbo_ref2v": (
+    "turbo_ref2va": (
         ROOT
         / "workflows"
         / "generation"
-        / "H3_Turbo_Ref2V_Production.json"
+        / "H3_Turbo_Ref2VA_Production.json"
     ),
     "upscale": (
         ROOT
         / "workflows"
         / "postprocess"
-        / "H3_Ref2V_UltimateUpscale_Production.json"
+        / "H3_Ref2VA_UltimateUpscale_Production.json"
     ),
 }
 
