@@ -1706,7 +1706,7 @@ def build_app(
             refresh.click(fn=refresh_saved_drafts_ui, inputs=[saved_draft], outputs=[saved_draft])
 
             approve.click(fn=controller.approve_and_generate, inputs=[session_plan_path], outputs=[result_status, final_video, session_plan_path])
-            refresh_job.click(fn=controller.refresh_job_status, inputs=[session_plan_path], outputs=[result_status, final_video])
+            refresh_job.click(fn=controller.refresh_job_status, inputs=[session_plan_path], outputs=[result_status, final_video, session_plan_path])
             refresh_live_preview.click(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             live_preview_timer.tick(fn=controller.latest_live_preview, inputs=[session_plan_path], outputs=[live_preview, live_preview_status])
             load_timeline.click(fn=controller.timeline_table, inputs=[session_plan_path], outputs=[timeline_table, timeline_status])
