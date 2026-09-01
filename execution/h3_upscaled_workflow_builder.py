@@ -415,12 +415,12 @@ class H3UpscaledWorkflowBuilder(
     ):
 
         if generation_mode not in {
-            "ref2v",
-            "turbo_ref2v",
+            "ref2va",
+            "turbo_ref2va",
         }:
             raise ValueError(
                 "Combined upscale requires "
-                "ref2v or turbo_ref2v generation mode."
+                "ref2va or turbo_ref2va generation mode."
             )
 
         workflow = self.load(
@@ -447,7 +447,7 @@ class H3UpscaledWorkflowBuilder(
 
         if (
             generation_mode
-            == "turbo_ref2v"
+            == "turbo_ref2va"
             and int(turbo_steps) != 8
         ):
             raise ValueError(
