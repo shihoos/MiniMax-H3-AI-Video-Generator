@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 
 from pipeline.job_queue import ProductionJobQueue
+from pipeline.production_plan_store import ProductionPlanStore
 from pipeline.timeline import ProductionTimeline
 from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.production_checkpoint import ProductionCheckpoint
@@ -54,6 +55,7 @@ class ProductionController:
         self._job_queue = ProductionJobQueue(
             ROOT / "data" / "production" / "jobs.sqlite3"
         )
+        self._plan_store = ProductionPlanStore()
         self._job_queue.recover_stale(max_age_seconds=21600.0)
         self._queue_stop = threading.Event()
         self._queue_thread = threading.Thread(
@@ -128,26 +130,10 @@ class ProductionController:
             / "story_preview.json"
         )
 
-        temporary = plan_path.with_name(
-            f".{plan_path.name}.{uuid.uuid4().hex}.tmp"
+        ProductionPlanStore.atomic_save_unlocked(
+            plan_path,
+            plan,
         )
-
-        try:
-            temporary.write_text(
-                json.dumps(
-                    plan,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            temporary.replace(
-                plan_path
-            )
-        finally:
-            temporary.unlink(
-                missing_ok=True
-            )
 
         return (
             production_id,
@@ -893,33 +879,46 @@ class ProductionController:
             return [], "### ERROR\n" + str(exc)
 
     def apply_timeline_edits(self, plan_path_value: str, rows):
+        if not self._lock.acquire(blocking=False):
+            return [], "### BUSY\nAnother production operation is running; timeline changes were not applied.", str(plan_path_value or "")
+
+        plan_path = Path(plan_path_value).resolve()
         try:
-            plan, plan_path = self._load_plan(plan_path_value)
-            ProductionTimeline(plan).apply_table(rows)
-            ProductionTimeline.validate(plan)
-            plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+            with self._plan_store.lock(plan_path):
+                plan = self._load_plan(str(plan_path))[0]
+                job_status = str(plan.get("job_status", "") or "").strip().lower()
+                approval_status = str((plan.get("approval", {}) or {}).get("status", "") or "").strip().lower()
 
-            # Keep the durable planning checkpoint synchronized with any user
-            # timeline edits. Otherwise the render runner would correctly
-            # reject the edited plan as a fingerprint mismatch.
-            production_id = str(plan.get("production_id", "")).strip()
-            if production_id:
-                store = ProductionCheckpoint(ROOT)
-                try:
-                    state = store.load(production_id)
-                    if isinstance(state.get("director_plan"), dict):
-                        state["director_plan"] = plan
-                        state["plan_sha256"] = store.plan_digest(plan)
-                        state["status"] = "ready"
-                        state["stage"] = "timeline_edited"
-                        state["error"] = ""
-                        store.save(production_id, state)
-                except FileNotFoundError:
-                    pass
+                if approval_status == "completed" or job_status == "completed":
+                    return [], "### COMPLETE\nTimeline edits are disabled after the production has completed. Create a new render revision to change the final plan.", str(plan_path)
+                if job_status in {"queued", "running"}:
+                    return [], f"### BUSY\nTimeline edits are disabled while the render job is `{job_status}`.", str(plan_path)
 
-            return ProductionTimeline(plan).table(), "### TIMELINE UPDATED\nChanges are persisted to the production plan and checkpoint.", str(plan_path)
+                ProductionTimeline(plan).apply_table(rows)
+                ProductionTimeline.validate(plan)
+                ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
+
+                production_id = str(plan.get("production_id", "")).strip()
+                if production_id:
+                    store = ProductionCheckpoint(ROOT)
+                    try:
+                        state = store.load(production_id)
+                        if isinstance(state.get("director_plan"), dict):
+                            state["director_plan"] = plan
+                            state["plan_sha256"] = store.plan_digest(plan)
+                            state["status"] = "ready"
+                            state["stage"] = "timeline_edited"
+                            state["error"] = ""
+                            store.save(production_id, state)
+                    except FileNotFoundError:
+                        pass
+
+                return ProductionTimeline(plan).table(), "### TIMELINE UPDATED\nChanges are persisted to the production plan and checkpoint.", str(plan_path)
         except Exception as exc:
             return [], "### ERROR\n" + str(exc), str(plan_path_value or "")
+        finally:
+            self._lock.release()
+
 
     def runtime_health(self, plan_path_value: str):
         try:
@@ -931,25 +930,39 @@ class ProductionController:
             return {}, "### ERROR\n" + str(exc)
 
     def create_retake_request(self, plan_path_value: str, shot_id: str, start_seconds: float, end_seconds: float, reason: str):
-        try:
-            plan, _ = self._load_plan(plan_path_value)
-            production_id = str(plan.get("production_id", "")).strip()
-            request_path = RetakeManager(ROOT).request(
-                production_id, shot_id,
-                start_seconds=float(start_seconds or 0.0),
-                end_seconds=float(end_seconds),
-                reason=reason,
-            )
-            for shot in plan.get("shots", []) or []:
-                if str(shot.get("shot_id", "")) == str(shot_id):
-                    shot["retake_requested"] = True
-                    shot["retake_start_seconds"] = float(start_seconds or 0.0)
-                    shot["retake_end_seconds"] = float(end_seconds)
-            production_id, plan_path = self._save_session_plan(plan)
+        if not self._lock.acquire(blocking=False):
+            return "### BUSY\nAnother production operation is running; retake changes were not applied.", str(plan_path_value or "")
 
-            # Retake metadata is part of the semantic plan, so keep the
-            # durable checkpoint fingerprint synchronized with the edited plan.
-            if production_id:
+        plan_path = Path(plan_path_value).resolve()
+        try:
+            with self._plan_store.lock(plan_path):
+                plan = self._load_plan(str(plan_path))[0]
+                job_status = str(plan.get("job_status", "") or "").strip().lower()
+                approval_status = str((plan.get("approval", {}) or {}).get("status", "") or "").strip().lower()
+                if approval_status == "completed" or job_status == "completed":
+                    return "### COMPLETE\nRetake requests are disabled after the production has completed. Create a new render revision instead.", str(plan_path)
+                if job_status in {"queued", "running"}:
+                    return f"### BUSY\nRetake requests are disabled while the render job is `{job_status}`.", str(plan_path)
+
+                production_id = str(plan.get("production_id", "")).strip()
+                if not production_id:
+                    raise RuntimeError("Production ID is missing from the storyboard plan.")
+
+                request_path = RetakeManager(ROOT).request(
+                    production_id,
+                    shot_id,
+                    start_seconds=float(start_seconds or 0.0),
+                    end_seconds=float(end_seconds),
+                    reason=reason,
+                )
+                for shot in plan.get("shots", []) or []:
+                    if str(shot.get("shot_id", "")) == str(shot_id):
+                        shot["retake_requested"] = True
+                        shot["retake_start_seconds"] = float(start_seconds or 0.0)
+                        shot["retake_end_seconds"] = float(end_seconds)
+
+                ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
+
                 store = ProductionCheckpoint(ROOT)
                 try:
                     state = store.load(production_id)
@@ -963,9 +976,12 @@ class ProductionController:
                 except FileNotFoundError:
                     pass
 
-            return f"### RETAKE REQUESTED\n`{request_path}`", str(plan_path)
+                return f"### RETAKE REQUESTED\n`{request_path}`", str(plan_path)
         except Exception as exc:
-            return "### ERROR\n" + str(exc), str(plan_path_value or "")
+            return "### ERROR\n" + str(exc), str(plan_path)
+        finally:
+            self._lock.release()
+
 
     def preview_saved(
         self,
@@ -1069,36 +1085,58 @@ class ProductionController:
     # APPROVAL / VIDEO
     # ========================================================
 
-    def approve_and_generate(
-        self,
-        plan_path_value: str,
-    ):
-        """Approve a saved plan and persist a render job without tying it to the browser lifetime."""
+    def approve_and_generate(self, plan_path_value: str):
+        """Approve a saved plan and enqueue one persistent render job."""
+        if not self._lock.acquire(blocking=False):
+            return "### BUSY\nAnother production operation is running.", None, plan_path_value
+
+        plan_path = Path(plan_path_value).resolve()
         try:
-            plan, plan_path = self._load_plan(plan_path_value)
+            with self._plan_store.lock(plan_path):
+                plan = self._load_plan(str(plan_path))[0]
+                approval = plan.get("approval", {}) or {}
+                job_status = str(plan.get("job_status", "") or "").strip().lower()
+
+                if approval.get("status") == "completed" or job_status == "completed":
+                    return "### COMPLETE\nThis production has already completed.", plan.get("final_video"), str(plan_path)
+                if job_status in {"queued", "running"}:
+                    job_id = str(plan.get("job_id", "") or "").strip()
+                    suffix = f" Job ID: `{job_id}`" if job_id else ""
+                    return f"### {job_status.upper()}\nThis production already has a `{job_status}` render job.{suffix}", None, str(plan_path)
+
+                production_id = str(plan.get("production_id", plan_path.parent.name)).strip()
+                if not production_id:
+                    raise RuntimeError("Production ID is missing from the storyboard plan.")
+
+                plan["production_id"] = production_id
+                plan["approval"] = {
+                    "status": "approved",
+                    "approved_at": datetime.now().isoformat(),
+                }
+                job_id = self._job_queue.submit(
+                    production_id,
+                    plan_path,
+                    {
+                        "profile": plan.get("profile", "turbo"),
+                        "upscale_enabled": bool(plan.get("upscale_enabled", False)),
+                    },
+                )
+                plan["job_id"] = job_id
+                plan["job_status"] = "queued"
+                ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
+
+                return (
+                    f"### QUEUED\nProduction `{production_id}` has been queued.\n\n"
+                    f"Job ID: `{job_id}`\n\n"
+                    "You can close the browser; the queue state is persisted on disk.",
+                    None,
+                    str(plan_path),
+                )
         except Exception as exc:
-            return "### ERROR\n" + str(exc), None, plan_path_value
+            return "### ERROR\n" + str(exc), None, str(plan_path)
+        finally:
+            self._lock.release()
 
-        approval = plan.get("approval", {}) or {}
-        if approval.get("status") == "completed":
-            return "### COMPLETE\nThis production has already completed.", plan.get("final_video"), plan_path_value
-
-        production_id = str(plan.get("production_id", plan_path.parent.name)).strip()
-        plan["production_id"] = production_id
-        plan["approval"] = {
-            "status": "approved",
-            "approved_at": datetime.now().isoformat(),
-        }
-        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
-        job_id = self._job_queue.submit(
-            production_id,
-            plan_path,
-            {"profile": plan.get("profile", "turbo"), "upscale_enabled": bool(plan.get("upscale_enabled", False))},
-        )
-        plan["job_id"] = job_id
-        plan["job_status"] = "queued"
-        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
-        return f"### QUEUED\nProduction `{production_id}` has been queued.\n\nJob ID: `{job_id}`\n\nYou can close the browser; the queue state is persisted on disk.", None, str(plan_path)
 
     def refresh_job_status(self, plan_path_value: str):
         try:
@@ -1128,295 +1166,147 @@ class ProductionController:
             job = self._job_queue.claim_next()
             if not job:
                 continue
+
             job_id = str(job["job_id"])
             worker_token = str(job.get("worker_token", "") or "")
             heartbeat_stop = threading.Event()
             heartbeat_thread = None
+            job_completed = False
+
             try:
                 def _heartbeat():
                     while not heartbeat_stop.wait(30.0):
                         if not self._job_queue.heartbeat(job_id, worker_token):
                             break
-                heartbeat_thread = threading.Thread(target=_heartbeat, name=f"h3-job-heartbeat-{job_id[:8]}", daemon=True)
+
+                heartbeat_thread = threading.Thread(
+                    target=_heartbeat,
+                    name=f"h3-job-heartbeat-{job_id[:8]}",
+                    daemon=True,
+                )
                 heartbeat_thread.start()
 
-                status_message, final_video, plan_path_value = self._execute_approved_plan(str(job["plan_path"]))
+                status_message, final_video, _ = self._execute_approved_plan(
+                    str(job["plan_path"])
+                )
                 if not str(status_message).startswith("### VIDEO GENERATION COMPLETE"):
                     raise RuntimeError(str(status_message))
-                plan, _ = self._load_plan(str(job["plan_path"]))
-                result = {
-                    "production_id": plan.get("production_id", job.get("production_id")),
-                    "final_video": final_video or plan.get("final_video"),
-                }
-                self._job_queue.complete(job_id, result, worker_token=worker_token)
-                heartbeat_stop.set()
-                plan["job_status"] = "completed"
-                Path(job["plan_path"]).write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+
+                with self._lock:
+                    with self._plan_store.lock(Path(job["plan_path"])):
+                        plan_path = Path(job["plan_path"]).resolve()
+                        plan = self._load_plan(str(plan_path))[0]
+                        result = {
+                            "production_id": plan.get("production_id", job.get("production_id")),
+                            "final_video": final_video or plan.get("final_video"),
+                        }
+                        self._job_queue.complete(
+                            job_id,
+                            result,
+                            worker_token=worker_token,
+                        )
+                        job_completed = True
+                        plan["job_status"] = "completed"
+                        ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
             except Exception as exc:
+                if not job_completed:
+                    try:
+                        self._job_queue.fail(
+                            job_id,
+                            str(exc),
+                            worker_token=worker_token,
+                        )
+                    except Exception:
+                        pass
+
                 try:
-                    self._job_queue.fail(job_id, str(exc), worker_token=worker_token)
+                    with self._lock:
+                        plan_path = Path(job["plan_path"]).resolve()
+                        with self._plan_store.lock(plan_path):
+                            plan = self._load_plan(str(plan_path))[0]
+                            if not job_completed:
+                                plan["job_status"] = "failed"
+                                plan["job_error"] = str(exc)
+                            else:
+                                plan["job_status"] = "completed"
+                            ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
                 except Exception:
                     pass
-                try:
-                    plan, plan_path = self._load_plan(str(job["plan_path"]))
-                    plan["job_status"] = "failed"
-                    plan["job_error"] = str(exc)
-                    plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
-                except Exception:
-                    pass
+            finally:
                 heartbeat_stop.set()
+                if heartbeat_thread is not None:
+                    heartbeat_thread.join(timeout=1.0)
 
-    def _execute_approved_plan(
-        self,
-        plan_path_value: str,
-    ):
 
-        try:
-
-            plan, plan_path = (
-                self._load_plan(
-                    plan_path_value
-                )
-            )
-
-        except Exception as exc:
-
-            return (
-                "### ERROR\n"
-                + str(exc),
-                None,
-                plan_path_value,
-            )
-
-        # Queue workers must wait for an active storyboard-planning operation
-        # instead of converting normal lock contention into a permanent job
-        # failure. Keep the timeout bounded so a genuinely wedged controller
-        # cannot block the persistent queue forever.
-        lock_acquired = self._lock.acquire(
-            timeout=3600.0
-        )
-
-        if not lock_acquired:
-
-            return (
-                "### ERROR\nLock acquisition timed out after 1 hour.",
-                None,
-                plan_path_value,
-            )
+    def _execute_approved_plan(self, plan_path_value: str):
+        plan_path = Path(plan_path_value).resolve()
+        if not self._lock.acquire(timeout=3600.0):
+            return "### ERROR\nLock acquisition timed out after 1 hour.", None, plan_path_value
 
         runtime_workers = None
-
         try:
+            with self._plan_store.lock(plan_path):
+                plan = self._load_plan(str(plan_path))[0]
+                scenes = plan.get("scenes", []) or []
+                shots = plan.get("shots", []) or []
+                if not scenes or not shots:
+                    raise RuntimeError("The storyboard is incomplete.")
 
-            scenes = (
-                plan.get(
-                    "scenes",
-                    [],
-                )
-                or []
-            )
+                approval = plan.get("approval", {}) or {}
+                if approval.get("status") == "completed":
+                    return "### COMPLETE\nThis production has already completed.", plan.get("final_video"), plan_path_value
 
-            shots = (
-                plan.get(
-                    "shots",
-                    [],
-                )
-                or []
-            )
-
-            if not scenes or not shots:
-
-                raise RuntimeError(
-                    "The storyboard is incomplete."
-                )
-
-            approval = (
-                plan.get(
-                    "approval",
-                    {},
-                )
-                or {}
-            )
-
-            if (
-                approval.get(
-                    "status"
-                )
-                == "completed"
-            ):
-
-                return (
-                    "### COMPLETE\n"
-                    "This production has already completed.",
-                    plan.get(
-                        "final_video"
-                    ),
-                    plan_path_value,
-                )
-
-            plan[
-                "approval"
-            ] = {
-                "status":
-                    "approved",
-
-                "approved_at":
-                    datetime.now().isoformat(),
-            }
-
-            plan_path.write_text(
-                json.dumps(
-                    plan,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+                plan["approval"] = {
+                    "status": "approved",
+                    "approved_at": approval.get("approved_at") or datetime.now().isoformat(),
+                }
+                ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
+                render_plan_sha = ProductionCheckpoint.plan_digest(plan)
 
             import torch
-
             if not torch.cuda.is_available():
+                raise RuntimeError("No NVIDIA CUDA GPU is available.")
 
-                raise RuntimeError(
-                    "No NVIDIA CUDA GPU is available."
-                )
+            from execution.h3_runtime import H3Runtime
+            from execution.comfy_client import ComfyClient
+            from execution.production_runner import ProductionRunner
 
-            from execution.h3_runtime import (
-                H3Runtime,
-            )
-
-            from execution.comfy_client import (
-                ComfyClient,
-            )
-
-            from execution.production_runner import (
-                ProductionRunner,
-            )
-
-            gpu_ids = list(
-                range(
-                    torch.cuda.device_count()
-                )
-            )
-
+            gpu_ids = list(range(torch.cuda.device_count()))
             if not gpu_ids:
+                raise RuntimeError("No CUDA GPU was detected.")
 
-                raise RuntimeError(
-                    "No CUDA GPU was detected."
-                )
-
-            runtime_workers = (
-                H3Runtime.launch_workers(
-                    ROOT,
-                    gpu_ids,
-                )
-            )
-
+            runtime_workers = H3Runtime.launch_workers(ROOT, gpu_ids)
             clients = {}
-
-            for gpu_id, worker in (
-                runtime_workers.items()
-            ):
-
-                client = ComfyClient(
-                    base_url=worker[
-                        "url"
-                    ],
-                    timeout=60,
-                    request_retries=3,
-                )
-
+            for gpu_id, worker in runtime_workers.items():
+                client = ComfyClient(base_url=worker["url"], timeout=60, request_retries=3)
                 if not client.health_check():
+                    raise RuntimeError(f"ComfyUI worker unavailable: {worker['url']}")
+                from kaggle.verify_live_runtime import check_worker
+                check_worker(worker["port"])
+                clients[gpu_id] = client
 
-                    raise RuntimeError(
-                        "ComfyUI worker unavailable: "
-                        f"{worker['url']}"
-                    )
-
-                from kaggle.verify_live_runtime import (
-                    check_worker,
-                )
-
-                check_worker(
-                    worker[
-                        "port"
-                    ]
-                )
-
-                clients[
-                    gpu_id
-                ] = client
-
-            result = (
-                ProductionRunner(
-                    project_root=ROOT,
-                    comfy_clients=clients,
-                )
-                .run(
-                    plan
-                )
-            )
-
-            final_video = (
-                Path(
-                    result[
-                        "final_video"
-                    ]
-                )
-                .resolve()
-            )
-
+            result = ProductionRunner(project_root=ROOT, comfy_clients=clients).run(plan)
+            final_video = Path(result["final_video"]).resolve()
             if not final_video.is_file():
-
-                raise RuntimeError(
-                    "Production runner completed but "
-                    "final video was not found:\n"
-                    f"{final_video}"
-                )
-
+                raise RuntimeError(f"Production runner completed but final video was not found:\n{final_video}")
             if final_video.stat().st_size <= 0:
+                raise RuntimeError(f"Production runner produced an empty final video:\n{final_video}")
 
-                raise RuntimeError(
-                    "Production runner produced an empty "
-                    "final video:\n"
-                    f"{final_video}"
-                )
-
-            plan[
-                "production_id"
-            ] = result[
-                "production_id"
-            ]
-
-            plan[
-                "final_video"
-            ] = str(
-                final_video
-            )
-
-            plan[
-                "approval"
-            ] = {
-                "status":
-                    "completed",
-
-                "approved_at":
-                    approval.get(
-                        "approved_at"
-                    ),
-
-                "completed_at":
-                    datetime.now().isoformat(),
-            }
-
-            plan_path.write_text(
-                json.dumps(
-                    plan,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            with self._plan_store.lock(plan_path):
+                latest_plan = self._load_plan(str(plan_path))[0]
+                if ProductionCheckpoint.plan_digest(latest_plan) != render_plan_sha:
+                    raise RuntimeError(
+                        "Production plan changed while rendering; final result was not committed "
+                        "to prevent a stale-plan overwrite."
+                    )
+                latest_plan["production_id"] = result["production_id"]
+                latest_plan["final_video"] = str(final_video)
+                latest_plan["approval"] = {
+                    "status": "completed",
+                    "approved_at": latest_plan.get("approval", {}).get("approved_at"),
+                    "completed_at": datetime.now().isoformat(),
+                }
+                ProductionPlanStore.atomic_save_unlocked(plan_path, latest_plan)
 
             return (
                 "### VIDEO GENERATION COMPLETE ✅\n\n"
@@ -1424,54 +1314,13 @@ class ProductionController:
                 f"Final video: `{final_video}`\n\n"
                 f"Profile: `{plan.get('profile', 'base')}`\n\n"
                 f"Upscale: `{'enabled' if plan.get('upscale_enabled', False) else 'disabled'}`\n\n"
-                f"Delivery: "
-                f"{plan.get('delivery_width', 1280)}×"
-                f"{plan.get('delivery_height', 720)} @ "
-                f"{plan.get('delivery_fps', 24)} FPS",
-                str(
-                    final_video
-                ),
+                f"Delivery: {plan.get('delivery_width', 1280)}×{plan.get('delivery_height', 720)} @ {plan.get('delivery_fps', 24)} FPS",
+                str(final_video),
                 plan_path_value,
             )
-
-        except Exception as exc:
-
-            traceback.print_exc()
-
-            details = (
-                f"{type(exc).__name__}: {exc}\n\n"
-                f"{traceback.format_exc()}"
-            )
-
-            return (
-                "### PRODUCTION FAILED\n\n"
-                "```text\n"
-                + details
-                + "\n```",
-                None,
-                plan_path_value,
-            )
-
         finally:
+            self._lock.release()
 
-            if runtime_workers is not None:
-
-                try:
-
-                    from execution.h3_runtime import (
-                        H3Runtime,
-                    )
-
-                    H3Runtime.stop_workers(
-                        runtime_workers
-                    )
-
-                except Exception:
-
-                    traceback.print_exc()
-
-            if lock_acquired:
-                self._lock.release()
 
 
 def build_app(
