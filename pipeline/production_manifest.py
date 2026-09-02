@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +21,26 @@ class ProductionManifest:
     @staticmethod
     def _file_hash(path: Path) -> str:
         if not path.is_file():
-            return ""
+            raise FileNotFoundError(f"Manifest-tracked file is missing: {path}")
         return ProductionCheckpoint.digest_file(path)
+
+    @staticmethod
+    def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+        path = Path(path).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def build(self, plan: dict[str, Any]) -> dict[str, Any]:
         files = {}
@@ -28,7 +48,6 @@ class ProductionManifest:
             "configs/runtime_versions.yaml",
             "configs/model_inventory.yaml",
             "configs/custom_nodes.yaml",
-            "execution/retake_executor.py",
             "planner/qwen_director.py",
             "planner/cinematic_compiler.py",
             "planner/production_planner.py",
@@ -42,6 +61,7 @@ class ProductionManifest:
             "pipeline/vlm_analyzer.py",
             "pipeline/quality_gate.py",
             "pipeline/retake_manager.py",
+            "execution/retake_executor.py",
             "pipeline/runtime_diagnostics.py",
             "pipeline/comfy_preview.py",
             "pipeline/visual_feedback.py",
@@ -74,7 +94,5 @@ class ProductionManifest:
 
     def write(self, plan: dict[str, Any], path: Path) -> dict[str, Any]:
         manifest = self.build(plan)
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        self._atomic_write_json(Path(path), manifest)
         return manifest
