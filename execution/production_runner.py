@@ -1726,6 +1726,23 @@ class ProductionRunner:
                     "Final video assembly produced no valid file."
                 )
 
+            expected_duration = float(
+                ((production_plan.get("timeline", {}) or {}).get("total_duration_seconds", 0.0))
+                or 0.0
+            )
+            if expected_duration > 0.0:
+                delivered_fps = int(production_plan.get("delivery_fps", DELIVERY_FPS))
+                actual_duration = FFProbeMediaDurationProvider().duration_seconds(
+                    final_video, stream_selector="v:0"
+                )
+                tolerance = max(0.10, 2.0 / max(delivered_fps, 1))
+                if abs(actual_duration - expected_duration) > tolerance:
+                    raise RuntimeError(
+                        "Final video duration is inconsistent with the canonical timeline: "
+                        f"expected={expected_duration:.3f}s actual={actual_duration:.3f}s "
+                        f"tolerance={tolerance:.3f}s."
+                    )
+
             self._update_render_checkpoint(
                 production_id,
                 status="completed",
