@@ -138,6 +138,8 @@ RUNTIME_IMPORTS = [
     "pipeline.visual_feedback",
     "pipeline.storyboard_cache",
     "pipeline.job_queue",
+    "pipeline.retake_executor",
+    "pipeline.retake_manager",
 
     # Schemas
     "schemas.dialogue",
@@ -1640,7 +1642,17 @@ def validate_media_contracts() -> None:
     script = ROOT / "scripts" / "validate_media_contracts.py"
     if not script.is_file():
         raise AssertionError("validate_media_contracts.py is missing.")
-    require("RetakeManager" in script.read_text(encoding="utf-8"), "Media contract validator is missing RetakeManager coverage.")
+    script_text = script.read_text(encoding="utf-8")
+    require("RetakeManager" in script_text, "Media contract validator is missing RetakeManager coverage.")
+    require("RetakeExecutor" in script_text, "Media contract validator is missing RetakeExecutor coverage.")
+
+    retake_executor = ROOT / "pipeline" / "retake_executor.py"
+    require(retake_executor.is_file(), "pipeline/retake_executor.py is missing.")
+    retake_tree = ast.parse(retake_executor.read_text(encoding="utf-8"), filename=str(retake_executor))
+    require(
+        any(isinstance(node, ast.ClassDef) and node.name == "RetakeExecutor" for node in ast.walk(retake_tree)),
+        "pipeline.retake_executor must define RetakeExecutor.",
+    )
     print("PASS media contract validator")
 
 
