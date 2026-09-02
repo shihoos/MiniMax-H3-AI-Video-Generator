@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -106,9 +107,25 @@ class RuntimeDiagnostics:
                 report["comfyui"] = {"healthy": False, "error": str(exc)}
         return report
 
+    @staticmethod
+    def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+        path = Path(path).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def write(self, path: Path, *, comfy_url: str | None = None) -> dict[str, Any]:
         report = self.collect(comfy_url=comfy_url)
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        self._atomic_write_json(Path(path), report)
         return report
