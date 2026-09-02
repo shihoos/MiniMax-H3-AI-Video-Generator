@@ -208,6 +208,13 @@ jobs:
         run: |
           python scripts/validate_enhancements.py
 
+      - name: Plan persistence race regression
+        env:
+          H3_DIRECTOR_ENABLED: "0"
+          H3_GRADIO_SHARE: "0"
+        run: |
+          python scripts/validate_plan_persistence.py
+
       - name: Planner smoke tests
         env:
           H3_DIRECTOR_ENABLED: "0"
