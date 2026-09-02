@@ -301,6 +301,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
         "-m", "pip", "install", "-q",
         "--disable-pip-version-check",
         "--no-cache-dir",
+        "--force-reinstall",
         "--index-url", index,
         f"torch=={version}",
         f"torchvision=={torchvision_version}",
