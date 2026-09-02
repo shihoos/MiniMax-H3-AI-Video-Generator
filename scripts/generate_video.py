@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:
     )
 
 
+from planner.config import RUNTIME
+
 def discover_gpu_ids():
 
     import torch
@@ -94,10 +96,11 @@ def load_clients(
                 f"Duplicate ComfyUI worker GPU ID: {gpu_id}."
             )
 
+        runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
         client = ComfyClient(
             base_url=url,
-            timeout=60,
-            request_retries=3,
+            timeout=float(runtime_cfg.get("comfyui_request_timeout_seconds", 60)),
+            request_retries=int(runtime_cfg.get("comfyui_request_retries", 3)),
         )
 
         if not client.health_check():
