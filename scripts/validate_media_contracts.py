@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.retake_manager import RetakeManager
+from pipeline.retake_executor import RetakeExecutor
 
 
 def run(command: list[str]) -> None:
@@ -33,6 +34,7 @@ def probe(path: Path) -> dict:
 
 
 def main() -> None:
+    assert RetakeExecutor.__name__ == "RetakeExecutor"
     with tempfile.TemporaryDirectory(prefix="h3-media-contract-") as tmp:
         root = Path(tmp)
         base = root / "base.mp4"
@@ -73,6 +75,20 @@ def main() -> None:
         assert out_audio is not None
         assert out_audio.get("sample_rate") == "32000"
         assert int(out_audio.get("channels") or 0) == 2
+
+        out_segmented = root / "out_segmented.mp4"
+        RetakeManager(root).stitch(
+            base, retake, out_segmented,
+            start_seconds=1.0, end_seconds=5.0, preserve_audio=False,
+        )
+        segmented_probe = probe(out_segmented)
+        segmented_video = next(s for s in segmented_probe["streams"] if s["codec_type"] == "video")
+        segmented_audio = next((s for s in segmented_probe["streams"] if s["codec_type"] == "audio"), None)
+        assert abs(float(segmented_video["duration"]) - float(base_video["duration"])) <= 1 / 24 + 0.01
+        assert segmented_audio is not None
+        assert segmented_audio.get("sample_rate") == "32000"
+        assert int(segmented_audio.get("channels") or 0) == 2
+        assert abs(float(segmented_audio.get("duration") or 0.0) - float(base_video["duration"])) <= 0.10
 
     print("PASS media/retake contracts")
 
