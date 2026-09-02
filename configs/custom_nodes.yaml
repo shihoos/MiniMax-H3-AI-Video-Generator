@@ -28,7 +28,7 @@ custom_nodes:
     required: true
   - name: H3-Optimizations
     repository: https://github.com/Zironic/H3-Optimizations.git
-    revision: 379f9c7922b3d7831dd93ae069ba0cb82cf4cf36
+    revision: 379f9c7922b3d7831dd93ae069ba0cb82cb4cf36
     purpose: Production H3 memory/QKV/MLP optimization for T4-safe execution
     required: true
   supporting:
