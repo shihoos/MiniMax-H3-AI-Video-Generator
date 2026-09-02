@@ -953,6 +953,7 @@ def validate_workflows() -> None:
         "UNETLoader",
         "CLIPLoader",
         "MiniMaxH3ReferenceToVideo",
+        "H3MemoryOptimization",
         "BasicGuider",
         "BasicScheduler",
         "SamplerCustomAdvanced",
