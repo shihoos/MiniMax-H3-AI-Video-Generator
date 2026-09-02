@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.retake_manager import RetakeManager
-from pipeline.retake_executor import RetakeExecutor
+from execution.retake_executor import RetakeExecutor
 
 
 def run(command: list[str]) -> None:
