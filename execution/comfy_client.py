@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from planner.config import RUNTIME
 import os
 import time
 import uuid
@@ -26,8 +27,8 @@ class ComfyClient:
     def __init__(
         self,
         base_url: str,
-        timeout: int = 60,
-        request_retries: int = 3,
+        timeout: float | None = None,
+        request_retries: int | None = None,
     ):
 
         self.base_url = (
@@ -41,11 +42,27 @@ class ComfyClient:
                 "ComfyUI base_url must start with http:// or https://."
             )
 
+        runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+        if timeout is None:
+            timeout = float(
+                runtime_cfg.get(
+                    "comfyui_request_timeout_seconds",
+                    60,
+                )
+            )
+        if request_retries is None:
+            request_retries = int(
+                runtime_cfg.get(
+                    "comfyui_request_retries",
+                    3,
+                )
+            )
+
         configured_timeout = os.getenv("H3_COMFY_REQUEST_TIMEOUT")
         configured_retries = os.getenv("H3_COMFY_REQUEST_RETRIES")
-        if configured_timeout is not None and timeout == 60:
+        if configured_timeout is not None:
             timeout = float(configured_timeout)
-        if configured_retries is not None and request_retries == 3:
+        if configured_retries is not None:
             request_retries = int(configured_retries)
 
         self.timeout = max(1, float(timeout))
