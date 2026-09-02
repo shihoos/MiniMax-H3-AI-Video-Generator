@@ -1636,6 +1636,14 @@ def validate_execution_runtime_contracts() -> None:
 
     print("PASS execution runtime contracts")
 
+def validate_media_contracts() -> None:
+    script = ROOT / "scripts" / "validate_media_contracts.py"
+    if not script.is_file():
+        raise AssertionError("validate_media_contracts.py is missing.")
+    require("RetakeManager" in script.read_text(encoding="utf-8"), "Media contract validator is missing RetakeManager coverage.")
+    print("PASS media contract validator")
+
+
 def main() -> None:
 
     validate_files()
@@ -1649,6 +1657,7 @@ def main() -> None:
     validate_config()
     validate_runtime_imports()
     validate_execution_runtime_contracts()
+    validate_media_contracts()
     validate_execution_integration()
     validate_gradio_ui()
     validate_gradio_director_override()
