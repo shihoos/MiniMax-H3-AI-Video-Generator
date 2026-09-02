@@ -118,9 +118,6 @@ REQUIRED_FILES = [
 
 
 RUNTIME_IMPORTS = [
-    #Execution
-    "execution.retake_executor",
-    
     # Planner
     "planner.production_planner",
     "planner.qwen_director",
@@ -141,6 +138,7 @@ RUNTIME_IMPORTS = [
     "pipeline.visual_feedback",
     "pipeline.storyboard_cache",
     "pipeline.job_queue",
+    "execution.retake_executor",
     "pipeline.retake_manager",
 
     # Schemas
