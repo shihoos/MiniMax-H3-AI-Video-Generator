@@ -30,6 +30,7 @@ from pipeline.production_checkpoint import ProductionCheckpoint
 from pipeline.retake_manager import RetakeManager
 from ui.shot_view_model import shot_choices, render_shot_card
 from planner.config import (
+    RUNTIME,
     GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
     STORYBOARD_PORT,
@@ -789,6 +790,45 @@ class ProductionController:
 
             self._lock.release()
 
+    def _current_preview_path(self, production_id: str) -> Path | None:
+        production_id = str(production_id or "").strip()
+        if not production_id:
+            return None
+
+        production_root = (
+            ROOT / "data" / "production" / self._safe_name(production_id)
+        ).resolve()
+        pointer = production_root / "previews" / "current_preview.json"
+
+        if not pointer.is_file():
+            return None
+
+        try:
+            payload = json.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+
+        raw = str(payload.get("preview_path", "") or "").strip()
+        if not raw:
+            return None
+
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (ROOT / path).resolve()
+        else:
+            path = path.resolve()
+
+        preview_root = (production_root / "previews").resolve()
+        try:
+            path.relative_to(preview_root)
+        except ValueError:
+            return None
+
+        return path if path.is_file() else None
+
     def shot_options(self, plan_path_value: str):
         try:
             plan, _ = self._load_plan(plan_path_value)
@@ -819,15 +859,21 @@ class ProductionController:
                     if path.is_file():
                         candidates.append(path)
             production_id = str(plan.get("production_id", "")).strip()
-            preview_root = ROOT / "data" / "production" / production_id / "previews"
-            if preview_root.is_dir():
-                shot_preview_root = preview_root / self._safe_name(wanted)
-                if shot_preview_root.is_dir():
-                    candidates.extend(
-                        path
-                        for path in shot_preview_root.rglob("latest.*")
-                        if path.is_file()
-                    )
+            current_preview = self._current_preview_path(production_id)
+            if current_preview is not None:
+                # The pointer is authoritative for the newest preview. It may
+                # belong to another shot, so only use it as a fallback when
+                # its path is inside the requested shot directory.
+                shot_root = (
+                    ROOT / "data" / "production" / production_id
+                    / "previews" / self._safe_name(wanted)
+                ).resolve()
+                try:
+                    current_preview.relative_to(shot_root)
+                except ValueError:
+                    pass
+                else:
+                    candidates.append(current_preview)
             if not candidates:
                 return None, f"No visual preview is available for `{wanted}` yet."
             path = max(candidates, key=lambda item: item.stat().st_mtime)
@@ -857,15 +903,9 @@ class ProductionController:
         try:
             plan, _ = self._load_plan(plan_path_value)
             production_id = str(plan.get("production_id", "")).strip()
-            root = ROOT / "data" / "production" / production_id / "previews"
-            candidates = []
-            if root.is_dir():
-                for path in root.rglob("latest.*"):
-                    if path.is_file():
-                        candidates.append(path)
-            if not candidates:
+            path = self._current_preview_path(production_id)
+            if path is None:
                 return None, "No sampling preview is available yet."
-            path = max(candidates, key=lambda item: item.stat().st_mtime)
             return str(path), f"Live preview: `{path.parent.name}`"
         except Exception as exc:
             return None, "### ERROR\n" + str(exc)
@@ -1278,7 +1318,12 @@ class ProductionController:
             runtime_workers = H3Runtime.launch_workers(ROOT, gpu_ids)
             clients = {}
             for gpu_id, worker in runtime_workers.items():
-                client = ComfyClient(base_url=worker["url"], timeout=60, request_retries=3)
+                runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+                client = ComfyClient(
+                    base_url=worker["url"],
+                    timeout=float(runtime_cfg.get("comfyui_request_timeout_seconds", 60)),
+                    request_retries=int(runtime_cfg.get("comfyui_request_retries", 3)),
+                )
                 if not client.health_check():
                     raise RuntimeError(f"ComfyUI worker unavailable: {worker['url']}")
                 from kaggle.verify_live_runtime import check_worker
