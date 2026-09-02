@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.vram_profile import VRAMProfile, resolve_vram_profile
+from planner.config import RUNTIME
 
 
 class H3Runtime:
@@ -205,7 +206,13 @@ class H3Runtime:
         startup_timeout: float | None = None,
     ) -> dict[int, dict[str, Any]]:
         if startup_timeout is None:
-            startup_timeout = float(os.getenv("H3_COMFY_STARTUP_TIMEOUT", "300"))
+            runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+            startup_timeout = float(
+                os.getenv(
+                    "H3_COMFY_STARTUP_TIMEOUT",
+                    str(runtime_cfg.get("comfyui_startup_timeout_seconds", 300)),
+                )
+            )
         lowvram = H3Runtime._resolve_bool(
             os.getenv("H3_COMFY_LOWVRAM"), lowvram
         )
