@@ -55,6 +55,7 @@ REQUIRED_FILES = [
     "pipeline/identity_continuity.py",
     "pipeline/h3_scene_continuity.py",
     "pipeline/identity_anchor_store.py",
+    "pipeline/production_plan_store.py",
 
     # --------------------------------------------------------
     # EXECUTION
@@ -1348,6 +1349,19 @@ def validate_reference_wiring() -> None:
     )
 
 
+def validate_plan_persistence_race_contracts() -> None:
+    path = ROOT / "scripts" / "validate_plan_persistence.py"
+    require(path.is_file(), "Plan persistence race validator is missing.")
+    text = path.read_text(encoding="utf-8")
+    for token in (
+        "ProductionPlanStore",
+        "validate_controller_contract",
+        "validate_atomic_concurrent_updates",
+    ):
+        require(token in text, f"Plan persistence race validator is incomplete: {token}")
+    print("PASS plan persistence race validator")
+
+
 def validate_plan_persistence_boundary() -> None:
     orchestrator_path = ROOT / "pipeline" / "production_orchestrator.py"
     cli_path = ROOT / "scripts" / "generate_video.py"
@@ -1640,6 +1654,7 @@ def main() -> None:
     validate_gradio_director_override()
     validate_reference_wiring()
     validate_plan_persistence_boundary()
+    validate_plan_persistence_race_contracts()
     validate_ui_share_configuration()
     from scripts import validate_production_scale
     validate_production_scale.main()
