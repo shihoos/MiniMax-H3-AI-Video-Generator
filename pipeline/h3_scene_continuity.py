@@ -168,8 +168,12 @@ class H3SceneContinuity:
         safe_label = self._safe(label)
         destination = self.root / safe_scene / f"{safe_shot}_{safe_label}_frame.png"
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # Output seeking: decode from the input and seek after -i so the
+        # requested timestamp is selected from decoded frames instead of
+        # snapping to the nearest preceding keyframe. This is important for
+        # exact boundary continuity references.
         command = [
-            "ffmpeg", "-y", "-ss", f"{seconds:.6f}", "-i", str(video_path),
+            "ffmpeg", "-y", "-i", str(video_path), "-ss", f"{seconds:.6f}",
             "-frames:v", "1", "-update", "1", str(destination),
         ]
         try:
