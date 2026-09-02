@@ -92,7 +92,7 @@ pytorch:
   torchaudio_version: 2.10.0
 h3_optimization:
   repository: https://github.com/Zironic/H3-Optimizations.git
-  revision: 379f9c7922b3d7831dd93ae069ba0cb82cf4cf36
+  revision: 379f9c7922b3d7831dd93ae069ba0cb82cb4cf36
   version: 0.2.41
   memory_optimization: true
   precision_mode: Auto
