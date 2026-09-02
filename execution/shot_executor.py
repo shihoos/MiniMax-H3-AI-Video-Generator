@@ -397,6 +397,108 @@ class ShotExecutor:
         if self.metrics is not None:
             self.metrics.record(event, gpu_id=(None if self.gpu_id < 0 else self.gpu_id), **fields)
 
+    @staticmethod
+    def _probe_media(path: Path) -> dict:
+        import json
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_streams", "-show_format",
+                "-of", "json", str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=30.0,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffprobe failed for shot output {path}: {result.stderr[-2000:]}"
+            )
+        try:
+            return json.loads(result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Invalid ffprobe output for {path}.") from exc
+
+    @classmethod
+    def _normalize_shot_audio(cls, result: Path) -> Path:
+        """Normalize missing/incompatible shot audio without touching compliant output."""
+        import subprocess
+
+        probe = cls._probe_media(result)
+        streams = probe.get("streams", []) or []
+        video = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        if video is None:
+            raise RuntimeError(f"Shot output has no video stream: {result}")
+
+        try:
+            video_duration = float(video.get("duration"))
+        except (TypeError, ValueError):
+            video_duration = 0.0
+        if video_duration <= 0:
+            try:
+                video_duration = float((probe.get("format") or {}).get("duration"))
+            except (TypeError, ValueError):
+                video_duration = 0.0
+        if video_duration <= 0:
+            raise RuntimeError(f"Unable to determine encoded video duration: {result}")
+
+        codec = str(audio.get("codec_name") or "").lower() if audio else ""
+        sample_rate = str(audio.get("sample_rate") or "") if audio else ""
+        channels = int(audio.get("channels") or 0) if audio else 0
+        needs = audio is None or codec != "aac" or sample_rate != "32000" or channels != 2
+
+        if not needs and audio is not None:
+            try:
+                audio_duration = float(audio.get("duration"))
+            except (TypeError, ValueError):
+                audio_duration = 0.0
+            needs = audio_duration <= 0 or abs(audio_duration - video_duration) > 0.20
+
+        if not needs:
+            return result
+
+        normalized = result.with_name(result.stem + "_normalized.mp4")
+        bitrate = os.getenv("H3_SHOT_AUDIO_BITRATE", "192k")
+        if audio is None:
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(result),
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=32000",
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "32000", "-ac", "2",
+                "-b:a", bitrate, "-t", f"{video_duration:.6f}",
+                "-movflags", "+faststart", str(normalized),
+            ]
+        else:
+            command = [
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", str(result),
+                "-map", "0:v:0", "-map", "0:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-ar", "32000", "-ac", "2",
+                "-b:a", bitrate,
+                "-af", f"aresample=async=1:first_pts=0,apad,atrim=duration={video_duration:.6f}",
+                "-movflags", "+faststart", str(normalized),
+            ]
+
+        try:
+            completed = subprocess.run(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, check=False, timeout=300.0,
+            )
+            if completed.returncode != 0 or not normalized.is_file() or normalized.stat().st_size <= 0:
+                raise RuntimeError(
+                    "FFmpeg audio normalization failed:\n" + completed.stderr[-4000:]
+                )
+            normalized.replace(result)
+            return result
+        finally:
+            normalized.unlink(missing_ok=True)
+
     def execute_shot(
         self,
         *,
@@ -567,6 +669,9 @@ class ShotExecutor:
                     file_type=output["type"],
                     destination=destination,
                 )
+                # Keep normal H3 outputs untouched; normalize only when the
+                # downstream assembly audio contract is actually violated.
+                result = self._normalize_shot_audio(Path(result))
                 self._record(
                     "shot_completed",
                     shot_id=shot_id,
