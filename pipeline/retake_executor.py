@@ -1,290 +1,162 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-import tempfile
-import uuid
 from pathlib import Path
 from typing import Any
 
+from pipeline.context_ir import H3ContextIRCompiler
+from pipeline.dialogue_duration import FFProbeMediaDurationProvider
+from pipeline.h3_scene_continuity import H3SceneContinuity
+from pipeline.retake_manager import RetakeManager
+from pipeline.seed_lineage import semantic_content_digest, stable_seed
 
-class RetakeManager:
-    """Persist selective-retake requests and safely stitch replacements.
 
-    A preserve-audio retake replaces only the requested video interval while
-    keeping the original production audio timeline intact. The replacement
-    video is normalized to the exact requested interval before it is stitched;
-    this prevents a generated retake that is a few frames long/short from
-    shifting the original soundtrack relative to the tail.
+class RetakeExecutor:
+    """Execute a bounded selective retake using the current H3 Ref2VA production path.
+
+    H3's official FL2VA task is the ideal primitive for a boundary-anchored retake,
+    but this repository deliberately has an exact Ref2VA production inventory. Until
+    an FL2VA checkpoint/workflow is explicitly added to that inventory, this executor
+    uses two extracted boundary frames as highest-priority Ref2VA references and then
+    stitches the replacement back into the existing shot.
     """
+
+    MIN_SECONDS = 4.0
+    MAX_SECONDS = 15.0
 
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root).resolve()
+        self.retake_manager = RetakeManager(self.project_root)
+        self.continuity = H3SceneContinuity(self.project_root)
+        self.probe = FFProbeMediaDurationProvider()
 
     @staticmethod
-    def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
-        path = Path(path).resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = json.dumps(payload, indent=2, ensure_ascii=False).encode("utf-8")
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
-        )
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, path)
-        finally:
-            try:
-                if os.path.exists(temp_name):
-                    os.unlink(temp_name)
-            except OSError:
-                pass
+    def _normalize_range(base_duration: float, start: float, end: float) -> tuple[float, float]:
+        start = max(0.0, min(float(start), base_duration))
+        end = max(start, min(float(end), base_duration))
+        requested = end - start
+        if requested >= RetakeExecutor.MIN_SECONDS:
+            return start, min(end, start + RetakeExecutor.MAX_SECONDS)
+        # H3 requires at least 4 seconds. Expand around the requested center while
+        # staying within the existing shot. This guarantees a legal replacement.
+        center = (start + end) / 2.0
+        half = RetakeExecutor.MIN_SECONDS / 2.0
+        expanded_start = max(0.0, center - half)
+        expanded_end = min(base_duration, expanded_start + RetakeExecutor.MIN_SECONDS)
+        if expanded_end - expanded_start < RetakeExecutor.MIN_SECONDS:
+            expanded_start = max(0.0, base_duration - RetakeExecutor.MIN_SECONDS)
+            expanded_end = base_duration
+        return expanded_start, expanded_end
 
-    def request(
+    def execute(
         self,
+        *,
         production_id: str,
-        shot_id: str,
-        *,
-        start_seconds: float = 0.0,
-        end_seconds: float | None = None,
-        reason: str = "",
-        preserve_audio: bool = True,
-    ) -> Path:
-        if start_seconds < 0:
-            raise ValueError("retake start must be >= 0")
-        if end_seconds is not None and end_seconds <= start_seconds:
-            raise ValueError("retake end must be greater than start")
-
-        root = self.project_root / "data" / "production" / str(production_id) / "retakes"
-        root.mkdir(parents=True, exist_ok=True)
-        request_id = "retake_" + uuid.uuid4().hex[:12]
-        path = root / f"{request_id}.json"
-
-        payload = {
-            "version": 2,
-            "request_id": request_id,
-            "production_id": str(production_id),
-            "shot_id": str(shot_id),
-            "start_seconds": float(start_seconds),
-            "end_seconds": None if end_seconds is None else float(end_seconds),
-            "reason": str(reason or "").strip(),
-            "preserve_audio": bool(preserve_audio),
-            "status": "requested",
-        }
-        self._atomic_json_write(path, payload)
-        return path
-
-    @staticmethod
-    def _filter(width: int, height: int, rate: str, *, duration: float | None = None, pad_to_duration: bool = False) -> str:
-        filters = [
-            f"fps={rate}",
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-            "setsar=1",
-        ]
-        if pad_to_duration and duration is not None:
-            # Clone the final frame when a generated retake is shorter than
-            # the requested interval, then trim to the exact target duration.
-            filters.append(f"tpad=stop_mode=clone:stop_duration={duration:.6f}")
-        return ",".join(filters)
-
-    def stitch(
-        self,
+        scene_id: str,
+        shot: dict[str, Any],
         base_video: Path,
-        retake_video: Path,
-        output_video: Path,
-        *,
         start_seconds: float,
         end_seconds: float,
-        preserve_audio: bool = True,
-    ) -> Path:
+        shot_executor,
+        workflow_mode: str,
+        upscale: bool,
+    ) -> dict[str, Any]:
         base_video = Path(base_video).resolve()
-        retake_video = Path(retake_video).resolve()
-        output_video = Path(output_video).resolve()
-        if not base_video.is_file() or not retake_video.is_file():
-            raise FileNotFoundError("Base or retake video is missing.")
-        if end_seconds <= start_seconds:
-            raise ValueError("Retake range must have positive duration.")
+        if not base_video.is_file():
+            raise FileNotFoundError(base_video)
+        base_duration = self.probe.duration_seconds(base_video, stream_selector="v:0")
+        start, end = self._normalize_range(base_duration, start_seconds, end_seconds)
+        duration = end - start
+        if not (self.MIN_SECONDS <= duration <= self.MAX_SECONDS):
+            raise RuntimeError(f"Retake range is outside H3 limits after normalization: {duration:.3f}s")
 
-        replacement_duration = float(end_seconds) - float(start_seconds)
-        output_video.parent.mkdir(parents=True, exist_ok=True)
-        head = output_video.with_name(output_video.stem + ".head.mp4")
-        tail = output_video.with_name(output_video.stem + ".tail.mp4")
-        middle = output_video.with_name(output_video.stem + ".middle.mp4")
-        concat = output_video.with_name(output_video.stem + ".concat.txt")
-        stitched_video = output_video.with_name(output_video.stem + ".video.mp4")
-
-        try:
-            probe = subprocess.run(
-                [
-                    "ffprobe", "-v", "error", "-select_streams", "v:0",
-                    "-show_entries", "stream=width,height,r_frame_rate",
-                    "-of", "json", str(base_video),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False,
-                timeout=30.0,
-            )
-            if probe.returncode != 0:
-                raise RuntimeError(
-                    "Unable to inspect base video for retake stitching: "
-                    + probe.stderr[-2000:]
-                )
-            streams = json.loads(probe.stdout or "{}").get("streams") or []
-            if not streams:
-                raise RuntimeError("Base video has no video stream.")
-
-            info = streams[0]
-            width = int(info.get("width") or 0)
-            height = int(info.get("height") or 0)
-            rate = str(info.get("r_frame_rate") or "24/1")
-            if width <= 0 or height <= 0:
-                raise RuntimeError("Base video has invalid dimensions for retake stitching.")
-
-            video_args = [
-                "-c:v", "libx264",
-                "-preset", os.getenv("H3_RETAKE_FFMPEG_PRESET", "fast"),
-                "-crf", os.getenv("H3_RETAKE_FFMPEG_CRF", "17"),
-                "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart",
-            ]
-
-            if preserve_audio:
-                # Preserve the original soundtrack. Critically, force the
-                # middle replacement video to the exact requested duration so
-                # the tail resumes on the same audio timestamp as the base.
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(base_video), "-t", f"{start_seconds:.6f}", "-an",
-                    "-vf", self._filter(width, height, rate),
-                    *video_args, str(head),
-                ])
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(retake_video), "-an",
-                    "-vf", self._filter(width, height, rate, duration=replacement_duration, pad_to_duration=True),
-                    "-t", f"{replacement_duration:.6f}",
-                    *video_args, str(middle),
-                ])
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(base_video), "-ss", f"{end_seconds:.6f}",
-                    "-an", "-vf", self._filter(width, height, rate),
-                    *video_args, str(tail),
-                ])
-            else:
-                audio_args = [
-                    "-c:a", "aac",
-                    "-ar", "32000",
-                    "-ac", "2",
-                    "-b:a", os.getenv("H3_RETAKE_AUDIO_BITRATE", "192k"),
-                ]
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(base_video), "-t", f"{start_seconds:.6f}",
-                    "-vf", self._filter(width, height, rate),
-                    *video_args, *audio_args, str(head),
-                ])
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(retake_video),
-                    "-vf", self._filter(width, height, rate, duration=replacement_duration, pad_to_duration=True),
-                    "-t", f"{replacement_duration:.6f}",
-                    *video_args, *audio_args, str(middle),
-                ])
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(base_video), "-ss", f"{end_seconds:.6f}",
-                    "-vf", self._filter(width, height, rate),
-                    *video_args, *audio_args, str(tail),
-                ])
-
-            parts = [
-                path for path in (head, middle, tail)
-                if path.is_file() and path.stat().st_size > 0
-            ]
-            if not parts:
-                raise RuntimeError("No retake stitch segments were produced.")
-
-            lines = []
-            for item in parts:
-                value = (
-                    item.as_posix()
-                    .replace("\\", "\\\\")
-                    .replace("'", "'\\''")
-                    .replace("\n", "\\n")
-                )
-                lines.append(f"file '{value}'")
-            concat.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-            self._run_ffmpeg([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-f", "concat", "-safe", "0", "-i", str(concat),
-                "-c", "copy", "-movflags", "+faststart", str(stitched_video),
-            ])
-
-            if preserve_audio:
-                # Replace only the video while keeping the ORIGINAL complete
-                # audio timeline. Since the video now has exactly the same
-                # duration as the base, the original soundtrack stays aligned.
-                self._run_ffmpeg([
-                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                    "-i", str(stitched_video),
-                    "-i", str(base_video),
-                    "-map", "0:v:0", "-map", "1:a:0?",
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-b:a", os.getenv("H3_RETAKE_AUDIO_BITRATE", "192k"),
-                    "-movflags", "+faststart",
-                    str(output_video),
-                ])
-            else:
-                # The segments already contain matching A/V parameters.
-                os.replace(stitched_video, output_video)
-
-            if not output_video.is_file() or output_video.stat().st_size <= 0:
-                raise RuntimeError(
-                    f"Retake stitching produced no valid output: {output_video}"
-                )
-            return output_video
-        finally:
-            for path in (head, tail, middle, concat, stitched_video):
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
-
-    def mark_completed(
-        self,
-        request_path: Path,
-        stitched_video: Path,
-        replacement_video: Path,
-    ) -> None:
-        path = Path(request_path).resolve()
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"Retake request is not a JSON object: {path}")
-        payload["status"] = "completed"
-        payload["stitched_video"] = str(Path(stitched_video).resolve())
-        payload["replacement_video"] = str(Path(replacement_video).resolve())
-        self._atomic_json_write(path, payload)
-
-    @staticmethod
-    def _run_ffmpeg(command: list[str]) -> None:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-            timeout=300.0,
+        request_path = self.retake_manager.request(
+            production_id,
+            str(shot["shot_id"]),
+            start_seconds=start,
+            end_seconds=end,
+            reason=str(shot.get("retake_reason", "Automatic quality-gate retake") or "Automatic quality-gate retake"),
+            preserve_audio=True,
         )
-        if result.returncode != 0:
+
+        first_frame = self.continuity.extract_frame_at(
+            base_video, start, scene_id=scene_id, shot_id=str(shot["shot_id"]), label="retake_start"
+        )
+        end_frame_time = min(max(0.0, end), max(0.0, base_duration - 1.0 / 24.0))
+        last_frame = self.continuity.extract_frame_at(
+            base_video, end_frame_time, scene_id=scene_id, shot_id=str(shot["shot_id"]), label="retake_end"
+        )
+
+        replacement = dict(shot)
+        original_refs = list(replacement.get("reference_images", []) or [])
+        original_roles = [dict(x) for x in (replacement.get("reference_roles", []) or []) if isinstance(x, dict)]
+        original_role_map = {str(x.get("path", "")): x for x in original_roles if str(x.get("path", "")).strip()}
+        boundary_items = [
+            (str(first_frame), {"path": str(first_frame), "role": "retake_start_frame", "priority": 200, "label": "Exact base-shot frame at retake start; preserve the state entering the replacement."}),
+            (str(last_frame), {"path": str(last_frame), "role": "retake_end_frame", "priority": 199, "label": "Exact base-shot frame at retake end; preserve the state leaving the replacement."}),
+        ]
+        remaining = []
+        for path in original_refs:
+            p = str(path)
+            if p in {str(first_frame), str(last_frame)}:
+                continue
+            remaining.append((p, dict(original_role_map.get(p, {"path": p, "role": "visual_reference", "priority": 50}))))
+        ordered = boundary_items + remaining
+        ordered = ordered[:9]
+        replacement["reference_images"] = [p for p, _ in ordered]
+        replacement["reference_roles"] = [r for _, r in ordered]
+        replacement["reference_bindings"] = [f"<Picture {i}> = {r.get('label', r.get('role', 'visual reference'))}" for i, (_, r) in enumerate(ordered, start=1)]
+        base_prompt = str(replacement.get("h3_prompt", replacement.get("visual_prompt", "")) or "").strip()
+        replacement["h3_prompt"] = (
+            "SELECTIVE RETAKE. Picture 1 is the exact frame at the start boundary; "
+            "Picture 2 is the exact frame at the end boundary. Recreate only the requested action "
+            "inside this range while preserving character identity, wardrobe, environment, lighting, "
+            "camera continuity and all non-target story state. Do not invent a new scene.\n\n"
+            + base_prompt
+        ).strip()
+        replacement["duration_seconds"] = duration
+        replacement["seed"] = stable_seed(f"{production_id}:retake", replacement)
+        replacement["semantic_content_digest"] = semantic_content_digest(replacement)
+        replacement["shot_id"] = f"{shot['shot_id']}__retake"
+        replacement["retake_source_shot_id"] = str(shot["shot_id"])
+        replacement["retake_start_seconds"] = start
+        replacement["retake_end_seconds"] = end
+        replacement["retake_request_path"] = str(request_path)
+        replacement_context_ir = H3ContextIRCompiler().compile(
+            {"production_id": production_id, "story": str(shot.get("story", "") or "")},
+            replacement,
+        )
+        replacement["h3_context_ir"] = replacement_context_ir
+
+        out_dir = self.project_root / "data" / "production" / str(production_id) / "retakes" / str(shot["shot_id"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        replacement_video = shot_executor.execute_shot(
+            shot=replacement,
+            workflow_mode=workflow_mode,
+            output_dir=out_dir,
+            upscale=upscale,
+            context_ir=replacement_context_ir,
+        )
+        replacement_video = Path(replacement_video).resolve()
+        retake_duration = self.probe.duration_seconds(replacement_video, stream_selector="v:0")
+        if abs(retake_duration - duration) > 0.45:
             raise RuntimeError(
-                "ffmpeg retake operation failed:\n" + result.stderr[-5000:]
+                f"Retake duration mismatch: requested {duration:.3f}s, generated {retake_duration:.3f}s."
             )
+
+        stitched = out_dir / f"{shot['shot_id']}__replaced.mp4"
+        self.retake_manager.stitch(
+            base_video,
+            replacement_video,
+            stitched,
+            start_seconds=start,
+            end_seconds=end,
+            preserve_audio=True,
+        )
+        self.retake_manager.mark_completed(request_path, stitched, replacement_video)
+        return {
+            "output": stitched.resolve(),
+            "replacement_video": replacement_video,
+            "start_seconds": start,
+            "end_seconds": end,
+            "request_path": request_path,
+        }
