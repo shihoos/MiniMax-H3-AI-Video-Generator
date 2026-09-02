@@ -16,6 +16,7 @@ from execution.shot_executor import (
     ShotExecutor,
 )
 from execution.execution_policy import ExecutionPolicy
+from execution.retake_executor import RetakeExecutor
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from pipeline.dialogue_duration import FFProbeMediaDurationProvider
 from pipeline.seed_lineage import ensure_shot_uid, semantic_content_digest, stable_seed
@@ -26,7 +27,6 @@ from pipeline.vlm_analyzer import VLMAnalyzer
 from pipeline.context_ir import H3ContextIRCompiler
 from pipeline.production_manifest import ProductionManifest
 from pipeline.runtime_diagnostics import RuntimeDiagnostics
-from pipeline.retake_executor import RetakeExecutor
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
