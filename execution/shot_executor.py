@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pipeline.comfy_preview import ComfyPreviewStreamer
 from execution.execution_policy import ExecutionPolicy
+from planner.config import RUNTIME
 
 from planner.config import (
     H3_HEIGHT,
@@ -649,10 +650,16 @@ class ShotExecutor:
                     )
                     preview.start(prompt_id, self.client.client_id)
                 try:
+                    runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
                     history = self.client.wait_for_prompt(
                         prompt_id,
                         poll_interval=float(os.getenv("H3_COMFY_POLL_INTERVAL", "2")),
-                        timeout=float(os.getenv("H3_COMFY_JOB_TIMEOUT", "14400")),
+                        timeout=float(
+                            os.getenv(
+                                "H3_COMFY_JOB_TIMEOUT",
+                                str(runtime_cfg.get("comfyui_job_timeout_seconds", 14400)),
+                            )
+                        ),
                     )
                 finally:
                     if preview is not None:
