@@ -8,6 +8,8 @@ import re
 import hashlib
 from pathlib import Path
 from typing import Any
+
+from jsonschema import ValidationError, validate as validate_jsonschema
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -113,7 +115,58 @@ class VLMAnalyzer:
         try:
             with urlopen(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError) as exc:
+        except HTTPError as exc:
+            if exc.code != 400 or not json_schema:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(
+                    f"VLM request failed (HTTP {exc.code}): {detail[-4000:]}"
+                ) from exc
+
+            # Some local OpenAI-compatible VLM servers do not implement the
+            # structured-output json_schema response format. Retry once using
+            # the broadly supported json_object mode while preserving the
+            # schema contract in the prompt.
+            LOGGER.warning(
+                "VLM rejected json_schema with HTTP 400; retrying with json_object."
+            )
+            fallback_body = dict(body)
+            fallback_body["response_format"] = {"type": "json_object"}
+            fallback_messages = [dict(message) for message in messages]
+            if fallback_messages and fallback_messages[0].get("role") == "system":
+                fallback_messages[0]["content"] = (
+                    str(fallback_messages[0].get("content") or "")
+                    + "\n\nReturn ONLY a valid JSON object matching this JSON Schema exactly:\n"
+                    + json.dumps(json_schema, ensure_ascii=False)
+                )
+            else:
+                fallback_messages.insert(
+                    0,
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return ONLY a valid JSON object matching this JSON Schema exactly:\n"
+                            + json.dumps(json_schema, ensure_ascii=False)
+                        ),
+                    },
+                )
+            fallback_body["messages"] = fallback_messages
+            fallback_payload = json.dumps(
+                fallback_body, ensure_ascii=False
+            ).encode("utf-8")
+            fallback_request = Request(
+                endpoint,
+                method="POST",
+                data=fallback_payload,
+                headers=headers,
+            )
+            try:
+                with urlopen(fallback_request, timeout=self.timeout) as response:
+                    result = json.loads(response.read().decode("utf-8"))
+            except (HTTPError, URLError, TimeoutError) as fallback_exc:
+                raise RuntimeError(
+                    f"VLM fallback request failed: {fallback_exc}"
+                ) from fallback_exc
+        except (URLError, TimeoutError) as exc:
             raise RuntimeError(f"VLM request failed: {exc}") from exc
         choices = result.get("choices") if isinstance(result, dict) else None
         if not choices:
@@ -125,12 +178,28 @@ class VLMAnalyzer:
         if not content:
             raise RuntimeError("VLM returned empty content.")
         try:
-            return json.loads(content)
+            parsed = json.loads(content)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", content, flags=re.DOTALL)
             if match:
-                return json.loads(match.group(0))
-            return {"description": content}
+                try:
+                    parsed = json.loads(match.group(0))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError("VLM returned malformed JSON content.") from exc
+            else:
+                if json_schema:
+                    raise RuntimeError("VLM response was not a JSON object matching the requested schema.")
+                return {"description": content}
+
+        if json_schema:
+            schema = json_schema.get("schema", json_schema)
+            try:
+                validate_jsonschema(parsed, schema)
+            except ValidationError as exc:
+                raise RuntimeError(
+                    "VLM response failed JSON-schema validation: " + exc.message
+                ) from exc
+        return parsed
 
 
     @staticmethod
