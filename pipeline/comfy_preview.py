@@ -68,6 +68,16 @@ class ComfyPreviewStreamer:
             temporary = target.with_name(target.name + ".tmp")
             temporary.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
             temporary.replace(target)
+
+            preview_path = payload.get("preview_path")
+            if preview_path:
+                pointer = self.output_dir.parent / "current_preview.json"
+                pointer_tmp = pointer.with_name(pointer.name + ".tmp")
+                pointer_tmp.write_text(
+                    json.dumps({"preview_path": str(preview_path)}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                pointer_tmp.replace(pointer)
         except Exception:
             pass
 
