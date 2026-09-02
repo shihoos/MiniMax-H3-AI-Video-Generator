@@ -83,6 +83,9 @@ jobs:
         run: |
           python scripts/validate_reference_wiring.py
 
+      - name: Media / retake contracts
+        run: python scripts/validate_media_contracts.py
+
       - name: Project validator
         env:
           H3_DIRECTOR_ENABLED: "0"
