@@ -40,6 +40,13 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Install system validation dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
       - name: Install validation dependencies
         run: |
           python -m pip install --upgrade pip
@@ -59,6 +66,7 @@ jobs:
               "gradio",
               "PIL",
               "websocket",
+              "jsonschema",
           ]
 
           for module in required_modules:
@@ -445,8 +453,9 @@ jobs:
           assert "sqlite3.connect(" in queue
           assert "check_same_thread=False" not in queue
 
-          # Production execution waits on the controller lock and only
-          # releases it when the current call acquired it.
+          # Production execution waits on the controller lock and releases
+          # it only after a successful bounded acquisition. Validate the
+          # actual AST shape rather than depending on source formatting.
           gradio_tree = ast.parse(
               gradio,
               filename="ui/storyboard_gradio.py",
@@ -456,10 +465,43 @@ jobs:
               "_execute_approved_plan",
           )
           assert execute_fn is not None
+
+          acquire_calls = [
+              node
+              for node in ast.walk(execute_fn)
+              if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)
+              and node.func.attr == "acquire"
+              and isinstance(node.func.value, ast.Attribute)
+              and isinstance(node.func.value.value, ast.Name)
+              and node.func.value.value.id == "self"
+              and node.func.value.attr == "_lock"
+          ]
+          assert acquire_calls, (
+              "Production execution must acquire self._lock."
+          )
+
+          bounded_acquires = [
+              node
+              for node in acquire_calls
+              if any(
+                  kw.arg == "timeout"
+                  and isinstance(kw.value, ast.Constant)
+                  and float(kw.value.value) == 3600.0
+                  for kw in node.keywords
+              )
+          ]
+          assert bounded_acquires, (
+              "Production execution must use a 3600-second bounded lock wait."
+          )
+
+          assert any(
+              isinstance(node, ast.Attribute)
+              and node.attr == "release"
+              for node in ast.walk(execute_fn)
+          ), "Production execution must release self._lock."
+
           execute_body = ast.unparse(execute_fn)
-          assert "lock_acquired = self._lock.acquire(timeout=3600.0)" in execute_body
-          assert "if not lock_acquired:" in execute_body
-          assert "if lock_acquired:" in execute_body
           assert "blocking=False" not in execute_body
 
           # Live preview is supported but automatic polling starts disabled.
