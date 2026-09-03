@@ -8,6 +8,9 @@ from execution.h3_workflow_builder import (
     H3WorkflowBuilder,
 )
 from planner.config import (
+    DELIVERY_FPS,
+    DELIVERY_HEIGHT,
+    DELIVERY_WIDTH,
     H3_HEIGHT,
     H3_WIDTH,
     UPSCALE_HEIGHT,
@@ -170,13 +173,10 @@ class H3UpscaledWorkflowBuilder(
             )
         )
 
-        if isinstance(
-            output_links,
-            list,
-        ):
-            output_links.append(
-                link_id
-            )
+        if not isinstance(output_links, list):
+            output_links = []
+            outputs[source_slot]["links"] = output_links
+        output_links.append(link_id)
 
         target[
             "inputs"
@@ -382,18 +382,20 @@ class H3UpscaledWorkflowBuilder(
             found[
                 "LATENT_SOURCE"
             ] = sampler_advanced[0]
-
-        elif turbo_sampler:
-            found[
-                "LATENT_SOURCE"
-            ] = turbo_sampler[0]
-
         else:
             raise RuntimeError(
-                "Combined H3 upscale graph has no "
-                "SamplerCustomAdvanced or "
-                "MiniMaxH3TurboSampler."
+                "Combined H3 upscale graph has no SamplerCustomAdvanced "
+                "generation latent source."
             )
+
+        if turbo_sampler:
+            found[
+                "SAMPLER_SOURCE"
+            ] = turbo_sampler[0]
+        else:
+            found[
+                "SAMPLER_SOURCE"
+            ] = found["KSamplerSelect"]
 
         return found
 
@@ -657,7 +659,7 @@ class H3UpscaledWorkflowBuilder(
             workflow,
             self._node_id(
                 generation_nodes[
-                    "KSamplerSelect"
+                    "SAMPLER_SOURCE"
                 ]
             ),
             0,
@@ -817,6 +819,21 @@ class H3UpscaledWorkflowBuilder(
                 "Upscale postcondition failed: VAEDecodeAudio is not connected to the original latent source."
             )
 
+        sampler_input_link = next(
+            item.get("link")
+            for item in self._nodes(workflow)
+            if self._node_id(item) == int(ultimate_id)
+            for item in item.get("inputs", [])
+            if item.get("name") == "sampler"
+        )
+        sampler_edge = links_by_id.get(int(sampler_input_link)) if sampler_input_link is not None else None
+        expected_sampler_id = self._node_id(generation_nodes["SAMPLER_SOURCE"])
+        if not sampler_edge or int(sampler_edge[1]) != expected_sampler_id:
+            raise RuntimeError(
+                "Upscale postcondition failed: MMH3UltimateUpscale is not using the "
+                "canonical generation sampler source."
+            )
+
         # Store explicit metadata for the runtime and UI.
         workflow[
             "_h3_combined_upscale"
@@ -830,8 +847,9 @@ class H3UpscaledWorkflowBuilder(
             "upscale_height": int(
                 UPSCALE_HEIGHT
             ),
-            "final_delivery_width": 1280,
-            "final_delivery_height": 720,
+            "final_delivery_width": int(DELIVERY_WIDTH),
+            "final_delivery_height": int(DELIVERY_HEIGHT),
+            "final_delivery_fps": int(DELIVERY_FPS),
             "audio_source": (
                 "original_generation_latent"
             ),
