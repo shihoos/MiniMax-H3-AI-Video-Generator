@@ -813,7 +813,40 @@ class ProductionPlanner:
         # Explicit names are authoritative. A phrase such as
         # "a young man named Eli" represents ONE character:
         # Eli. The generic role "man" is metadata for Eli.
+        # [PATCH] coordinated character parser
         explicit_names: list[str] = []
+
+        # Coordinated narrative subjects such as:
+        # "Mira, a systems engineer, and Arun, her specialist, arrive..."
+        # must remain canonical named entities.
+        coordinated_name_pattern = re.compile(
+            r"\\b"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\\s*,\\s*"
+            r"[^.!?;]{0,120}?"
+            r"\\band\\b"
+            r"\\s+"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"(?=\\s*(?:,|\\b(?:arrived|arrive|appears|appear|"
+            r"enters|enter|stands|stand|walks|walk|runs|run|"
+            r"leaves|leave|moves|move|descends|descend|"
+            r"discovers|discover|chooses|choose|faces|face|"
+            r"works|work|returns|return|waits|wait)\\b))"
+        )
+
+        for match in coordinated_name_pattern.finditer(story):
+            for group in (1, 2):
+                name = match.group(group).strip()
+                if (
+                    name
+                    and name not in self.COMMON_PROPER_WORDS
+                    and name.lower()
+                    not in {
+                        existing.lower()
+                        for existing in explicit_names
+                    }
+                ):
+                    explicit_names.append(name)
 
         named_pattern = re.compile(
             r"\b(?:named|called)\s+"
@@ -1345,8 +1378,74 @@ class ProductionPlanner:
         )
 
         if not descriptors:
-            # A story with no explicit human/character descriptor
-            # is allowed to remain character-free.
+            # High-confidence fallback for ordinary narrative prose.
+            # Example:
+            #   "Mira, a polar systems engineer, ..."
+            #   "Arun, her communications specialist, ..."
+            #
+            # Deliberately do NOT use _proper_names() because that
+            # intentionally recognizes broad capitalized tokens and can
+            # return locations/pronouns such as "Arctic" and "They".
+
+            appositive_pattern = re.compile(
+                r"\b(?:"
+                r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|"
+                r"Captain|Commander|Detective|Agent)\.?\s+"
+                r")?"
+                r"([A-Z][A-Za-z0-9'_-]+"
+                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+                r",\s*"
+                r"(?=(?:a|an|the|his|her|their|my|our|whose)\b)",
+                flags=0,
+            )
+
+            fallback_names = []
+            seen_names = set()
+
+            pronouns = {
+                "they",
+                "them",
+                "he",
+                "him",
+                "she",
+                "her",
+                "it",
+                "we",
+                "us",
+                "i",
+                "you",
+            }
+
+            for match in appositive_pattern.finditer(story):
+                name = match.group(1).strip()
+
+                if not name:
+                    continue
+
+                if name in self.COMMON_PROPER_WORDS:
+                    continue
+
+                if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+                    continue
+
+                if name.lower() in pronouns:
+                    continue
+
+                key = name.lower()
+
+                if key in seen_names:
+                    continue
+
+                seen_names.add(key)
+                fallback_names.append(name)
+
+            descriptors = (
+                self._canonicalize_character_descriptors(
+                    fallback_names
+                )
+            )
+
+        if not descriptors:
             return []
 
         characters = []
@@ -1355,7 +1454,6 @@ class ProductionPlanner:
             descriptors,
             start=1,
         ):
-
             characters.append(
                 self._make_character(
                     descriptor,
@@ -1368,7 +1466,6 @@ class ProductionPlanner:
             characters
         )
 
-        # References are optional now.
         self.references.validate(
             characters,
             require_images=False,
