@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from pipeline.dialogue_timeline import DialogueTimeline
 
-MIN_SEGMENT_SECONDS = 4.0
-MAX_SEGMENT_SECONDS = 15.0
+
+MIN_SEGMENT_SECONDS = DialogueTimeline.h3_effective_duration_seconds(4.0)
+MAX_SEGMENT_SECONDS = DialogueTimeline.h3_effective_duration_seconds(15.0)
 
 VALID_CONTINUITY_MODES = {
     "independent",
@@ -75,7 +77,12 @@ class ProductionTimeline:
         previous: dict[str, Any] | None = None
         segments: list[TimelineSegment] = []
         for shot in shots:
-            duration = self._safe_float(shot.get("duration_seconds"), 5.2)
+            requested_duration = self._safe_float(shot.get("duration_seconds"), 5.2)
+            duration = DialogueTimeline.h3_effective_duration_seconds(requested_duration)
+            shot["requested_duration_seconds"] = requested_duration
+            shot["h3_effective_frames"] = DialogueTimeline.h3_legal_frames(requested_duration)
+            shot["h3_effective_duration_seconds"] = duration
+            shot["frames_per_shot"] = int(shot["h3_effective_frames"])
             if duration < MIN_SEGMENT_SECONDS or duration > MAX_SEGMENT_SECONDS:
                 raise ValueError(
                     f"Duration for {shot.get('shot_id', 'unknown')} must be between "
@@ -141,7 +148,12 @@ class ProductionTimeline:
             if shot is None:
                 continue
             if len(row) >= 5:
-                duration = self._safe_float(row[4], self._safe_float(shot.get("duration_seconds"), 5.2))
+                requested_duration = self._safe_float(row[4], self._safe_float(shot.get("duration_seconds"), 5.2))
+                duration = DialogueTimeline.h3_effective_duration_seconds(requested_duration)
+                shot["requested_duration_seconds"] = requested_duration
+                shot["h3_effective_frames"] = DialogueTimeline.h3_legal_frames(requested_duration)
+                shot["h3_effective_duration_seconds"] = duration
+                shot["frames_per_shot"] = int(shot["h3_effective_frames"])
                 if duration < MIN_SEGMENT_SECONDS or duration > MAX_SEGMENT_SECONDS:
                     raise ValueError(
                         f"Duration for {shot['shot_id']} must be between "
