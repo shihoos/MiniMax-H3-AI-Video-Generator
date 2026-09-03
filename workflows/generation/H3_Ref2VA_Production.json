@@ -1149,22 +1149,22 @@
       "widgets_values": [
         "auto",
         "auto",
-        4096,
+        1024,
         true,
         "Auto",
         "Auto",
         "Auto",
-        "Standard"
+        "Lower VRAM (slower)"
       ],
       "widgets_values_named": {
         "fused_qkv": "auto",
         "mlp_memory": "auto",
-        "chunk_rows": 4096,
+        "chunk_rows": 1024,
         "preserve_precision": true,
         "precision_mode": "Auto",
         "qkv_streaming_mode": "Auto",
         "embedding_memory_mode": "Auto",
-        "kitchen_v_memory_mode": "Standard"
+        "kitchen_v_memory_mode": "Lower VRAM (slower)"
       }
     }
   ],
