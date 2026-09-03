@@ -8,6 +8,7 @@ from pipeline.dialogue_duration import (
     ExplicitOrWPMDurationProvider,
 )
 from schemas.dialogue import DialogueEvent
+from planner.config import H3_FPS, H3_FRAMES_PER_SHOT
 
 
 class DialogueTimeline:
@@ -19,10 +20,10 @@ class DialogueTimeline:
     rendered-media duration is validated separately with ffprobe.
     """
 
-    FPS = 24.0
+    FPS = float(H3_FPS)
     MIN_REQUESTED_SECONDS = 4.0
     MAX_REQUESTED_SECONDS = 15.0
-    MIN_FRAMES = 124
+    MIN_FRAMES = int(H3_FRAMES_PER_SHOT)
     MAX_FRAMES = 362
 
     DEFAULT_PRE_ROLL = 0.35
@@ -168,6 +169,9 @@ class DialogueTimeline:
         requested_duration = float(shot.get("duration_seconds", 5.2) or 5.2)
         effective_frames = self.h3_legal_frames(requested_duration)
         duration = effective_frames / self.FPS
+        shot["requested_duration_seconds"] = requested_duration
+        shot["duration_seconds"] = round(duration, 4)
+        shot["frames_per_shot"] = effective_frames
         shot["h3_effective_frames"] = effective_frames
         shot["h3_effective_duration_seconds"] = duration
 
