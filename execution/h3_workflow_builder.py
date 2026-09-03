@@ -349,7 +349,7 @@ class H3WorkflowBuilder:
         except Exception:
             cfg = {}
 
-        chunk_rows = int(cfg.get("chunk_rows", 4096) or 4096)
+        chunk_rows = int(cfg.get("chunk_rows", 1024) or 1024)
         precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
         qkv_streaming_mode = str(
             cfg.get("qkv_streaming_mode", "Auto") or "Auto"
