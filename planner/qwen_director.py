@@ -5046,22 +5046,45 @@ Return JSON only.
             )
         )
 
-        # ----------------------------------------------------
+                # ----------------------------------------------------
         # CANONICAL CHARACTERS / SCENES
         # ----------------------------------------------------
         #
-        # These are owned by ProductionPlanner. Never replace them with
-        # free-form Qwen entities or scene topology.
+        # AI Story / Expand Story:
+        # Qwen first creates the final narrative. The canonical production
+        # roster and scene topology must then be derived from THAT final story.
+        #
+        # Preserve Story:
+        # the supplied user story remains the source of truth.
+        #
+        # ProductionPlanner remains the canonical deterministic extractor;
+        # Qwen does not directly own the final character/scene objects.
+
+        planner = self._planner()
+
+        if mode in (
+            AI_STORY_MODE,
+            EXPAND_USER_STORY_MODE,
+        ):
+            canonical_source_story = story
+        else:
+            canonical_source_story = user_input
+
+        canonical_characters = planner.create_characters(
+            canonical_source_story
+        )
+
         characters = self._sanitize_characters(
-            deepcopy(
-                base_plan.get("characters", [])
-                or []
-            )
+            [
+                character.to_dict()
+                for character in canonical_characters
+                if character is not None
+            ]
         )
 
         if not characters:
             raise RuntimeError(
-                "Deterministic base plan contains no canonical characters."
+                "No canonical characters could be derived from the final story."
             )
 
         character_names = {
@@ -5073,17 +5096,23 @@ Return JSON only.
 
         if not character_names:
             raise RuntimeError(
-                "Deterministic base plan contains no canonical character names."
+                "Canonical character extraction produced no usable names."
             )
 
-        scenes = self._sanitize_scenes(
-            deepcopy(
-                base_plan.get("scenes", [])
-                or []
-            ),
-            character_names,
+        canonical_scenes = planner.create_scenes(
+            canonical_source_story,
+            canonical_characters,
         )
 
+        scenes = self._sanitize_scenes(
+            [
+                scene.to_dict()
+                for scene in canonical_scenes
+                if scene is not None
+            ],
+            character_names,
+        )
+        
         if not scenes:
             raise RuntimeError(
                 "Deterministic base plan contains no canonical scenes."
