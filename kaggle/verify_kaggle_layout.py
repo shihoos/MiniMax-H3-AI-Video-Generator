@@ -278,7 +278,8 @@ def verify_comfy_runtime() -> None:
         "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
         "low_precision_attention=False",
         "self.out_proj((out / 64.0).to(torch.float16))",
-        ".to(torch.float32).mul_(64.0)",
+        ".to(torch.float32)",
+        ".mul_(64.0)",
     )
     for required in required_model_patches:
         if required not in model_text:
