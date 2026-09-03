@@ -98,5 +98,5 @@ h3_optimization:
   precision_mode: Auto
   qkv_streaming_mode: Auto
   attention_memory_mode: Lower VRAM (slower)
-  chunk_rows: 1024
+  chunk_rows: 2560
   sparse_attention: false
