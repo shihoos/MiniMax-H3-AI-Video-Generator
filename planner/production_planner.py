@@ -861,7 +861,10 @@ def detect_character_descriptors(
         if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
             return
 
-        if name.lower() in role_names:
+        if (
+            name.lower() in role_names
+            and source != "role"
+        ):
             return
 
         key = name.lower()
