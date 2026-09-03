@@ -225,7 +225,6 @@ class H3Runtime:
         # not match the project-locked CUDA build. This prevents another long
         # H3 run on a silently downgraded cu128 environment.
         try:
-            from planner.config import RUNTIME
             pytorch_cfg = dict(RUNTIME.get("pytorch", {}) or {})
             expected_version = str(pytorch_cfg.get("version", "2.10.0") or "2.10.0").strip()
             expected_cuda = str(pytorch_cfg.get("cuda", "cu130") or "cu130").strip().lower()
@@ -242,7 +241,6 @@ class H3Runtime:
             raise RuntimeError(f"Failed to validate locked PyTorch runtime: {exc}") from exc
 
         try:
-            from planner.config import RUNTIME
             runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
             vram_cfg = dict(runtime_cfg.get("vram", {}) or {})
             vram_cfg["cpu_vae"] = runtime_cfg.get("cpu_vae", cpu_vae)
