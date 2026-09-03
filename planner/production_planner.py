@@ -176,6 +176,25 @@ class ProductionPlanner:
         "At",
         "As",
         "During",
+        "With",
+        "Without",
+        "From",
+        "To",
+        "By",
+        "For",
+        "Under",
+        "Over",
+        "Through",
+        "Between",
+        "Among",
+        "Behind",
+        "Beside",
+        "Beyond",
+        "Across",
+        "Until",
+        "Toward",
+        "Towards",
+        "Upon",
     }
 
     ACTION_WORDS = (
@@ -1024,8 +1043,7 @@ def detect_character_descriptors(
             if not verb:
                 return False
 
-            if verb.endswith("ing") and not before:
-                return False
+            
 
             # A morphology candidate inside a prepositional phrase
             # is not subject evidence.
