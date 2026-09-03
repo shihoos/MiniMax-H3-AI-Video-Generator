@@ -5871,9 +5871,20 @@ state. Do not invent facts that are not present in the plan.
 
         # Canonical structure is never replaced by Qwen.
         # Characters and scene topology come from the deterministic base plan.
-        merged["characters"] = deepcopy(
+        base_characters = deepcopy(
             base_plan.get("characters", [])
             or []
+        )
+        
+        creative_characters = deepcopy(
+            creative.get("characters", [])
+            or []
+        )
+        
+        merged["characters"] = (
+            base_characters
+            if base_characters
+            else creative_characters
         )
 
         canonical_scenes = deepcopy(
