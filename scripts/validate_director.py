@@ -209,7 +209,7 @@ def test_shot_batch_contract() -> None:
     prompt = director._shot_director_batch_system()
 
     check(
-        f"Create exactly {QwenDirector.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
+        "Create exactly TWO production-ready shots for EACH supplied scene." in prompt,
         "Batch shot prompt does not enforce two shots per scene.",
     )
 
@@ -553,9 +553,15 @@ def test_director_prompt_contract() -> None:
     )
 
     check(
-        "character_spatial_bboxes" in shots
-        and "character_spatial_regions" in shots,
-        "Shot prompt is missing spatial continuity fields.",
+        "SCENE-FUNCTION DIRECTING" in shots
+        and "obligatory_moment" in shots,
+        "Shot prompt is missing scene-function / obligatory-moment directing constraints.",
+    )
+
+    check(
+        "Do NOT output these compiler-owned fields" in shots
+        and "continuity_notes" in shots,
+        "Shot prompt is missing compiler-ownership boundaries.",
     )
     
 
@@ -1340,6 +1346,52 @@ def test_final_generation_uses_compiler_before_quality_validation() -> None:
     )
 
 
+def test_cinematic_compiler_deterministic_fallback() -> None:
+    from planner.cinematic_compiler import CinematicCompiler
+
+    scene = _sample_scene("scene_001", ["Elias", "Mara"], 1)
+    compiler = CinematicCompiler(
+        character_names={"Elias", "Mara"},
+    )
+
+    compiled = compiler.compile_all(
+        [scene],
+        [],
+    )
+
+    check(
+        len(compiled) == 2,
+        "CinematicCompiler fallback did not produce exactly two shots.",
+    )
+    check(
+        all(shot.get("scene_id") == "scene_001" for shot in compiled),
+        "Compiler fallback changed the canonical scene ID.",
+    )
+    check(
+        len({shot.get("shot_id") for shot in compiled}) == 2
+        and all(str(shot.get("shot_id", "")).strip() for shot in compiled),
+        "Compiler fallback did not produce unique non-empty shot IDs.",
+    )
+    check(
+        all(
+            str(shot.get("camera_shot", "")).strip()
+            and str(shot.get("camera_movement", "")).strip()
+            and str(shot.get("lens_and_depth_of_field", "")).strip()
+            and str(shot.get("composition_notes", "")).strip()
+            and str(shot.get("lighting", "")).strip()
+            and str(shot.get("color_temperature", "")).strip()
+            and str(shot.get("mood", "")).strip()
+            and str(shot.get("visual_prompt", "")).strip()
+            for shot in compiled
+        ),
+        "Compiler fallback did not satisfy required creative shot fields.",
+    )
+    check(
+        all(set(shot.get("characters", [])) <= {"Elias", "Mara"} for shot in compiled),
+        "Compiler fallback introduced a character outside the canonical roster.",
+    )
+
+
 def test_resume_does_not_rewrite_scene_ids() -> None:
     director = QwenDirector(ROOT)
     import inspect
@@ -1471,6 +1523,7 @@ def main() -> None:
         test_mult_word_character_extraction_regression,
         test_visual_language_partial_merge_preserves_base_fields,
         test_final_generation_uses_compiler_before_quality_validation,
+        test_cinematic_compiler_deterministic_fallback,
         test_scene_budget_contract_and_fallback,
         test_scene_budget_semantic_repair_contract,
         test_batch_planning_runtime_contract,
