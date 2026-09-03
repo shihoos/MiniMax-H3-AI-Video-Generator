@@ -1157,8 +1157,8 @@ def test_batch_planning_runtime_contract() -> None:
     source = inspect.getsource(director.generate)
 
     check(
-        director.MAX_SHOT_BATCH_SCENES == 5,
-        "Shot batch max scenes must be 5.",
+        director.MAX_SHOT_BATCH_SCENES == 2,
+        "Shot batch max scenes must be 2.",
     )
 
     check(
