@@ -905,7 +905,7 @@ class ProductionPlanner:
             r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
             r")?"
             r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
-            r"(?:[a-z]+(?:ed|s))\b"
+            r"(?:[a-z]+(?:ed|ing|s))\b"
         )
 
         appositive_pattern = re.compile(
