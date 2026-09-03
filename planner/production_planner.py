@@ -820,18 +820,18 @@ class ProductionPlanner:
         # "Mira, a systems engineer, and Arun, her specialist, arrive..."
         # must remain canonical named entities.
         coordinated_name_pattern = re.compile(
-            r"\\b"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
-            r"\\s*,\\s*"
+            r"\b"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\s*,\s*"
             r"[^.!?;]{0,120}?"
-            r"\\band\\b"
-            r"\\s+"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
-            r"(?=\\s*(?:,|\\b(?:arrived|arrive|appears|appear|"
+            r"\band\b"
+            r"\s+"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"(?=\s*(?:,|\b(?:arrived|arrive|appears|appear|"
             r"enters|enter|stands|stand|walks|walk|runs|run|"
             r"leaves|leave|moves|move|descends|descend|"
             r"discovers|discover|chooses|choose|faces|face|"
-            r"works|work|returns|return|waits|wait)\\b))"
+            r"works|work|returns|return|waits|wait)\b))"
         )
 
         for match in coordinated_name_pattern.finditer(story):
