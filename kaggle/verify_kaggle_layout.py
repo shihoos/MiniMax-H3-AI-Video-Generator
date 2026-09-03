@@ -171,9 +171,9 @@ def verify_workflow(path: Path, turbo: bool) -> None:
     if len(widgets) < 8:
         fail(f"Incomplete H3MemoryOptimization widgets: {path}")
 
-    if int(widgets[2]) != 1024:
+    if int(widgets[2]) != 2048:
         fail(
-            f"{path}: expected chunk_rows=1024, "
+            f"{path}: expected chunk_rows=2048, "
             f"got {widgets[2]!r}"
         )
 
@@ -200,8 +200,8 @@ def verify_runtime_config() -> None:
     if config["pytorch"]["cuda"] != "cu130":
         fail("PyTorch CUDA target must be cu130")
 
-    if config["h3_optimization"]["chunk_rows"] != 1024:
-        fail("H3 chunk_rows must be 1024")
+    if config["h3_optimization"]["chunk_rows"] != 2048:
+        fail("H3 chunk_rows must be 2048")
 
     if (
         config["h3_optimization"]["attention_memory_mode"]
@@ -261,6 +261,22 @@ def verify_comfy_runtime() -> None:
         if required not in vae_text:
             fail(
                 "H3 VAE dtype patch is incomplete: "
+                f"{required}"
+            )
+
+    if "mm.MLP.forward =" in model_text or "mm.DiTBlock.forward =" in model_text:
+        fail("Forbidden legacy global MLP/DiTBlock monkey-patch remains in H3 model")
+
+    required_model_patches = (
+        "condition_proj(text_states.to(torch.float32))",
+        "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
+        "self.out_proj((out / 64.0).to(torch.float16))",
+        ".to(torch.float32).mul_(64.0)",
+    )
+    for required in required_model_patches:
+        if required not in model_text:
+            fail(
+                "H3 FP16 numerical patch is incomplete: "
                 f"{required}"
             )
 
@@ -421,7 +437,6 @@ def verify_bootstrap() -> None:
 
     required = (
         "apply_embedded_h3_runtime_overlay",
-        "patch_h3_vae_decoder_dtype",
         "verify_runtime_files",
     )
 
@@ -436,6 +451,16 @@ def verify_bootstrap() -> None:
             "Bootstrap is missing required runtime operations: "
             f"{missing}"
         )
+
+    embedded_targets = (
+        "'comfy/ldm/minimax/model.py'",
+        "'comfy/ldm/minimax/vae.py'",
+        "'comfy/supported_models.py'",
+        "'custom_nodes/ComfyUI-MiniMax-H3-Turbo/__init__.py'",
+    )
+    for target in embedded_targets:
+        if target not in text:
+            fail(f"Bootstrap embedded runtime target is missing: {target}")
 
     print("[PASS] Bootstrap")
 
