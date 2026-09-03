@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 from planner.cinematic_compiler import CinematicCompiler
 from pipeline.continuity_ledger import ContinuityLedger
 from pipeline.dialogue_timeline import DialogueTimeline
+from pipeline.timeline import ProductionTimeline
 from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 from schemas.character import Character
 from schemas.shot import Shot
@@ -251,6 +252,40 @@ def main() -> None:
     assert DialogueTimeline.h3_legal_frames(5.0) == 124
     assert abs(DialogueTimeline.h3_effective_duration_seconds(5.0) - 124 / 24.0) < 1e-9
     assert DialogueTimeline.h3_legal_frames(15.0) == 362
+
+    # Requested shot timing must be canonicalized to the exact H3 frame-grid
+    # duration so the plan/timeline/ComfyUI render cannot silently diverge.
+    timing_plan = {
+        "shots": [
+            {
+                "shot_id": "timing_001",
+                "scene_id": "timing_scene",
+                "order": 1,
+                "duration_seconds": 5.2,
+            }
+        ]
+    }
+    ProductionTimeline(timing_plan).build()
+    timing_shot = timing_plan["shots"][0]
+    assert abs(timing_shot["duration_seconds"] - 141 / 24.0) < 1e-9
+    assert timing_shot["frames_per_shot"] == 141
+    assert abs(timing_shot["h3_effective_duration_seconds"] - timing_shot["duration_seconds"]) < 1e-9
+    assert abs(timing_shot["requested_duration_seconds"] - 5.2) < 1e-9
+
+    max_timing_plan = {
+        "shots": [
+            {
+                "shot_id": "timing_max",
+                "scene_id": "timing_scene",
+                "order": 1,
+                "duration_seconds": 15.0,
+            }
+        ]
+    }
+    ProductionTimeline(max_timing_plan).build()
+    max_timing_shot = max_timing_plan["shots"][0]
+    assert max_timing_shot["frames_per_shot"] == 362
+    assert abs(max_timing_shot["duration_seconds"] - 362 / 24.0) < 1e-4
 
     print("PRODUCTION CONTINUITY VALIDATION PASSED")
 
