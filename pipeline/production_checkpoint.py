@@ -93,6 +93,7 @@ class ProductionCheckpoint:
             "runtime_diagnostics_warning",
             "production_manifest",
             "production_manifest_path",
+            "approval",
         ):
             normalized.pop(key, None)
         return cls.digest_object(normalized)
