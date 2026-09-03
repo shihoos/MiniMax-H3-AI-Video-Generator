@@ -5245,7 +5245,7 @@ Return JSON only.
                 # ------------------------------------------------
                 # CREATIVE SHOT PASS
                 # ------------------------------------------------
-                # One fresh batch call for 1–5 scenes. No per-scene retry
+                # One fresh batch call for 1–2 scenes. No per-scene retry
                 # or missing-shot Qwen recovery is performed.
                 if existing_scene_shots:
                     generated_by_scene[scene_id] = list(
