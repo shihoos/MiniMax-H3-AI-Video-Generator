@@ -1409,6 +1409,7 @@ def test_expand_failure_is_source_fallback_without_retry() -> None:
         director._llama = object()
 
     director.load = fake_load
+    director._count_tokens = lambda text: 100
 
     def fake_chat(*args, **kwargs):
         calls.append(kwargs.get("call_name", ""))
