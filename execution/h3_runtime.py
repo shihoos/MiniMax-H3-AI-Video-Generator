@@ -91,7 +91,7 @@ class H3Runtime:
                 if free is None:
                     continue
                 try:
-                    free_gib = float(free) / (2560 ** 3)
+                    free_gib = float(free) / (1024 ** 3)
                 except (TypeError, ValueError):
                     continue
                 if free_gib < float(min_free_vram_gib):
