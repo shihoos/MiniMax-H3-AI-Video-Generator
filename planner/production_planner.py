@@ -777,318 +777,545 @@ class ProductionPlanner:
 
         return result
 
-    def detect_character_descriptors(
-        self,
-        story: str,
-    ) -> list[str]:
+def detect_character_descriptors(
+    self,
+    story: str,
+) -> list[str]:
 
-        story = self._clean_text(
-            story
-        )
+    story = self._clean_text(
+        story
+    )
 
-        if not story:
-            return []
+    if not story:
+        return []
 
-        role_names = {
-            "woman",
-            "man",
-            "girl",
-            "boy",
-            "child",
-            "person",
-            "hero",
-            "heroine",
-            "explorer",
-            "detective",
-            "scientist",
-            "soldier",
-            "warrior",
-            "king",
-            "queen",
-            "robot",
-            "android",
-            "pilot",
-        }
+    role_names = {
+        "woman",
+        "man",
+        "girl",
+        "boy",
+        "child",
+        "person",
+        "hero",
+        "heroine",
+        "explorer",
+        "detective",
+        "scientist",
+        "soldier",
+        "warrior",
+        "king",
+        "queen",
+        "robot",
+        "android",
+        "pilot",
+    }
 
-        # Explicit names are authoritative. A phrase such as
-        # "a young man named Eli" represents ONE character:
-        # Eli. The generic role "man" is metadata for Eli.
-        # [PATCH] coordinated character parser
-        explicit_names: list[str] = []
+    # ========================================================
+    # EVIDENCE MODEL
+    # ========================================================
+    #
+    # Detectors produce evidence, not final identities.
+    #
+    #   explicit       100
+    #   subject_verb    80
+    #   appositive      70
+    #   role            30
+    #   morphology      20
+    #
+    # Weak evidence must survive occurrence-level validation
+    # and the confidence gate before becoming canonical identity.
+    evidence: dict[str, dict] = {}
 
-        # Coordinated narrative subjects such as:
-        # "Mira, a systems engineer, and Arun, her specialist, arrive..."
-        # must remain canonical named entities.
-        coordinated_name_pattern = re.compile(
-            r"\b"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
-            r"\s*,\s*"
-            r"[^.!?;]{0,120}?"
-            r"\band\b"
-            r"\s+"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
-            r"(?=\s*(?:,|\b(?:arrived|arrive|appears|appear|"
-            r"enters|enter|stands|stand|walks|walk|runs|run|"
-            r"leaves|leave|moves|move|descends|descend|"
-            r"discovers|discover|chooses|choose|faces|face|"
-            r"works|work|returns|return|waits|wait)\b))"
-        )
+    def add_evidence(
+        raw_name: str,
+        source: str,
+        weight: int,
+    ) -> None:
 
-        for match in coordinated_name_pattern.finditer(story):
-            for group in (1, 2):
-                name = match.group(group).strip()
-                if (
-                    name
-                    and name not in self.COMMON_PROPER_WORDS
-                    and name.lower()
-                    not in {
-                        existing.lower()
-                        for existing in explicit_names
-                    }
-                ):
-                    explicit_names.append(name)
+        name = str(
+            raw_name or ""
+        ).strip()
 
-        named_pattern = re.compile(
-            r"\b(?:named|called)\s+"
-            r"([A-Z][A-Za-z0-9'_-]+"
-            r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b"
-        )
+        if not name:
+            return
 
-        for match in named_pattern.finditer(
-            story
+        name_tokens = name.split()
+
+        while (
+            len(name_tokens) > 1
+            and name_tokens[0]
+            in self.COMMON_PROPER_WORDS
         ):
+            name_tokens.pop(0)
 
-            name = match.group(
-                1
-            ).strip()
+        name = " ".join(
+            name_tokens
+        ).strip()
 
-            if not name:
-                continue
+        if not name:
+            return
 
-            if name in self.COMMON_PROPER_WORDS:
-                continue
+        if name in self.COMMON_PROPER_WORDS:
+            return
 
-            explicit_names.append(
-                name
+        if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+            return
+
+        if name.lower() in role_names:
+            return
+
+        key = name.lower()
+
+        item = evidence.setdefault(
+            key,
+            {
+                "name": name,
+                "score": 0,
+                "sources": set(),
+                "occurrences": 0,
+            },
+        )
+
+        item["score"] += weight
+        item["sources"].add(source)
+        item["occurrences"] += 1
+
+    # ========================================================
+    # OCCURRENCE-LEVEL CONTEXT
+    # ========================================================
+
+    def sentence_bounds(
+        start: int,
+        end: int,
+    ) -> tuple[int, int]:
+
+        left = max(
+            story.rfind(".", 0, start),
+            story.rfind("!", 0, start),
+            story.rfind("?", 0, start),
+            story.rfind("\n", 0, start),
+        )
+
+        right_candidates = [
+            position
+            for position in (
+                story.find(".", end),
+                story.find("!", end),
+                story.find("?", end),
+                story.find("\n", end),
+            )
+            if position >= 0
+        ]
+
+        right = (
+            min(right_candidates)
+            if right_candidates
+            else len(story)
+        )
+
+        return (
+            left + 1,
+            right,
+        )
+
+    def validate_occurrence(
+        match: re.Match,
+        source: str,
+    ) -> bool:
+
+        candidate_start = match.start(1)
+        candidate_end = match.end(1)
+
+        sentence_start, sentence_end = (
+            sentence_bounds(
+                candidate_start,
+                candidate_end,
+            )
+        )
+
+        before = story[
+            sentence_start:candidate_start
+        ].strip()
+
+        candidate = story[
+            candidate_start:candidate_end
+        ].strip()
+
+        if not candidate:
+            return False
+
+        # ----------------------------------------------------
+        # Explicit names are authoritative.
+        # ----------------------------------------------------
+        if source == "explicit":
+            return True
+
+        # ----------------------------------------------------
+        # Do not allow sentence-leading function words to become
+        # character identities merely because capitalization makes
+        # them look like proper nouns.
+        #
+        # This uses the existing small structural vocabulary rather
+        # than turning the extractor into an ever-growing blacklist.
+        # ----------------------------------------------------
+        candidate_tokens = candidate.split()
+
+        if (
+            len(candidate_tokens) == 1
+            and candidate_tokens[0]
+            in self.COMMON_PROPER_WORDS
+        ):
+            return False
+
+        if (
+            len(candidate_tokens) == 1
+            and candidate_tokens[0]
+            in self.NARRATIVE_SUBJECT_EXCLUSIONS
+        ):
+            return False
+
+        # ----------------------------------------------------
+        # Strong subject evidence has already matched a known
+        # narrative verb. It is therefore trusted after the
+        # basic structural exclusions above.
+        # ----------------------------------------------------
+        if source == "subject_verb":
+            return True
+
+        # ----------------------------------------------------
+        # Appositive evidence is intentionally person-oriented:
+        #
+        #     Anton, who worked there...
+        #
+        # The "which" form is handled nowhere in the identity
+        # path because it commonly describes non-person entities.
+        # ----------------------------------------------------
+        if source == "appositive":
+            return True
+
+        # ----------------------------------------------------
+        # Morphology is weak evidence.
+        #
+        # Crucial protection:
+        #
+        #     "With trembling hands..."
+        #     "After entering the chamber..."
+        #     "Before leaving..."
+        #
+        # These are introductory participial/prepositional
+        # constructions, not character subjects.
+        #
+        # Do NOT globally remove "-ing". Simply refuse to let a
+        # sentence-leading "-ing" occurrence create identity by
+        # itself.
+        # ----------------------------------------------------
+        if source == "morphology":
+
+            verb = ""
+
+            if match.lastindex and match.lastindex >= 2:
+                verb = match.group(
+                    2
+                ).strip().lower()
+
+            if not verb:
+                return False
+
+            if verb.endswith("ing") and not before:
+                return False
+
+            # A morphology candidate inside a prepositional phrase
+            # is not subject evidence.
+            previous_tokens = (
+                before.rstrip(
+                    " ,;:-—"
+                ).split()
+                if before
+                else []
             )
 
-        # Subject-position names: ordinary narrative prose often uses a
-        # character name directly as the grammatical subject (for example
-        # "Marcus Chen arrived" or "Dr. Elara Voss stood").  The old
-        # one-token expression silently reduced multi-word names to the
-        # surname immediately before the verb.  Capture the complete
-        # capitalized name, while treating an optional honorific as metadata.
-        verb_alternation = "|".join(
+            if previous_tokens:
+
+                previous = (
+                    previous_tokens[-1]
+                    .strip(
+                        "\"'()[]{}"
+                    )
+                    .lower()
+                )
+
+                if previous in {
+                    "with",
+                    "without",
+                    "from",
+                    "to",
+                    "by",
+                    "for",
+                    "on",
+                    "in",
+                    "at",
+                    "under",
+                    "over",
+                    "through",
+                    "between",
+                    "among",
+                    "behind",
+                    "beside",
+                    "beyond",
+                    "across",
+                    "during",
+                    "before",
+                    "after",
+                    "until",
+                    "toward",
+                    "towards",
+                    "upon",
+                }:
+                    return False
+
+            return True
+
+        return False
+
+    # ========================================================
+    # 1. EXPLICIT NAMES
+    # ========================================================
+
+    named_pattern = re.compile(
+        r"\b(?:named|called)\s+"
+        r"([A-Z][A-Za-z0-9'_-]+"
+        r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b"
+    )
+
+    for match in named_pattern.finditer(
+        story
+    ):
+        if validate_occurrence(
+            match,
+            "explicit",
+        ):
+            add_evidence(
+                match.group(1),
+                "explicit",
+                100,
+            )
+
+    # ========================================================
+    # 2. STRONG SUBJECT + KNOWN VERB
+    # ========================================================
+
+    verb_alternation = "|".join(
+        sorted(
+            self.NARRATIVE_SUBJECT_VERBS,
+            key=len,
+            reverse=True,
+        )
+    )
+
+    subject_verb_pattern = re.compile(
+        r"\b(?:"
+        r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+        r")?"
+        r"([A-Z][A-Za-z0-9'_-]+"
+        r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
+        r"("
+        + verb_alternation
+        + r")\b"
+    )
+
+    for match in subject_verb_pattern.finditer(
+        story
+    ):
+        if not validate_occurrence(
+            match,
+            "subject_verb",
+        ):
+            continue
+
+        add_evidence(
+            match.group(1),
+            "subject_verb",
+            80,
+        )
+
+    # ========================================================
+    # 3. MORPHOLOGICAL FALLBACK
+    # ========================================================
+    #
+    # Keep "-ing".
+    #
+    # It is useful as weak evidence for narrative constructions
+    # that do not use a verb from NARRATIVE_SUBJECT_VERBS.
+    #
+    # It is NOT sufficient by itself to create identity.
+    # ========================================================
+
+    subject_morphology_pattern = re.compile(
+        r"\b(?:"
+        r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+        r")?"
+        r"([A-Z][A-Za-z0-9'_-]+"
+        r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
+        r"([a-z]+(?:ed|ing|s))\b"
+    )
+
+    for match in subject_morphology_pattern.finditer(
+        story
+    ):
+        if not validate_occurrence(
+            match,
+            "morphology",
+        ):
+            continue
+
+        add_evidence(
+            match.group(1),
+            "morphology",
+            20,
+        )
+
+    # ========================================================
+    # 4. APPOSITIVE IDENTITY
+    # ========================================================
+
+    appositive_pattern = re.compile(
+        r"\b([A-Z][a-z]+)\s*,\s*who\b"
+    )
+
+    for match in appositive_pattern.finditer(
+        story
+    ):
+        if not validate_occurrence(
+            match,
+            "appositive",
+        ):
+            continue
+
+        add_evidence(
+            match.group(1),
+            "appositive",
+            70,
+        )
+
+    # ========================================================
+    # 5. ROLE DESCRIPTORS
+    # ========================================================
+
+    role_pattern = re.compile(
+        r"\b(?:a|an|the)\s+"
+        r"(?:[a-z][a-z'-]*\s+){0,3}"
+        r"("
+        + "|".join(
             sorted(
-                self.NARRATIVE_SUBJECT_VERBS,
+                role_names,
                 key=len,
                 reverse=True,
             )
         )
+        + r")\b",
+        flags=re.IGNORECASE,
+    )
 
-        subject_verb_pattern = re.compile(
-            r"\b(?:"
-            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
-            r")?"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
-            r"(?:" + verb_alternation + r")\b"
+    explicit_keys = {
+        key
+        for key, item in evidence.items()
+        if "explicit" in item["sources"]
+    }
+
+    for match in role_pattern.finditer(
+        story
+    ):
+        role = (
+            match.group(1)
+            .strip()
+            .lower()
         )
 
-        # Do not make the finite verb vocabulary a hard ceiling.  Short-film
-        # prose routinely contains inflected verbs that are absent from any
-        # hand-maintained list (for example "arrived" or "finished").  A
-        # conservative morphological fallback catches common -ed/-ing/-s
-        # finite/action forms, while the explicit vocabulary above remains
-        # the higher-confidence path.
-        subject_morphology_pattern = re.compile(
-            r"\b(?:"
-            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
-            r")?"
-            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
-            r"(?:[a-z]+(?:ed|ing|s))\b"
+        tail = story[
+            match.end():
+            min(
+                len(story),
+                match.end() + 48,
+            )
+        ]
+
+        nearby_name = re.match(
+            r"\s*,?\s*(?:named|called)\s+"
+            r"([A-Z][A-Za-z0-9'_-]+"
+            r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
+            tail,
         )
 
-        appositive_pattern = re.compile(
-            r"\b([A-Z][a-z]+)\s*,\s*(?:who|which)\b"
-        )
-
-        for pattern in (
-            subject_verb_pattern,
-            subject_morphology_pattern,
-            appositive_pattern,
+        if (
+            nearby_name is not None
+            and nearby_name.group(1).strip().lower()
+            in explicit_keys
         ):
+            continue
 
-            for match in pattern.finditer(
-                story
-            ):
-
-                name = match.group(
-                    1
-                ).strip()
-
-                # The regex intentionally permits sentence-leading
-                # capitalized words. Remove known function words without
-                # disturbing legitimate multi-word names.
-                name_tokens = name.split()
-                while (
-                    len(name_tokens) > 1
-                    and name_tokens[0] in self.COMMON_PROPER_WORDS
-                ):
-                    name_tokens.pop(0)
-                name = " ".join(name_tokens).strip()
-
-                if not name:
-                    continue
-
-                if name in self.COMMON_PROPER_WORDS:
-                    continue
-
-                if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
-                    continue
-
-                if name.lower() in role_names:
-                    continue
-
-                if (
-                    name.lower()
-                    in {
-                        existing.lower()
-                        for existing in explicit_names
-                    }
-                ):
-                    continue
-
-                explicit_names.append(
-                    name
-                )
-
-        explicit_lower = {
-            name.lower()
-            for name in explicit_names
-        }
-
-        role_pattern = re.compile(
-            r"\b(?:a|an|the)\s+"
-            r"(?:[a-z][a-z'-]*\s+){0,3}"
-            r"("
-            + "|".join(
-                sorted(
-                    role_names,
-                    key=len,
-                    reverse=True,
-                )
-            )
-            + r")\b",
-            flags=re.IGNORECASE,
+        add_evidence(
+            role,
+            "role",
+            30,
         )
 
-        candidates: list[str] = []
+    # ========================================================
+    # 6. CONFIDENCE GATE
+    # ========================================================
 
-        for match in role_pattern.finditer(
-            story
+    accepted: list[str] = []
+
+    for item in evidence.values():
+
+        name = item["name"]
+        sources = item["sources"]
+        score = item["score"]
+        occurrences = item["occurrences"]
+
+        # Explicit identity is authoritative.
+        if "explicit" in sources:
+            accepted.append(
+                name
+            )
+            continue
+
+        # Strong subject/appositive evidence is accepted when
+        # the occurrence passed contextual validation.
+        if (
+            "subject_verb" in sources
+            or "appositive" in sources
         ):
+            accepted.append(
+                name
+            )
+            continue
 
-            role = (
-                match.group(1)
-                .strip()
-                .lower()
+        # Role descriptors retain the deterministic fallback.
+        if (
+            "role" in sources
+            and score >= 30
+        ):
+            accepted.append(
+                name
+            )
+            continue
+
+        # Morphological evidence is deliberately weak.
+        #
+        # It needs repeated validated occurrences before it can
+        # create a canonical identity.
+        if (
+            "morphology" in sources
+            and occurrences >= 2
+            and score >= 40
+        ):
+            accepted.append(
+                name
             )
 
-            if role not in role_names:
-                continue
-
-            # Look immediately after the role first. This catches
-            # the canonical forms "a man named Eli" and
-            # "a woman called Sara" without producing duplicates.
-            tail = story[
-                match.end():
-                min(
-                    len(story),
-                    match.end() + 48,
-                )
-            ]
-
-            nearby_name = re.match(
-                r"\s*,?\s*(?:named|called)\s+"
-                r"([A-Z][A-Za-z0-9'_-]+"
-                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
-                tail,
-            )
-
-            if (
-                nearby_name is not None
-                and nearby_name.group(1).strip().lower()
-                in explicit_lower
-            ):
-                continue
-
-            # Also check the surrounding phrase for a nearby
-            # explicit name. This handles adjective-heavy forms
-            # such as "the heavily wounded young man named Eli".
-            start = max(
-                0,
-                match.start() - 80,
-            )
-
-            context = story[
-                start:
-                min(
-                    len(story),
-                    match.end() + 48,
-                )
-            ]
-
-            surrounding_name = re.search(
-                r"\b(?:named|called)\s+"
-                r"([A-Z][A-Za-z0-9'_-]+"
-                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b",
-                context,
-            )
-
-            if (
-                surrounding_name is not None
-                and surrounding_name.group(1).strip().lower()
-                in explicit_lower
-            ):
-                continue
-
-            candidates.append(
-                role
-            )
-
-        # Explicit names always win over generic role descriptors.
-        # Keep the named identity and let _make_character infer its
-        # role from the surrounding story.
-        candidates.extend(
-            explicit_names
-        )
-
-        result: list[str] = []
-        seen: set[str] = set()
-
-        for value in candidates:
-
-            value = str(
-                value
-            ).strip()
-
-            if not value:
-                continue
-
-            key = value.lower()
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-
-            result.append(
-                value
-            )
-
-        return self._canonicalize_character_descriptors(
-            result
-        )
+    return self._canonicalize_character_descriptors(
+        accepted
+    )
 
     @staticmethod
     def _appearance_from_story(
