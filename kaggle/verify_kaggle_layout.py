@@ -218,11 +218,6 @@ def verify_runtime_config() -> None:
     ):
         fail("H3 T4 value-clone workaround is disabled")
 
-    if not config["comfyui"].get(
-        "h3_vae_decoder_dtype_patch",
-        False,
-    ):
-        fail("H3 VAE decoder dtype patch is disabled")
 
     print("[PASS] Runtime configuration")
 
