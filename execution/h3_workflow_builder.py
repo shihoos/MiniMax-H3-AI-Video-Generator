@@ -1330,17 +1330,11 @@ class H3WorkflowBuilder:
             0 <= source_slot
             < len(outputs)
         ):
-            links = outputs[
-                source_slot
-            ].setdefault(
-                "links",
-                [],
-            )
-
-            if links is not None:
-                links.append(
-                    link_id
-                )
+            links = outputs[source_slot].get("links")
+            if not isinstance(links, list):
+                links = []
+                outputs[source_slot]["links"] = links
+            links.append(link_id)
 
         return link_id
 
