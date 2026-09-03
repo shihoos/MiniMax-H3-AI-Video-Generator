@@ -1321,15 +1321,31 @@ def detect_character_descriptors(
             )
             continue
 
-        # Morphological evidence is deliberately weak.
-        #
-        # It needs repeated validated occurrences before it can
-        # create a canonical identity.
-        if (
-            "morphology" in sources
-            and occurrences >= 2
-            and score >= 40
-        ):
+        # Morphological evidence is deliberately weak for ambiguous
+        # single-token candidates, but a multi-word proper name in
+        # subject morphology is strong enough to establish identity
+        # from one validated occurrence.
+        morphology_valid = False
+
+        if "morphology" in sources:
+            tokens = item["name"].split()
+
+            # Example:
+            #   "Elena Kovalenko stumbled ..."
+            #
+            # A multi-token proper name is a strong structural signal.
+            if len(tokens) >= 2:
+                morphology_valid = True
+
+            else:
+                # One-token morphology remains weak and therefore
+                # requires repeated validated occurrences.
+                morphology_valid = (
+                    occurrences >= 2
+                    and score >= 40
+                )
+
+        if morphology_valid:
             accepted.append(
                 name
             )
