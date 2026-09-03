@@ -171,9 +171,9 @@ def verify_workflow(path: Path, turbo: bool) -> None:
     if len(widgets) < 8:
         fail(f"Incomplete H3MemoryOptimization widgets: {path}")
 
-    if int(widgets[2]) != 2048:
+    if int(widgets[2]) != 2560:
         fail(
-            f"{path}: expected chunk_rows=2048, "
+            f"{path}: expected chunk_rows=2560, "
             f"got {widgets[2]!r}"
         )
 
