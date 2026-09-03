@@ -200,8 +200,8 @@ def verify_runtime_config() -> None:
     if config["pytorch"]["cuda"] != "cu130":
         fail("PyTorch CUDA target must be cu130")
 
-    if config["h3_optimization"]["chunk_rows"] != 2048:
-        fail("H3 chunk_rows must be 2048")
+    if config["h3_optimization"]["chunk_rows"] != 2560:
+        fail("H3 chunk_rows must be 2560")
 
     if (
         config["h3_optimization"]["attention_memory_mode"]
@@ -217,6 +217,12 @@ def verify_runtime_config() -> None:
         False,
     ):
         fail("H3 T4 value-clone workaround is disabled")
+
+    h3_opt = config.get("h3_optimization", {})
+    if h3_opt.get("memory_optimization") is not True:
+        fail("H3 memory optimization must be enabled")
+    if h3_opt.get("qkv_streaming_mode") != "Auto":
+        fail("H3 qkv_streaming_mode must be Auto")
 
 
     print("[PASS] Runtime configuration")
@@ -270,6 +276,7 @@ def verify_comfy_runtime() -> None:
     required_model_patches = (
         "condition_proj(text_states.to(torch.float32))",
         "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
+        "low_precision_attention=False",
         "self.out_proj((out / 64.0).to(torch.float16))",
         ".to(torch.float32).mul_(64.0)",
     )
@@ -461,6 +468,24 @@ def verify_bootstrap() -> None:
     for target in embedded_targets:
         if target not in text:
             fail(f"Bootstrap embedded runtime target is missing: {target}")
+
+    # The bootstrap must carry the exact H3 numerical/memory corrections that
+    # are later written into the temporary ComfyUI checkout.
+    bootstrap_contracts = (
+        "condition_proj(text_states.to(torch.float32))",
+        "low_precision_attention=False",
+        "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
+        "self.out_proj((out / 64.0).to(torch.float16))",
+        "decoder_dtype = next(self.decoder.parameters()).dtype",
+        "memory_usage_factor = 0.17",
+        "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
+    )
+    for contract in bootstrap_contracts:
+        if contract not in text:
+            fail(f"Bootstrap H3 contract is missing: {contract}")
+
+    if "mm.MLP.forward =" in text or "mm.DiTBlock.forward =" in text:
+        fail("Bootstrap still contains the forbidden legacy global MLP/DiTBlock monkey-patch")
 
     print("[PASS] Bootstrap")
 
