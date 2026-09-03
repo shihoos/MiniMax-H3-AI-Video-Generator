@@ -43,7 +43,7 @@ class QwenDirector:
     # The runtime selects the largest batch that still fits the 8K context
     # budget with a bounded completion reserve. Missing shots are deterministic
     # fallbacks; no per-scene Qwen recovery is used.
-    MAX_SHOT_BATCH_SCENES = 5
+    MAX_SHOT_BATCH_SCENES = 2
 
     FORBIDDEN_CHARACTER_NAMES = {
         "treat",
@@ -5264,9 +5264,12 @@ Return JSON only.
                             visual_language,
                         )
 
-                        desired_completion = max(
-                            320,
-                            600 * len(batch_scenes),
+                        desired_completion = min(
+                            DIRECTOR_MAX_TOKENS,
+                            max(
+                                320,
+                                1400 * len(batch_scenes),
+                            ),
                         )
 
                         prompt_tokens = self._count_tokens(
@@ -5307,8 +5310,8 @@ Return JSON only.
                                 + "_".join(batch_ids)
                             ),
                             max_completion=min(
-                                3500,
-                                700 * len(batch_scenes),
+                                DIRECTOR_MAX_TOKENS,
+                                1400 * len(batch_scenes),
                             ),
                             json_mode=True,
                             disable_thinking=True,
