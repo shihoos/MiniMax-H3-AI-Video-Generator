@@ -54,6 +54,204 @@ class H3WorkflowBuilder:
             self.project_root / "workflows"
         )
 
+    @classmethod
+    def _repair_turbo_model_chain(cls, workflow: dict) -> None:
+        """Enforce the canonical T4 Turbo MODEL topology.
+
+        Production topology is deliberately explicit and does not infer
+        downstream consumers from a damaged graph:
+
+            UNETLoader
+                -> MiniMaxH3TurboLoRA
+                -> H3MemoryOptimization
+                -> BasicScheduler
+                -> BasicGuider
+
+        The FP16Safe experiment is intentionally not part of the production
+        workflow. Its instance-level DiT/MLP patches conflict with the public
+        H3MemoryOptimization block patch: the H3 optimizer preserves foreign
+        block-forward patches by disabling its bounded block path. The final
+        production path therefore uses the H3 optimizer as the sole block/MLP
+        execution owner after the Turbo LoRA merge.
+        """
+        unet = cls._one(workflow, "UNETLoader")
+        turbo = cls._one(workflow, "MiniMaxH3TurboLoRA")
+        optimizer = cls._one(workflow, "H3MemoryOptimization")
+        scheduler = cls._one(workflow, "BasicScheduler")
+        guider = cls._one(workflow, "BasicGuider")
+
+        nodes = cls._nodes(workflow)
+        links = workflow.setdefault("links", [])
+
+        def model_input_slot(node):
+            slots = [
+                i for i, item in enumerate(node.get("inputs", []))
+                if (
+                    isinstance(item, dict)
+                    and str(item.get("name", "")).lower() == "model"
+                )
+            ]
+            if len(slots) != 1:
+                raise RuntimeError(
+                    f"Expected exactly one MODEL input on {node.get('type')}; found {slots}"
+                )
+            return slots[0]
+
+        def is_model_link(row):
+            return (
+                isinstance(row, list)
+                and len(row) >= 6
+                and str(row[5]).upper() == "MODEL"
+            )
+
+        ids = {
+            "unet": cls._node_id(unet),
+            "turbo": cls._node_id(turbo),
+            "optimizer": cls._node_id(optimizer),
+            "scheduler": cls._node_id(scheduler),
+            "guider": cls._node_id(guider),
+        }
+        chain_ids = set(ids.values())
+
+        # A stale FP16Safe node is not a production dependency. Remove it from
+        # the graph entirely so bootstrap can reproduce the runtime without
+        # an extra unpinned/unused custom node.
+        stale_safe = [
+            node for node in nodes
+            if node.get("type") == "MiniMaxH3FP16Safe"
+        ]
+        stale_safe_ids = {cls._node_id(node) for node in stale_safe}
+        if stale_safe_ids:
+            links[:] = [
+                row for row in links
+                if not (
+                    is_model_link(row)
+                    and (
+                        int(row[1]) in stale_safe_ids
+                        or int(row[3]) in stale_safe_ids
+                    )
+                )
+            ]
+            workflow["nodes"] = [
+                node for node in nodes
+                if cls._node_id(node) not in stale_safe_ids
+            ]
+            nodes = cls._nodes(workflow)
+
+        model_targets = {
+            ids["scheduler"],
+            ids["guider"],
+        }
+
+        # Remove every MODEL edge touching any canonical chain node, and every
+        # MODEL edge into the two terminal consumers. Non-MODEL graph links are
+        # preserved byte-for-byte.
+        links[:] = [
+            row for row in links
+            if not (
+                is_model_link(row)
+                and (
+                    int(row[1]) in chain_ids
+                    or int(row[3]) in chain_ids
+                    or int(row[3]) in model_targets
+                )
+            )
+        ]
+
+        model_nodes = (unet, turbo, optimizer, scheduler, guider)
+        for node in model_nodes:
+            for inp in node.get("inputs", []):
+                if (
+                    isinstance(inp, dict)
+                    and str(inp.get("name", "")).lower() == "model"
+                ):
+                    inp["link"] = None
+            for output in node.get("outputs", []):
+                if (
+                    isinstance(output, dict)
+                    and str(output.get("name", "")).upper() == "MODEL"
+                ):
+                    output["links"] = []
+
+        turbo_slot = model_input_slot(turbo)
+        optimizer_slot = model_input_slot(optimizer)
+        scheduler_slot = model_input_slot(scheduler)
+        guider_slot = model_input_slot(guider)
+
+        existing_ids = [
+            int(row[0])
+            for row in links
+            if isinstance(row, list) and row
+        ]
+        next_link = max(existing_ids, default=0) + 1
+
+        def add_link(src_id, dst_id, dst_slot):
+            nonlocal next_link
+            lid = next_link
+            next_link += 1
+            links.append([
+                lid,
+                src_id,
+                0,
+                dst_id,
+                dst_slot,
+                "MODEL",
+            ])
+            return lid
+
+        l1 = add_link(ids["unet"], ids["turbo"], turbo_slot)
+        l2 = add_link(ids["turbo"], ids["optimizer"], optimizer_slot)
+        l3 = add_link(ids["optimizer"], ids["scheduler"], scheduler_slot)
+        l4 = add_link(ids["optimizer"], ids["guider"], guider_slot)
+
+        turbo["inputs"][turbo_slot]["link"] = l1
+        optimizer["inputs"][optimizer_slot]["link"] = l2
+        scheduler["inputs"][scheduler_slot]["link"] = l3
+        guider["inputs"][guider_slot]["link"] = l4
+
+        def add_output_link(node, link_id):
+            for output in node.get("outputs", []):
+                if (
+                    isinstance(output, dict)
+                    and str(output.get("name", "")).upper() == "MODEL"
+                ):
+                    output.setdefault("links", []).append(link_id)
+
+        add_output_link(unet, l1)
+        add_output_link(turbo, l2)
+        add_output_link(optimizer, l3)
+        add_output_link(optimizer, l4)
+
+        widgets = cls._widgets(turbo)
+        if len(widgets) < 3:
+            raise RuntimeError(
+                "MiniMaxH3TurboLoRA requires at least three widgets."
+            )
+        widgets[0] = H3_TURBO_LORA
+        widgets[1] = 1.0
+        widgets[2] = True
+
+        cls._apply_memory_optimization_config(optimizer)
+
+        # Final structural assertion: exactly the four canonical MODEL edges.
+        expected = {
+            (ids["unet"], ids["turbo"]),
+            (ids["turbo"], ids["optimizer"]),
+            (ids["optimizer"], ids["scheduler"]),
+            (ids["optimizer"], ids["guider"]),
+        }
+        actual = {
+            (int(row[1]), int(row[3]))
+            for row in links
+            if is_model_link(row)
+            and int(row[1]) in chain_ids
+            and int(row[3]) in chain_ids
+        }
+        if actual != expected:
+            raise RuntimeError(
+                f"Turbo MODEL topology mismatch. expected={sorted(expected)} actual={sorted(actual)}"
+            )
+
     # ============================================================
     # BASIC GRAPH HELPERS
     # ============================================================
@@ -337,6 +535,11 @@ class H3WorkflowBuilder:
                 encoding="utf-8",
             )
         )
+
+        if mode == "turbo_ref2va":
+            data = copy.deepcopy(data)
+            self._repair_turbo_model_chain(data)
+            return data
 
         return copy.deepcopy(data)
 
@@ -1643,6 +1846,20 @@ class H3WorkflowBuilder:
             workflow,
             mode,
         )
+
+        # Turbo on the T4 uses the LoRA merge path explicitly.
+        # Do not rely on the workflow UI default.
+        if mode == "turbo_ref2va":
+            turbo_lora = self._one(
+                workflow,
+                "MiniMaxH3TurboLoRA",
+            )
+            widgets = self._widgets(turbo_lora)
+            if len(widgets) < 3:
+                raise RuntimeError(
+                    "Turbo LoRA node is missing the low_vram control."
+                )
+            widgets[2] = True
 
         if context_ir is not None:
             from pipeline.context_ir import H3ContextIRCompiler
