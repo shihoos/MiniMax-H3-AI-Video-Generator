@@ -45,8 +45,6 @@ RUNTIME_MANIFEST = (
     / "runtime_versions.yaml"
 )
 
-COMFY_PATCH_ROOT = ROOT / "kaggle" / "comfyui_patches"
-COMFY_PATCH_MANIFEST = COMFY_PATCH_ROOT / "manifest.json"
 
 
 def apply_embedded_h3_runtime_overlay() -> None:
@@ -1001,20 +999,6 @@ def verify_runtime_files(runtime: dict) -> None:
             f"ComfyUI checkout is not the expected release tag. "
             f"HEAD={tagged or 'untagged'}, expected={expected_version}."
         )
-
-    if bool(runtime.get("comfyui", {}).get("h3_runtime_overrides", True)):
-        if not COMFY_PATCH_MANIFEST.is_file():
-            raise RuntimeError("H3 ComfyUI patch manifest missing during runtime verification.")
-        manifest = __import__("json").loads(COMFY_PATCH_MANIFEST.read_text(encoding="utf-8"))
-        import hashlib
-        for entry in manifest.get("files", []):
-            target = COMFY / str(entry["target"])
-            expected = str(entry["sha256"]).lower()
-            if not target.is_file():
-                raise RuntimeError(f"H3 ComfyUI runtime override missing: {target}")
-            actual = hashlib.sha256(target.read_bytes()).hexdigest()
-            if actual != expected:
-                raise RuntimeError(f"H3 ComfyUI runtime override hash mismatch: {target}")
 
 
 def main():
