@@ -39,7 +39,7 @@ class QwenDirector:
     # into dozens of scenes and therefore dozens of expensive Qwen calls.
     MAX_SCENES = 6
     SHOTS_PER_SCENE = 2
-    # Creative shot batching may cover up to five fresh adjacent scenes.
+    # Creative shot batching may cover up to two fresh adjacent scenes.
     # The runtime selects the largest batch that still fits the 8K context
     # budget with a bounded completion reserve. Missing shots are deterministic
     # fallbacks; no per-scene Qwen recovery is used.
@@ -5158,7 +5158,7 @@ Return JSON only.
         # ----------------------------------------------------
         # PASS 2: cinematography
         #
-        # Fresh scenes are planned in bounded creative batches of up to five.
+        # Fresh scenes are planned in bounded creative batches of up to two.
         # Qwen supplies only
         # creative shot direction; deterministic compilation/rebinding
         # supplies all production identity and technical fields.
