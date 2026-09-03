@@ -1149,7 +1149,7 @@
       "widgets_values": [
         "auto",
         "auto",
-        1024,
+        2560,
         true,
         "Auto",
         "Auto",
@@ -1159,7 +1159,7 @@
       "widgets_values_named": {
         "fused_qkv": "auto",
         "mlp_memory": "auto",
-        "chunk_rows": 1024,
+        "chunk_rows": 2560,
         "preserve_precision": true,
         "precision_mode": "Auto",
         "qkv_streaming_mode": "Auto",
