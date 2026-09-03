@@ -1378,7 +1378,7 @@
         "Auto",
         "Auto",
         "Auto",
-        "Standard → Lower VRAM (slower)"
+        "Lower VRAM (slower)"
       ],
       "widgets_values_named": {
         "fused_qkv": "auto",
@@ -1388,7 +1388,7 @@
         "precision_mode": "Auto",
         "qkv_streaming_mode": "Auto",
         "embedding_memory_mode": "Auto",
-        "kitchen_v_memory_mode": "Standard → Lower VRAM (slower)"
+        "kitchen_v_memory_mode": "Lower VRAM (slower)"
       }
     }
   ],
