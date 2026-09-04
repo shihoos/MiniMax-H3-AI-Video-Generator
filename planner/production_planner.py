@@ -283,6 +283,35 @@ class ProductionPlanner:
         "There", "Here", "Who", "What", "Which",
     }
 
+    # Auxiliary/copular verbs are grammatically useful for real character
+    # subjects ("Sara was hiding", "Elena had left"), but they are dangerous
+    # when capitalization is the only name signal ("Arctic station had...").
+    # They therefore receive an additional noun-phrase / optional NER gate
+    # rather than being trusted as ordinary lexical action verbs.
+    AUXILIARY_SUBJECT_VERBS = {
+        "am", "is", "are", "was", "were",
+        "be", "been", "being",
+        "have", "has", "had",
+    }
+
+    # Small fixed semantic head vocabulary for obvious non-person spans.
+    NON_PERSON_HEAD_WORDS = {
+        "airport", "arena", "base", "basin", "bay", "beach", "bridge",
+        "building", "camp", "canyon", "castle", "cave", "center", "centre",
+        "chamber", "channel", "city", "coast", "compound", "corridor",
+        "country", "crater", "desert", "district", "facility", "field",
+        "forest", "fort", "fortress", "garden", "glacier", "harbor", "harbour",
+        "headquarters", "island", "lake", "library", "mine", "mountain",
+        "museum", "ocean", "outpost", "park", "planet", "port", "prison",
+        "project", "region", "research", "reservoir", "river", "road",
+        "ruins", "school", "sea", "ship", "shore", "spaceport", "station",
+        "temple", "terminal", "theater", "theatre", "tower", "town",
+        "valley", "village", "warehouse", "world", "zone",
+    }
+
+    _ENTITY_NER = None
+    _ENTITY_NER_INITIALIZED = False
+
     LOCATION_PATTERNS = (
         r"\bin\s+(?:the\s+)?([^,.!?]+)",
         r"\bat\s+(?:the\s+)?([^,.!?]+)",
@@ -355,6 +384,77 @@ class ProductionPlanner:
         self.references = ReferenceManager(
             self.project_root
         )
+
+    @classmethod
+    def _optional_entity_label(
+        cls,
+        value: str,
+    ) -> str | None:
+        """
+        Optional local NER safety net.
+
+        This is deliberately lazy and non-required:
+          - no package is imported during normal startup;
+          - no model is downloaded;
+          - if spaCy/en_core_web_sm is absent, the deterministic
+            structural rules remain authoritative;
+          - when the small English NER model is already installed, it is
+            loaded once and used only for ambiguous auxiliary/copular
+            constructions.
+
+        PERSON is compatible with character identity. Location/organization
+        style entities are not.
+        """
+        candidate = str(
+            value or ""
+        ).strip()
+
+        if not candidate:
+            return None
+
+        if cls._ENTITY_NER_INITIALIZED:
+            nlp = cls._ENTITY_NER
+        else:
+            cls._ENTITY_NER_INITIALIZED = True
+            nlp = None
+
+            try:
+                import spacy  # type: ignore
+
+                nlp = spacy.load(
+                    "en_core_web_sm",
+                    exclude=[
+                        "tagger",
+                        "parser",
+                        "attribute_ruler",
+                        "lemmatizer",
+                    ],
+                )
+            except Exception:
+                nlp = None
+
+            cls._ENTITY_NER = nlp
+
+        if nlp is None:
+            return None
+
+        try:
+            doc = nlp(candidate)
+        except Exception:
+            return None
+
+        for entity in doc.ents:
+            if not str(entity.text).strip():
+                continue
+
+            if entity.text.strip().lower() != candidate.lower():
+                continue
+
+            return str(
+                entity.label_
+            ).upper()
+
+        return None
 
     # ============================================================
     # TEXT NORMALIZATION
@@ -1023,6 +1123,108 @@ class ProductionPlanner:
                 right,
             )
 
+        def has_intervening_lowercase_token(
+            match: re.Match,
+        ) -> bool:
+            """
+            Detect a lowercase noun/adjective phrase between a candidate
+            proper-name span and its verb.
+
+            Example:
+                "Arctic station had ..."
+                         ^^^^^^^
+            makes "Arctic" a modifier, not the grammatical character head.
+
+            Real names such as:
+                "Sara was hiding ..."
+                "Elena Kovalenko had left ..."
+            have no intervening lowercase token.
+            """
+            if not match.lastindex or match.lastindex < 2:
+                return False
+
+            gap = story[
+                match.end(1):match.start(2)
+            ]
+
+            return re.search(
+                r"(?<![A-Za-z0-9'_-])[a-z][a-z'-]*"
+                r"(?![A-Za-z0-9'_-])",
+                gap,
+            ) is not None
+
+        def has_lowercase_token_after_candidate(
+            match: re.Match,
+        ) -> bool:
+            """
+            Reject capitalized noun modifiers used as object references.
+
+            Example:
+                "entered Arctic station"
+                        ^^^^^^
+            must not make "Arctic" a character.
+            """
+            tail = story[
+                match.end(1):
+            ]
+
+            return re.match(
+                r"\s+[a-z][a-z'-]*\b",
+                tail,
+            ) is not None
+
+        def has_non_person_semantic_head(
+            candidate: str,
+        ) -> bool:
+            """Return True for multi-token spans ending in a common
+            location/facility/project noun."""
+            tokens = [
+                token.strip(" ,.;:!?()[]{}\\\"'")
+                for token in str(candidate or "").split()
+            ]
+
+            return (
+                len(tokens) >= 2
+                and tokens[-1].lower()
+                in self.NON_PERSON_HEAD_WORDS
+            )
+
+        def candidate_has_definite_non_person_frame(
+            match: re.Match,
+        ) -> bool:
+            """Catch explicit definite noun frames like 'The Frozen Lake was...'."""
+            candidate = story[
+                match.start(1):match.end(1)
+            ].strip()
+
+            if not candidate:
+                return False
+
+            sentence_start, _ = sentence_bounds(
+                match.start(1),
+                match.end(1),
+            )
+
+            before_candidate = story[
+                sentence_start:match.start(1)
+            ].strip()
+
+            previous_word_match = re.search(
+                r"([A-Za-z][A-Za-z'-]*)\\s*$",
+                before_candidate,
+            )
+
+            previous_word = (
+                previous_word_match.group(1).lower()
+                if previous_word_match is not None
+                else ""
+            )
+
+            return (
+                previous_word == "the"
+                and has_non_person_semantic_head(candidate)
+            )
+
         def validate_occurrence(
             match: re.Match,
             source: str,
@@ -1080,11 +1282,60 @@ class ProductionPlanner:
                 return False
 
             # ----------------------------------------------------
-            # Strong subject evidence has already matched a known
-            # narrative verb. It is therefore trusted after the
-            # basic structural exclusions above.
+            # Strong subject evidence is trusted only when the
+            # proper-name span is actually the grammatical subject.
+            #
+            # This blocks:
+            #     "Arctic station had ..."
+            #     "Northern outpost was ..."
+            # while preserving:
+            #     "Sara was ..."
+            #     "Elena Kovalenko had ..."
+            #
+            # Auxiliary/copular constructions receive an optional
+            # local NER veto for obvious non-person entities such as
+            # locations, facilities, and organizations.
             # ----------------------------------------------------
             if source == "subject_verb":
+                if has_intervening_lowercase_token(match):
+                    return False
+
+                if candidate_has_definite_non_person_frame(match):
+                    return False
+
+                if (
+                    has_non_person_semantic_head(candidate)
+                    and match.lastindex
+                    and match.lastindex >= 2
+                    and match.group(2).strip().lower()
+                    in self.AUXILIARY_SUBJECT_VERBS
+                ):
+                    return False
+
+                verb = (
+                    match.group(2)
+                    .strip()
+                    .lower()
+                    if match.lastindex and match.lastindex >= 2
+                    else ""
+                )
+
+                if verb in self.AUXILIARY_SUBJECT_VERBS:
+                    entity_label = self._optional_entity_label(
+                        candidate
+                    )
+
+                    if entity_label in {
+                        "GPE",
+                        "LOC",
+                        "FAC",
+                        "ORG",
+                        "NORP",
+                        "EVENT",
+                        "PRODUCT",
+                    }:
+                        return False
+
                 return True
 
             # ----------------------------------------------------
@@ -1304,6 +1555,35 @@ class ProductionPlanner:
                 if "appositive" in item["sources"]
             ):
                 continue
+
+            # The generic pass uses its own permissive morphology rule.
+            # Reuse the same noun-phrase boundary logic before allowing a
+            # candidate into the evidence model.
+            if (
+                verb in self.AUXILIARY_SUBJECT_VERBS
+                and re.search(
+                    r"(?<![A-Za-z0-9'_-])[a-z][a-z'-]*"
+                    r"(?![A-Za-z0-9'_-])",
+                    story[match.end(1):match.start(2)],
+                )
+            ):
+                continue
+
+            if verb in self.AUXILIARY_SUBJECT_VERBS:
+                entity_label = self._optional_entity_label(
+                    candidate
+                )
+                if entity_label in {
+                    "GPE",
+                    "LOC",
+                    "FAC",
+                    "ORG",
+                    "NORP",
+                    "EVENT",
+                    "PRODUCT",
+                }:
+                    continue
+
             generic_match = re.match(r"(.+)", candidate)
             if generic_match and validate_occurrence(generic_match, "morphology"):
                 add_evidence(candidate, "morphology", 35 if len(candidate.split()) >= 2 else 25)
@@ -1361,6 +1641,46 @@ class ProductionPlanner:
             previous_word = previous_tokens[-1].lower() if previous_tokens else ""
             if previous_word not in subject_verbs:
                 continue
+
+            # A capitalized object can be followed by a normal determiner
+            # ("Sara gives Eli a map"), so do not reject merely because some
+            # lowercase word follows. Only reject when the immediately
+            # following token is already recognized as a common non-person
+            # noun ("entered Arctic station").
+            tail = story[match.end(1):]
+            next_word_match = re.match(
+                r"\s+([a-z][a-z'-]*)\b",
+                tail,
+            )
+            if (
+                next_word_match is not None
+                and next_word_match.group(1).lower()
+                in non_person_tokens
+            ):
+                continue
+
+            if has_non_person_semantic_head(candidate):
+                continue
+
+            # A single capitalized token used after a transitive verb can
+            # still be a place/object rather than a person. When the small
+            # local NER model is available, reject obvious non-person entity
+            # classes; otherwise keep deterministic behavior unchanged.
+            if len(candidate.split()) == 1:
+                entity_label = self._optional_entity_label(
+                    candidate
+                )
+                if entity_label in {
+                    "GPE",
+                    "LOC",
+                    "FAC",
+                    "ORG",
+                    "NORP",
+                    "EVENT",
+                    "PRODUCT",
+                }:
+                    continue
+
             add_evidence(
                 candidate,
                 "object_reference",
@@ -1842,6 +2162,39 @@ class ProductionPlanner:
             result.append(value)
 
         return result
+
+    @classmethod
+    def character_detection_regression_cases(cls) -> tuple[tuple[str, set[str]], ...]:
+        """
+        Small, production-local regression corpus for capitalization/entity
+        boundary failures. No model inference is required to run these cases.
+        """
+        return (
+            (
+                "The Arctic station had been abandoned for years.",
+                set(),
+            ),
+            (
+                "The Arctic station is empty.",
+                set(),
+            ),
+            (
+                "The Northern outpost was silent.",
+                set(),
+            ),
+            (
+                "Sara was hiding near the station.",
+                {"Sara"},
+            ),
+            (
+                "Sara had escaped before dawn.",
+                {"Sara"},
+            ),
+            (
+                "Elena Kovalenko was waiting outside.",
+                {"Elena Kovalenko"},
+            ),
+        )
 
     def create_characters(
         self,
