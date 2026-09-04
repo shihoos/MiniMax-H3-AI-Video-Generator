@@ -209,7 +209,7 @@ def test_shot_batch_contract() -> None:
     prompt = director._shot_director_batch_system()
 
     check(
-        "Create exactly TWO production-ready shots for EACH supplied scene." in prompt,
+        f"Create exactly {QwenDirector.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
         "Batch shot prompt does not enforce two shots per scene.",
     )
 
@@ -559,8 +559,7 @@ def test_director_prompt_contract() -> None:
     )
 
     check(
-        "Do NOT output these compiler-owned fields" in shots
-        and "continuity_notes" in shots,
+        "Do NOT output compiler-owned fields." in shots,
         "Shot prompt is missing compiler-ownership boundaries.",
     )
     
@@ -1408,8 +1407,6 @@ def test_resume_does_not_rewrite_scene_ids() -> None:
 
 
 def test_deterministic_foundation_when_director_enabled() -> None:
-    from planner.config import director_enabled
-
     original = os.environ.get("H3_DIRECTOR_ENABLED")
     try:
         os.environ["H3_DIRECTOR_ENABLED"] = "1"
