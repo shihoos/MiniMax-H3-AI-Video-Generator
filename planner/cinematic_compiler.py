@@ -65,11 +65,15 @@ class CinematicCompiler:
     ) -> None:
 
         self.character_names = {
-            str(name).strip().lower()
-            for name in (
-                character_names or set()
-            )
-            if str(name).strip()
+            EntityResolver.normalize(name)
+            for name in (character_names or set())
+            if EntityResolver.normalize(name)
+        }
+
+        self._character_display_names = {
+            EntityResolver.normalize(name): str(name).strip()
+            for name in (character_names or set())
+            if EntityResolver.normalize(name)
         }
 
     # ============================================================
@@ -164,14 +168,10 @@ class CinematicCompiler:
     ) -> list[str]:
 
         canonical_names = [
-            str(name).strip()
-            for name in (self.character_names or [])
-            if str(name).strip()
+            self._character_display_names[key]
+            for key in sorted(self._character_display_names)
+            if key
         ]
-        for name in (scene_characters or []):
-            value = str(name).strip()
-            if value and value not in canonical_names:
-                canonical_names.append(value)
 
         alias_map = EntityResolver.build_alias_map(
             canonical_names
@@ -204,43 +204,43 @@ class CinematicCompiler:
             if canonical is None:
                 continue
 
-            if key in seen:
+            canonical_key = EntityResolver.normalize(canonical)
+            if canonical_key in seen:
                 continue
 
             seen.add(
-                key
+                canonical_key
             )
 
+            # Preserve the input spelling when it is already an exact canonical
+            # identity (case-insensitively). This keeps downstream continuity
+            # keys such as ``Alex`` stable even when the compiler was initialized
+            # from a normalized set such as ``{"alex"}``. Aliases still resolve
+            # to the canonical display spelling.
             result.append(
-                canonical
+                value.strip()
+                if EntityResolver.normalize(value) == canonical_key
+                else canonical
             )
 
         if not result:
-
             for value in (
                 scene_characters
                 or []
             ):
-
-                key = str(
-                    value
-                ).strip().lower()
-
-                if not key:
+                key = EntityResolver.normalize(value)
+                canonical = allowed.get(key)
+                if canonical is None:
+                    canonical = allowed.get(
+                        EntityResolver.strip_honorific(key)
+                    )
+                if canonical is None:
                     continue
-
-                if key in seen:
+                canonical_key = EntityResolver.normalize(canonical)
+                if canonical_key in seen:
                     continue
-
-                seen.add(
-                    key
-                )
-
-                result.append(
-                    str(
-                        value
-                    ).strip()
-                )
+                seen.add(canonical_key)
+                result.append(canonical)
 
         return result
 
@@ -498,9 +498,8 @@ class CinematicCompiler:
 
         unknown = [
             name
-            for name
-            in characters
-            if name.lower()
+            for name in characters
+            if EntityResolver.normalize(name)
             not in self.character_names
         ]
 
