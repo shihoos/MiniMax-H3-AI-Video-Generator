@@ -278,8 +278,6 @@ def verify_comfy_runtime() -> None:
         "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
         "low_precision_attention=False",
         "self.out_proj((out / 64.0).to(torch.float16))",
-        ".to(torch.float32)",
-        ".mul_(64.0)",
     )
     for required in required_model_patches:
         if required not in model_text:
@@ -287,6 +285,16 @@ def verify_comfy_runtime() -> None:
                 "H3 FP16 numerical patch is incomplete: "
                 f"{required}"
             )
+
+    # Source formatting may place the two chained operations on separate lines.
+    if not re.search(
+        r"\.to\(torch\.float32\)\s*\.mul_\(64\.0\)",
+        model_text,
+    ):
+        fail(
+            "H3 FP16 numerical patch is incomplete: "
+            ".to(torch.float32) followed by .mul_(64.0)"
+        )
 
     if "supported_inference_dtypes" not in supported_text:
         fail(
