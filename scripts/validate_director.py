@@ -707,6 +707,114 @@ def test_shot_sanitization_cinematography_fields() -> None:
 
 
 
+
+def test_entity_resolution_adversarial_regressions() -> None:
+    planner = ProductionPlanner(ROOT)
+
+    cases = {
+        "Eli enters the station. Sara gives Eli a map.": {"Eli", "Sara"},
+        "Eli enters the station. Sara helps Eli escape.": {"Eli", "Sara"},
+        "Eli enters the station. Sara says the signal is dangerous.": {"Eli", "Sara"},
+        "Eli, a scientist, enters the station.": {"Eli"},
+        "Mira, the detective, follows Arun.": {"Mira", "Arun"},
+        "Sara, an engineer, and Eli, a pilot, arrive.": {"Sara", "Eli"},
+        "Mira and Arun arrive at the station.": {"Mira", "Arun"},
+        "Dr. Elara Voss entered the station. Marcus Chen followed her.": {"Elara Voss", "Marcus Chen"},
+        "Sara said, \"Eli, run!\"": {"Sara", "Eli"},
+    }
+
+    for story, expected in cases.items():
+        actual = set(planner.detect_character_descriptors(story))
+        check(
+            expected.issubset(actual),
+            f"Entity detector missed canonical names for: {story}; actual={sorted(actual)}",
+        )
+
+    roles = {
+        value.lower()
+        for value in planner.detect_character_descriptors(
+            "Sara, an engineer, and Eli, a pilot, arrive."
+        )
+    }
+    check(
+        not ({"engineer", "pilot"} & roles),
+        "Appositive role descriptors leaked into the canonical roster.",
+    )
+
+    false_positive = {
+        value.lower()
+        for value in planner.detect_character_descriptors(
+            "The Station opened at dawn."
+        )
+    }
+    check(
+        "station" not in false_positive,
+        "A location noun was classified as a character.",
+    )
+
+
+def test_character_appearance_is_locally_scoped() -> None:
+    planner = ProductionPlanner(ROOT)
+    appearance = planner._appearance_from_story(
+        "Eli",
+        "Eli has long hair. Sara wears a red coat and has short hair.",
+    )
+    check(
+        appearance["hair"] == "long hair",
+        "Eli inherited Sara's unrelated hair description.",
+    )
+    check(
+        "red" not in appearance["clothing"],
+        "Eli inherited Sara's unrelated clothing description.",
+    )
+
+
+def test_cinematic_compiler_cannot_promote_scene_identity() -> None:
+    from planner.cinematic_compiler import CinematicCompiler
+
+    compiler = CinematicCompiler({"Eli", "Sara"})
+    scene = _sample_scene("scene_001", ["Eli"], 1)
+    shot = _sample_shot("scene_001", 1)
+    shot["characters"] = ["Eli", "Invented Character"]
+    compiled = compiler.compile_shot(scene, shot, 1)
+    check(
+        compiled["characters"] == ["Eli"],
+        "Compiler promoted an unrecognized Qwen character into the output roster.",
+    )
+    check(
+        "invented character" not in compiler.character_names,
+        "Compiler mutated the canonical identity set.",
+    )
+
+
+def test_h3_optimizer_ownership_guard() -> None:
+    from execution.h3_workflow_builder import H3WorkflowBuilder
+
+    workflow = {
+        "nodes": [
+            {"id": 1, "type": "UNETLoader", "outputs": [{"name": "MODEL", "links": [1, 2]}]},
+            {"id": 2, "type": "H3MemoryOptimization", "inputs": [{"name": "model", "type": "MODEL", "link": 1}], "outputs": [{"name": "MODEL", "links": [3, 4]}]},
+            {"id": 3, "type": "BasicScheduler", "inputs": [{"name": "model", "type": "MODEL", "link": 3}]},
+            {"id": 4, "type": "BasicGuider", "inputs": [{"name": "model", "type": "MODEL", "link": 4}]},
+        ],
+        "links": [
+            [1, 1, 0, 2, 0, "MODEL"],
+            [2, 1, 0, 3, 0, "MODEL"],
+            [3, 2, 0, 3, 0, "MODEL"],
+            [4, 2, 0, 4, 0, "MODEL"],
+        ],
+    }
+    try:
+        H3WorkflowBuilder._assert_optimizer_ownership(
+            workflow,
+            "UNETLoader",
+        )
+    except RuntimeError:
+        return
+    raise RuntimeError(
+        "H3 optimizer ownership guard accepted a bypassing MODEL edge."
+    )
+
 def _sample_scene(scene_id: str, characters=None, order: int = 1) -> dict:
     return {
         "scene_id": scene_id,
@@ -1517,6 +1625,10 @@ def main() -> None:
         test_short_story_rebalances_to_four_units_without_losing_source_text,
         test_canonical_roster_not_overwritten_by_qwen,
         test_entity_resolver_shot_rebinding,
+        test_entity_resolution_adversarial_regressions,
+        test_character_appearance_is_locally_scoped,
+        test_cinematic_compiler_cannot_promote_scene_identity,
+        test_h3_optimizer_ownership_guard,
         test_mult_word_character_extraction_regression,
         test_visual_language_partial_merge_preserves_base_fields,
         test_final_generation_uses_compiler_before_quality_validation,
