@@ -845,6 +845,41 @@ class ProductionPlanner:
         # and the confidence gate before becoming canonical identity.
         evidence: dict[str, dict] = {}
 
+        # Weak single-token capitalized nouns need a structural guard. These
+        # are common locations/objects in narrative prose, not an exhaustive
+        # blacklist of names. Explicitly named characters still bypass this
+        # suppression.
+        non_person_tokens = {
+            "station", "city", "street", "road", "house", "tower", "castle",
+            "forest", "mountain", "river", "ocean", "building", "room", "door",
+            "platform", "corridor", "vault", "chamber", "world", "earth", "moon",
+            "sun", "signal", "gate", "bridge", "ship", "train", "village",
+            "kingdom", "planet", "island", "coast", "sky", "shadow", "darkness",
+            "storm", "rain", "fire", "water", "wind", "light", "camera", "radio",
+            "screen", "computer", "terminal", "vehicle", "car", "truck", "boat",
+            "weapon", "map", "letter", "message", "phone", "alarm", "machine",
+            "system", "engine", "device", "night", "morning", "dawn", "sunset",
+            "evening", "afternoon", "midnight",
+        }
+
+        # Common verbs that appear frequently in short-story prose but were not
+        # part of the older closed narrative-verb vocabulary.
+        additional_subject_verbs = {
+            "said", "says", "told", "tells", "asked", "asks", "gave", "gives",
+            "got", "gets", "made", "makes", "used", "uses", "took", "takes",
+            "brought", "brings", "sent", "sends", "kept", "keeps", "lost", "loses",
+            "met", "meets", "joined", "joins", "needed", "needs", "wanted", "wants",
+            "tried", "tries", "started", "starts", "began", "begins", "continued",
+            "continues", "stopped", "stops", "called", "calls", "answered", "answers",
+            "returned", "returns", "came", "comes", "went", "goes", "arrived", "arrive", "arrives",
+            "helped", "helps", "saved", "saves", "rescued", "rescues", "protected", "protects",
+            "warned", "warns", "trusted", "trusts", "believed", "believes",
+            "forgot", "forgets", "understood", "understands", "noticed", "notices",
+            "appeared", "appears", "became", "becomes", "wore", "wears",
+        }
+
+        subject_verbs = set(self.NARRATIVE_SUBJECT_VERBS) | additional_subject_verbs
+
         # Coordinated narrative subjects are a strong explicit signal. Keep this
         # detector inside the same evidence model so constructs such as
         # "Mira, a systems engineer, and Arun, her specialist, arrive..."
@@ -900,6 +935,12 @@ class ProductionPlanner:
                 return
 
             if (
+                name.lower() in non_person_tokens
+                and source != "explicit"
+            ):
+                return
+
+            if (
                 name.lower() in role_names
                 and source != "role"
             ):
@@ -924,6 +965,25 @@ class ProductionPlanner:
         for match in coordinated_name_pattern.finditer(story):
             for group in (1, 2):
                 add_evidence(match.group(group), "explicit", 100)
+
+        simple_coordinated_pattern = re.compile(
+            r"\b"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\s+and\s+"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\s+([a-z][a-z'-]+)\b"
+        )
+
+        for match in simple_coordinated_pattern.finditer(story):
+            verb = match.group(3).lower()
+            if verb not in subject_verbs and not re.match(r"^[a-z]+(?:ed|ing|s)$", verb):
+                continue
+            for group in (1, 2):
+                candidate = match.group(group).strip()
+                candidate_tokens = candidate.split()
+                if candidate_tokens and candidate_tokens[0] in self.COMMON_PROPER_WORDS:
+                    continue
+                add_evidence(candidate, "coordinated", 100)
 
         # ========================================================
         # OCCURRENCE-LEVEL CONTEXT
@@ -1150,7 +1210,7 @@ class ProductionPlanner:
 
         verb_alternation = "|".join(
             sorted(
-                self.NARRATIVE_SUBJECT_VERBS,
+                subject_verbs,
                 key=len,
                 reverse=True,
             )
@@ -1218,17 +1278,53 @@ class ProductionPlanner:
                 20,
             )
 
+        # A second, deliberately conservative subject pass catches ordinary
+        # finite verbs not present in the maintained vocabulary. The candidate
+        # must still have proper-name capitalization and a verb-like form.
+        generic_subject_pattern = re.compile(
+            r"\b(?:"
+            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+            r")?"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
+            r"([a-z][a-z'-]*(?:ed|ing|s))\b"
+        )
+
+        for match in generic_subject_pattern.finditer(story):
+            candidate = match.group(1).strip()
+            verb = match.group(2).lower()
+            if verb not in subject_verbs:
+                # Regular morphology supplies weak support for unfamiliar verbs.
+                if not re.match(r"^[a-z][a-z'-]*(?:ed|ing|s)$", verb):
+                    continue
+            if not candidate:
+                continue
+            if any(
+                candidate.lower() == str(item["name"]).lower()
+                for item in evidence.values()
+                if "appositive" in item["sources"]
+            ):
+                continue
+            generic_match = re.match(r"(.+)", candidate)
+            if generic_match and validate_occurrence(generic_match, "morphology"):
+                add_evidence(candidate, "morphology", 35 if len(candidate.split()) >= 2 else 25)
+
         # ========================================================
         # 4. APPOSITIVE IDENTITY
         # ========================================================
 
         appositive_pattern = re.compile(
-            r"\b([A-Z][a-z]+)\s*,\s*who\b"
+            r"\b(?:(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+)?"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\s*,\s*(?=(?:a|an|the|who|whose|his|her|their|my|our)\b)",
         )
 
+        appositive_spans = []
         for match in appositive_pattern.finditer(
             story
         ):
+            appositive_spans.append(
+                (match.start(), match.end())
+            )
             if not validate_occurrence(
                 match,
                 "appositive",
@@ -1238,11 +1334,62 @@ class ProductionPlanner:
             add_evidence(
                 match.group(1),
                 "appositive",
-                70,
+                90,
             )
 
         # ========================================================
-        # 5. ROLE DESCRIPTORS
+        # 5. PROPER-NAME OBJECT / COMPLEMENT REFERENCES
+        # ========================================================
+        # A character can first appear as the object of a verb:
+        #   "Sara gives Eli a map."
+        #   "Mira follows Arun."
+        # These references are strong enough to preserve a canonical entity.
+        object_name_pattern = re.compile(
+            r"(?<![A-Za-z0-9'_-])"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"(?![A-Za-z0-9'_-])"
+        )
+
+        for match in object_name_pattern.finditer(story):
+            candidate = match.group(1).strip()
+            if candidate in self.COMMON_PROPER_WORDS:
+                continue
+            if candidate in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+                continue
+            previous_text = story[:match.start(1)].rstrip(" ,;:!?\"'()[]{}")
+            previous_tokens = previous_text.split()
+            previous_word = previous_tokens[-1].lower() if previous_tokens else ""
+            if previous_word not in subject_verbs:
+                continue
+            add_evidence(
+                candidate,
+                "object_reference",
+                75,
+            )
+
+        # ========================================================
+        # 5. VOCATIVE / DIRECT ADDRESS
+        # ========================================================
+        # A quoted direct address such as 'Eli, run!' is strong identity
+        # evidence even when the addressed character has no subject verb in
+        # the same sentence.
+        vocative_pattern = re.compile(
+            r"(?:^|[\"'“”])\s*"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"\s*,\s*(?=[a-z][a-z'-]+\b)",
+            flags=re.MULTILINE,
+        )
+
+        for match in vocative_pattern.finditer(story):
+            if validate_occurrence(match, "vocative"):
+                add_evidence(
+                    match.group(1),
+                    "vocative",
+                    90,
+                )
+
+        # ========================================================
+        # 6. ROLE DESCRIPTORS
         # ========================================================
 
         role_pattern = re.compile(
@@ -1275,6 +1422,12 @@ class ProductionPlanner:
                 .lower()
             )
 
+            if any(
+                start <= match.start() <= end + 8
+                for start, end in appositive_spans
+            ):
+                continue
+
             tail = story[
                 match.end():
                 min(
@@ -1304,7 +1457,7 @@ class ProductionPlanner:
             )
 
         # ========================================================
-        # 6. CONFIDENCE GATE
+        # 7. CONFIDENCE GATE
         # ========================================================
 
         accepted: list[str] = []
@@ -1328,6 +1481,9 @@ class ProductionPlanner:
             if (
                 "subject_verb" in sources
                 or "appositive" in sources
+                or "coordinated" in sources
+                or "vocative" in sources
+                or "object_reference" in sources
             ):
                 accepted.append(
                     name
@@ -1383,8 +1539,44 @@ class ProductionPlanner:
         story: str,
     ) -> dict:
 
-        lower = story.lower()
+        story_text = str(story or "")
+        name_text = str(name or "").strip()
 
+        stripped_name = re.sub(
+            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+            "",
+            name_text,
+            flags=re.IGNORECASE,
+        ).strip()
+        name_tokens = stripped_name.split()
+        appearance_aliases = [
+            value
+            for value in (
+                name_text,
+                stripped_name,
+                name_tokens[0] if name_tokens else "",
+            )
+            if value
+        ]
+
+        sentence_pattern = re.compile(
+            r"[^.!?\n]+(?:[.!?](?:\s+|$)|$)"
+        )
+        relevant_sentences = []
+        for sentence_match in sentence_pattern.finditer(story_text):
+            sentence = sentence_match.group(0).strip()
+            lower_sentence = sentence.lower()
+            if any(
+                re.search(
+                    rf"(?<![A-Za-z0-9'_-]){re.escape(alias.lower())}(?![A-Za-z0-9'_-])",
+                    lower_sentence,
+                )
+                for alias in appearance_aliases
+            ):
+                relevant_sentences.append(sentence)
+
+        local_text = " ".join(relevant_sentences)
+        lower = local_text.lower()
         hair = "stable hairstyle inferred from the story"
         body_build = "natural consistent body structure"
         skin_tone = "preserve consistent skin tone"
@@ -1439,7 +1631,7 @@ class ProductionPlanner:
             "skin_tone": skin_tone,
             "age_range": age_range,
             "stable_identity_marks": stable_marks,
-            "story-derived": True,
+            "story-derived": bool(local_text),
             "clothing": clothing,
         }
 
