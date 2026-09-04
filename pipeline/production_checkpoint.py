@@ -94,6 +94,12 @@ class ProductionCheckpoint:
             "production_manifest",
             "production_manifest_path",
             "approval",
+            # Queue bookkeeping is operational metadata, not semantic plan content.
+            # The persistent job can legitimately add/change these fields after
+            # the render plan has been fingerprinted.
+            "job_id",
+            "job_status",
+            "job_error",
         ):
             normalized.pop(key, None)
         return cls.digest_object(normalized)
@@ -248,7 +254,12 @@ class ProductionCheckpoint:
             raise TypeError("Checkpoint updates must be a dictionary.")
 
         with self._process_lock(session_id):
-            state = self._load_unlocked(session_id)
+            try:
+                state = self._load_unlocked(session_id)
+            except FileNotFoundError:
+                # The first checkpoint update is allowed to create the checkpoint.
+                # Keep the existing caller-provided session id and merge normally.
+                state = {}
             merged = deepcopy(updates)
 
             for key in ("completed_shot_ids", "completed_scene_ids"):
