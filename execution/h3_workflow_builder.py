@@ -399,6 +399,10 @@ class H3WorkflowBuilder:
                 raise RuntimeError(
                     "Workflow contains multiple H3MemoryOptimization nodes."
                 )
+            self._assert_optimizer_ownership(
+                workflow,
+                source_node_type,
+            )
             self._apply_memory_optimization_config(existing[0])
             return
 
@@ -499,6 +503,106 @@ class H3WorkflowBuilder:
         if not node["outputs"][0]["links"]:
             raise RuntimeError(
                 "H3MemoryOptimization produced no downstream MODEL links."
+            )
+
+        self._assert_optimizer_ownership(
+            workflow,
+            source_node_type,
+        )
+
+    @classmethod
+    def _assert_optimizer_ownership(
+        cls,
+        workflow: dict,
+        source_node_type: str,
+    ) -> None:
+        """Verify that H3MemoryOptimization is the sole MODEL consumer of the H3 source."""
+        source = cls._one(workflow, source_node_type)
+        optimizer = cls._one(workflow, "H3MemoryOptimization")
+        source_id = cls._node_id(source)
+        optimizer_id = cls._node_id(optimizer)
+
+        def is_model_link(row) -> bool:
+            return (
+                isinstance(row, list)
+                and len(row) >= 6
+                and str(row[5]).upper() == "MODEL"
+            )
+
+        model_links = [
+            row for row in workflow.get("links", [])
+            if is_model_link(row)
+        ]
+
+        source_outgoing = [
+            row for row in model_links
+            if int(row[1]) == source_id
+        ]
+        if len(source_outgoing) != 1 or int(source_outgoing[0][3]) != optimizer_id:
+            raise RuntimeError(
+                f"{source_node_type} must have exactly one MODEL consumer "
+                "and it must be H3MemoryOptimization."
+            )
+
+        optimizer_incoming = [
+            row for row in model_links
+            if int(row[3]) == optimizer_id
+        ]
+        if len(optimizer_incoming) != 1 or int(optimizer_incoming[0][1]) != source_id:
+            raise RuntimeError(
+                "H3MemoryOptimization must have exactly one MODEL input "
+                f"owned by {source_node_type}."
+            )
+
+        optimizer_outgoing = [
+            row for row in model_links
+            if int(row[1]) == optimizer_id
+        ]
+        if not optimizer_outgoing:
+            raise RuntimeError(
+                "H3MemoryOptimization has no downstream MODEL consumers."
+            )
+
+        source_model_outputs = [
+            output for output in source.get("outputs", [])
+            if (
+                isinstance(output, dict)
+                and str(output.get("name", "")).upper() == "MODEL"
+            )
+        ]
+        if len(source_model_outputs) != 1:
+            raise RuntimeError(
+                f"{source_node_type} must expose exactly one MODEL output."
+            )
+
+        source_output_links = {
+            int(link_id)
+            for link_id in source_model_outputs[0].get("links", []) or []
+        }
+        if source_output_links != {int(source_outgoing[0][0])}:
+            raise RuntimeError(
+                f"{source_node_type} MODEL output metadata disagrees with the graph link."
+            )
+
+        optimizer_model_inputs = [
+            item for item in optimizer.get("inputs", [])
+            if (
+                isinstance(item, dict)
+                and str(item.get("name", "")).lower() == "model"
+            )
+        ]
+        optimizer_link = (
+            optimizer_model_inputs[0].get("link")
+            if len(optimizer_model_inputs) == 1
+            else None
+        )
+        if len(optimizer_model_inputs) != 1 or optimizer_link is None:
+            raise RuntimeError(
+                "H3MemoryOptimization must expose exactly one linked MODEL input."
+            )
+        if int(optimizer_link) != int(optimizer_incoming[0][0]):
+            raise RuntimeError(
+                "H3MemoryOptimization MODEL input metadata disagrees with the graph link."
             )
 
     # ============================================================
