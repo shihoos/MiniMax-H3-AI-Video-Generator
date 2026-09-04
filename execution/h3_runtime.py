@@ -129,6 +129,19 @@ class H3Runtime:
             "--port",
             str(port),
         ]
+
+        # Each ComfyUI process must have its own SQLite database. ComfyUI's
+        # default user/comfyui.db is process-shared and causes cross-GPU lock
+        # contention when multiple workers run in the same project tree.
+        database_root = comfy_root.parent / "data" / "workers"
+        database_root.mkdir(parents=True, exist_ok=True)
+        database_path = database_root / f"comfyui_gpu_{int(gpu_id)}.db"
+        command.extend(
+            [
+                "--database-url",
+                f"sqlite:///{database_path.as_posix()}",
+            ]
+        )
         # ComfyUI 0.34+ uses DynamicVRAM by default on Nvidia. Explicitly keep
         # asynchronous weight offload enabled; it is a core H3 performance path.
         if vram_profile is None:
