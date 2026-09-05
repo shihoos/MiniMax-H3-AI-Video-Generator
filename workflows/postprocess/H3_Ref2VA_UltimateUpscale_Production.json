@@ -551,18 +551,18 @@
         "Node name for S&R": "UNETLoader",
         "models": [
           {
-            "name": "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
+            "name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
             "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
             "directory": "diffusion_models"
           }
         ]
       },
       "widgets_values": [
-        "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
+        "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
         "default"
       ],
       "widgets_values_named": {
-        "unet_name": "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
         "weight_dtype": "default"
       }
     },
