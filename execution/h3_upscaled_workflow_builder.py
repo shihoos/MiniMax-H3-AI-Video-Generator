@@ -543,6 +543,17 @@ class H3UpscaledWorkflowBuilder(
                 prompt,
             )
 
+        self._ensure_official_context_ir(
+            workflow,
+            prompt=prompt,
+            reference_images=reference_images,
+            reference_videos=reference_videos,
+            reference_audio=reference_audio,
+            duration_seconds=duration_seconds,
+            width=width,
+            height=height,
+        )
+
         if bool(
             __import__("planner.config", fromlist=["RUNTIME"])
             .RUNTIME.get("h3_optimization", {})
