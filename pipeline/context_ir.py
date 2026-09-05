@@ -20,7 +20,7 @@ class H3ContextIRCompiler:
       H3ContextIRCompiler.prompt(context_ir)
     """
 
-    VERSION = 3
+    VERSION = 2
     REQUIRED_SECTIONS = (
         "subject_definitions",
         "summary",
