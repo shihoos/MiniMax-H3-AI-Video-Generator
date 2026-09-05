@@ -78,6 +78,9 @@ features:
   context_ir_official_api: true
   context_ir_official_preferred: true
   context_ir_official_required: true
+  context_ir_official_timeout_seconds: 180
+  context_ir_official_poll_interval_seconds: 5
+  context_ir_official_max_polls: 36
 assembly:
   video_codec: libx264
   preset: medium
