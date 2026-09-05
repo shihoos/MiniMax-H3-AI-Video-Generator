@@ -1,7 +1,7 @@
 models:
 
   diffusion_model:
-    filename: "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors"
+    filename: "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
     directory: "diffusion_models"
     required: true
     purpose: "Primary MiniMax H3 Ref2VA generation"
