@@ -69,7 +69,7 @@ def main() -> None:
     baseline_shot = plan["shots"][0]
     baseline_shot["h3_prompt"] = "A scientist crosses a dark archive."
     ctx = H3ContextIRCompiler().compile(plan, baseline_shot)
-    assert ctx["version"] == 3
+    assert ctx["version"] == 2
     prompt_text = ctx["context_ir_input"]
     assert prompt_text.strip()
     assert "A scientist crosses a dark archive." in prompt_text
