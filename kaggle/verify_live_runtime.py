@@ -44,6 +44,7 @@ REQUIRED_LIVE_NODES = {
     "MMH3SpatialSplitParams",
     "MMH3TemporalSplitParams",
     "MMH3UltimateUpscale",
+    "MiniMaxH3ContextIR",
     "MiniMaxH3ReferenceToVideo",
     "MiniMaxH3TurboLoRA",
     "MiniMaxH3TurboSampler",
@@ -297,6 +298,18 @@ def check_worker(
                 )
             )
         )
+
+    if "MiniMaxH3ContextIR" not in objects:
+        raise RuntimeError("Worker does not expose the required official H3 Context-IR runtime node.")
+    ctx_info = objects.get("MiniMaxH3ContextIR") or {}
+    inputs = ((ctx_info.get("input", {}) or {}).get("required", {}) or {})
+    for field in ("prompt", "duration", "ratio", "reference_images", "reference_videos", "reference_audios"):
+        if field not in inputs:
+            raise RuntimeError(f"MiniMaxH3ContextIR is missing required input: {field}")
+
+    print(
+        "PASS official H3 Context-IR runtime contract"
+    )
 
     print(
         "PASS required H3 node inventory"
