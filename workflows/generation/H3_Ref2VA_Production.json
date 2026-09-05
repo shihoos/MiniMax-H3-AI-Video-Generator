@@ -406,12 +406,12 @@
         "Node name for S&R": "BasicScheduler"
       },
       "widgets_values": [
-        "simple",
+        "beta",
         20,
         1
       ],
       "widgets_values_named": {
-        "scheduler": "simple",
+        "scheduler": "beta",
         "steps": 20,
         "denoise": 1
       }
