@@ -348,6 +348,14 @@ class H3WorkflowBuilder:
         return min(candidates, key=lambda k: abs(candidates[k] - ratio))
 
     def _ensure_official_context_ir(self, workflow: dict, *, prompt: str, reference_images: list[str], reference_videos: list[str], reference_audio: list[str], duration_seconds: float, width: int, height: int) -> None:
+        from planner.config import RUNTIME
+        features = RUNTIME.get("features", {}) or {}
+        official_enabled = bool(features.get("context_ir_official_enabled", features.get("context_ir_official_api", True)))
+        official_required = bool(features.get("context_ir_official_required", True))
+        if not official_enabled:
+            if official_required:
+                raise RuntimeError("Official H3 Context-IR is required but disabled by runtime configuration.")
+            return
         ref_node = self._one(workflow, "MiniMaxH3ReferenceToVideo")
         prompt_nodes = self._find(workflow, "PrimitiveStringMultiline")
         if not prompt_nodes:
@@ -381,8 +389,16 @@ class H3WorkflowBuilder:
         l1=self._next_link_id(workflow); workflow["links"].append([l1,self._node_id(prompt_node),pout,node_id,0,"STRING"]); node["inputs"][0]["link"]=l1; prompt_node["outputs"][pout].setdefault("links",[]).append(l1)
         l2=self._next_link_id(workflow); workflow["links"].append([l2,node_id,0,ref_id,prompt_slot,"STRING"]); ref_node["inputs"][prompt_slot]["link"]=l2; node["outputs"][0].setdefault("links",[]).append(l2)
         node.setdefault("widgets_values_named",{}).update({"prompt":prompt,"duration":values[1],"ratio":values[2],"reference_images":values[3],"reference_videos":values[4],"reference_audios":values[5]})
-        node["properties"]["context_ir_role"]="official_pre_generation_multimodal_prompt_enhancement"
-        node["properties"]["requires_official_api"]=True
+        node["properties"]["context_ir_role"] = "official_pre_generation_multimodal_prompt_enhancement"
+        node["properties"]["requires_official_api"] = True
+        node["properties"]["reference_order"] = {
+            "images": [f"<Picture {i + 1}>" for i in range(len(reference_images))],
+            "videos": [f"<Video {i + 1}>" for i in range(len(reference_videos))],
+            "audios": [f"<Audio {i + 1}>" for i in range(len(reference_audio))],
+        }
+        node["properties"]["reference_media_source"] = "absolute_or_url_paths_resolved_by_official_runtime_bridge"
+        node["properties"]["official_api_base_env"] = "MINIMAX_API_BASE"
+        node["properties"]["official_api_token_env"] = "MINIMAX_API_TOKEN"
 
 
     @staticmethod
