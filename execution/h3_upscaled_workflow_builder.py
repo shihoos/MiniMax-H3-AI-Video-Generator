@@ -543,6 +543,11 @@ class H3UpscaledWorkflowBuilder(
                 prompt,
             )
 
+        from planner.config import RUNTIME
+        features = RUNTIME.get("features", {}) or {}
+        if not bool(features.get("context_ir_official_enabled", True)) and bool(features.get("context_ir_official_required", True)):
+            raise RuntimeError("Official H3 Context-IR is required but disabled by runtime configuration.")
+
         self._ensure_official_context_ir(
             workflow,
             prompt=prompt,
