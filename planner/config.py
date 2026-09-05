@@ -80,7 +80,7 @@ def ensure_directories() -> None:
 # ============================================================
 
 H3_REF2VA_MODEL = (
-    "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors"
+    "minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 )
 
 H3_TEXT_ENCODER = (
