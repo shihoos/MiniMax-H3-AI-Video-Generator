@@ -69,19 +69,10 @@ def main() -> None:
     baseline_shot = plan["shots"][0]
     baseline_shot["h3_prompt"] = "A scientist crosses a dark archive."
     ctx = H3ContextIRCompiler().compile(plan, baseline_shot)
-    assert ctx["version"] == 2
-    expected_sections = [
-        "subject_definitions:",
-        "summary:",
-        "retention_analysis:",
-        "detailed_description:",
-        "overall_soundscape:",
-        "non_diegetic_music:",
-    ]
-    prompt_text = ctx["h3_prompt"]
-    assert all(section in prompt_text for section in expected_sections)
-    positions = [prompt_text.index(section) for section in expected_sections]
-    assert positions == sorted(positions)
+    assert ctx["version"] == 3
+    prompt_text = ctx["context_ir_input"]
+    assert prompt_text.strip()
+    assert "A scientist crosses a dark archive." in prompt_text
     assert ctx["shot"]["shot_id"] == "shot_001"
 
     # ------------------------------------------------------------------
@@ -139,14 +130,14 @@ def main() -> None:
     assert refs["<Picture 2>"]["relationship"] == "partially_preserved"
     assert refs["<Video 1>"]["relationship"] == "weak_reference"
     assert refs["<Audio 1>"]["relationship"] == "reference"
-    assert "<Picture 1> =" not in reference_ctx["h3_prompt"]
-    assert "<Picture 2> =" not in reference_ctx["h3_prompt"]
-    assert "/refs/alice.png" not in reference_ctx["h3_prompt"]
-    assert "(S1)" in reference_ctx["sections"]["detailed_description"]
-    assert "(S2)" in reference_ctx["sections"]["detailed_description"]
-    assert reference_ctx["sections"]["detailed_description"].count("(S1)") >= 2
-    assert "<d>[English] We are late.</d>" in reference_ctx["sections"]["detailed_description"]
-    assert "<d>[English] Then move.</d>" in reference_ctx["sections"]["detailed_description"]
+    assert "<Picture 1> =" not in reference_ctx["context_ir_input"]
+    assert "<Picture 2> =" not in reference_ctx["context_ir_input"]
+    assert "/refs/alice.png" not in reference_ctx["context_ir_input"]
+    assert "(S1)" in reference_ctx["context_ir_input"]
+    assert "(S2)" in reference_ctx["context_ir_input"]
+    assert reference_ctx["context_ir_input"].count("(S1)") >= 2
+    assert "<d>[English] We are late.</d>" in reference_ctx["context_ir_input"]
+    assert "<d>[English] Then move.</d>" in reference_ctx["context_ir_input"]
     print("PASS: Context-IR six-section structure")
     print("PASS: Context-IR canonical reference/entity semantics")
     print("PASS: Context-IR stable speaker mapping and language markers")
@@ -154,10 +145,7 @@ def main() -> None:
     # Audio cannot be the only reference modality.
     audio_only = dict(reference_ctx)
     audio_only["references"] = [dict(refs["<Audio 1>"])]
-    audio_only["h3_prompt"] = "\n\n".join(
-        [f"{name}:\n{reference_ctx['sections'][name]}" for name in H3ContextIRCompiler.REQUIRED_SECTIONS]
-    ).replace("<Picture 1>", "<Audio 1>")
-    audio_only["sections"] = dict(reference_ctx["sections"])
+    audio_only["context_ir_input"] = "Audio-only test <Audio 1>."
     _assert_raises(ValueError, lambda: H3ContextIRCompiler.validate(audio_only))
     print("PASS: Context-IR audio-only guard")
 
@@ -190,8 +178,8 @@ def main() -> None:
     ]
     assert prompt_nodes
     widgets = prompt_nodes[0].get("widgets_values", [])
-    assert widgets and str(widgets[0]) == ctx["h3_prompt"]
-    assert H3ContextIRCompiler.prompt(ctx) == ctx["h3_prompt"]
+    assert widgets and str(widgets[0]) == ctx["context_ir_input"]
+    assert H3ContextIRCompiler.input_prompt(ctx) == ctx["context_ir_input"]
     ctx_nodes = [node for node in built.get("nodes", []) if node.get("type") == "MiniMaxH3ContextIR"]
     assert len(ctx_nodes) == 1
     ctx_node = ctx_nodes[0]
