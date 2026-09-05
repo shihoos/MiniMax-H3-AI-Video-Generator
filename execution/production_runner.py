@@ -994,7 +994,7 @@ class ProductionRunner:
             )
 
             shot["h3_context_ir"] = self.context_ir.compile(
-                {"story": self._active_story},
+                {"story": self._active_story, "language": shot.get("language", shot.get("dialogue_language", ""))},
                 shot,
             )
 
