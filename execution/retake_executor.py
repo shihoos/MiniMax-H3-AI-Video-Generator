@@ -91,8 +91,28 @@ class RetakeExecutor:
         original_roles = [dict(x) for x in (replacement.get("reference_roles", []) or []) if isinstance(x, dict)]
         original_role_map = {str(x.get("path", "")): x for x in original_roles if str(x.get("path", "")).strip()}
         boundary_items = [
-            (str(first_frame), {"path": str(first_frame), "role": "retake_start_frame", "priority": 200, "label": "Exact base-shot frame at retake start; preserve the state entering the replacement."}),
-            (str(last_frame), {"path": str(last_frame), "role": "retake_end_frame", "priority": 199, "label": "Exact base-shot frame at retake end; preserve the state leaving the replacement."}),
+            (
+                str(first_frame),
+                {
+                    "path": str(first_frame),
+                    "media_type": "picture",
+                    "role": "retake_start_frame",
+                    "relationship": "fully_preserved",
+                    "priority": 200,
+                    "label": "Exact base-shot frame at the retake start; preserve the visual state entering the replacement.",
+                },
+            ),
+            (
+                str(last_frame),
+                {
+                    "path": str(last_frame),
+                    "media_type": "picture",
+                    "role": "retake_end_frame",
+                    "relationship": "fully_preserved",
+                    "priority": 199,
+                    "label": "Exact base-shot frame at the retake end; preserve the visual state leaving the replacement.",
+                },
+            ),
         ]
         remaining = []
         for path in original_refs:
@@ -104,7 +124,10 @@ class RetakeExecutor:
         ordered = ordered[:9]
         replacement["reference_images"] = [p for p, _ in ordered]
         replacement["reference_roles"] = [r for _, r in ordered]
-        replacement["reference_bindings"] = [f"<Picture {i}> = {r.get('label', r.get('role', 'visual reference'))}" for i, (_, r) in enumerate(ordered, start=1)]
+        replacement["reference_bindings"] = [
+            f"<Picture {i}> = {r.get('label', r.get('role', 'visual reference'))}"
+            for i, (_, r) in enumerate(ordered, start=1)
+        ]
         base_prompt = str(replacement.get("h3_prompt", replacement.get("visual_prompt", "")) or "").strip()
         replacement["h3_prompt"] = (
             "SELECTIVE RETAKE. Picture 1 is the exact frame at the start boundary; "
