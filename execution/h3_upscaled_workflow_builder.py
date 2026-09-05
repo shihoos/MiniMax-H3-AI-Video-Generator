@@ -528,29 +528,20 @@ class H3UpscaledWorkflowBuilder(
                 f"<Audio {index + 1}>"
             )
 
+        effective_prompt = prompt
         if tags:
-
-            prompt = (
+            effective_prompt = (
                 "REFERENCE INPUTS: "
                 + ", ".join(tags)
                 + ". Use each reference only for "
                   "the role described in the prompt.\n\n"
                 + prompt
             )
-
-            self._set_prompt(
-                workflow,
-                prompt,
-            )
-
-        from planner.config import RUNTIME
-        features = RUNTIME.get("features", {}) or {}
-        if not bool(features.get("context_ir_official_enabled", True)) and bool(features.get("context_ir_official_required", True)):
-            raise RuntimeError("Official H3 Context-IR is required but disabled by runtime configuration.")
+            self._set_prompt(workflow, effective_prompt)
 
         self._ensure_official_context_ir(
             workflow,
-            prompt=prompt,
+            prompt=effective_prompt,
             reference_images=reference_images,
             reference_videos=reference_videos,
             reference_audio=reference_audio,
@@ -558,6 +549,10 @@ class H3UpscaledWorkflowBuilder(
             width=width,
             height=height,
         )
+
+        ctx_nodes = self._find(workflow, "MiniMaxH3ContextIR")
+        if len(ctx_nodes) != 1 or ctx_nodes[0].get("properties", {}).get("media_source_contract") != "exact_same_reference_paths_and_order_as_H3_Ref2VA":
+            raise RuntimeError("Combined upscale workflow has an invalid official Context-IR integration.")
 
         if bool(
             __import__("planner.config", fromlist=["RUNTIME"])
