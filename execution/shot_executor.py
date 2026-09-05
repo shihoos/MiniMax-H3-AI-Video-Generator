@@ -508,7 +508,7 @@ class ShotExecutor:
 
         if context_ir is not None:
             from pipeline.context_ir import H3ContextIRCompiler
-            prompt = H3ContextIRCompiler.prompt(context_ir)
+            prompt = H3ContextIRCompiler.input_prompt(context_ir)
         else:
             prompt = (
                 shot.get(
