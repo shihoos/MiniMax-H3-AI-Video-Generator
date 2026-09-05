@@ -337,6 +337,53 @@ class H3WorkflowBuilder:
     # ============================================================
     # H3 MEMORY OPTIMIZATION
     # ============================================================
+    # ============================================================
+    # OFFICIAL H3 CONTEXT-IR
+    # ============================================================
+
+    @staticmethod
+    def _context_ratio(width: int, height: int) -> str:
+        candidates = {"21:9": 21/9, "16:9": 16/9, "4:3": 4/3, "1:1": 1.0, "3:4": 3/4, "9:16": 9/16}
+        ratio = float(width) / float(height)
+        return min(candidates, key=lambda k: abs(candidates[k] - ratio))
+
+    def _ensure_official_context_ir(self, workflow: dict, *, prompt: str, reference_images: list[str], reference_videos: list[str], reference_audio: list[str], duration_seconds: float, width: int, height: int) -> None:
+        ref_node = self._one(workflow, "MiniMaxH3ReferenceToVideo")
+        prompt_nodes = self._find(workflow, "PrimitiveStringMultiline")
+        if not prompt_nodes:
+            raise RuntimeError("H3 workflow has no PrimitiveStringMultiline prompt node.")
+        prompt_node = next((n for n in prompt_nodes if "prompt" in str(n.get("title", "")).lower()), prompt_nodes[0])
+        existing = self._find(workflow, "MiniMaxH3ContextIR")
+        if len(existing) > 1:
+            raise RuntimeError("Workflow contains multiple MiniMaxH3ContextIR nodes.")
+        if existing:
+            node = existing[0]
+        else:
+            node = {"id": self._next_id(workflow), "type": "MiniMaxH3ContextIR", "pos": [float(prompt_node.get("pos", [0,0])[0])+460.0, float(prompt_node.get("pos", [0,0])[1])+40.0], "size": [420, 420], "flags": {}, "order": int(prompt_node.get("order",0))+1, "mode": 0, "inputs": [{"name":"prompt","type":"STRING","link":None},{"name":"duration","type":"INT","link":None},{"name":"ratio","type":"COMBO","link":None},{"name":"reference_images","type":"STRING","link":None},{"name":"reference_videos","type":"STRING","link":None},{"name":"reference_audios","type":"STRING","link":None}], "outputs":[{"name":"enhanced_prompt","type":"STRING","links":[]}], "properties":{"Node name for S&R":"MiniMaxH3ContextIR"}, "widgets_values":["",5,"16:9","","",""]}
+            workflow.setdefault("nodes", []).append(node)
+        values=node.setdefault("widgets_values",[])
+        while len(values)<6: values.append(None)
+        values[0]=prompt; values[1]=max(4,min(15,int(round(float(duration_seconds))))); values[2]=self._context_ratio(width,height); values[3]="\n".join(reference_images); values[4]="\n".join(reference_videos); values[5]="\n".join(reference_audio)
+        ref_id=self._node_id(ref_node); node_id=self._node_id(node)
+        prompt_slot=next((i for i,x in enumerate(ref_node.get("inputs",[])) if x.get("name")=="prompt"),None)
+        if prompt_slot is None: raise RuntimeError("MiniMaxH3ReferenceToVideo has no prompt input.")
+        remove=[]
+        for row in workflow.get("links",[]):
+            if isinstance(row,list) and len(row)>=6 and ((int(row[3])==ref_id and int(row[4])==prompt_slot and str(row[5]).upper()=="STRING") or (int(row[3])==node_id and int(row[4])==0 and str(row[5]).upper()=="STRING")): remove.append(int(row[0]))
+        workflow["links"]=[row for row in workflow.get("links",[]) if not (isinstance(row,list) and row and int(row[0]) in remove)]
+        for n in self._nodes(workflow):
+            for out in n.get("outputs",[]) or []:
+                if isinstance(out,dict) and isinstance(out.get("links"),list): out["links"]=[x for x in out["links"] if int(x) not in remove]
+            for inp in n.get("inputs",[]) or []:
+                if isinstance(inp,dict) and inp.get("link") is not None and int(inp["link"]) in remove: inp["link"]=None
+        pout=next((i for i,x in enumerate(prompt_node.get("outputs",[])) if str(x.get("name","")).upper()=="STRING"),None)
+        if pout is None: raise RuntimeError("Prompt node has no STRING output.")
+        l1=self._next_link_id(workflow); workflow["links"].append([l1,self._node_id(prompt_node),pout,node_id,0,"STRING"]); node["inputs"][0]["link"]=l1; prompt_node["outputs"][pout].setdefault("links",[]).append(l1)
+        l2=self._next_link_id(workflow); workflow["links"].append([l2,node_id,0,ref_id,prompt_slot,"STRING"]); ref_node["inputs"][prompt_slot]["link"]=l2; node["outputs"][0].setdefault("links",[]).append(l2)
+        node.setdefault("widgets_values_named",{}).update({"prompt":prompt,"duration":values[1],"ratio":values[2],"reference_images":values[3],"reference_videos":values[4],"reference_audios":values[5]})
+        node["properties"]["context_ir_role"]="official_pre_generation_multimodal_prompt_enhancement"
+        node["properties"]["requires_official_api"]=True
+
 
     @staticmethod
     def _apply_memory_optimization_config(
@@ -1607,114 +1654,6 @@ class H3WorkflowBuilder:
             if int(node.get("id", -1)) not in placeholder_ids
         ]
 
-    def _inject_official_context_ir(
-        self,
-        workflow: dict,
-        prompt: str,
-        duration_seconds: float,
-        width: int,
-        height: int,
-        reference_images: list[str],
-        reference_videos: list[str],
-        reference_audio: list[str],
-    ) -> None:
-        """Configure the official MiniMax H3 Context-IR stage in the graph.
-
-        The node receives the deterministic production prompt and the original
-        reference file paths. Its output is the sole prompt source for local H3
-        Ref2VA. This method is idempotent: repeated workflow builds cannot create
-        duplicate prompt links.
-        """
-        nodes = self._find(workflow, "MiniMaxH3ContextIR")
-        if len(nodes) != 1:
-            raise RuntimeError("Production Ref2VA workflow must contain exactly one MiniMaxH3ContextIR node.")
-        node = nodes[0]
-
-        h3 = self._one(workflow, "MiniMaxH3ReferenceToVideo")
-        h3_id = self._node_id(h3)
-        h3_prompt_slot = next((i for i, item in enumerate(h3.get("inputs", []) or []) if item.get("name") == "prompt"), None)
-        if h3_prompt_slot is None:
-            raise RuntimeError("MiniMaxH3ReferenceToVideo prompt input is missing.")
-
-        # Configure the node's widget values; the prompt widget itself is linked
-        # from the deterministic PrimitiveStringMultiline source below.
-        duration = max(4, min(15, int(round(float(duration_seconds)))))
-        ratio = "adaptive" if (reference_images or reference_videos) else ("16:9" if int(width) * 9 == int(height) * 16 else "adaptive")
-        values = [
-            str(prompt),
-            duration,
-            ratio,
-            "\n".join(str(x) for x in reference_images),
-            "\n".join(str(x) for x in reference_videos),
-            "\n".join(str(x) for x in reference_audio),
-        ]
-        node["widgets_values"] = values
-        node["widgets_values_named"] = {
-            "prompt": values[0],
-            "duration": values[1],
-            "ratio": values[2],
-            "reference_images": values[3],
-            "reference_videos": values[4],
-            "reference_audios": values[5],
-        }
-
-        primitive_nodes = self._find(workflow, "PrimitiveStringMultiline")
-        if not primitive_nodes:
-            raise RuntimeError("Official Context-IR stage requires the deterministic prompt source.")
-        primitive_id = self._node_id(primitive_nodes[0])
-        node_id = self._node_id(node)
-
-        def _remove_target_links(target_id: int, target_slot: int) -> None:
-            stale_ids = {
-                int(row[0])
-                for row in workflow.get("links", [])
-                if isinstance(row, list) and len(row) >= 6 and int(row[3]) == target_id and int(row[4]) == target_slot
-            }
-            if not stale_ids:
-                return
-            workflow["links"] = [row for row in workflow.get("links", []) if int(row[0]) not in stale_ids]
-            for out_node in self._nodes(workflow):
-                for output in out_node.get("outputs", []) or []:
-                    links = output.get("links")
-                    if isinstance(links, list):
-                        output["links"] = [x for x in links if int(x) not in stale_ids]
-
-        def _remove_source_links(source_id: int, source_slot: int, target_id: int, target_slot: int) -> None:
-            stale_ids = {
-                int(row[0])
-                for row in workflow.get("links", [])
-                if isinstance(row, list) and len(row) >= 6
-                and int(row[1]) == source_id and int(row[2]) == source_slot
-                and int(row[3]) == target_id and int(row[4]) == target_slot
-            }
-            if not stale_ids:
-                return
-            workflow["links"] = [row for row in workflow.get("links", []) if int(row[0]) not in stale_ids]
-            for out_node in self._nodes(workflow):
-                for output in out_node.get("outputs", []) or []:
-                    links = output.get("links")
-                    if isinstance(links, list):
-                        output["links"] = [x for x in links if int(x) not in stale_ids]
-
-        # Normalize both endpoints before creating exactly one link per edge.
-        _remove_target_links(node_id, 0)
-        _remove_target_links(h3_id, h3_prompt_slot)
-        for item in node.get("inputs", []) or []:
-            if item.get("name") == "prompt":
-                item["link"] = None
-        for item in h3.get("inputs", []) or []:
-            if item.get("name") == "prompt":
-                item["link"] = None
-        for output in node.get("outputs", []) or []:
-            if isinstance(output.get("links"), list):
-                output["links"] = []
-
-        prompt_link = self._connect(workflow, primitive_id, 0, node_id, 0, "STRING")
-        node["inputs"][0]["link"] = prompt_link
-        output_link = self._connect(workflow, node_id, 0, h3_id, h3_prompt_slot, "STRING")
-        node["outputs"][0]["links"] = [output_link]
-        h3["inputs"][h3_prompt_slot]["link"] = output_link
-
     def _connect_media(
         self,
         workflow: dict,
@@ -2159,20 +2098,20 @@ class H3WorkflowBuilder:
                 "the role described in the prompt.\n\n"
             )
 
-            final_prompt = prompt_prefix + prompt
-            self._set_prompt(workflow, final_prompt)
-        else:
-            final_prompt = prompt
+            self._set_prompt(
+                workflow,
+                prompt_prefix + prompt,
+            )
 
-        self._inject_official_context_ir(
+        self._ensure_official_context_ir(
             workflow,
-            final_prompt,
-            duration_seconds,
-            int(width),
-            int(height),
-            reference_images,
-            reference_videos,
-            reference_audio,
+            prompt=prompt,
+            reference_images=reference_images,
+            reference_videos=reference_videos,
+            reference_audio=reference_audio,
+            duration_seconds=duration_seconds,
+            width=width,
+            height=height,
         )
 
         from planner.config import RUNTIME
