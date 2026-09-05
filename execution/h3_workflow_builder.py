@@ -350,12 +350,13 @@ class H3WorkflowBuilder:
     def _ensure_official_context_ir(self, workflow: dict, *, prompt: str, reference_images: list[str], reference_videos: list[str], reference_audio: list[str], duration_seconds: float, width: int, height: int) -> None:
         from planner.config import RUNTIME
         features = RUNTIME.get("features", {}) or {}
-        official_enabled = bool(features.get("context_ir_official_enabled", features.get("context_ir_official_api", True)))
+        official_enabled = bool(features.get("context_ir_official_enabled", True))
         official_required = bool(features.get("context_ir_official_required", True))
-        if not official_enabled:
-            if official_required:
-                raise RuntimeError("Official H3 Context-IR is required but disabled by runtime configuration.")
-            return
+        if not official_required or not official_enabled:
+            raise RuntimeError(
+                "Official MiniMax H3 Context-IR is mandatory for the production Ref2VA path; "
+                "disablement/fallback is not supported."
+            )
         ref_node = self._one(workflow, "MiniMaxH3ReferenceToVideo")
         prompt_nodes = self._find(workflow, "PrimitiveStringMultiline")
         if not prompt_nodes:
