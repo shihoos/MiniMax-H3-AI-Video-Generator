@@ -342,6 +342,17 @@ def verify_custom_nodes() -> None:
     official_context_ir = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR" / "__init__.py"
     if not official_context_ir.is_file():
         fail("Embedded official H3 Context-IR node is missing: " + str(official_context_ir))
+    else:
+        text = official_context_ir.read_text(encoding="utf-8")
+        required_markers = (
+            'CREATE_PATH = "/v2/h3_context_ir"',
+            'QUERY_PATH = "/v2/query/video_generation/{task_id}"',
+            'UPLOAD_PATH = "/v1/files/upload"',
+            'NODE_CLASS_MAPPINGS = {"MiniMaxH3ContextIR": MiniMaxH3ContextIR}',
+        )
+        missing_markers = [marker for marker in required_markers if marker not in text]
+        if missing_markers:
+            fail("Embedded H3 Context-IR runtime is incomplete: " + repr(missing_markers))
 
     forbidden = {
         "MiniMaxH3_FP16_T4",
