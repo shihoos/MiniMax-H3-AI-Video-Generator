@@ -1210,7 +1210,7 @@ class ProductionPlanner:
             ].strip()
 
             previous_word_match = re.search(
-                r"([A-Za-z][A-Za-z'-]*)\\s*$",
+                r"([A-Za-z][A-Za-z'-]*)\s*$",
                 before_candidate,
             )
 
