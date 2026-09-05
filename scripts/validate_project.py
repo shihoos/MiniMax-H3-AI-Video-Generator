@@ -200,7 +200,7 @@ SOURCE_WORKFLOWS = {
 
 
 LOCKED_MODELS = {
-    "MiniMax_H3_Ref2VA_pruned_mixed_int4_int8_convrot.safetensors",
+    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
     "qwen3vl_32b_minimax_h3_int4_convrot.safetensors",
     "minimax_h3_turbo_v4_step600_ema.safetensors",
     "minimax_h3_video_vae_fp16.safetensors",
