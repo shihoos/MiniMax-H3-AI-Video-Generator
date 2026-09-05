@@ -23,6 +23,8 @@ generation:
   frames_per_shot: 124
   normal_steps: 20
   turbo_steps: 8
+  ref2va_scheduler: beta
+  turbo_scheduler: simple
   ref_image_size: match
 upscale:
   width: 1920
