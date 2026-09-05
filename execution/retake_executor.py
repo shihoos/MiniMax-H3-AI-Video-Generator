@@ -128,12 +128,12 @@ class RetakeExecutor:
             f"<Picture {i}> = {r.get('label', r.get('role', 'visual reference'))}"
             for i, (_, r) in enumerate(ordered, start=1)
         ]
-        base_prompt = str(replacement.get("h3_prompt", replacement.get("visual_prompt", "")) or "").strip()
-        replacement["h3_prompt"] = (
-            "SELECTIVE RETAKE. Picture 1 is the exact frame at the start boundary; "
-            "Picture 2 is the exact frame at the end boundary. Recreate only the requested action "
-            "inside this range while preserving character identity, wardrobe, environment, lighting, "
-            "camera continuity and all non-target story state. Do not invent a new scene.\n\n"
+        base_prompt = str(replacement.get("visual_prompt", replacement.get("action", "")) or "").strip()
+        replacement["context_ir_instruction"] = (
+            "Selective retake: Picture 1 is the exact frame at the start boundary and Picture 2 is "
+            "the exact frame at the end boundary. Recreate only the requested action inside this range "
+            "while preserving character identity, wardrobe, environment, lighting, camera continuity, "
+            "and all non-target story state. Do not invent a new scene. "
             + base_prompt
         ).strip()
         replacement["duration_seconds"] = duration
