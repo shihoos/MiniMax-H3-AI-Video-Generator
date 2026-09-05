@@ -90,7 +90,27 @@ def main() -> None:
     ref_prompt_slot = next(i for i, item in enumerate(ref_node.get("inputs", [])) if item.get("name") == "prompt")
     ctx_prompt_link = [row for row in built.get("links", []) if isinstance(row, list) and len(row) >= 6 and str(row[5]).upper() == "STRING" and int(row[1]) == int(ctx_node["id"]) and int(row[3]) == int(ref_node["id"]) and int(row[4]) == ref_prompt_slot]
     assert len(ctx_prompt_link) == 1
-    assert ctx_node.get("widgets_values", [None, None, None, None, None, None])[3] == ""
+    ctx_values = ctx_node.get("widgets_values", [None, None, None, None, None, None])
+    assert ctx_values[3] == ""
+    assert ctx_node.get("properties", {}).get("requires_official_api") is True
+    assert ctx_node.get("properties", {}).get("official_api_base_env") == "MINIMAX_API_BASE"
+    assert ctx_node.get("properties", {}).get("official_api_token_env") == "MINIMAX_API_TOKEN"
+    assert ctx_node.get("properties", {}).get("reference_order") == {"images": [], "videos": [], "audios": []}
+    import yaml
+    runtime_features = yaml.safe_load(runtime)["features"]
+    assert runtime_features["context_ir_official_api"] is True
+    assert runtime_features["context_ir_official_preferred"] is True
+    assert runtime_features["context_ir_official_required"] is True
+    assert int(runtime_features["context_ir_official_timeout_seconds"]) == 180
+    assert int(runtime_features["context_ir_official_poll_interval_seconds"]) == 5
+    assert int(runtime_features["context_ir_official_max_polls"]) == 36
+    bootstrap = (ROOT / "kaggle" / "bootstrap.py").read_text(encoding="utf-8")
+    assert 'CREATE_PATH = "/v2/h3_context_ir"' in bootstrap
+    assert 'QUERY_PATH = "/v2/query/video_generation/{task_id}"' in bootstrap
+    assert 'UPLOAD_PATH = "/v1/files/upload"' in bootstrap
+    live = (ROOT / "kaggle" / "verify_live_runtime.py").read_text(encoding="utf-8")
+    assert '"MiniMaxH3ContextIR"' in live
+    print("PASS: official Context-IR runtime contract")
     print("PASS: context_ir builder consumption")
     from execution.execution_policy import ExecutionPolicy
     production_policy = ExecutionPolicy.from_runtime(mode="production", gpu_id=None)
