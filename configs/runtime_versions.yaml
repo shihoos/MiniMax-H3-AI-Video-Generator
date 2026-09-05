@@ -76,11 +76,15 @@ features:
   retake_execution_mode: true
   context_ir_required: true
   context_ir_official_api: true
+  context_ir_official_enabled: true
   context_ir_official_preferred: true
   context_ir_official_required: true
   context_ir_official_timeout_seconds: 180
   context_ir_official_poll_interval_seconds: 5
   context_ir_official_max_polls: 36
+  context_ir_official_max_image_mb: 30
+  context_ir_official_max_video_mb: 50
+  context_ir_official_max_audio_mb: 15
 assembly:
   video_codec: libx264
   preset: medium
