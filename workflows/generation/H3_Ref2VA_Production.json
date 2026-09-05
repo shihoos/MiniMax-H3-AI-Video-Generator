@@ -1,8 +1,8 @@
 {
   "id": "e3f2b845-8f2c-4b5a-9caf-eac1029d3e7e",
   "revision": 0,
-  "last_node_id": 144,
-  "last_link_id": 287,
+  "last_node_id": 145,
+  "last_link_id": 289,
   "nodes": [
     {
       "id": 92,
@@ -878,7 +878,7 @@
           "widget": {
             "name": "prompt"
           },
-          "link": 279
+          "link": 289
         },
         {
           "name": "width",
@@ -961,7 +961,7 @@
           "name": "STRING",
           "type": "STRING",
           "links": [
-            279
+            288
           ]
         }
       ],
@@ -1166,6 +1166,101 @@
         "embedding_memory_mode": "Auto",
         "kitchen_v_memory_mode": "Lower VRAM (slower)"
       }
+    },
+    {
+      "id": 145,
+      "type": "MiniMaxH3ContextIR",
+      "pos": [
+        -1030.0,
+        6560.0
+      ],
+      "size": [
+        440,
+        360
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "prompt"
+          },
+          "link": 288
+        },
+        {
+          "name": "duration",
+          "type": "INT",
+          "widget": {
+            "name": "duration"
+          },
+          "link": null
+        },
+        {
+          "name": "ratio",
+          "type": "COMBO",
+          "widget": {
+            "name": "ratio"
+          },
+          "link": null
+        },
+        {
+          "name": "reference_images",
+          "type": "STRING",
+          "widget": {
+            "name": "reference_images"
+          },
+          "link": null
+        },
+        {
+          "name": "reference_videos",
+          "type": "STRING",
+          "widget": {
+            "name": "reference_videos"
+          },
+          "link": null
+        },
+        {
+          "name": "reference_audios",
+          "type": "STRING",
+          "widget": {
+            "name": "reference_audios"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "enhanced_prompt",
+          "type": "STRING",
+          "links": [
+            289
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3ContextIR",
+        "context_ir_role": "official_pre_generation_multimodal_prompt_enhancement",
+        "requires_official_api": true
+      },
+      "widgets_values": [
+        "",
+        5,
+        "adaptive",
+        "",
+        "",
+        ""
+      ],
+      "widgets_values_named": {
+        "prompt": "",
+        "duration": 5,
+        "ratio": "adaptive",
+        "reference_images": "",
+        "reference_videos": "",
+        "reference_audios": ""
+      }
     }
   ],
   "links": [
@@ -1314,14 +1409,6 @@
       "INT"
     ],
     [
-      279,
-      138,
-      0,
-      136,
-      9,
-      "STRING"
-    ],
-    [
       280,
       125,
       0,
@@ -1368,6 +1455,22 @@
       126,
       0,
       "MODEL"
+    ],
+    [
+      288,
+      138,
+      0,
+      145,
+      0,
+      "STRING"
+    ],
+    [
+      289,
+      145,
+      0,
+      136,
+      9,
+      "STRING"
     ]
   ],
   "groups": [
