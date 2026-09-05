@@ -195,12 +195,16 @@ class H3ContextIRCompiler:
                 return
             seen.add(key)
             counters[media_kind] += 1
-            role = dict(extra or role_by_path.get(cls._path_key(clean_path), {}))
+            path_key = cls._path_key(clean_path)
+            role = dict(role_by_path.get(path_key, {}))
+            if extra:
+                role.update(extra)
             role_name = cls._clean(role.get("role"))
+            mapped_owner = (video_owner if media_kind == "Video" else audio_owner).get(path_key, "")
             owner = cls._clean(
-                role.get("character_name")
+                mapped_owner
+                or role.get("character_name")
                 or role.get("entity_name")
-                or (video_owner if media_kind == "Video" else audio_owner).get(cls._path_key(clean_path), "")
             )
             description = cls._clean(
                 role.get("description")
@@ -237,19 +241,9 @@ class H3ContextIRCompiler:
         for path in shot.get("reference_images", []) or []:
             append_ref(path, "Picture")
         for path in shot.get("reference_videos", []) or []:
-            append_ref(
-                path,
-                "Video",
-                role_by_path.get(cls._path_key(path), {})
-                or {"character_name": video_owner.get(cls._path_key(path), "")},
-            )
+            append_ref(path, "Video")
         for path in shot.get("reference_audio_paths", []) or []:
-            append_ref(
-                path,
-                "Audio",
-                role_by_path.get(cls._path_key(path), {})
-                or {"character_name": audio_owner.get(cls._path_key(path), "")},
-            )
+            append_ref(path, "Audio")
 
         # Legacy fallback only when the runtime media lists are absent.
         if not refs:
