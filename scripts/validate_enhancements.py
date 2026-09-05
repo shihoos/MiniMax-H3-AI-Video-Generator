@@ -83,6 +83,14 @@ def main() -> None:
     widgets = prompt_nodes[0].get("widgets_values", [])
     assert widgets and str(widgets[0]) == ctx["h3_prompt"]
     assert H3ContextIRCompiler.prompt(ctx) == ctx["h3_prompt"]
+    ctx_nodes = [node for node in built.get("nodes", []) if node.get("type") == "MiniMaxH3ContextIR"]
+    assert len(ctx_nodes) == 1
+    ctx_node = ctx_nodes[0]
+    ref_node = next(node for node in built.get("nodes", []) if node.get("type") == "MiniMaxH3ReferenceToVideo")
+    ref_prompt_slot = next(i for i, item in enumerate(ref_node.get("inputs", [])) if item.get("name") == "prompt")
+    ctx_prompt_link = [row for row in built.get("links", []) if isinstance(row, list) and len(row) >= 6 and str(row[5]).upper() == "STRING" and int(row[1]) == int(ctx_node["id"]) and int(row[3]) == int(ref_node["id"]) and int(row[4]) == ref_prompt_slot]
+    assert len(ctx_prompt_link) == 1
+    assert ctx_node.get("widgets_values", [None, None, None, None, None, None])[3] == ""
     print("PASS: context_ir builder consumption")
     from execution.execution_policy import ExecutionPolicy
     production_policy = ExecutionPolicy.from_runtime(mode="production", gpu_id=None)
