@@ -20,7 +20,7 @@ class H3ContextIRCompiler:
       H3ContextIRCompiler.prompt(context_ir)
     """
 
-    VERSION = 2
+    VERSION = 3
     REQUIRED_SECTIONS = (
         "subject_definitions",
         "summary",
@@ -296,18 +296,30 @@ class H3ContextIRCompiler:
     @classmethod
     def _speaker_map(cls, shot: dict[str, Any]) -> dict[str, str]:
         mapping: dict[str, str] = {}
-        next_id = 1
+        reserved = sorted(
+            {
+                cls._clean(event.get("speaker_id"))
+                for event in (shot.get("dialogue_events", []) or [])
+                if isinstance(event, dict) and re.fullmatch(r"S\d+", cls._clean(event.get("speaker_id")))
+            },
+            key=lambda value: int(value[1:]),
+        )
+        used_ids = {sid for sid in reserved}
+        next_id = max([int(sid[1:]) for sid in reserved], default=0) + 1
         for event in shot.get("dialogue_events", []) or []:
             if not isinstance(event, dict):
                 continue
             raw_id = cls._clean(event.get("speaker_id") or event.get("speaker") or event.get("speaker_name"))
             if not raw_id:
                 continue
-            if raw_id.startswith("S") and raw_id[1:].isdigit():
+            if re.fullmatch(r"S\d+", raw_id):
                 mapping.setdefault(raw_id, raw_id)
                 continue
             if raw_id not in mapping:
+                while f"S{next_id}" in used_ids:
+                    next_id += 1
                 mapping[raw_id] = f"S{next_id}"
+                used_ids.add(f"S{next_id}")
                 next_id += 1
         return mapping
 
@@ -677,186 +689,129 @@ class H3ContextIRCompiler:
         return "No non-diegetic music unless required by the production plan."
 
     @classmethod
+    def _canonical_input_prompt(cls, plan: dict[str, Any], shot: dict[str, Any], refs: list[dict[str, Any]]) -> str:
+        """Build the one canonical multimodal intent sent to official Context-IR."""
+        lines: list[str] = []
+        story = cls._clean(plan.get("story") or shot.get("story"))
+        if story:
+            lines.append(f"Production story context: {story}")
+        ids = []
+        scene_id = cls._clean(shot.get("scene_id"))
+        shot_id = cls._clean(shot.get("shot_id"))
+        if scene_id: ids.append(f"scene={scene_id}")
+        if shot_id: ids.append(f"shot={shot_id}")
+        if ids: lines.append("Target shot: " + "; ".join(ids) + ".")
+        setting = ", ".join(x for x in (cls._clean(shot.get("location")), cls._clean(shot.get("time_of_day")), cls._clean(shot.get("mood"))) if x)
+        if setting: lines.append(f"Setting and tone: {setting}.")
+        characters = [cls._clean(x) for x in (shot.get("characters", []) or []) if cls._clean(x)]
+        if characters: lines.append("Characters present: " + ", ".join(dict.fromkeys(characters)) + ".")
+        action = cls._clean(shot.get("detailed_description") or shot.get("visual_prompt") or shot.get("action"))
+        instruction = cls._clean(shot.get("context_ir_instruction"))
+        if action: lines.append(f"Desired visual action: {action}")
+        if instruction and instruction not in action: lines.append(f"Special generation instruction: {instruction}")
+        camera = ", ".join(x for x in (cls._clean(shot.get("camera_shot")), cls._clean(shot.get("camera_movement")), cls._clean(shot.get("lens_and_depth_of_field")), cls._clean(shot.get("composition_notes"))) if x)
+        if camera: lines.append(f"Camera and composition: {camera}.")
+        lighting = ", ".join(x for x in (cls._clean(shot.get("lighting")), cls._clean(shot.get("color_temperature")), cls._clean(shot.get("style")), cls._clean(shot.get("visual_style"))) if x)
+        if lighting: lines.append(f"Lighting and visual style: {lighting}.")
+        continuity = shot.get("continuity_start_state", {})
+        if isinstance(continuity, dict):
+            ci=[]
+            for key in ("location","lighting","environment","camera_side","state_description"):
+                value=cls._clean(continuity.get(key))
+                if value: ci.append(f"{key.replace('_',' ')}={value}")
+            props=cls._list_text(continuity.get("props",[]),8)
+            if props: ci.append(f"props={props}")
+            if ci: lines.append("Continuity to preserve: " + "; ".join(ci) + ".")
+        if refs:
+            lines.append("Reference inputs and their intended semantic roles, in the exact order supplied to H3:")
+            for ref in refs:
+                owner=f" for {ref['character_name']}" if cls._clean(ref.get("character_name")) else ""
+                lines.append(f"{ref['label']} ({ref['media_type']}){owner}: role={ref['role']}; relationship={ref['relationship']}; purpose={ref['description']}.")
+        dialogue=cls._dialogue_lines(plan,shot)
+        if dialogue:
+            lines.append("Dialogue and speech timing:")
+            lines.extend(dialogue)
+        soundscape=cls._soundscape(shot,refs)
+        lines.append(f"Diegetic sound: {soundscape}")
+        music=cls._music(shot,refs)
+        lines.append(f"Non-diegetic music: {music}")
+        duration=float(shot.get("duration_seconds",0.0) or 0.0)
+        if duration>0: lines.append(f"Target duration: {duration:.3f} seconds.")
+        lines.append("Use the supplied references for their stated roles, preserve identity and temporal continuity, and generate the intended shot without inventing a different scene.")
+        return "\n".join(line.strip() for line in lines if line.strip()).strip()
+
+    @classmethod
     def validate(cls, context_ir: dict[str, Any]) -> None:
         if not isinstance(context_ir, dict):
             raise TypeError("H3 Context-IR must be a mapping.")
-        version = int(context_ir.get("version", 0) or 0)
+        version=int(context_ir.get("version",0) or 0)
         if version != cls.VERSION:
             raise ValueError(f"Unsupported H3 Context-IR version: {version}; expected {cls.VERSION}.")
         if cls._clean(context_ir.get("mode")).lower() != "ref2va":
             raise ValueError("H3 Context-IR mode must be ref2va for this repository.")
-
-        prompt = cls._clean(context_ir.get("h3_prompt"))
+        prompt=cls._clean(context_ir.get("context_ir_input"))
         if not prompt:
-            raise ValueError("H3 Context-IR contains an empty h3_prompt.")
-        sections = context_ir.get("sections")
-        if not isinstance(sections, dict):
-            raise ValueError("H3 Context-IR must expose its six named sections.")
-        if tuple(sections.keys()) != cls.REQUIRED_SECTIONS:
-            raise ValueError("H3 Context-IR section mapping is incomplete or out of order.")
-        positions: list[int] = []
-        for section in cls.REQUIRED_SECTIONS:
-            marker = f"{section}:"
-            pos = prompt.find(marker)
-            if pos < 0:
-                raise ValueError(f"H3 Context-IR prompt is missing required section: {marker}")
-            positions.append(pos)
-            if not cls._clean(sections.get(section)):
-                raise ValueError(f"H3 Context-IR section is empty: {section}")
-        if positions != sorted(positions):
-            raise ValueError("H3 Context-IR sections are out of order.")
-
-        references = context_ir.get("references", []) or []
-        if not isinstance(references, list):
+            raise ValueError("H3 Context-IR contains an empty context_ir_input.")
+        refs=context_ir.get("references",[]) or []
+        if not isinstance(refs,list):
             raise ValueError("H3 Context-IR references must be a list.")
-        declared: dict[str, dict[str, Any]] = {}
-        media_counts = {"picture": 0, "video": 0, "audio": 0}
-        for item in references:
-            if not isinstance(item, dict):
-                raise ValueError("H3 Context-IR reference entries must be objects.")
-            label = cls._clean(item.get("label"))
-            match = cls.REF_PATTERN.fullmatch(label)
-            if not match:
-                raise ValueError(f"Invalid canonical reference label: {label!r}")
-            if label in declared:
-                raise ValueError(f"Duplicate Context-IR reference label: {label}")
-            media_kind = match.group(1).lower()
-            media_counts[media_kind] += 1
-            if cls._clean(item.get("media_type")) not in {"", media_kind}:
-                raise ValueError(f"Context-IR reference type mismatch for {label}.")
-            relationship = cls._clean(item.get("relationship")).lower()
-            allowed = cls.AUDIO_RELATIONSHIPS if media_kind == "audio" else cls.VISUAL_RELATIONSHIPS
-            if relationship not in allowed:
-                raise ValueError(f"Invalid {media_kind} relationship for {label}: {relationship!r}")
-            declared[label] = item
+        declared={}; counts={"picture":0,"video":0,"audio":0}
+        for item in refs:
+            if not isinstance(item,dict): raise ValueError("H3 Context-IR reference entries must be objects.")
+            label=cls._clean(item.get("label")); match=cls.REF_PATTERN.fullmatch(label)
+            if not match: raise ValueError(f"Invalid canonical reference label: {label!r}")
+            if label in declared: raise ValueError(f"Duplicate Context-IR reference label: {label}")
+            kind=match.group(1).lower(); counts[kind]+=1
+            if cls._clean(item.get("media_type")) not in {"",kind}: raise ValueError(f"Context-IR reference type mismatch for {label}.")
+            rel=cls._clean(item.get("relationship")).lower(); allowed=cls.AUDIO_RELATIONSHIPS if kind=="audio" else cls.VISUAL_RELATIONSHIPS
+            if rel not in allowed: raise ValueError(f"Invalid {kind} relationship for {label}: {rel!r}")
+            declared[label]=item
+        if counts["picture"]>9 or counts["video"]>3 or counts["audio"]>3: raise ValueError("Context-IR exceeds Ref2VA per-media reference limits.")
+        if sum(counts.values())>12: raise ValueError("Context-IR exceeds the Ref2VA mixed reference limit of 12 files.")
+        if counts["audio"] and not (counts["picture"] or counts["video"]): raise ValueError("Ref2VA audio references cannot be the only reference modality.")
+        used=set(cls.REF_TOKEN_PATTERN.findall(prompt))
+        unknown=sorted(used-set(declared)); missing=sorted(set(declared)-used)
+        if unknown: raise ValueError("H3 Context-IR contains undeclared reference labels: "+", ".join(unknown))
+        if missing: raise ValueError("H3 Context-IR declares references never described: "+", ".join(missing))
+        for item in refs:
+            path=cls._clean(item.get("path"))
+            if path and path in prompt: raise ValueError(f"Internal reference path leaked into Context-IR input: {path}")
+        dialogue_events=context_ir.get("dialogue",[]) or []
+        for event in dialogue_events:
+            if not isinstance(event,dict): raise ValueError("H3 Context-IR dialogue entries must be objects.")
+            sid=cls._clean(event.get("speaker_id"))
+            if sid and not re.fullmatch(r"S\d+",sid): raise ValueError(f"Non-canonical speaker ID in Context-IR: {sid}")
+        if dialogue_events and "<d>[" not in prompt: raise ValueError("Dialogue-bearing Context-IR input must contain <d>[Language] ...</d> markers.")
 
-        if media_counts["picture"] > 9 or media_counts["video"] > 3 or media_counts["audio"] > 3:
-            raise ValueError("Context-IR exceeds Ref2VA per-media reference limits (9 pictures, 3 videos, 3 audio).")
-        if sum(media_counts.values()) > 12:
-            raise ValueError("Context-IR exceeds the Ref2VA mixed reference limit of 12 files.")
-        if media_counts["audio"] and not (media_counts["picture"] or media_counts["video"]):
-            raise ValueError("Ref2VA audio references cannot be the only reference modality.")
-
-        used = set(cls.REF_TOKEN_PATTERN.findall(prompt))
-        unknown = sorted(used - set(declared))
-        if unknown:
-            raise ValueError("H3 Context-IR contains undeclared reference labels: " + ", ".join(unknown))
-        missing = sorted(set(declared) - used)
-        if missing:
-            raise ValueError("H3 Context-IR declares references never used: " + ", ".join(missing))
-
-        # Reference labels should be visible in the reference-aware semantic sections.
-        for label in declared:
-            for section in ("subject_definitions", "summary", "retention_analysis", "detailed_description"):
-                if label not in str(sections.get(section, "") or ""):
-                    raise ValueError(f"Context-IR reference {label} is missing from {section}.")
-
-        # Reject internal runtime paths leaking into the multimodal prompt.
-        for item in references:
-            path = cls._clean(item.get("path"))
-            if path and path in prompt:
-                raise ValueError(f"Internal reference path leaked into Context-IR prompt: {path}")
-
-        dialogue_section = str(sections.get("detailed_description", "") or "")
-        dialogue_events = context_ir.get("dialogue", []) or []
-        if dialogue_events:
-            for event in dialogue_events:
-                speaker_id = cls._clean(event.get("speaker_id"))
-                if speaker_id and not re.fullmatch(r"S\d+", speaker_id):
-                    raise ValueError(f"Non-canonical speaker ID in Context-IR: {speaker_id}")
-        for marker in re.findall(r"<d>.*?</d>", dialogue_section):
-            if not re.search(r"<d>\[[^\]]+\]\s*.+</d>", marker, flags=re.DOTALL):
-                raise ValueError("Dialogue must use <d>[Language] text</d> formatting.")
-        speaker_ids = cls.SPEAKER_TOKEN_PATTERN.findall(dialogue_section)
-        if speaker_ids:
-            # Repeated speakers are allowed; the mapping itself must be stable.
-            first_seen: dict[str, str] = {}
-            for token in speaker_ids:
-                first_seen.setdefault(token, token)
+    @classmethod
+    def input_prompt(cls, context_ir: dict[str, Any]) -> str:
+        cls.validate(context_ir)
+        return str(context_ir["context_ir_input"]).strip()
 
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
-        cls.validate(context_ir)
-        return str(context_ir["h3_prompt"]).strip()
+        # Backward-compatible method name; it returns the single canonical API input.
+        return cls.input_prompt(context_ir)
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
-        refs = self._canonical_references(shot)
-        speaker_map = self._speaker_map(shot)
-        sections = {
-            "subject_definitions": self._subject_definitions(plan, shot, refs),
-            "summary": self._summary(plan, shot, refs),
-            "retention_analysis": self._retention_analysis(shot, refs),
-            "detailed_description": self._detailed_description(plan, shot, refs),
-            "overall_soundscape": self._soundscape(shot, refs),
-            "non_diegetic_music": self._music(shot, refs),
-        }
-        prompt = "\n\n".join(
-            f"{name}:\n{sections[name]}" for name in self.REQUIRED_SECTIONS
-        ).strip()
-        reference_rows = []
+        refs=self._canonical_references(shot)
+        speaker_map=self._speaker_map(shot)
+        reference_rows=[]
         for ref in refs:
-            reference_rows.append({
-                "index": int(ref["index"]),
-                "label": ref["label"],
-                "media_type": ref["media_type"],
-                "binding": f"{ref['label']} {ref['role']}; relationship={ref['relationship']}",
-                "role": ref["role"],
-                "relationship": ref["relationship"],
-                "path": ref["path"],
-                "description": ref["description"],
-                "character_name": ref.get("character_name", ""),
-                "character_id": ref.get("character_id", ""),
-                "priority": int(ref["priority"]),
-            })
-
-        dialogue_rows = []
-        for event in shot.get("dialogue_events", []) or []:
-            if not isinstance(event, dict):
-                continue
-            raw = self._clean(event.get("speaker_id") or event.get("speaker_name") or event.get("speaker"))
-            if not raw:
-                continue
-            dialogue_rows.append({
-                "speaker_id": speaker_map.get(raw, raw if re.fullmatch(r"S\d+", raw) else ""),
-                "speaker_name": self._speaker_name(event),
-                "language": self._language(plan, shot, event),
-                "text": str(event.get("text", "") or ""),
-                "start_seconds": float(event.get("start_seconds", 0.0) or 0.0),
-                "end_seconds": float(event.get("end_seconds", 0.0) or 0.0),
-            })
-
-        result = {
-            "version": self.VERSION,
-            "mode": "ref2va",
-            "story": str(plan.get("story", "") or ""),
-            "scene": {
-                "scene_id": self._clean(shot.get("scene_id")),
-                "location": self._clean(shot.get("location")),
-                "time_of_day": self._clean(shot.get("time_of_day")),
-                "mood": self._clean(shot.get("mood")),
-            },
-            "h3_prompt": prompt,
-            "sections": sections,
-            "shot": {
-                "shot_id": self._clean(shot.get("shot_id")),
-                "duration_seconds": float(shot.get("duration_seconds", 0.0) or 0.0),
-                "camera": {
-                    "shot": self._clean(shot.get("camera_shot")),
-                    "movement": self._clean(shot.get("camera_movement")),
-                    "lens": self._clean(shot.get("lens_and_depth_of_field")),
-                },
-                "composition": self._clean(shot.get("composition_notes")),
-                "lighting": self._clean(shot.get("lighting")),
-                "action": self._clean(shot.get("action")),
-            },
-            "continuity": shot.get("continuity_start_state", {}) or {},
-            "references": reference_rows,
-            "speakers": speaker_map,
-            "dialogue": dialogue_rows,
-            "audio": {
-                "soundscape": self._soundscape(shot, refs),
-                "music": self._music(shot, refs),
-            },
+            reference_rows.append({"index":int(ref["index"]),"label":ref["label"],"media_type":ref["media_type"],"binding":f"{ref['label']} {ref['role']}; relationship={ref['relationship']}","role":ref["role"],"relationship":ref["relationship"],"path":ref["path"],"description":ref["description"],"character_name":ref.get("character_name",""),"character_id":ref.get("character_id",""),"priority":int(ref["priority"])})
+        dialogue_rows=[]
+        for event in shot.get("dialogue_events",[]) or []:
+            if not isinstance(event,dict): continue
+            raw=self._clean(event.get("speaker_id") or event.get("speaker_name") or event.get("speaker"))
+            if not raw: continue
+            dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0)})
+        result={
+            "version":self.VERSION,"mode":"ref2va","story":str(plan.get("story","") or ""),
+            "scene":{"scene_id":self._clean(shot.get("scene_id")),"location":self._clean(shot.get("location")),"time_of_day":self._clean(shot.get("time_of_day")),"mood":self._clean(shot.get("mood"))},
+            "context_ir_input":self._canonical_input_prompt(plan,shot,refs),
+            "shot":{"shot_id":self._clean(shot.get("shot_id")),"duration_seconds":float(shot.get("duration_seconds",0.0) or 0.0),"camera":{"shot":self._clean(shot.get("camera_shot")),"movement":self._clean(shot.get("camera_movement")),"lens":self._clean(shot.get("lens_and_depth_of_field"))},"composition":self._clean(shot.get("composition_notes")),"lighting":self._clean(shot.get("lighting")),"action":self._clean(shot.get("action"))},
+            "continuity":shot.get("continuity_start_state",{}) or {},"references":reference_rows,"speakers":speaker_map,"dialogue":dialogue_rows,"audio":{"soundscape":self._soundscape(shot,refs),"music":self._music(shot,refs)},
+            "official_context_ir":{"status":"not_requested","task_id":"","prompt":""},
         }
-        self.validate(result)
-        return result
+        self.validate(result); return result
+
