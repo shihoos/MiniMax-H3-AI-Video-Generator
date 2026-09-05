@@ -339,6 +339,10 @@ def verify_custom_nodes() -> None:
             f"{sorted(missing)}"
         )
 
+    official_context_ir = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR" / "__init__.py"
+    if not official_context_ir.is_file():
+        fail("Embedded official H3 Context-IR node is missing: " + str(official_context_ir))
+
     forbidden = {
         "MiniMaxH3_FP16_T4",
         "ComfyUI-MiniMaxH3FP16Safe",
