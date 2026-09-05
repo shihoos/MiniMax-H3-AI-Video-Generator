@@ -2027,7 +2027,7 @@ class H3WorkflowBuilder:
             H3ContextIRCompiler.validate(context_ir)
             if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
                 raise ValueError("Production H3 builder accepts Ref2VA Context-IR only.")
-            prompt = H3ContextIRCompiler.prompt(context_ir)
+            prompt = H3ContextIRCompiler.input_prompt(context_ir)
 
         if mode not in {"ref2va", "turbo_ref2va", "upscale"}:
             raise ValueError(f"Unsupported production workflow mode: {mode}")
