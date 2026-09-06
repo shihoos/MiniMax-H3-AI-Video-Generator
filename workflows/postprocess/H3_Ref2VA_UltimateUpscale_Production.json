@@ -1375,7 +1375,7 @@
         "auto",
         2560,
         true,
-        "Auto",
+        "Preserve native",
         "Auto",
         "Auto",
         "Lower VRAM (slower)"
@@ -1385,7 +1385,7 @@
         "mlp_memory": "auto",
         "chunk_rows": 2560,
         "preserve_precision": true,
-        "precision_mode": "Auto",
+        "precision_mode": "Preserve native",
         "qkv_streaming_mode": "Auto",
         "embedding_memory_mode": "Auto",
         "kitchen_v_memory_mode": "Lower VRAM (slower)"
