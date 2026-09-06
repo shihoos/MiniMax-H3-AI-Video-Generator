@@ -2159,75 +2159,96 @@ class ProductionPlanner:
         story: str,
         name: str,
     ) -> bool:
-        """Return True when a deterministic named identity has strong story evidence.
-
-        Qwen semantic classification may recover entities, but a false-negative
-        verdict must not erase a deterministic identity established by strong
-        narrative evidence. This guard is intentionally structural rather than
-        a generic capitalized-word heuristic, so locations/facilities remain
-        excluded.
-        """
+        """Protect a strong deterministic named identity from one Qwen false-negative."""
         story = str(story or "")
         name = str(name or "").strip()
         if not story or not name:
             return False
 
-        escaped = re.escape(name)
-        tokens = name.split()
-        # Protect the specific high-confidence multi-word named identity
-        # failure mode. Single-token candidates remain eligible for semantic
-        # veto because capitalization alone is intentionally weaker evidence.
-        if len(tokens) < 2:
+        escaped_name = re.escape(name)
+        name_tokens = name.split()
+        if len(name_tokens) < 2:
             return False
 
-        verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
+        subject_verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
         verb_alt = "|".join(
-            sorted((re.escape(value) for value in verbs), key=len, reverse=True)
+            sorted(
+                (re.escape(value) for value in subject_verbs),
+                key=len,
+                reverse=True,
+            )
         )
 
-        # Multi-word named subject, including familiar finite verbs:
-        #   Elena Kovalenko stumbled ...
-        #   Elena Kovalenko was ...
+        # Strong named subject with a maintained narrative verb.
         subject_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + escaped +
-            r"\s+(?:" + verb_alt + r")\b",
+            r"(?<![A-Za-z0-9'_-])"
+            + escaped_name
+            + r"\s+(?:"
+            + verb_alt
+            + r")\b",
             flags=re.IGNORECASE,
         )
         if subject_pattern.search(story):
             return True
 
-        # Preserve the existing deterministic morphology rule for unfamiliar
-        # regular narrative verbs such as "stumbled".
+        # Multi-word proper name + unfamiliar regular narrative verb, e.g.
+        # "Elena Kovalenko stumbled ...".
         generic_subject_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + escaped +
-            r"\s+[a-z][a-z'-]*(?:ed|ing|s)\b",
+            r"(?<![A-Za-z0-9'_-])"
+            + escaped_name
+            + r"\s+[a-z][a-z'-]*(?:ed|ing|s)\b",
             flags=re.IGNORECASE,
         )
         if generic_subject_pattern.search(story):
             definite_non_person = re.compile(
-                r"(?<![A-Za-z0-9'_-])the\s+" + escaped + r"\b",
+                r"(?<![A-Za-z0-9'_-])the\s+"
+                + escaped_name
+                + r"\b",
                 flags=re.IGNORECASE,
             )
             if not definite_non_person.search(story):
                 return True
 
+        # Strong appositive evidence.
         appositive_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + escaped +
-            r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
+            r"(?<![A-Za-z0-9'_-])"
+            + escaped_name
+            + r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
             flags=re.IGNORECASE,
         )
         if appositive_pattern.search(story):
             return True
 
-        vocative_pattern = re.compile(
-            r"(?:^|[\"'“”])\s*" + escaped +
-            r"\s*,\s*(?=[a-z][a-z'-]+\b)",
-            flags=re.IGNORECASE | re.MULTILINE,
+        # Coordinated subject evidence.
+        coordinated_pattern = re.compile(
+            r"(?<![A-Za-z0-9'_-])"
+            + escaped_name
+            + r"\s+and\s+"
+            r"[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}"
+            r"\s+(?:"
+            + verb_alt
+            + r")\b"
+            r"|"
+            r"(?<![A-Za-z0-9'_-])"
+            r"[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}"
+            r"\s+and\s+"
+            + escaped_name
+            + r"\s+(?:"
+            + verb_alt
+            + r")\b",
+            flags=re.IGNORECASE,
         )
-        if vocative_pattern.search(story):
+        if coordinated_pattern.search(story):
             return True
 
-        return False
+        # Direct-address/vocative evidence.
+        vocative_pattern = re.compile(
+            r"(?:^|[\"'“”])\s*"
+            + escaped_name
+            + r"\s*,\s*(?=[a-z][a-z'-]+\b)",
+            flags=re.MULTILINE,
+        )
+        return bool(vocative_pattern.search(story))
 
     @classmethod
     def _reconcile_semantic_characters(
@@ -2236,11 +2257,11 @@ class ProductionPlanner:
         deterministic: list[str],
         semantic_result,
     ) -> list[str]:
-        """Merge deterministic candidates with a Qwen semantic character pass.
+        """Merge deterministic identities with Qwen semantic character classification.
 
-        Deterministic candidates remain the baseline. Qwen may recover missed
-        names and veto candidates it explicitly classifies as non-characters.
-        Every accepted semantic name must have a literal story anchor.
+        Strong deterministic identities are the baseline. Qwen may recover
+        additional story-anchored identities, but one semantic false-negative
+        cannot erase a high-confidence deterministic named identity.
         """
         result = list(deterministic or [])
         if not isinstance(semantic_result, dict):
@@ -2296,10 +2317,12 @@ class ProductionPlanner:
                 # canonical identities. They remain ordinary story descriptors.
                 continue
             if key in verdicts and verdicts[key] is False:
-                # Qwen is a semantic classification/recovery layer. A single
-                # false-negative must not erase a strong deterministic named
-                # identity already established from the story.
-                if not cls._high_confidence_deterministic_character(story, name):
+                # Semantic classification is not allowed to erase a strong
+                # deterministic identity such as "Elena Kovalenko stumbled ...".
+                if not cls._high_confidence_deterministic_character(
+                    story,
+                    str(name).strip(),
+                ):
                     continue
 
             candidate_tokens = token_sequence(name)
