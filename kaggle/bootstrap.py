@@ -790,16 +790,39 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
             f"expected={expected_revision}, actual={actual_revision}"
         )
 
+    # H3-Optimizations is a ComfyUI custom node, not an installed site-package.
+    # The package therefore lives one directory above ``h3_optimizations/`` and
+    # must be exposed on sys.path before validating its Python modules.
+    node_dir_text = str(node_dir)
+    path_added = False
+    if node_dir_text not in sys.path:
+        sys.path.insert(0, node_dir_text)
+        path_added = True
+
     try:
         import h3_optimizations
         from h3_optimizations.memory import forward as h3_forward
         from h3_optimizations.memory import linear as h3_linear
         from h3_optimizations.qkv import providers as h3_providers
+
+        package_file = Path(getattr(h3_optimizations, "__file__", "")).resolve()
+        expected_package_dir = (node_dir / "h3_optimizations").resolve()
+        if package_file.parent != expected_package_dir:
+            raise RuntimeError(
+                "H3-Optimizations imported from an unexpected location: "
+                f"expected={expected_package_dir}, actual={package_file.parent}"
+            )
     except Exception as exc:
         raise RuntimeError(
             "H3-Optimizations installed but bounded execution modules could not "
             f"be imported: {exc}"
         ) from exc
+    finally:
+        if path_added:
+            try:
+                sys.path.remove(node_dir_text)
+            except ValueError:
+                pass
 
     package_version = str(getattr(h3_optimizations, "__version__", "")).strip()
     if expected_version and package_version != expected_version:
