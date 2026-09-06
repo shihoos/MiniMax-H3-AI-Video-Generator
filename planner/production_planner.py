@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,12 @@ class StoryUnit:
     order: int
     text: str
 
+LOGGER = logging.getLogger(__name__)
+
+LOGGER.warning(
+    "Semantic character extraction failed; using deterministic fallback: %s",
+    exc,
+)
 
 class ProductionPlanner:
     """
