@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 COMFY = ROOT / "ComfyUI"
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
-CUSTOM = ROOT / "configs" / "custom_nodes.yaml"
+NODE_MANIFEST = ROOT / "configs" / "custom_nodes.yaml"
+CUSTOM = COMFY / "custom_nodes"
 
 
 def fail(message: str) -> None:
@@ -264,7 +265,7 @@ def verify_runtime_config() -> None:
             f"{h3_revision!r}"
         )
 
-    custom_nodes = yaml.safe_load(CUSTOM.read_text(encoding="utf-8")) or {}
+    custom_nodes = yaml.safe_load(NODE_MANIFEST.read_text(encoding="utf-8")) or {}
     required_nodes = custom_nodes.get("custom_nodes", {}).get("required", []) or []
     h3_node = next(
         (item for item in required_nodes if item.get("name") == "H3-Optimizations"),
@@ -361,16 +362,13 @@ def verify_comfy_runtime() -> None:
 
 
 def verify_custom_nodes() -> None:
-    require_file(CUSTOM)
-
-    config = yaml.safe_load(
-        CUSTOM.read_text(encoding="utf-8")
-    )
+    if not CUSTOM.is_dir():
+        fail(f"Custom-node runtime path is missing or not a directory: {CUSTOM}")
 
     installed = {
-        node["name"]
-        for group in config["custom_nodes"].values()
-        for node in group
+        path.name
+        for path in CUSTOM.iterdir()
+        if path.is_dir() and path.name != "__pycache__"
     }
 
     required = {
