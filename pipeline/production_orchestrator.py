@@ -1259,6 +1259,13 @@ class ProductionOrchestrator:
                 ]
             )
 
+            # Resumed sessions must preserve the checkpointed canonical roster
+            # just like fresh sessions do.
+            canonical_characters = deepcopy(
+                base_plan.get("characters", [])
+                or []
+            )
+
             director_resume_state = deepcopy(
                 state
             )
@@ -1274,6 +1281,14 @@ class ProductionOrchestrator:
                     workflow_mode=workflow_mode,
                     profile=profile,
                 )
+            )
+
+            # The planner owns the canonical character roster. Keep an
+            # immutable boundary copy so a director/enrichment pass can never
+            # replace or erase deterministic character identities downstream.
+            canonical_characters = deepcopy(
+                base_plan.get("characters", [])
+                or []
             )
 
             director_resume_state = None
@@ -1338,6 +1353,13 @@ class ProductionOrchestrator:
                     resume_state=director_resume_state,
                 )
 
+                # Canonical entity boundary: the director may enrich the plan,
+                # but it never owns character identity. Always carry forward the
+                # planner/checkpoint roster before any critique or compilation.
+                plan["characters"] = deepcopy(
+                    canonical_characters
+                )
+
                 if H3_DIRECTOR_CRITIC:
                     try:
                         critique = self.director.critique_plan(
@@ -1348,6 +1370,14 @@ class ProductionOrchestrator:
                         if isinstance(critique, dict):
                             plan["director_critique"] = critique
                             plan = self._apply_director_critic_patches(plan, critique)
+
+                            # Critique is read-only with respect to canonical
+                            # entities. Re-assert the roster after patching so a
+                            # future critic implementation cannot erase it.
+                            plan["characters"] = deepcopy(
+                                canonical_characters
+                            )
+
                             # Recompile only after bounded, whitelisted creative edits.
                             from planner.cinematic_compiler import CinematicCompiler
                             plan["shots"] = CinematicCompiler(
@@ -1386,6 +1416,13 @@ class ProductionOrchestrator:
         if mode == PRESERVE_USER_STORY_MODE:
 
             plan["story"] = base_plan["story"]
+
+        # Final invariant: downstream production must use the canonical roster
+        # captured from the deterministic planner/checkpoint, never a mutable
+        # director-generated substitute.
+        plan["characters"] = deepcopy(
+            canonical_characters
+        )
 
         characters = self._character_objects(
             plan.get(
