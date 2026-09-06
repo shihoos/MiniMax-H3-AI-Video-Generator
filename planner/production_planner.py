@@ -2023,6 +2023,8 @@ class ProductionPlanner:
         cleaned: list[str] = []
         seen: set[str] = set()
 
+        possessive_pattern = re.compile(r"^(.+?)'s$")
+
         for raw in descriptors:
             value = str(
                 raw or ""
@@ -2030,6 +2032,17 @@ class ProductionPlanner:
 
             if not value:
                 continue
+
+            # Strip a trailing English possessive marker ("Elena's" ->
+            # "Elena") before dedup/alias logic runs. Without this, a
+            # possessive-only mention of an already-detected character
+            # survives as its own malformed pseudo-character distinct
+            # from the base name.
+            possessive_match = possessive_pattern.match(value)
+            if possessive_match:
+                stripped = possessive_match.group(1).strip()
+                if stripped:
+                    value = stripped
 
             key = value.lower()
 
