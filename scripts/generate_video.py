@@ -6,6 +6,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from pipeline.production_plan_store import ProductionPlanStore
 
 ROOT = (
     Path(__file__)
@@ -167,7 +168,11 @@ def save_plan(
     path: Path,
     plan: dict,
 ) -> None:
-
+    ProductionPlanStore.atomic_save(
+        path,
+        plan,
+    )
+    
     path = (
         Path(path)
         .resolve()
