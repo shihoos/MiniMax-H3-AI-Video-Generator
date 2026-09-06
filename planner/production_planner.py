@@ -162,6 +162,7 @@ class ProductionPlanner:
         "A",
         "An",
         "Then",
+        "Now",
         "When",
         "While",
         "After",
@@ -169,6 +170,24 @@ class ProductionPlanner:
         "Suddenly",
         "Meanwhile",
         "Finally",
+        "Later",
+        "Soon",
+        "Still",
+        "Yet",
+        "Eventually",
+        "Afterward",
+        "Afterwards",
+        "Immediately",
+        "Instead",
+        "Elsewhere",
+        "Outside",
+        "Inside",
+        "Nearby",
+        "Slowly",
+        "Quietly",
+        "Silently",
+        "Perhaps",
+        "Indeed",
         "But",
         "And",
         "In",
@@ -281,6 +300,11 @@ class ProductionPlanner:
         "His", "Her", "Its", "Their", "Our", "Your",
         "This", "That", "These", "Those",
         "There", "Here", "Who", "What", "Which",
+        "Monday", "Tuesday", "Wednesday", "Thursday",
+        "Friday", "Saturday", "Sunday",
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November",
+        "December",
     }
 
     # Auxiliary/copular verbs are grammatically useful for real character
@@ -307,6 +331,11 @@ class ProductionPlanner:
         "ruins", "school", "sea", "ship", "shore", "spaceport", "station",
         "temple", "terminal", "theater", "theatre", "tower", "town",
         "valley", "village", "warehouse", "world", "zone",
+        "command", "corps", "division", "agency", "bureau", "council",
+        "committee", "authority", "administration", "department",
+        "ministry", "office", "organization", "organisation", "network",
+        "alliance", "coalition", "federation", "union", "guild",
+        "brigade", "battalion", "squadron", "fleet", "regiment",
     }
 
     _ENTITY_NER = None
@@ -976,6 +1005,27 @@ class ProductionPlanner:
             "warned", "warns", "trusted", "trusts", "believed", "believes",
             "forgot", "forgets", "understood", "understands", "noticed", "notices",
             "appeared", "appears", "became", "becomes", "wore", "wears",
+            # Irregular past tenses with no regular -ed/-ing/-s surface form,
+            # so the morphology fallback can never reach them on its own.
+            "led", "leads", "chose", "chooses", "grew", "grows", "drew", "draws",
+            "threw", "throws", "wrote", "writes", "rose", "rises", "fell", "falls",
+            "sank", "sinks", "shook", "shakes", "swept", "sweeps", "crept", "creeps",
+            "sought", "seeks", "caught", "catches", "taught", "teaches", "bought", "buys",
+            "dealt", "deals", "spent", "spends", "built", "builds", "sold", "sells",
+            "hung", "hangs", "rang", "rings", "sang", "sings", "swam", "swims",
+            "stole", "steals", "broke", "breaks", "woke", "wakes", "froze", "freezes",
+            "tore", "tears", "swore", "swears", "rode", "rides", "bled", "bleeds",
+            "fled", "flees", "shed", "sheds", "spread", "spreads", "bore", "bears",
+            # Common narrative action verbs unlikely to double as ordinary nouns.
+            "guided", "guides", "commanded", "commands", "signaled", "signals",
+            "gestured", "gestures", "muttered", "mutters", "murmured", "murmurs",
+            "screamed", "screams", "flinched", "flinches", "hesitated", "hesitates",
+            "glanced", "glances", "spotted", "spots", "shoved", "shoves",
+            "dragged", "drags", "lifted", "lifts", "dropped", "drops",
+            "crawled", "crawls", "crouched", "crouches", "ducked", "ducks",
+            "dodged", "dodges", "blocked", "blocks", "aimed", "aims",
+            "fired", "fires", "loaded", "loads", "activated", "activates",
+            "scouted", "scouts", "deactivated", "deactivates", "triggered", "triggers",
         }
 
         subject_verbs = set(self.NARRATIVE_SUBJECT_VERBS) | additional_subject_verbs
@@ -1303,13 +1353,7 @@ class ProductionPlanner:
                 if candidate_has_definite_non_person_frame(match):
                     return False
 
-                if (
-                    has_non_person_semantic_head(candidate)
-                    and match.lastindex
-                    and match.lastindex >= 2
-                    and match.group(2).strip().lower()
-                    in self.AUXILIARY_SUBJECT_VERBS
-                ):
+                if has_non_person_semantic_head(candidate):
                     return False
 
                 verb = (
@@ -1377,7 +1421,14 @@ class ProductionPlanner:
                 if not verb:
                     return False
 
-            
+                if has_intervening_lowercase_token(match):
+                    return False
+
+                if candidate_has_definite_non_person_frame(match):
+                    return False
+
+                if has_non_person_semantic_head(candidate):
+                    return False
 
                 # A morphology candidate inside a prepositional phrase
                 # is not subject evidence.
@@ -1584,8 +1635,7 @@ class ProductionPlanner:
                 }:
                     continue
 
-            generic_match = re.match(r"(.+)", candidate)
-            if generic_match and validate_occurrence(generic_match, "morphology"):
+            if validate_occurrence(match, "morphology"):
                 add_evidence(candidate, "morphology", 35 if len(candidate.split()) >= 2 else 25)
 
         # ========================================================
