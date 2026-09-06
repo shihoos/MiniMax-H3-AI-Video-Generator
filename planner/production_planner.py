@@ -338,9 +338,6 @@ class ProductionPlanner:
         "brigade", "battalion", "squadron", "fleet", "regiment",
     }
 
-    _ENTITY_NER = None
-    _ENTITY_NER_INITIALIZED = False
-
     LOCATION_PATTERNS = (
         r"\bin\s+(?:the\s+)?([^,.!?]+)",
         r"\bat\s+(?:the\s+)?([^,.!?]+)",
@@ -413,77 +410,6 @@ class ProductionPlanner:
         self.references = ReferenceManager(
             self.project_root
         )
-
-    @classmethod
-    def _optional_entity_label(
-        cls,
-        value: str,
-    ) -> str | None:
-        """
-        Optional local NER safety net.
-
-        This is deliberately lazy and non-required:
-          - no package is imported during normal startup;
-          - no model is downloaded;
-          - if spaCy/en_core_web_sm is absent, the deterministic
-            structural rules remain authoritative;
-          - when the small English NER model is already installed, it is
-            loaded once and used only for ambiguous auxiliary/copular
-            constructions.
-
-        PERSON is compatible with character identity. Location/organization
-        style entities are not.
-        """
-        candidate = str(
-            value or ""
-        ).strip()
-
-        if not candidate:
-            return None
-
-        if cls._ENTITY_NER_INITIALIZED:
-            nlp = cls._ENTITY_NER
-        else:
-            cls._ENTITY_NER_INITIALIZED = True
-            nlp = None
-
-            try:
-                import spacy  # type: ignore
-
-                nlp = spacy.load(
-                    "en_core_web_sm",
-                    exclude=[
-                        "tagger",
-                        "parser",
-                        "attribute_ruler",
-                        "lemmatizer",
-                    ],
-                )
-            except Exception:
-                nlp = None
-
-            cls._ENTITY_NER = nlp
-
-        if nlp is None:
-            return None
-
-        try:
-            doc = nlp(candidate)
-        except Exception:
-            return None
-
-        for entity in doc.ents:
-            if not str(entity.text).strip():
-                continue
-
-            if entity.text.strip().lower() != candidate.lower():
-                continue
-
-            return str(
-                entity.label_
-            ).upper()
-
-        return None
 
     # ============================================================
     # TEXT NORMALIZATION
@@ -1364,22 +1290,6 @@ class ProductionPlanner:
                     else ""
                 )
 
-                if verb in self.AUXILIARY_SUBJECT_VERBS:
-                    entity_label = self._optional_entity_label(
-                        candidate
-                    )
-
-                    if entity_label in {
-                        "GPE",
-                        "LOC",
-                        "FAC",
-                        "ORG",
-                        "NORP",
-                        "EVENT",
-                        "PRODUCT",
-                    }:
-                        return False
-
                 return True
 
             # ----------------------------------------------------
@@ -1620,21 +1530,6 @@ class ProductionPlanner:
             ):
                 continue
 
-            if verb in self.AUXILIARY_SUBJECT_VERBS:
-                entity_label = self._optional_entity_label(
-                    candidate
-                )
-                if entity_label in {
-                    "GPE",
-                    "LOC",
-                    "FAC",
-                    "ORG",
-                    "NORP",
-                    "EVENT",
-                    "PRODUCT",
-                }:
-                    continue
-
             if validate_occurrence(match, "morphology"):
                 add_evidence(candidate, "morphology", 35 if len(candidate.split()) >= 2 else 25)
 
@@ -1711,25 +1606,6 @@ class ProductionPlanner:
 
             if has_non_person_semantic_head(candidate):
                 continue
-
-            # A single capitalized token used after a transitive verb can
-            # still be a place/object rather than a person. When the small
-            # local NER model is available, reject obvious non-person entity
-            # classes; otherwise keep deterministic behavior unchanged.
-            if len(candidate.split()) == 1:
-                entity_label = self._optional_entity_label(
-                    candidate
-                )
-                if entity_label in {
-                    "GPE",
-                    "LOC",
-                    "FAC",
-                    "ORG",
-                    "NORP",
-                    "EVENT",
-                    "PRODUCT",
-                }:
-                    continue
 
             add_evidence(
                 candidate,
@@ -2246,9 +2122,129 @@ class ProductionPlanner:
             ),
         )
 
+    @staticmethod
+    def _story_has_character_name(
+        story: str,
+        name: str,
+    ) -> bool:
+        """Return True only when a proposed canonical name is present in the story.
+
+        This is a hard anti-hallucination boundary for semantic extraction: the
+        language model may recover or classify names, but it may not invent a
+        canonical identity that has no textual anchor in the source story.
+        """
+        story_norm = re.sub(r"[^a-z0-9]+", " ", str(story or "").lower()).strip()
+        name_norm = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
+        if not story_norm or not name_norm:
+            return False
+        story_tokens = story_norm.split()
+        name_tokens = name_norm.split()
+        if not name_tokens:
+            return False
+        width = len(name_tokens)
+        for index in range(0, len(story_tokens) - width + 1):
+            if story_tokens[index : index + width] == name_tokens:
+                return True
+        # Possessive mentions such as "Sara's notebook" normalize to the same
+        # token, so they are intentionally covered by the normalization above.
+        return False
+
+    @classmethod
+    def _reconcile_semantic_characters(
+        cls,
+        story: str,
+        deterministic: list[str],
+        semantic_result,
+    ) -> list[str]:
+        """Merge deterministic candidates with a Qwen semantic character pass.
+
+        Deterministic candidates remain the baseline. Qwen may recover missed
+        names and veto candidates it explicitly classifies as non-characters.
+        Every accepted semantic name must have a literal story anchor.
+        """
+        result = list(deterministic or [])
+        if not isinstance(semantic_result, dict):
+            return cls._canonicalize_character_descriptors(result)
+
+        verdicts = {}
+        additions = []
+        for raw in semantic_result.get("candidates", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("name", "") or "").strip()
+            if not name:
+                continue
+            canonical_name = EntityResolver.strip_honorific(name) or name
+            key = canonical_name.lower()
+            verdicts[key] = bool(raw.get("is_character", False))
+            if (
+                bool(raw.get("is_character", False))
+                and str(raw.get("entity_type", "")).strip().upper()
+                in {"PERSON", "CHARACTER", "SENTIENT"}
+                and cls._story_has_character_name(story, canonical_name)
+            ):
+                additions.append(canonical_name)
+
+        role_names = {
+            "man", "woman", "girl", "boy", "child", "person", "hero",
+            "heroine", "explorer", "detective", "scientist", "soldier",
+            "warrior", "king", "queen", "robot", "android", "pilot",
+        }
+        true_semantic = [
+            str(raw.get("name", "") or "").strip()
+            for raw in semantic_result.get("candidates", []) or []
+            if isinstance(raw, dict)
+            and bool(raw.get("is_character", False))
+            and str(raw.get("entity_type", "")).strip().upper()
+            in {"PERSON", "CHARACTER", "SENTIENT"}
+        ]
+
+        def token_sequence(value: str) -> list[str]:
+            return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split()
+
+        semantic_sequences = [
+            (candidate, token_sequence(candidate))
+            for candidate in true_semantic
+            if token_sequence(candidate)
+        ]
+
+        filtered = []
+        for name in result:
+            key = str(name or "").strip().lower()
+            if key in role_names:
+                # With semantic extraction available, anonymous roles are not
+                # canonical identities. They remain ordinary story descriptors.
+                continue
+            if key in verdicts and verdicts[key] is False:
+                continue
+
+            candidate_tokens = token_sequence(name)
+            if candidate_tokens:
+                matched_full_name = [
+                    canonical
+                    for canonical, full_tokens in semantic_sequences
+                    if candidate_tokens != full_tokens
+                    and any(
+                        full_tokens[index:index + len(candidate_tokens)] == candidate_tokens
+                        for index in range(len(full_tokens) - len(candidate_tokens) + 1)
+                    )
+                ]
+                if len(matched_full_name) == 1:
+                    # Qwen supplied a fuller canonical identity for a short
+                    # deterministic alias such as "Voss" -> "Elara Voss" or
+                    # "Warden" -> "The Warden". Keep the fuller form only.
+                    continue
+
+            filtered.append(name)
+
+        filtered.extend(additions)
+        return cls._canonicalize_character_descriptors(filtered)
+
     def create_characters(
         self,
         story: str,
+        *,
+        qwen_character_extractor=None,
     ) -> list[Character]:
 
         descriptors = (
@@ -2258,6 +2254,22 @@ class ProductionPlanner:
                 )
             )
         )
+
+        if qwen_character_extractor is not None:
+            try:
+                semantic_result = qwen_character_extractor(
+                    story,
+                    list(descriptors),
+                )
+                descriptors = self._reconcile_semantic_characters(
+                    story,
+                    descriptors,
+                    semantic_result,
+                )
+            except Exception:
+                # Deterministic extraction remains the production fallback; a
+                # failed semantic pass must never block offline/CI planning.
+                pass
 
         if not descriptors:
             # High-confidence fallback for ordinary narrative prose.
