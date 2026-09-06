@@ -414,13 +414,36 @@ class H3WorkflowBuilder:
             cfg = {}
 
         chunk_rows = int(cfg.get("chunk_rows", 2560) or 2560)
-        precision_mode = str(cfg.get("precision_mode", "Auto") or "Auto")
+        precision_mode = str(
+            cfg.get("precision_mode", "Preserve native") or "Preserve native"
+        )
         qkv_streaming_mode = str(
             cfg.get("qkv_streaming_mode", "Auto") or "Auto"
         )
         attention_memory_mode = str(
-            cfg.get("attention_memory_mode", "Standard") or "Standard"
+            cfg.get("attention_memory_mode", "Lower VRAM (slower)")
+            or "Lower VRAM (slower)"
         )
+
+        if chunk_rows != 2560:
+            raise RuntimeError(
+                f"Production H3 requires chunk_rows=2560; got {chunk_rows}."
+            )
+        if precision_mode != "Preserve native":
+            raise RuntimeError(
+                "Production H3 requires precision_mode='Preserve native'; "
+                f"got {precision_mode!r}."
+            )
+        if qkv_streaming_mode != "Auto":
+            raise RuntimeError(
+                "Production H3 requires qkv_streaming_mode='Auto'; "
+                f"got {qkv_streaming_mode!r}."
+            )
+        if attention_memory_mode != "Lower VRAM (slower)":
+            raise RuntimeError(
+                "Production H3 requires attention_memory_mode='Lower VRAM (slower)'; "
+                f"got {attention_memory_mode!r}."
+            )
         version = str(cfg.get("version", "0.2.41") or "0.2.41")
 
         node["properties"] = dict(node.get("properties") or {})
@@ -450,6 +473,30 @@ class H3WorkflowBuilder:
             "kitchen_v_memory_mode": attention_memory_mode,
         }
 
+    @classmethod
+    def _assert_no_foreign_h3_block_nodes(cls, workflow: dict) -> None:
+        """Reject nodes that can take ownership of H3 block/MLP forward execution."""
+        forbidden = {
+            "MiniMaxH3FP16Safe",
+            "MiniMaxH3FP16T4",
+            "MiniMaxH3_FP16_T4",
+            "MiniMaxH3MLPChunk",
+            "MiniMaxH3ActivationChunk",
+        }
+        present = sorted(
+            {
+                str(node.get("type"))
+                for node in cls._nodes(workflow)
+                if str(node.get("type")) in forbidden
+            }
+        )
+        if present:
+            raise RuntimeError(
+                "Production H3 forbids foreign block/MLP patch nodes because "
+                "H3MemoryOptimization must be the sole bounded block/MLP owner: "
+                f"{present}"
+            )
+
     def _inject_memory_optimization(
         self,
         workflow: dict,
@@ -457,6 +504,7 @@ class H3WorkflowBuilder:
         source_node_type: str = "UNETLoader",
     ) -> None:
         """Ensure one H3MemoryOptimization node owns the H3 MODEL fan-out."""
+        self._assert_no_foreign_h3_block_nodes(workflow)
         existing = self._find(workflow, "H3MemoryOptimization")
         if existing:
             if len(existing) != 1:
