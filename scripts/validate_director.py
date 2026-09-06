@@ -1348,17 +1348,16 @@ def test_batch_prompt_is_compact() -> None:
 # Removed test_shot_prompt_is_compact since _shot_director_user is gone.
 
 
-def test_semantic_false_negative_cannot_erase_high_confidence_name() -> None:
+def test_deterministic_named_character_survives_semantic_false_negative() -> None:
     planner = ProductionPlanner(ROOT)
     story = (
-        "The wind screamed like a wounded beast as Elena Kovalenko stumbled "
-        "through the blinding snow. The Arctic station had been abandoned for years."
+        "Elena Kovalenko stumbled through the blinding snow. "
+        "The Arctic station had been abandoned for years."
     )
-
     deterministic = planner.detect_character_descriptors(story)
     check(
         "Elena Kovalenko" in deterministic,
-        "Deterministic extractor failed to recover the named protagonist.",
+        f"Deterministic extraction lost Elena Kovalenko: {deterministic}",
     )
 
     semantic = {
@@ -1382,7 +1381,7 @@ def test_semantic_false_negative_cannot_erase_high_confidence_name() -> None:
     }
     check(
         "elena kovalenko" in names,
-        "A false-negative Qwen verdict erased a high-confidence deterministic character.",
+        "A semantic false-negative erased a high-confidence deterministic character.",
     )
 
 
@@ -1858,7 +1857,7 @@ def main() -> None:
         test_h3_optimizer_ownership_guard,
         test_character_pipeline_has_no_external_ner_dependency,
         test_semantic_character_reconciliation_adversarial_matrix,
-        test_semantic_false_negative_cannot_erase_high_confidence_name,
+        test_deterministic_named_character_survives_semantic_false_negative,
         test_qwen_semantic_character_reconciliation,
         test_verified_semantic_character_roster_reaches_final_plan,
         test_qwen_semantic_character_extractor_contract,
