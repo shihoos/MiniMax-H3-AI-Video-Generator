@@ -701,6 +701,7 @@ class Shot:
             "reference_audio": self.reference_audio,
             "reference_audio_paths": self.reference_audio_paths,
             "reference_audio_by_character": self.reference_audio_by_character,
+            "reference_video_by_character": self.reference_video_by_character,
             "speaking_characters": self.speaking_characters,
             "speech_text": self.speech_text,
             "dialogue_events": self.dialogue_events,
