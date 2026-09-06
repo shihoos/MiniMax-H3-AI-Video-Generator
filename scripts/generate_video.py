@@ -6,7 +6,6 @@ import sys
 import uuid
 from pathlib import Path
 
-from pipeline.production_plan_store import ProductionPlanStore
 
 ROOT = (
     Path(__file__)
@@ -22,6 +21,7 @@ if str(ROOT) not in sys.path:
 
 
 from planner.config import RUNTIME
+from pipeline.production_plan_store import ProductionPlanStore
 
 def discover_gpu_ids():
 
@@ -171,36 +171,6 @@ def save_plan(
     ProductionPlanStore.atomic_save(
         path,
         plan,
-    )
-    
-    path = (
-        Path(path)
-        .resolve()
-    )
-
-    path.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    temporary = (
-        path.with_suffix(
-            path.suffix
-            + ".tmp"
-        )
-    )
-
-    temporary.write_text(
-        json.dumps(
-            plan,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-
-    temporary.replace(
-        path
     )
 
 
