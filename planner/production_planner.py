@@ -2159,78 +2159,70 @@ class ProductionPlanner:
         story: str,
         name: str,
     ) -> bool:
-        """Protect a strongly evidenced deterministic identity from a false Qwen veto.
+        """Return True when a deterministic named identity has strong story evidence.
 
-        A semantic model is allowed to classify/recover entities, but a single
-        false-negative semantic verdict must not erase an explicitly named
-        character that the deterministic extractor found in a strong grammatical
-        position (named subject, appositive, coordinated subject, or vocative).
-        Obvious definite non-person noun phrases such as ``The Arctic station``
-        remain excluded.
+        Qwen semantic classification may recover entities, but a false-negative
+        verdict must not erase a deterministic identity established by strong
+        narrative evidence. This guard is intentionally structural rather than
+        a generic capitalized-word heuristic, so locations/facilities remain
+        excluded.
         """
         story = str(story or "")
         name = str(name or "").strip()
         if not story or not name:
             return False
 
-        token = re.escape(name)
-        name_tokens = name.split()
-        if len(name_tokens) < 1:
+        escaped = re.escape(name)
+        tokens = name.split()
+        # Protect the specific high-confidence multi-word named identity
+        # failure mode. Single-token candidates remain eligible for semantic
+        # veto because capitalization alone is intentionally weaker evidence.
+        if len(tokens) < 2:
             return False
 
-        narrative_verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
-        verb_alt = "|".join(sorted((re.escape(v) for v in narrative_verbs), key=len, reverse=True))
+        verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
+        verb_alt = "|".join(
+            sorted((re.escape(value) for value in verbs), key=len, reverse=True)
+        )
 
-        # Strong named-subject evidence: ``Elena Kovalenko stumbled`` /
-        # ``Elena Kovalenko was ...``. Exclude definite non-person frames such
-        # as ``The Arctic station was ...``.
+        # Multi-word named subject, including familiar finite verbs:
+        #   Elena Kovalenko stumbled ...
+        #   Elena Kovalenko was ...
         subject_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + token +
+            r"(?<![A-Za-z0-9'_-])" + escaped +
             r"\s+(?:" + verb_alt + r")\b",
             flags=re.IGNORECASE,
         )
-        if len(name_tokens) >= 2 and subject_pattern.search(story):
+        if subject_pattern.search(story):
             return True
 
-        # The deterministic extractor also accepts unfamiliar regular narrative
-        # verbs through morphology (for example ``stumbled``). Mirror that
-        # conservative fallback here so a semantic false-negative cannot erase
-        # a multi-word named subject merely because the verb is absent from the
-        # maintained lexical list.
+        # Preserve the existing deterministic morphology rule for unfamiliar
+        # regular narrative verbs such as "stumbled".
         generic_subject_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + token +
+            r"(?<![A-Za-z0-9'_-])" + escaped +
             r"\s+[a-z][a-z'-]*(?:ed|ing|s)\b",
             flags=re.IGNORECASE,
         )
-        if len(name_tokens) >= 2 and generic_subject_pattern.search(story):
-            prefix = re.compile(
-                r"(?<![A-Za-z0-9'_-])the\s+" + token + r"\b",
+        if generic_subject_pattern.search(story):
+            definite_non_person = re.compile(
+                r"(?<![A-Za-z0-9'_-])the\s+" + escaped + r"\b",
                 flags=re.IGNORECASE,
             )
-            if not prefix.search(story):
+            if not definite_non_person.search(story):
                 return True
 
         appositive_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + token +
+            r"(?<![A-Za-z0-9'_-])" + escaped +
             r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
             flags=re.IGNORECASE,
         )
         if appositive_pattern.search(story):
             return True
 
-        coordinated_pattern = re.compile(
-            r"(?<![A-Za-z0-9'_-])" + token +
-            r"\s+and\s+(?:[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+(?:"
-            + verb_alt + r")\b|(?<![A-Za-z0-9'_-])(?:[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+and\s+"
-            + token + r"\s+(?:" + verb_alt + r")\b",
-            flags=re.IGNORECASE,
-        )
-        if coordinated_pattern.search(story):
-            return True
-
         vocative_pattern = re.compile(
-            r"(?:^|[\"'“”])\s*" + token + r"\s*,\s*(?=[a-z][a-z'-]+\b)",
-            flags=re.MULTILINE,
+            r"(?:^|[\"'“”])\s*" + escaped +
+            r"\s*,\s*(?=[a-z][a-z'-]+\b)",
+            flags=re.IGNORECASE | re.MULTILINE,
         )
         if vocative_pattern.search(story):
             return True
@@ -2304,11 +2296,9 @@ class ProductionPlanner:
                 # canonical identities. They remain ordinary story descriptors.
                 continue
             if key in verdicts and verdicts[key] is False:
-                # Qwen semantic classification is a recovery/classification
-                # layer, not an authority that can erase strong deterministic
-                # identity evidence. Keep a deterministic named subject,
-                # appositive, coordinated subject, or vocative even when Qwen
-                # produces a false-negative verdict.
+                # Qwen is a semantic classification/recovery layer. A single
+                # false-negative must not erase a strong deterministic named
+                # identity already established from the story.
                 if not cls._high_confidence_deterministic_character(story, name):
                     continue
 
