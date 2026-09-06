@@ -443,6 +443,94 @@ def test_character_descriptor_deduplication() -> None:
     )
 
 
+def test_character_detection_diverse_story_styles() -> None:
+    # Wide, deliberately diverse regression corpus assembled after a
+    # deep audit found the detector had real gaps across several
+    # independent categories: organizational compounds ("Central
+    # Command issued..."), action-verb location subjects ("The
+    # Research Station hummed..."), calendar words ("Monday
+    # arrived..."), irregular narrative verbs with no -ed/-ing/-s
+    # surface form ("Renn led...", "Talia scouted..."), hyphenated/
+    # apostrophe names, and sentence-initial discourse adverbs before
+    # a real name ("Now Elias understood..."). Each category maps to
+    # a specific, independently-verified fix; this test exists so a
+    # future change cannot silently reopen any of them.
+    planner = ProductionPlanner(ROOT)
+
+    cases = (
+        ("Sara was hiding near the station.", {"sara"}),
+        ("Dr. Elara Voss stood at the edge of the ice shelf.", {"elara voss"}),
+        (
+            "Eli walked through the ruined city looking for Sara, "
+            "who was hiding near the old clock tower.",
+            {"eli", "sara"},
+        ),
+        (
+            "Marcus Chen arrived at the station just as Elara Voss "
+            "finished her final reading.",
+            {"marcus chen", "elara voss"},
+        ),
+        (
+            "Mira, a systems engineer, and Arun, her specialist, "
+            "arrive at the outpost before dawn.",
+            {"mira", "arun"},
+        ),
+        ("The Arctic station had been abandoned for years.", set()),
+        ("The Frozen Lake was silent under the winter sky.", set()),
+        (
+            "The Research Station hummed with quiet machinery. "
+            "Dr. Naomi Reyes reviewed the readings one last time.",
+            {"naomi reyes"},
+        ),
+        ("Central Command issued the evacuation order at dawn.", set()),
+        ("Monday arrived cold and grey over the harbor town.", set()),
+        (
+            "Renn led the group through the tunnels. Behind him, "
+            "Kass and Odile carried the wounded soldier, while "
+            "Talia scouted ahead in silence.",
+            {"renn", "kass", "odile", "talia", "soldier"},
+        ),
+        (
+            "Zara-Lin activated the console. Nex'to watched from "
+            "the doorway, saying nothing.",
+            {"zara-lin", "nex'to"},
+        ),
+        (
+            "Elias packed his bag. Now Elias understood what he "
+            "had to do.",
+            {"elias"},
+        ),
+        (
+            "The night was quiet. Then Sara spoke, breaking the "
+            "silence.",
+            {"sara"},
+        ),
+        ("Suddenly Marcus stopped walking and turned around.", {"marcus"}),
+    )
+
+    for story, expected_lower in cases:
+        got = {
+            str(value).lower()
+            for value in planner.detect_character_descriptors(story)
+        }
+        check(
+            got == expected_lower,
+            "Character detection regression: "
+            f"{story!r} expected {sorted(expected_lower)}, got "
+            f"{sorted(got)}.",
+        )
+
+    # The built-in regression corpus was previously defined but never
+    # actually run by any validator -- wire it in.
+    for story, expected in ProductionPlanner.character_detection_regression_cases():
+        got = set(planner.detect_character_descriptors(story))
+        check(
+            got == expected,
+            "Built-in character_detection_regression_cases failed: "
+            f"{story!r} expected {sorted(expected)}, got {sorted(got)}.",
+        )
+
+
 def test_single_paragraph_segmentation() -> None:
 
     planner = ProductionPlanner(
@@ -1614,6 +1702,7 @@ def main() -> None:
         test_scene_id_sanitization_before_batching,
         test_shot_id_normalization,
         test_character_descriptor_deduplication,
+        test_character_detection_diverse_story_styles,
         test_single_paragraph_segmentation,
         test_director_prompt_contract,
         test_shot_sampling_contract,
