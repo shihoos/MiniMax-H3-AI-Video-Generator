@@ -2255,22 +2255,33 @@ class ProductionPlanner:
             )
         )
 
+        semantic_pass_succeeded = False
+
         if qwen_character_extractor is not None:
             try:
                 semantic_result = qwen_character_extractor(
                     story,
                     list(descriptors),
                 )
+        
                 descriptors = self._reconcile_semantic_characters(
                     story,
                     descriptors,
                     semantic_result,
                 )
-            except Exception:
-                # Deterministic extraction remains the production fallback; a
-                # failed semantic pass must never block offline/CI planning.
-                pass
-
+        
+                semantic_pass_succeeded = True
+        
+            except Exception as exc:
+                # Semantic character validation is optional for offline/CI operation,
+                # but failure must remain observable. The deterministic extractor is
+                # still used as the fallback and planning must not fail solely because
+                # the semantic model is unavailable.
+                self.logger.warning(
+                    "Semantic character extraction failed; using deterministic fallback: %s",
+                    exc,
+                )
+        
         if not descriptors:
             # High-confidence fallback for ordinary narrative prose.
             # Example:
