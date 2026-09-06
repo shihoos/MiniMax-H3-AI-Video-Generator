@@ -5746,6 +5746,11 @@ Return JSON only.
             "director_notes": director_notes,
             "visual_language": visual_language,
             "characters": characters,
+            # Preserve the verified canonical roster marker produced by the
+            # planner. Without this marker, the orchestrator correctly falls
+            # back to its pre-director roster, which is empty for AI_STORY
+            # before Qwen has generated the final narrative.
+            "_canonical_character_roster_verified": True,
             "scenes": scenes,
             "shots": all_shots,
         }
