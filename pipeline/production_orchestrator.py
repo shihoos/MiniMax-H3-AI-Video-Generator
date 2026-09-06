@@ -1353,12 +1353,12 @@ class ProductionOrchestrator:
                     resume_state=director_resume_state,
                 )
 
-                # Canonical entity boundary: the director may enrich the plan,
-                # but it never owns character identity. Always carry forward the
-                # planner/checkpoint roster before any critique or compilation.
-                plan["characters"] = deepcopy(
-                    canonical_characters
-                )
+                # Canonical entity boundary: raw creative output may never
+                # replace the canonical roster. A roster is accepted from the
+                # Director only when generate() explicitly marked it as verified
+                # after deterministic + semantic reconciliation.
+                if not isinstance(plan, dict) or plan.get("_canonical_character_roster_verified") is not True:
+                    plan["characters"] = deepcopy(canonical_characters)
 
                 if H3_DIRECTOR_CRITIC:
                     try:
@@ -1372,11 +1372,10 @@ class ProductionOrchestrator:
                             plan = self._apply_director_critic_patches(plan, critique)
 
                             # Critique is read-only with respect to canonical
-                            # entities. Re-assert the roster after patching so a
-                            # future critic implementation cannot erase it.
-                            plan["characters"] = deepcopy(
-                                canonical_characters
-                            )
+                            # entities. Preserve the already verified roster (or
+                            # fall back to the planner roster if verification is absent).
+                            if plan.get("_canonical_character_roster_verified") is not True:
+                                plan["characters"] = deepcopy(canonical_characters)
 
                             # Recompile only after bounded, whitelisted creative edits.
                             from planner.cinematic_compiler import CinematicCompiler
@@ -1417,12 +1416,11 @@ class ProductionOrchestrator:
 
             plan["story"] = base_plan["story"]
 
-        # Final invariant: downstream production must use the canonical roster
-        # captured from the deterministic planner/checkpoint, never a mutable
-        # director-generated substitute.
-        plan["characters"] = deepcopy(
-            canonical_characters
-        )
+        # Final invariant: downstream production may use a Director roster only
+        # when the Director marked it verified after deterministic + semantic
+        # reconciliation. Otherwise retain the planner/checkpoint roster.
+        if plan.get("_canonical_character_roster_verified") is not True:
+            plan["characters"] = deepcopy(canonical_characters)
 
         characters = self._character_objects(
             plan.get(
