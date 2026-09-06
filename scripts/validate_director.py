@@ -1115,6 +1115,122 @@ def test_canonical_roster_not_overwritten_by_qwen() -> None:
     )
 
 
+def test_verified_roster_flag_propagates_to_orchestrator() -> None:
+    # Regression guard for a real production failure reproduced from a
+    # live Kaggle benchmark: AI Story mode produced "characters=0" and
+    # a hard AssertionError on a story that clearly named two
+    # characters ("Elena Kovalenko", "Anton"). Root cause: enrich_plan()
+    # correctly computed merged["characters"] from generate()'s
+    # verified, story-derived roster, but never copied the
+    # "_canonical_character_roster_verified" flag itself into the
+    # returned dict. The orchestrator's boundary check
+    # (production_orchestrator.py) reads exactly this key to decide
+    # whether it may trust the roster enrich_plan() just computed; with
+    # the flag missing, it always fell back to its own premise-derived
+    # roster -- which is empty for AI Story mode, since the user's
+    # premise rarely names the characters Qwen goes on to invent in the
+    # final story. This test simulates that exact orchestrator check.
+    director = QwenDirector(ROOT)
+
+    premise = (
+        "Write a sci-fi thriller about a researcher who discovers "
+        "something dangerous in an abandoned Arctic station."
+    )
+
+    base_plan = {
+        "story": premise,
+        # What a premise-only deterministic pass would find: nobody,
+        # since the premise itself never names a character.
+        "characters": [],
+        "scenes": [
+            {
+                "scene_id": f"scene_{i:03d}",
+                "order": i,
+                "characters": [],
+                "shot_ids": [],
+            }
+            for i in range(1, 5)
+        ],
+        "shots": [],
+        "visual_language": {},
+    }
+
+    def fake_generate(
+        self,
+        *,
+        mode,
+        user_input,
+        base_plan,
+        checkpoint_session_id=None,
+        resume_state=None,
+    ):
+        return {
+            "enabled": True,
+            "plan": {
+                "story": (
+                    "Elena Kovalenko stumbled through the blinding "
+                    "snow. Anton had left notes behind."
+                ),
+                "director_notes": "",
+                "visual_language": {},
+                "characters": [
+                    {
+                        "character_id": "char_elena",
+                        "name": "Elena Kovalenko",
+                        "role": "protagonist",
+                        "description": "",
+                        "personality": "",
+                    },
+                    {
+                        "character_id": "char_anton",
+                        "name": "Anton",
+                        "role": "supporting",
+                        "description": "",
+                        "personality": "",
+                    },
+                ],
+                "_canonical_character_roster_verified": True,
+                "scenes": base_plan["scenes"],
+                "shots": [],
+            },
+        }
+
+    original_generate = QwenDirector.generate
+    QwenDirector.generate = fake_generate
+    try:
+        merged = director.enrich_plan(
+            mode="ai_story",
+            user_input=premise,
+            base_plan=base_plan,
+        )
+    finally:
+        QwenDirector.generate = original_generate
+
+    check(
+        merged.get("_canonical_character_roster_verified") is True,
+        "enrich_plan() did not propagate the "
+        "_canonical_character_roster_verified flag into its returned "
+        "dict, even though generate() marked the roster verified.",
+    )
+
+    # Simulate the orchestrator's own boundary check verbatim.
+    plan = merged
+    premise_derived_characters: list = []
+    if (
+        not isinstance(plan, dict)
+        or plan.get("_canonical_character_roster_verified") is not True
+    ):
+        plan["characters"] = premise_derived_characters
+
+    check(
+        {c["name"] for c in plan["characters"]}
+        == {"Elena Kovalenko", "Anton"},
+        "A verified, story-derived character roster was lost when "
+        "passed through the orchestrator's boundary check -- this is "
+        "the exact 'characters=0' production failure.",
+    )
+
+
 def test_entity_resolver_shot_rebinding() -> None:
     # P0 regression guard: shot/scene character references must resolve
     # through EntityResolver (aliases, honorifics) rather than exact-name
@@ -1850,6 +1966,7 @@ def main() -> None:
         test_h3_workflow_resolution_selector_mapping,
         test_short_story_rebalances_to_four_units_without_losing_source_text,
         test_canonical_roster_not_overwritten_by_qwen,
+        test_verified_roster_flag_propagates_to_orchestrator,
         test_entity_resolver_shot_rebinding,
         test_entity_resolution_adversarial_regressions,
         test_character_appearance_is_locally_scoped,
