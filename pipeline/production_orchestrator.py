@@ -1353,11 +1353,46 @@ class ProductionOrchestrator:
                     resume_state=director_resume_state,
                 )
 
+                # AI_STORY / EXPAND_USER_STORY produce the authoritative story
+                # inside the Director. The initial planner roster can therefore
+                # be empty before that story exists. Recover the canonical roster
+                # once from the final generated story using the deterministic
+                # planner path; this is a semantic boundary, not a blacklist or
+                # a second Qwen ownership path.
+                if (
+                    mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE)
+                    and not canonical_characters
+                    and str(plan.get("story", "") or "").strip()
+                ):
+                    recovered_characters = self.planner.create_characters(
+                        str(plan.get("story", "") or "")
+                    )
+                    if recovered_characters:
+                        canonical_characters = [
+                            character.to_dict()
+                            for character in recovered_characters
+                            if character is not None
+                        ]
+                        plan["characters"] = deepcopy(canonical_characters)
+
                 # Canonical entity boundary: raw creative output may never
-                # replace the canonical roster. A roster is accepted from the
-                # Director only when generate() explicitly marked it as verified
-                # after deterministic + semantic reconciliation.
-                if not isinstance(plan, dict) or plan.get("_canonical_character_roster_verified") is not True:
+                # replace a missing/invalid canonical roster. A Director roster
+                # is accepted only when generate() explicitly verified it and
+                # it contains usable character dictionaries.
+                verified_characters = (
+                    plan.get("characters", [])
+                    if isinstance(plan, dict)
+                    else []
+                )
+                usable_verified = isinstance(verified_characters, list) and any(
+                    isinstance(character, dict)
+                    and str(character.get("name", "") or "").strip()
+                    for character in verified_characters
+                )
+                if (
+                    not usable_verified
+                    or plan.get("_canonical_character_roster_verified") is not True
+                ):
                     plan["characters"] = deepcopy(canonical_characters)
 
                 if H3_DIRECTOR_CRITIC:
@@ -1416,10 +1451,19 @@ class ProductionOrchestrator:
 
             plan["story"] = base_plan["story"]
 
-        # Final invariant: downstream production may use a Director roster only
-        # when the Director marked it verified after deterministic + semantic
-        # reconciliation. Otherwise retain the planner/checkpoint roster.
-        if plan.get("_canonical_character_roster_verified") is not True:
+        # Final invariant: a verified Director roster is usable only when it
+        # actually contains character dictionaries. Otherwise retain the
+        # canonical planner/checkpoint roster recovered above.
+        final_characters = plan.get("characters", []) if isinstance(plan, dict) else []
+        usable_final = isinstance(final_characters, list) and any(
+            isinstance(character, dict)
+            and str(character.get("name", "") or "").strip()
+            for character in final_characters
+        )
+        if (
+            not usable_final
+            or plan.get("_canonical_character_roster_verified") is not True
+        ):
             plan["characters"] = deepcopy(canonical_characters)
 
         characters = self._character_objects(
