@@ -2059,6 +2059,110 @@ Do not output JSON, labels, analysis, notes, or explanations.
         }
 
     @staticmethod
+    def _character_extraction_json_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "entity_type": {
+                                "type": "string",
+                                "enum": [
+                                    "PERSON",
+                                    "CHARACTER",
+                                    "SENTIENT",
+                                    "ORGANIZATION",
+                                    "LOCATION",
+                                    "FACILITY",
+                                    "OBJECT",
+                                    "ROLE",
+                                    "EVENT",
+                                    "OTHER",
+                                ],
+                            },
+                            "is_character": {"type": "boolean"},
+                            "aliases": {
+                                "type": "array",
+                                "maxItems": 6,
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "name",
+                            "entity_type",
+                            "is_character",
+                            "aliases",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["candidates"],
+            "additionalProperties": False,
+        }
+
+    def extract_character_entities(
+        self,
+        story: str,
+        deterministic_candidates: list[str] | None = None,
+    ) -> dict:
+        """Use the already-loaded Qwen model for a compact semantic entity pass.
+
+        Qwen is a recovery/classification layer only: it must not invent names,
+        and ProductionPlanner performs the final canonicalization and safety
+        checks before characters enter the production roster.
+        """
+        story = str(story or "").strip()
+        if not story:
+            return {"candidates": []}
+
+        candidate_hints = [
+            str(value).strip()
+            for value in (deterministic_candidates or [])
+            if str(value).strip()
+        ]
+
+        system_prompt = """
+You are a strict character/entity extraction component for a cinematic production planner.
+Return JSON only. Analyze the supplied story and classify named entities relevant to character identity.
+A character is a named human or named sentient fictional entity that can receive a stable identity lock.
+Do NOT invent names. Every returned name must literally occur in the story text, allowing only harmless
+case/punctuation/possessive normalization. Do NOT treat locations, organizations, facilities, projects,
+missions, events, objects, calendar words, weather, or unnamed role descriptors as characters.
+Titles such as Dr., Captain, Commander, etc. are not part of the canonical name. Preserve full names when
+present and use the most complete canonical name actually present in the story. Review the deterministic
+candidate hints and explicitly mark any that are not characters, while also recovering named characters
+that the deterministic scan missed.
+""".strip()
+
+        user_payload = json.dumps(
+            {
+                "story": self._limit_text(story, 7000),
+                "deterministic_candidates": candidate_hints[:32],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        return self._chat_json(
+            system_prompt,
+            user_payload,
+            minimum_completion=96,
+            temperature=0.05,
+            top_p=0.70,
+            call_name="character_entity_extraction",
+            max_completion=384,
+            json_mode=True,
+            disable_thinking=True,
+            response_schema=self._character_extraction_json_schema(),
+        )
+
+    @staticmethod
     def _scene_json_schema() -> dict:
         metadata = QwenDirector._metadata_json_schema()
         return {
@@ -5071,7 +5175,8 @@ Return JSON only.
             canonical_source_story = user_input
 
         canonical_characters = planner.create_characters(
-            canonical_source_story
+            canonical_source_story,
+            qwen_character_extractor=self.extract_character_entities,
         )
 
         characters = self._sanitize_characters(
@@ -5136,6 +5241,11 @@ Return JSON only.
             "director_notes": director_notes,
             "visual_language": visual_language,
             "characters": deepcopy(characters),
+            # This marker is set only after ProductionPlanner has performed
+            # deterministic extraction plus the bounded Qwen semantic pass.
+            # enrich_plan may use this verified roster, but never raw Qwen
+            # character metadata from the creative response.
+            "_canonical_character_roster_verified": True,
             "scenes": deepcopy(scenes),
             "shots": prior_shots,
         }
@@ -5869,23 +5979,23 @@ state. Do not invent facts that are not present in the plan.
 
         merged["visual_language"] = base_visual_language
 
-        # Canonical structure is never replaced by Qwen.
-        # Characters and scene topology come from the deterministic base plan.
+        # Canonical structure is never taken directly from raw creative Qwen
+        # metadata. The only exception is the roster that generate() itself
+        # marked as verified after deterministic + semantic reconciliation.
         base_characters = deepcopy(
             base_plan.get("characters", [])
             or []
         )
-        
+
         creative_characters = deepcopy(
             creative.get("characters", [])
             or []
         )
-        
-        merged["characters"] = (
-            base_characters
-            if base_characters
-            else creative_characters
-        )
+
+        if creative.get("_canonical_character_roster_verified") is True:
+            merged["characters"] = creative_characters or base_characters
+        else:
+            merged["characters"] = base_characters
 
         canonical_scenes = deepcopy(
             base_plan.get("scenes", [])
