@@ -761,6 +761,89 @@ def install_embedded_context_ir_node(runtime: dict) -> None:
         shutil.rmtree(pycache, ignore_errors=True)
     print("[NODE] embedded official MiniMax H3 Context-IR bridge")
 
+def verify_h3_optimization_runtime(runtime: dict) -> None:
+    """Validate the installed H3 optimizer before any model generation runs."""
+    cfg = dict(runtime.get("h3_optimization", {}) or {})
+    expected_revision = str(cfg.get("revision", "")).strip()
+    expected_version = str(cfg.get("version", "")).strip()
+    node_dir = CUSTOM / "H3-Optimizations"
+
+    if not node_dir.is_dir():
+        raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
+    if len(expected_revision) != 40:
+        raise RuntimeError("runtime_versions.yaml contains no valid H3-Optimizations SHA")
+
+    try:
+        actual_revision = subprocess.check_output(
+            ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to read installed H3-Optimizations revision: {exc}"
+        ) from exc
+
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            "Installed H3-Optimizations revision does not match the runtime lock: "
+            f"expected={expected_revision}, actual={actual_revision}"
+        )
+
+    try:
+        import h3_optimizations
+        from h3_optimizations.memory import forward as h3_forward
+        from h3_optimizations.memory import linear as h3_linear
+        from h3_optimizations.qkv import providers as h3_providers
+    except Exception as exc:
+        raise RuntimeError(
+            "H3-Optimizations installed but bounded execution modules could not "
+            f"be imported: {exc}"
+        ) from exc
+
+    package_version = str(getattr(h3_optimizations, "__version__", "")).strip()
+    if expected_version and package_version != expected_version:
+        raise RuntimeError(
+            "Installed H3-Optimizations version does not match the runtime lock: "
+            f"expected={expected_version}, actual={package_version}"
+        )
+
+    required_symbols = (
+        (h3_linear, "ConvRotTwoSliceMLP"),
+        (h3_linear, "HeldMLP"),
+        (h3_linear, "acquire_linear"),
+        (h3_linear, "bind_convrot_mlp"),
+        (h3_forward, "make_forward"),
+        (h3_forward, "iter_mod_chunks"),
+        (h3_providers, "MLP_CONVROT_INT8_TWO_SLICE"),
+        (h3_providers, "resolve_mlp_provider"),
+    )
+    missing = [name for module, name in required_symbols if not hasattr(module, name)]
+    if missing:
+        raise RuntimeError(
+            "H3-Optimizations bounded MLP capability check failed; missing symbols: "
+            f"{missing}"
+        )
+
+    provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
+    if provider_id != "convrot_int8_two_slice":
+        raise RuntimeError(
+            f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}"
+        )
+
+    print(
+        "[H3 OPT] revision={} version={} bounded_mlp=PASS "
+        "ConvRotTwoSliceMLP=PASS provider={}".format(
+            actual_revision, package_version, provider_id
+        ),
+        flush=True,
+    )
+    print(
+        "[H3 OPT] runtime capability check passed; no H3 model generation was run.",
+        flush=True,
+    )
+
+
 def install_nodes() -> None:
 
     manifest = load_yaml(
@@ -1066,6 +1149,7 @@ def main():
     )
 
     install_nodes()
+    verify_h3_optimization_runtime(runtime)
     install_embedded_context_ir_node(runtime)
 
     # Re-assert the locked PyTorch CUDA build after every package that can
