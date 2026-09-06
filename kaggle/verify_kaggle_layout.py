@@ -78,7 +78,10 @@ def verify_workflow(path: Path, turbo: bool) -> None:
 
     forbidden = {
         "MiniMaxH3FP16Safe",
+        "MiniMaxH3FP16T4",
         "MiniMaxH3_FP16_T4",
+        "MiniMaxH3MLPChunk",
+        "MiniMaxH3ActivationChunk",
     }
 
     present_forbidden = {
@@ -177,11 +180,36 @@ def verify_workflow(path: Path, turbo: bool) -> None:
             f"got {widgets[2]!r}"
         )
 
+    if str(widgets[4]) != "Preserve native":
+        fail(
+            f"{path}: expected precision_mode='Preserve native', "
+            f"got {widgets[4]!r}"
+        )
+
+    if str(widgets[5]) != "Auto":
+        fail(
+            f"{path}: expected qkv_streaming_mode='Auto', "
+            f"got {widgets[5]!r}"
+        )
+
     if str(widgets[7]) != "Lower VRAM (slower)":
         fail(
             f"{path}: expected Lower VRAM (slower), "
             f"got {widgets[7]!r}"
         )
+
+
+
+def verify_optimizer_settings_only(path: Path) -> None:
+    workflow = load_json(path)
+    optimizer = get_node(workflow, "H3MemoryOptimization")
+    widgets = optimizer.get("widgets_values", [])
+    if len(widgets) < 8:
+        fail(f"Incomplete H3MemoryOptimization widgets: {path}")
+    checks = ((2, 2560, "chunk_rows"), (4, "Preserve native", "precision_mode"), (5, "Auto", "qkv_streaming_mode"), (7, "Lower VRAM (slower)", "attention_memory_mode"))
+    for index, expected, label in checks:
+        if widgets[index] != expected:
+            fail(f"{path}: expected {label}={expected!r}, got {widgets[index]!r}")
 
 
 def verify_runtime_config() -> None:
@@ -223,6 +251,29 @@ def verify_runtime_config() -> None:
         fail("H3 memory optimization must be enabled")
     if h3_opt.get("qkv_streaming_mode") != "Auto":
         fail("H3 qkv_streaming_mode must be Auto")
+    if h3_opt.get("precision_mode") != "Preserve native":
+        fail("H3 precision_mode must be Preserve native")
+    if h3_opt.get("sparse_attention") is not False:
+        fail("H3 sparse_attention must remain false")
+
+    h3_revision = str(h3_opt.get("revision", "")).strip()
+    expected_h3_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    if h3_revision != expected_h3_revision:
+        fail(
+            "H3 revision is not the verified 0.2.41 release commit: "
+            f"{h3_revision!r}"
+        )
+
+    custom_nodes = yaml.safe_load(CUSTOM.read_text(encoding="utf-8")) or {}
+    required_nodes = custom_nodes.get("custom_nodes", {}).get("required", []) or []
+    h3_node = next(
+        (item for item in required_nodes if item.get("name") == "H3-Optimizations"),
+        None,
+    )
+    if h3_node is None:
+        fail("H3-Optimizations is missing from custom_nodes.yaml")
+    if str(h3_node.get("revision", "")).strip() != h3_revision:
+        fail("H3 revision differs between custom_nodes.yaml and runtime_versions.yaml")
 
 
     print("[PASS] Runtime configuration")
@@ -493,6 +544,18 @@ def verify_bootstrap() -> None:
         if target not in text:
             fail(f"Bootstrap embedded runtime target is missing: {target}")
 
+    bootstrap_optimizer_contracts = (
+        "def verify_h3_optimization_runtime(runtime: dict)",
+        "ConvRotTwoSliceMLP",
+        "verify_h3_optimization_runtime(runtime)",
+    )
+    for contract in bootstrap_optimizer_contracts:
+        if contract not in text:
+            fail(
+                "Bootstrap H3 optimizer diagnostic is incomplete: "
+                f"{contract}"
+            )
+
     # The bootstrap must carry the exact H3 numerical/memory corrections that
     # are later written into the temporary ComfyUI checkout.
     bootstrap_contracts = (
@@ -528,6 +591,10 @@ def main() -> None:
     verify_workflow(
         ROOT / "workflows/generation/H3_Turbo_Ref2VA_Production.json",
         turbo=True,
+    )
+
+    verify_optimizer_settings_only(
+        ROOT / "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json"
     )
 
     print("[PASS] Production workflow topology")
