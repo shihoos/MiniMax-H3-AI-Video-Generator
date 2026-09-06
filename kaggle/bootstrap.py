@@ -790,27 +790,34 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
             f"expected={expected_revision}, actual={actual_revision}"
         )
 
-    # H3-Optimizations is a ComfyUI custom node, not an installed site-package.
-    # The package therefore lives one directory above ``h3_optimizations/`` and
-    # must be exposed on sys.path before validating its Python modules.
-    node_dir_text = str(node_dir)
-    path_added = False
-    if node_dir_text not in sys.path:
-        sys.path.insert(0, node_dir_text)
-        path_added = True
-
+    # The H3 optimizer is a ComfyUI custom node, not a separately installed
+    # site-package. Its Python package lives inside the custom-node directory,
+    # while its implementation imports the sibling ComfyUI ``comfy`` package.
+    # Expose both roots only for this verification import so the checker tests
+    # the exact installed sources without changing the persistent process path.
+    import_roots = [
+        str(COMFY),
+        str(node_dir),
+    ]
+    original_sys_path = list(sys.path)
     try:
+        for import_root in reversed(import_roots):
+            if import_root not in sys.path:
+                sys.path.insert(0, import_root)
+
         import h3_optimizations
         from h3_optimizations.memory import forward as h3_forward
         from h3_optimizations.memory import linear as h3_linear
         from h3_optimizations.qkv import providers as h3_providers
 
-        package_file = Path(getattr(h3_optimizations, "__file__", "")).resolve()
-        expected_package_dir = (node_dir / "h3_optimizations").resolve()
-        if package_file.parent != expected_package_dir:
+        package_file = Path(
+            getattr(h3_optimizations, "__file__", "")
+        ).resolve()
+        expected_package_root = (node_dir / "h3_optimizations").resolve()
+        if not package_file.is_relative_to(expected_package_root):
             raise RuntimeError(
-                "H3-Optimizations imported from an unexpected location: "
-                f"expected={expected_package_dir}, actual={package_file.parent}"
+                "H3-Optimizations import resolved outside the pinned custom-node "
+                f"directory: {package_file}"
             )
     except Exception as exc:
         raise RuntimeError(
@@ -818,11 +825,7 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
             f"be imported: {exc}"
         ) from exc
     finally:
-        if path_added:
-            try:
-                sys.path.remove(node_dir_text)
-            except ValueError:
-                pass
+        sys.path[:] = original_sys_path
 
     package_version = str(getattr(h3_optimizations, "__version__", "")).strip()
     if expected_version and package_version != expected_version:
@@ -1172,12 +1175,17 @@ def main():
     )
 
     install_nodes()
-    verify_h3_optimization_runtime(runtime)
     install_embedded_context_ir_node(runtime)
 
     # Re-assert the locked PyTorch CUDA build after every package that can
     # mutate the Python runtime has been installed.
     install_pytorch_runtime(runtime)
+
+    # Verify H3 only after the final locked PyTorch runtime is active. The
+    # optimizer imports ComfyUI and Torch internals, so checking it earlier
+    # would validate against Kaggle's pre-existing runtime instead of the
+    # project's locked CUDA environment.
+    verify_h3_optimization_runtime(runtime)
 
     # ComfyUI is a runtime dependency, not repository content.
     # Apply the project-owned H3 overrides only after the locked upstream
