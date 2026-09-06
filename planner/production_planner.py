@@ -2267,9 +2267,27 @@ class ProductionPlanner:
         if not isinstance(semantic_result, dict):
             return cls._canonicalize_character_descriptors(result)
 
+        # Qwen normally returns {"candidates": [{...}]}, but the live
+        # runtime can also return the compact semantic form
+        # {"characters": ["Name", ...]}. Accept both representations at
+        # this boundary while retaining the literal story-anchor safety gate.
+        semantic_candidates = list(
+            semantic_result.get("candidates", []) or []
+        )
+        character_items = semantic_result.get("characters", []) or []
+        if not semantic_candidates and character_items:
+            semantic_candidates = list(character_items)
+
         verdicts = {}
         additions = []
-        for raw in semantic_result.get("candidates", []) or []:
+        for raw in semantic_candidates:
+            if isinstance(raw, str):
+                raw = {
+                    "name": raw,
+                    "entity_type": "CHARACTER",
+                    "is_character": True,
+                    "aliases": [],
+                }
             if not isinstance(raw, dict):
                 continue
             name = str(raw.get("name", "") or "").strip()
@@ -2291,14 +2309,23 @@ class ProductionPlanner:
             "heroine", "explorer", "detective", "scientist", "soldier",
             "warrior", "king", "queen", "robot", "android", "pilot",
         }
-        true_semantic = [
-            str(raw.get("name", "") or "").strip()
-            for raw in semantic_result.get("candidates", []) or []
-            if isinstance(raw, dict)
-            and bool(raw.get("is_character", False))
-            and str(raw.get("entity_type", "")).strip().upper()
-            in {"PERSON", "CHARACTER", "SENTIENT"}
-        ]
+        true_semantic = []
+        for raw in semantic_candidates:
+            if isinstance(raw, str):
+                raw = {
+                    "name": raw,
+                    "entity_type": "CHARACTER",
+                    "is_character": True,
+                }
+            if (
+                isinstance(raw, dict)
+                and bool(raw.get("is_character", False))
+                and str(raw.get("entity_type", "")).strip().upper()
+                in {"PERSON", "CHARACTER", "SENTIENT"}
+            ):
+                name = str(raw.get("name", "") or "").strip()
+                if name:
+                    true_semantic.append(name)
 
         def token_sequence(value: str) -> list[str]:
             return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split()
