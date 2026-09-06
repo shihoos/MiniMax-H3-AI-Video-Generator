@@ -6002,6 +6002,18 @@ state. Do not invent facts that are not present in the plan.
         else:
             merged["characters"] = base_characters
 
+        # Propagate the verification flag itself. Without this, the
+        # orchestrator's boundary check (which relies on this exact key
+        # to decide whether it may trust the roster just computed above)
+        # always sees it missing and silently discards a correctly
+        # verified, story-derived roster in favor of its own premise-
+        # derived one -- which is empty for AI Story / Expand Story mode,
+        # since the premise rarely names the characters Qwen goes on to
+        # invent in the final story.
+        merged["_canonical_character_roster_verified"] = (
+            creative.get("_canonical_character_roster_verified") is True
+        )
+
         canonical_scenes = deepcopy(
             base_plan.get("scenes", [])
             or []
