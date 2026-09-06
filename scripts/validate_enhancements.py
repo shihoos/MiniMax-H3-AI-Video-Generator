@@ -23,6 +23,49 @@ def _assert_raises(exc_type, fn):
         return
     raise AssertionError(f"Expected {exc_type.__name__} to be raised.")
 
+def test_shot_reference_video_by_character_roundtrip() -> None:
+    from schemas.shot import Shot
+
+    shot = Shot(
+        shot_id="shot_test_001",
+        scene_id="scene_test_001",
+        order=1,
+        duration_seconds=4.0,
+        characters=["Alice"],
+        location="Test Location",
+        action="Alice walks forward.",
+        camera_shot="medium",
+        camera_movement="static",
+        lens_and_depth_of_field="35mm",
+        composition_notes="centered",
+        lighting="soft",
+        color_temperature="neutral",
+        mood="calm",
+        visual_prompt="Alice walks forward.",
+        reference_video_by_character={
+            "Alice": ["/refs/alice_motion.mp4"],
+        },
+    )
+
+    payload = shot.to_dict()
+
+    check(
+        payload.get("reference_video_by_character")
+        == {
+            "Alice": ["/refs/alice_motion.mp4"],
+        },
+        "Shot.to_dict() dropped reference_video_by_character.",
+    )
+
+    rebuilt = Shot(**payload)
+
+    check(
+        rebuilt.reference_video_by_character
+        == {
+            "Alice": ["/refs/alice_motion.mp4"],
+        },
+        "Shot serialization round-trip lost reference_video_by_character.",
+    )
 
 def main() -> None:
     plan = {
