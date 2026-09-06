@@ -2250,6 +2250,16 @@ class ProductionPlanner:
         )
         return bool(vocative_pattern.search(story))
 
+    @staticmethod
+    def _semantic_identity_key(value: str) -> str:
+        """Return a conservative comparison key for character identities."""
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"[^a-z0-9']+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
     @classmethod
     def _reconcile_semantic_characters(
         cls,
@@ -2259,9 +2269,11 @@ class ProductionPlanner:
     ) -> list[str]:
         """Merge deterministic identities with Qwen semantic character classification.
 
-        Strong deterministic identities are the baseline. Qwen may recover
-        additional story-anchored identities, but one semantic false-negative
-        cannot erase a high-confidence deterministic named identity.
+        Deterministic identity detection is the canonical admission boundary.
+        Qwen supplies semantic classification and canonical-name normalization,
+        but it may not introduce a brand-new identity merely because a token
+        appears in the story. One semantic false-negative cannot erase a
+        high-confidence deterministic named identity.
         """
         result = list(deterministic or [])
         if not isinstance(semantic_result, dict):
@@ -2280,6 +2292,184 @@ class ProductionPlanner:
 
         verdicts = {}
         additions = []
+
+        # Semantic extraction is a classification/reconciliation layer, not an
+        # unrestricted entity generator. A semantic candidate may become a
+        # canonical identity only when the deterministic character detector
+        # independently supports that same identity in the story. This is the
+        # critical anti-hallucination boundary: mere textual presence is not
+        # enough (for example, "Arctic" occurs in "Arctic station" but is
+        # not a character).
+        deterministic_names = {
+            cls._semantic_identity_key(value)
+            for value in result
+            if str(value or '').strip()
+        }
+
+        def semantic_candidate_is_deterministically_supported(
+            candidate: str,
+        ) -> bool:
+            """Require independent grammatical character evidence for a new semantic identity."""
+            candidate_key = cls._semantic_identity_key(candidate)
+            if not candidate_key:
+                return False
+
+            # A deterministic identity already passed the planner's full
+            # evidence model, so it is an unconditional admission candidate.
+            if candidate_key in deterministic_names:
+                return True
+
+            bare_candidate = candidate_key
+            if bare_candidate.startswith("the "):
+                bare_candidate = bare_candidate[4:].strip()
+
+            for deterministic_name in deterministic_names:
+                bare_deterministic = deterministic_name
+                if bare_deterministic.startswith("the "):
+                    bare_deterministic = bare_deterministic[4:].strip()
+                if bare_candidate == bare_deterministic:
+                    return True
+
+            story_text = str(story or "")
+            escaped_candidate = re.escape(candidate.strip())
+
+            # Explicit naming is independent structural evidence.
+            if re.search(
+                r"\b(?:named|called)\s+" + escaped_candidate + r"\b",
+                story_text,
+                flags=re.IGNORECASE,
+            ):
+                return True
+
+            # Appositive/name-as-role construction is strong identity evidence.
+            if re.search(
+                r"(?<![A-Za-z0-9'_-])"
+                + escaped_candidate
+                + r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
+                story_text,
+                flags=re.IGNORECASE,
+            ):
+                return True
+
+            # A direct address is an unambiguous identity reference.
+            if re.search(
+                r"(?:^|[\"'“”])\s*"
+                + escaped_candidate
+                + r"\s*,\s*(?=[a-z][a-z'-]+\b)",
+                story_text,
+                flags=re.MULTILINE,
+            ):
+                return True
+
+            # Possessive references such as "Sara's notebook" identify an
+            # entity mention without requiring a subject verb in the same
+            # sentence. Qwen still decides whether that entity is a character.
+            if re.search(
+                r"(?<![A-Za-z0-9'_-])"
+                + escaped_candidate
+                + r"(?:'s|’)\s+",
+                story_text,
+                flags=re.IGNORECASE,
+            ):
+                return True
+
+            # Generic named-entity occurrence gate. A proposed identity must
+            # occur in a grammatical position that can act as an entity head.
+            # The critical anti-modifier rule rejects:
+            #     "Arctic station" -> Arctic
+            # because the candidate is immediately followed by a lowercase noun.
+            # It still accepts:
+            #     "Elena stumbled"
+            #     "Marcus Chen waited"
+            #     "beside Marcus Chen."
+            subject_verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
+            auxiliary_verbs = set(getattr(cls, "AUXILIARY_SUBJECT_VERBS", ()))
+            verb_vocab = subject_verbs | auxiliary_verbs
+
+            occurrence_pattern = re.compile(
+                r"(?<![A-Za-z0-9'_-])"
+                + escaped_candidate
+                + r"(?![A-Za-z0-9'_-])",
+                flags=re.IGNORECASE,
+            )
+
+            clause_introducers = {
+                "what", "that", "who", "whom", "which", "where", "when",
+                "while", "because", "although", "unless", "since", "after",
+                "before", "as", "if", "though", "and", "or", "but",
+            }
+            prepositions = {
+                "about", "above", "across", "after", "against", "along",
+                "among", "around", "at", "behind", "beside", "between",
+                "beyond", "by", "despite", "during", "for", "from", "in",
+                "inside", "near", "of", "on", "onto", "over", "through",
+                "to", "toward", "towards", "under", "until", "upon", "with",
+                "within", "without",
+            }
+
+            for match in occurrence_pattern.finditer(story_text):
+                tail = story_text[match.end():]
+                head = story_text[:match.start()]
+
+                previous_word_match = re.search(
+                    r"([a-z][a-z'-]*)\s*$",
+                    head,
+                    flags=re.IGNORECASE,
+                )
+                previous_word = (
+                    previous_word_match.group(1).lower()
+                    if previous_word_match is not None
+                    else ""
+                )
+
+                next_word_match = re.match(
+                    r"\s+([a-z][a-z'-]*)\b",
+                    tail,
+                    flags=re.IGNORECASE,
+                )
+
+                if next_word_match is None:
+                    # End of sentence / punctuation / quote: entity-like
+                    # occurrence rather than a modifier head.
+                    return True
+
+                next_word = next_word_match.group(1).lower()
+
+                # A candidate that follows a known verb is an object/entity
+                # reference even when a determiner follows it ("gave Eli a map").
+                if previous_word in verb_vocab:
+                    return True
+
+                # A known auxiliary/narrative verb can head the predicate.
+                if next_word in verb_vocab:
+                    return True
+
+                # Regular finite/past/progressive morphology supplies the same
+                # structural signal without adding a non-person vocabulary.
+                if re.fullmatch(r"[a-z][a-z'-]*(?:ed|ing|s)", next_word):
+                    return True
+
+                # Embedded-clause subjects such as "what Sara meant" are valid
+                # character positions even when the verb is an irregular form
+                # outside the maintained verb vocabulary. The clause introducer
+                # is the structural evidence; Qwen still decides character type.
+                if previous_word in clause_introducers:
+                    return True
+
+                # A prepositional reference ending at punctuation is an entity
+                # mention ("beside Marcus Chen."). Do not accept it when a
+                # lowercase head follows, because that is the modifier pattern
+                # responsible for false positives such as "Arctic station".
+                if previous_word in prepositions:
+                    continue
+
+                # Otherwise the candidate is immediately followed by a normal
+                # lowercase word. Treat it as a modifier/complement rather
+                # than independent character evidence.
+
+            return False
+
+
         for raw in semantic_candidates:
             if isinstance(raw, str):
                 raw = {
@@ -2301,6 +2491,9 @@ class ProductionPlanner:
                 and str(raw.get("entity_type", "")).strip().upper()
                 in {"PERSON", "CHARACTER", "SENTIENT"}
                 and cls._story_has_character_name(story, canonical_name)
+                and semantic_candidate_is_deterministically_supported(
+                    canonical_name
+                )
             ):
                 additions.append(canonical_name)
 
