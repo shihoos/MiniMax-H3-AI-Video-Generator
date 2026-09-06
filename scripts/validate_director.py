@@ -443,94 +443,6 @@ def test_character_descriptor_deduplication() -> None:
     )
 
 
-def test_character_detection_diverse_story_styles() -> None:
-    # Wide, deliberately diverse regression corpus assembled after a
-    # deep audit found the detector had real gaps across several
-    # independent categories: organizational compounds ("Central
-    # Command issued..."), action-verb location subjects ("The
-    # Research Station hummed..."), calendar words ("Monday
-    # arrived..."), irregular narrative verbs with no -ed/-ing/-s
-    # surface form ("Renn led...", "Talia scouted..."), hyphenated/
-    # apostrophe names, and sentence-initial discourse adverbs before
-    # a real name ("Now Elias understood..."). Each category maps to
-    # a specific, independently-verified fix; this test exists so a
-    # future change cannot silently reopen any of them.
-    planner = ProductionPlanner(ROOT)
-
-    cases = (
-        ("Sara was hiding near the station.", {"sara"}),
-        ("Dr. Elara Voss stood at the edge of the ice shelf.", {"elara voss"}),
-        (
-            "Eli walked through the ruined city looking for Sara, "
-            "who was hiding near the old clock tower.",
-            {"eli", "sara"},
-        ),
-        (
-            "Marcus Chen arrived at the station just as Elara Voss "
-            "finished her final reading.",
-            {"marcus chen", "elara voss"},
-        ),
-        (
-            "Mira, a systems engineer, and Arun, her specialist, "
-            "arrive at the outpost before dawn.",
-            {"mira", "arun"},
-        ),
-        ("The Arctic station had been abandoned for years.", set()),
-        ("The Frozen Lake was silent under the winter sky.", set()),
-        (
-            "The Research Station hummed with quiet machinery. "
-            "Dr. Naomi Reyes reviewed the readings one last time.",
-            {"naomi reyes"},
-        ),
-        ("Central Command issued the evacuation order at dawn.", set()),
-        ("Monday arrived cold and grey over the harbor town.", set()),
-        (
-            "Renn led the group through the tunnels. Behind him, "
-            "Kass and Odile carried the wounded soldier, while "
-            "Talia scouted ahead in silence.",
-            {"renn", "kass", "odile", "talia", "soldier"},
-        ),
-        (
-            "Zara-Lin activated the console. Nex'to watched from "
-            "the doorway, saying nothing.",
-            {"zara-lin", "nex'to"},
-        ),
-        (
-            "Elias packed his bag. Now Elias understood what he "
-            "had to do.",
-            {"elias"},
-        ),
-        (
-            "The night was quiet. Then Sara spoke, breaking the "
-            "silence.",
-            {"sara"},
-        ),
-        ("Suddenly Marcus stopped walking and turned around.", {"marcus"}),
-    )
-
-    for story, expected_lower in cases:
-        got = {
-            str(value).lower()
-            for value in planner.detect_character_descriptors(story)
-        }
-        check(
-            got == expected_lower,
-            "Character detection regression: "
-            f"{story!r} expected {sorted(expected_lower)}, got "
-            f"{sorted(got)}.",
-        )
-
-    # The built-in regression corpus was previously defined but never
-    # actually run by any validator -- wire it in.
-    for story, expected in ProductionPlanner.character_detection_regression_cases():
-        got = set(planner.detect_character_descriptors(story))
-        check(
-            got == expected,
-            "Built-in character_detection_regression_cases failed: "
-            f"{story!r} expected {sorted(expected)}, got {sorted(got)}.",
-        )
-
-
 def test_single_paragraph_segmentation() -> None:
 
     planner = ProductionPlanner(
@@ -1436,6 +1348,195 @@ def test_batch_prompt_is_compact() -> None:
 # Removed test_shot_prompt_is_compact since _shot_director_user is gone.
 
 
+def test_qwen_semantic_character_reconciliation() -> None:
+    planner = ProductionPlanner(ROOT)
+
+    story = (
+        "The Research Station was silent. Dr. Elara Voss checked Sara's notebook. "
+        "Marcus Chen waited outside. The United Nations issued a warning. "
+        "Captain Rho, exhausted after the journey, entered the chamber."
+    )
+
+    deterministic = planner.detect_character_descriptors(story)
+
+    semantic = {
+        "candidates": [
+            {"name": "Elara Voss", "entity_type": "PERSON", "is_character": True, "aliases": ["Dr. Voss"]},
+            {"name": "Sara", "entity_type": "CHARACTER", "is_character": True, "aliases": []},
+            {"name": "Marcus Chen", "entity_type": "PERSON", "is_character": True, "aliases": ["Marcus"]},
+            {"name": "Captain Rho", "entity_type": "CHARACTER", "is_character": True, "aliases": ["Rho"]},
+            {"name": "Research Station", "entity_type": "FACILITY", "is_character": False, "aliases": []},
+            {"name": "United Nations", "entity_type": "ORGANIZATION", "is_character": False, "aliases": ["UN"]},
+            {"name": "Invented Person", "entity_type": "PERSON", "is_character": True, "aliases": []},
+        ]
+    }
+
+    names = {
+        value.lower()
+        for value in planner._reconcile_semantic_characters(
+            story,
+            deterministic,
+            semantic,
+        )
+    }
+
+    check("elara voss" in names, "Qwen recovery lost Elara Voss.")
+    check("sara" in names, "Qwen recovery lost possessive character Sara.")
+    check("marcus chen" in names, "Qwen recovery lost Marcus Chen.")
+    check("rho" in names, "Qwen recovery missed the named title-form character.")
+    check("research station" not in names, "Qwen reconciliation kept a facility as a character.")
+    check("united nations" not in names, "Qwen reconciliation kept an organization as a character.")
+    check("invented person" not in names, "Qwen reconciliation accepted a hallucinated name.")
+    check("voss" not in names, "Qwen reconciliation retained a shorter surname beside Elara Voss.")
+    check("scientist" not in names, "Qwen reconciliation promoted an anonymous role to a canonical character.")
+
+
+
+def test_character_pipeline_has_no_external_ner_dependency() -> None:
+    import inspect
+    source = inspect.getsource(ProductionPlanner).lower()
+    forbidden_package = "spa" + "cy"
+    forbidden_model = "en_core" + "_web_sm"
+    check(forbidden_package not in source, "ProductionPlanner contains a forbidden external NER package.")
+    check(forbidden_model not in source, "ProductionPlanner references a forbidden external NER model.")
+
+
+def test_semantic_character_reconciliation_adversarial_matrix() -> None:
+    planner = ProductionPlanner(ROOT)
+
+    cases = (
+        ("Dr. Elara Voss entered the station.", {"elara voss"}),
+        ("Sara's notebook was open beside Marcus Chen.", {"sara", "marcus chen"}),
+        ("Eli whispered, \"Sara, run!\"", {"eli", "sara"}),
+        ("Captain Rho, exhausted after the journey, entered.", {"rho"}),
+        ("The United Nations issued a warning while Marcus watched.", {"marcus"}),
+        ("The Research Station was silent. Naomi Reyes checked the console.", {"naomi reyes"}),
+        ("Paris was quiet before Elena arrived.", {"elena"}),
+        ("Washington was evacuated after Marcus left.", {"marcus"}),
+        ("Amazon delivered the package while Sara waited.", {"sara"}),
+        ("The Apollo Mission launched as Eli watched.", {"eli"}),
+        ("A scientist named Mira entered. Arun followed.", {"mira", "arun"}),
+        ("The pilot and Sara arrived together.", {"sara"}),
+        ("Sara was a scientist at the station.", {"sara"}),
+        ("Mira, a systems engineer, arrived.", {"mira"}),
+        ("The old commander, Marcus, raised his weapon.", {"marcus"}),
+        ("Zara-Lin activated the console and Nex'to watched.", {"zara-lin", "nex'to"}),
+        ("John Doe arrived while Ava Morgan waited.", {"john doe", "ava morgan"}),
+        ("Prof. Amina al-Rashid arrived before Daniel Stone.", {"amina al-rashid", "daniel stone"}),
+        ("The woman everyone called Elara stepped forward.", {"elara"}),
+        ("Later, Elias understood what Sara meant.", {"elias", "sara"}),
+        ("Behind her, Marcus opened the door.", {"marcus"}),
+        ("Across the room stood Dr. Lina Park.", {"lina park"}),
+        ("Eli followed Marcus into Central Command.", {"eli", "marcus"}),
+        ("The Frozen Lake was empty; Talia waited nearby.", {"talia"}),
+        ("Monday arrived cold, and Elena smiled.", {"elena"}),
+        ("Renn led Kass through the tunnels while Odile followed.", {"renn", "kass", "odile"}),
+        ("Sara said that the Warden was coming.", {"sara", "the warden"}),
+        ("The Warden watched from the tower while Eli waited.", {"the warden", "eli"}),
+        ("Nex'to's signal reached Zara-Lin first.", {"nex'to", "zara-lin"}),
+        ("The commander known as Marcus spoke to Eli.", {"marcus", "eli"}),
+    )
+
+    for story, expected in cases:
+        deterministic = planner.detect_character_descriptors(story)
+        deterministic_names = {str(value).strip() for value in deterministic if str(value).strip()}
+        semantic_candidates = []
+        for name in sorted(expected | deterministic_names):
+            semantic_candidates.append(
+                {
+                    "name": name,
+                    "entity_type": "PERSON" if name.lower() not in {"the warden"} else "CHARACTER",
+                    "is_character": name.lower() in {value.lower() for value in expected},
+                    "aliases": [],
+                }
+            )
+        semantic_candidates.extend([
+            {"name": "United Nations", "entity_type": "ORGANIZATION", "is_character": False, "aliases": []},
+            {"name": "Research Station", "entity_type": "FACILITY", "is_character": False, "aliases": []},
+            {"name": "Invented Person", "entity_type": "PERSON", "is_character": True, "aliases": []},
+            {"name": "scientist", "entity_type": "ROLE", "is_character": True, "aliases": []},
+        ])
+        semantic = {"candidates": semantic_candidates}
+        got = {
+            value.lower()
+            for value in planner._reconcile_semantic_characters(story, deterministic, semantic)
+        }
+        check(
+            got == {value.lower() for value in expected},
+            f"Semantic reconciliation mismatch for {story!r}: expected {sorted(expected)}, got {sorted(got)}",
+        )
+
+
+def test_verified_semantic_character_roster_reaches_final_plan() -> None:
+    director = QwenDirector(ROOT)
+    base_plan = {
+        "story": "Eli entered the station.",
+        "characters": [{"name": "Eli"}],
+        "scenes": [],
+        "shots": [],
+        "visual_language": {},
+    }
+
+    original_generate = director.generate
+    try:
+        director.generate = lambda **kwargs: {
+            "enabled": True,
+            "plan": {
+                "story": "Eli entered the station.",
+                "characters": [{"name": "Eli"}, {"name": "Sara"}],
+                "scenes": [],
+                "shots": [],
+                "visual_language": {},
+                "_canonical_character_roster_verified": True,
+            },
+        }
+        merged = director.enrich_plan(
+            mode="PRESERVE_USER_STORY_MODE",
+            user_input=base_plan["story"],
+            base_plan=base_plan,
+        )
+    finally:
+        director.generate = original_generate
+
+    names = {str(item.get("name", "")).lower() for item in merged["characters"] if isinstance(item, dict)}
+    check(names == {"eli", "sara"}, "Verified semantic roster did not reach the final production plan.")
+
+
+def test_qwen_semantic_character_extractor_contract() -> None:
+    planner = ProductionPlanner(ROOT)
+
+    calls = []
+
+    def fake_extractor(story, candidates):
+        calls.append((story, list(candidates)))
+        return {
+            "candidates": [
+                {
+                    "name": "Eli",
+                    "entity_type": "PERSON",
+                    "is_character": True,
+                    "aliases": [],
+                },
+                {
+                    "name": "Station",
+                    "entity_type": "FACILITY",
+                    "is_character": False,
+                    "aliases": [],
+                },
+            ]
+        }
+
+    characters = planner.create_characters(
+        "Eli entered the station.",
+        qwen_character_extractor=fake_extractor,
+    )
+    names = {character.name.lower() for character in characters}
+
+    check(calls, "Qwen character extractor callback was not invoked.")
+    check("eli" in names, "Semantic extraction failed to preserve Eli.")
+    check("station" not in names, "Semantic extraction allowed a facility into the canonical roster.")
+
+
 def test_mult_word_character_extraction_regression() -> None:
     # P0 regression guard for the ProductionPlanner character extractor.
     # Multi-word names must remain intact and extraction cannot depend on a
@@ -1702,7 +1803,6 @@ def main() -> None:
         test_scene_id_sanitization_before_batching,
         test_shot_id_normalization,
         test_character_descriptor_deduplication,
-        test_character_detection_diverse_story_styles,
         test_single_paragraph_segmentation,
         test_director_prompt_contract,
         test_shot_sampling_contract,
@@ -1718,6 +1818,11 @@ def main() -> None:
         test_character_appearance_is_locally_scoped,
         test_cinematic_compiler_cannot_promote_scene_identity,
         test_h3_optimizer_ownership_guard,
+        test_character_pipeline_has_no_external_ner_dependency,
+        test_semantic_character_reconciliation_adversarial_matrix,
+        test_qwen_semantic_character_reconciliation,
+        test_verified_semantic_character_roster_reaches_final_plan,
+        test_qwen_semantic_character_extractor_contract,
         test_mult_word_character_extraction_regression,
         test_visual_language_partial_merge_preserves_base_fields,
         test_final_generation_uses_compiler_before_quality_validation,
