@@ -2149,6 +2149,24 @@ that the deterministic scan missed.
             separators=(",", ":"),
         )
 
+        result = self._chat_json(
+            system_prompt,
+            user_payload,
+            minimum_completion=96,
+            temperature=0.05,
+            top_p=0.70,
+            call_name="character_entity_extraction",
+            max_completion=384,
+            json_mode=True,
+            disable_thinking=True,
+            response_schema=self._character_extraction_json_schema(),
+        )
+        
+        print("\n[CHARACTER QWEN RAW RESULT]")
+        print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+        
+        return result
+
         return self._chat_json(
             system_prompt,
             user_payload,
