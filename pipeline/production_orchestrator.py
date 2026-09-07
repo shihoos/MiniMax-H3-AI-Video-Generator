@@ -1283,12 +1283,13 @@ class ProductionOrchestrator:
                 )
             )
 
-            # The planner owns the canonical character roster. Keep an
-            # immutable boundary copy so a director/enrichment pass can never
-            # replace or erase deterministic character identities downstream.
-            canonical_characters = deepcopy(
-                base_plan.get("characters", [])
-                or []
+            # AI/Expand premises may not name the characters Qwen introduces in
+            # the final story. Until the Director verifies that final roster, the
+            # deterministic premise roster is only an explicit failure fallback.
+            canonical_characters = (
+                deepcopy(base_plan.get("characters", []) or [])
+                if mode == PRESERVE_USER_STORY_MODE
+                else []
             )
 
             director_resume_state = None
@@ -1410,6 +1411,10 @@ class ProductionOrchestrator:
 
         finally:
 
+            try:
+                self.director.print_qwen_summary()
+            except Exception:
+                pass
             self.director.unload()
 
         if mode == PRESERVE_USER_STORY_MODE:
