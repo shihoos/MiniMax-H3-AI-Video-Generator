@@ -26,6 +26,9 @@ if str(ROOT) not in sys.path:
 from planner.production_planner import (
     ProductionPlanner,
 )
+from planner.entity_resolver import (
+    EntityResolver,
+)
 from planner.qwen_director import (
     QwenDirector,
 )
@@ -1464,7 +1467,7 @@ def test_batch_prompt_is_compact() -> None:
 # Removed test_shot_prompt_is_compact since _shot_director_user is gone.
 
 
-def test_deterministic_named_character_survives_semantic_false_negative() -> None:
+def test_qwen_semantic_authority_resolves_false_negative_only_through_adjudication() -> None:
     planner = ProductionPlanner(ROOT)
     story = (
         "Elena Kovalenko stumbled through the blinding snow. "
@@ -1496,9 +1499,87 @@ def test_deterministic_named_character_survives_semantic_false_negative() -> Non
         )
     }
     check(
-        "elena kovalenko" in names,
-        "A semantic false-negative erased a high-confidence deterministic character.",
+        "elena kovalenko" not in names,
+        "Planner overrode Qwen's explicit semantic false-negative.",
     )
+
+    calls = []
+    def adjudicator(story_text, disputed, candidates):
+        calls.append((story_text, disputed, candidates))
+        return {
+            "decisions": [
+                {
+                    "name": "Elena Kovalenko",
+                    "verdict": "CHARACTER",
+                    "aliases": ["Elena"],
+                }
+            ]
+        }
+
+    adjudicated = {
+        value.lower()
+        for value in planner._reconcile_semantic_characters(
+            story,
+            deterministic,
+            semantic,
+            adjudicator=adjudicator,
+        )
+    }
+    check(calls and len(calls) == 1, "Character disagreement did not use exactly one bounded adjudication pass.")
+    check("elena kovalenko" in adjudicated, "Valid adjudication did not recover the canonical character.")
+
+
+def test_qwen_character_authority_contracts() -> None:
+    import inspect
+    planner = ProductionPlanner(ROOT)
+    director = QwenDirector(ROOT)
+
+    # Lower layers must not accept a live Qwen callback.
+    resolver_source = inspect.getsource(EntityResolver)
+    check("qwen_chat" not in resolver_source and "self.qwen" not in resolver_source,
+          "EntityResolver still contains a live Qwen semantic hook.")
+    resolve_signature = inspect.signature(EntityResolver.resolve_scene_aliases)
+    check("qwen_chat" not in resolve_signature.parameters,
+          "EntityResolver.resolve_scene_aliases still accepts qwen_chat.")
+
+    # Qwen semantic authority is bounded to one extraction + one adjudication.
+    director._reset_qwen_telemetry()
+    director._semantic_session_active = True
+    calls = {"extract": 0, "adjudicate": 0}
+
+    def fake_chat(*args, **kwargs):
+        name = kwargs.get("call_name")
+        if name == "character_entity_extraction":
+            calls["extract"] += 1
+            return {"candidates": [
+                {"name": "Elena", "entity_type": "PERSON", "is_character": True, "aliases": []}
+            ]}
+        if name == "character_entity_adjudication":
+            calls["adjudicate"] += 1
+            return {"decisions": [{"name": "Elena", "verdict": "CHARACTER", "aliases": []}]}
+        return {}
+
+    original = director._chat_json
+    director._chat_json = fake_chat
+    try:
+        # Direct extractor invocation twice must be rejected while the semantic session is active.
+        director.extract_character_entities("Elena waited.", [])
+        failed = False
+        try:
+            director.extract_character_entities("Elena waited.", [])
+        except RuntimeError as exc:
+            failed = "maximum one extraction call" in str(exc)
+        check(failed, "More than one semantic extraction call was permitted.")
+    finally:
+        director._chat_json = original
+
+    check(calls["extract"] == 1, "Semantic extraction call bound was not exactly one.")
+
+    # Finite source code guards against a convergence-style reconciliation loop.
+    reconcile_source = inspect.getsource(planner._reconcile_semantic_characters)
+    check("while" not in reconcile_source, "Character reconciliation contains a while loop and is not explicitly finite.")
+    check("UNCERTAIN" in inspect.getsource(director.adjudicate_character_entities),
+          "Adjudication contract does not define terminal UNCERTAIN handling.")
 
 
 def test_qwen_semantic_character_reconciliation() -> None:
@@ -1974,7 +2055,8 @@ def main() -> None:
         test_h3_optimizer_ownership_guard,
         test_character_pipeline_has_no_external_ner_dependency,
         test_semantic_character_reconciliation_adversarial_matrix,
-        test_deterministic_named_character_survives_semantic_false_negative,
+        test_qwen_semantic_authority_resolves_false_negative_only_through_adjudication,
+        test_qwen_character_authority_contracts,
         test_qwen_semantic_character_reconciliation,
         test_verified_semantic_character_roster_reaches_final_plan,
         test_qwen_semantic_character_extractor_contract,
