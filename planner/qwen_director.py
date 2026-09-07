@@ -2167,19 +2167,7 @@ that the deterministic scan missed.
         
         return result
 
-        return self._chat_json(
-            system_prompt,
-            user_payload,
-            minimum_completion=96,
-            temperature=0.05,
-            top_p=0.70,
-            call_name="character_entity_extraction",
-            max_completion=384,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
-        )
-
+        
     @staticmethod
     def _scene_json_schema() -> dict:
         metadata = QwenDirector._metadata_json_schema()
