@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import faulthandler
+import sys
 import gc
 import hashlib
 import json
@@ -158,9 +159,10 @@ class QwenDirector:
         )
 
         self._fallback_planner = None
-        self._entity_resolver = EntityResolver()
+        self._entity_resolver = EntityResolver(self)
         self._current_visual_language: dict = {}
         self._reference_visual_context: dict[str, dict] = {}
+        self._character_semantic_calls = 0
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -175,11 +177,6 @@ class QwenDirector:
         # Runtime Qwen telemetry is intentionally lightweight: keep only
         # aggregate/per-call metrics needed to diagnose latency, token usage,
         # retries, cache behavior, and deterministic recovery decisions.
-        self._faulthandler_watchdog_armed = False
-        self._semantic_extraction_calls = 0
-        self._semantic_adjudication_calls = 0
-        self._semantic_session_active = False
-
         self._qwen_telemetry = {
             "calls": [],
             "total_elapsed_seconds": 0.0,
@@ -310,33 +307,6 @@ class QwenDirector:
             (f"detail={detail}" if detail else ""),
             flush=True,
         )
-
-    def _reset_qwen_telemetry(self) -> None:
-        self._qwen_telemetry = {
-            "calls": [], "total_elapsed_seconds": 0.0, "prompt_tokens": 0,
-            "completion_tokens": 0, "retries": 0, "cache_hits": 0, "deterministic_recoveries": 0,
-        }
-        self._semantic_extraction_calls = 0
-        self._semantic_adjudication_calls = 0
-        self._semantic_session_active = True
-
-    def _arm_hang_diagnostics(self) -> None:
-        try:
-            faulthandler.enable()
-            timeout=float(os.getenv("H3_FAULTHANDLER_TIMEOUT_SECONDS", "180") or 180)
-            if timeout > 0:
-                faulthandler.dump_traceback_later(timeout, repeat=True)
-                self._faulthandler_watchdog_armed=True
-        except Exception as exc:
-            print("[QWEN] faulthandler_setup_failed", str(exc), flush=True)
-
-    def _disarm_hang_diagnostics(self) -> None:
-        try: faulthandler.cancel_dump_traceback_later()
-        except Exception: pass
-        self._faulthandler_watchdog_armed=False
-
-    def print_qwen_summary(self) -> None:
-        self._print_qwen_summary()
 
     def _print_qwen_summary(self) -> None:
         """Print a compact production-level Qwen accounting summary."""
@@ -1662,8 +1632,6 @@ class QwenDirector:
         self,
     ) -> None:
 
-        self._disarm_hang_diagnostics()
-
         model = self._llama
 
         self._llama = None
@@ -2145,19 +2113,19 @@ Do not output JSON, labels, analysis, notes, or explanations.
         story: str,
         deterministic_candidates: list[str] | None = None,
     ) -> dict:
-        """Use the already-loaded Qwen model for a compact semantic entity pass.
+        """Use the loaded Qwen model as the semantic character authority.
 
-        Qwen is a recovery/classification layer only: it must not invent names,
-        and ProductionPlanner performs the final canonicalization and safety
-        checks before characters enter the production roster.
+        The planner performs only bounded production-safety validation and
+        canonicalization after this call. No lower layer may call Qwen for
+        character identity or alias semantics.
         """
         story = str(story or "").strip()
         if not story:
             return {"candidates": []}
-        if self._semantic_session_active:
-            self._semantic_extraction_calls += 1
-            if self._semantic_extraction_calls > 1:
-                raise RuntimeError("Character semantic extraction budget exceeded: maximum one extraction call per plan.")
+
+        self._character_semantic_calls += 1
+        if self._character_semantic_calls > 2:
+            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
 
         candidate_hints = [
             str(value).strip()
@@ -2206,40 +2174,56 @@ that the deterministic scan missed.
         return result
 
         
-    @staticmethod
-    def _character_adjudication_json_schema() -> dict:
-        return {
-            "type": "object",
-            "properties": {"decisions": {"type": "array", "maxItems": 12, "items": {
-                "type": "object", "properties": {
-                    "name": {"type": "string"},
-                    "verdict": {"type": "string", "enum": ["CHARACTER", "NOT_CHARACTER", "UNCERTAIN"]},
-                    "aliases": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-                }, "required": ["name", "verdict", "aliases"], "additionalProperties": False
-            }}},
-            "required": ["decisions"], "additionalProperties": False
-        }
+    def adjudicate_character_entities(
+        self,
+        story: str,
+        deterministic_candidates: list[str] | None,
+        semantic_result,
+    ) -> dict:
+        """Run the single bounded semantic adjudication pass when extraction disagrees with safety evidence."""
+        self._character_semantic_calls += 1
+        if self._character_semantic_calls > 2:
+            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
 
-    def adjudicate_character_entities(self, story: str, disputed_names: list[str], semantic_candidates: list[dict]) -> dict:
-        if self._semantic_session_active:
-            self._semantic_adjudication_calls += 1
-            if self._semantic_adjudication_calls > 1:
-                raise RuntimeError("Character adjudication budget exceeded: maximum one adjudication call per plan.")
-        payload={"story": self._limit_text(story, 5000), "disputed_names": disputed_names[:12], "prior_semantic_candidates": semantic_candidates[:32]}
+        candidates = [
+            str(value).strip()
+            for value in (deterministic_candidates or [])
+            if str(value).strip()
+        ][:12]
+        supplied = semantic_result if isinstance(semantic_result, dict) else {}
+        system_prompt = """
+You are the final character-identity adjudicator. Return JSON only.
+Review only the supplied candidate names and the supplied semantic extraction.
+For each candidate decide whether it is a stable named character identity: CHARACTER,
+NOT_CHARACTER, or UNCERTAIN. Never invent or rename a candidate. A name is valid only
+when its name or an explicitly supplied alias is anchored in the story. UNCERTAIN is
+terminal and must not trigger another call.
+""".strip()
+        payload = json.dumps(
+            {
+                "story": self._limit_text(story, 7000),
+                "deterministic_candidates": candidates,
+                "semantic_result": supplied,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         return self._chat_json(
-            """You are a final character adjudicator. Resolve ONLY the supplied disputed named entities.
-Return exactly one verdict per supplied name: CHARACTER, NOT_CHARACTER, or UNCERTAIN.
-CHARACTER means a named human or named sentient fictional entity with stable identity.
-NOT_CHARACTER includes locations, facilities, organizations, projects, objects, events, roles, or descriptors.
-UNCERTAIN is terminal; do not retry it. Never invent a new identity. Return JSON only.""",
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            minimum_completion=96, temperature=0.05, top_p=0.70,
-            call_name="character_entity_adjudication", max_completion=320,
-            json_mode=True, disable_thinking=True, response_schema=self._character_adjudication_json_schema(),
+            system_prompt,
+            payload,
+            minimum_completion=96,
+            temperature=0.05,
+            top_p=0.70,
+            call_name="character_entity_adjudication",
+            max_completion=256,
+            json_mode=True,
+            disable_thinking=True,
+            response_schema=self._character_extraction_json_schema(),
         )
 
     @staticmethod
     def _scene_json_schema() -> dict:
+
         metadata = QwenDirector._metadata_json_schema()
         return {
             "type": "object",
@@ -2632,7 +2616,8 @@ UNCERTAIN is terminal; do not retry it. Never invent a new identity. Return JSON
         response = None
         error_text = ""
 
-        print("[QWEN]", call_name, "START", f"max_tokens={max_tokens}", f"prompt_chars={len(system_prompt)+len(user_prompt)}", flush=True)
+        print(f"[QWEN] START {call_name}", flush=True)
+
         try:
             response = self._llama.create_chat_completion(
                 **kwargs
@@ -2783,6 +2768,8 @@ UNCERTAIN is terminal; do not retry it. Never invent a new identity. Return JSON
         started = time.perf_counter()
         response = None
         error_text = ""
+
+        print(f"[QWEN] START {call_name}", flush=True)
 
         try:
             response = (
@@ -4931,11 +4918,21 @@ Return JSON only.
         resume_state: dict | None = None,
     ) -> dict:
 
-        self._reset_qwen_telemetry()
-        self._arm_hang_diagnostics()
+        self._character_semantic_calls = 0
+        watchdog_armed = False
+        try:
+            faulthandler.dump_traceback_later(180, repeat=False, file=sys.stderr)
+            watchdog_armed = True
+        except Exception:
+            watchdog_armed = False
 
         if not director_enabled():
 
+            if watchdog_armed:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
             return {
                 "enabled": False,
                 "plan": deepcopy(
@@ -5230,7 +5227,9 @@ Return JSON only.
             )
         )
 
-                # ----------------------------------------------------
+        print("[DIRECTOR] resolving canonical roster", flush=True)
+
+        # ----------------------------------------------------
         # CANONICAL CHARACTERS / SCENES
         # ----------------------------------------------------
         #
@@ -5241,8 +5240,8 @@ Return JSON only.
         # Preserve Story:
         # the supplied user story remains the source of truth.
         #
-        # ProductionPlanner remains the canonical deterministic extractor;
-        # Qwen does not directly own the final character/scene objects.
+        # Qwen owns semantic character identity. ProductionPlanner performs
+        # only bounded validation/canonicalization before production binding.
 
         planner = self._planner()
 
@@ -5304,30 +5303,11 @@ Return JSON only.
                 "Deterministic base plan contains no canonical scenes."
             )
 
-        if len(scenes) > self.MAX_SCENES:
-            # Settle the scene budget BEFORE any shot-batch generation. No shot
-            # output can therefore be orphaned by a later scene-count change.
-            scenes = self._compress_scenes_to_budget(
-                mode,
-                canonical_source_story,
-                characters,
-                scenes,
-                character_names,
-            )
-
         if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
             raise RuntimeError(
-                "Canonical scene count is outside "
-                f"the required 4-{self.MAX_SCENES} range after budget lock: {len(scenes)}"
+                "Deterministic base plan scene count is outside "
+                f"the required 4-{self.MAX_SCENES} range: {len(scenes)}"
             )
-
-        locked_scene_count = len(scenes)
-        print(
-            "[QWEN] stage=scene_plan_locked",
-            f"scene_count={locked_scene_count}",
-            "shots_not_started=True",
-            flush=True,
-        )
 
         # Preserve deterministic scene topology and only add the
         # Director's creative scene annotations if they already exist.
@@ -5394,6 +5374,8 @@ Return JSON only.
                 ),
             )
 
+        print(f"[DIRECTOR] roster={len(characters)} scenes={len(scenes)}; scene count locked before shot batches", flush=True)
+
         # ----------------------------------------------------
         # PASS 2: cinematography
         #
@@ -5405,7 +5387,6 @@ Return JSON only.
 
         all_shots: list[dict] = []
         shot_temperature, shot_top_p = self._shot_sampling()
-        print("[QWEN] stage=scene_plan", f"scene_count={len(scenes)}", "scene_count_locked=True", flush=True)
 
         try:
 
@@ -5496,7 +5477,7 @@ Return JSON only.
                     # Start with the largest candidate and shrink only if the
                     # prompt would leave less than a useful completion reserve
                     # inside the fixed 8192-token context.
-                    for _ in range(2):
+                    while True:
                         batch_user = self._shot_director_batch_user(
                             story,
                             characters,
@@ -5506,18 +5487,29 @@ Return JSON only.
 
                         desired_completion = min(
                             DIRECTOR_MAX_TOKENS,
-                            max(320, 1400 * len(batch_scenes)),
+                            max(
+                                320,
+                                1400 * len(batch_scenes),
+                            ),
                         )
 
                         prompt_tokens = self._count_tokens(
-                            self._shot_director_batch_system() + "\n\n" + batch_user
+                            self._shot_director_batch_system()
+                            + "\n\n"
+                            + batch_user
                         )
 
                         if (
-                            prompt_tokens <= int(DIRECTOR_N_CTX) - 128 - desired_completion
-                            or len(batch_scenes) == 1
+                            prompt_tokens
+                            <= int(DIRECTOR_N_CTX)
+                            - 128
+                            - desired_completion
                         ):
                             break
+
+                        if len(batch_scenes) == 1:
+                            break
+
                         batch_scenes = batch_scenes[:-1]
 
                     batch_ids = [
@@ -5830,18 +5822,6 @@ Return JSON only.
             characters=characters,
         )
 
-        if len(scenes) != locked_scene_count:
-            raise RuntimeError(
-                f"Scene count changed after lock: locked={locked_scene_count}, final={len(scenes)}"
-            )
-        print(
-            "[QWEN] stage=shot_plan_complete",
-            f"locked_scene_count={locked_scene_count}",
-            f"generated_scene_count={len({str(s.get('scene_id','')).strip() for s in all_shots if isinstance(s, dict) and str(s.get('scene_id','')).strip()})}",
-            f"shot_count={len(all_shots)}",
-            flush=True,
-        )
-
         final_director_plan = {
             "story": story,
             "story_mode": mode,
@@ -5856,6 +5836,8 @@ Return JSON only.
             "scenes": scenes,
             "shots": all_shots,
         }
+
+        self._print_qwen_summary()
 
         self._save_checkpoint(
             checkpoint_store,
