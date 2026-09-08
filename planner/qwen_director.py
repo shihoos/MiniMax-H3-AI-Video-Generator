@@ -296,9 +296,9 @@ class QwenDirector:
             "temperature": temperature,
             "top_p": top_p,
             "response_format": (
-                "json_object"
+                "json_schema"
                 if isinstance(response_format, dict)
-                and response_format.get("type") == "json_object"
+                and response_format.get("type") == "json_schema"
                 else (
                     response_format.get("type")
                     if isinstance(response_format, dict)
@@ -2594,7 +2594,7 @@ terminal and must not trigger another call.
                     temperature=temperature,
                     top_p=top_p,
                     response_format=(
-                        {"type": "json_object", "schema": response_schema}
+                        {"type": "json_schema", "schema": response_schema}
                         if json_mode and response_schema is not None
                         else None
                     ),
@@ -2627,7 +2627,7 @@ terminal and must not trigger another call.
                     f"No JSON schema supplied for {call_name}."
                 )
             kwargs["response_format"] = {
-                "type": "json_object",
+                "type": "json_schema",
                 "schema": response_schema,
             }
 
