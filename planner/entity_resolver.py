@@ -97,16 +97,6 @@ class EntityResolver:
         "agent",
     }
 
-    def __init__(
-        self,
-        qwen=None,
-    ) -> None:
-        # Keep the historical constructor compatibility used by QwenDirector,
-        # but never retain or call the supplied model handle. This makes the
-        # ownership boundary explicit without requiring a broader constructor
-        # refactor elsewhere in the pipeline.
-        del qwen
-
     @classmethod
     def normalize(
         cls,
