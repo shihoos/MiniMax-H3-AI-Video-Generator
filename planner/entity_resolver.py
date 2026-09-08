@@ -28,9 +28,11 @@ class EntityResolver:
         1. exact canonical
         2. unique first name
         3. unique full final-name pair
-        4. one global semantic Qwen decision for unresolved references
-        5. confidence gate >= 0.95
-        6. unresolved references remain unresolved
+        4. unresolved references remain unresolved for Director-level semantic handling
+
+    The resolver deliberately has no live Qwen dependency. Semantic decisions
+    are owned and telemetried by QwenDirector; this class only performs
+    deterministic identity binding against an already-approved roster.
     """
 
     PRONOUNS = {
@@ -99,7 +101,11 @@ class EntityResolver:
         self,
         qwen=None,
     ) -> None:
-        self.qwen = qwen
+        # Keep the historical constructor compatibility used by QwenDirector,
+        # but never retain or call the supplied model handle. This makes the
+        # ownership boundary explicit without requiring a broader constructor
+        # refactor elsewhere in the pipeline.
+        del qwen
 
     @classmethod
     def normalize(
