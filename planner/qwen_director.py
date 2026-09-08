@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+from functools import wraps
 from copy import deepcopy
 from pathlib import Path
 
@@ -32,6 +33,37 @@ from planner.config import (
     PRESERVE_USER_STORY_MODE,
     director_enabled,
 )
+
+
+def _with_faulthandler_watchdog(func):
+    """Arm a long-lived traceback watchdog around one Director operation.
+
+    The watchdog is diagnostic only. It is always cancelled on normal return
+    and exception, so a healthy long-running generation cannot leave a stale
+    timer behind for the next operation.
+    """
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        try:
+            seconds = float(os.getenv("H3_DIRECTOR_WATCHDOG_SECONDS", "900"))
+        except (TypeError, ValueError):
+            seconds = 900.0
+        armed = seconds > 0
+        if armed:
+            try:
+                faulthandler.dump_traceback_later(seconds, repeat=False, file=sys.stderr)
+            except Exception:
+                armed = False
+        try:
+            return func(*args, **kwargs)
+        finally:
+            if armed:
+                try:
+                    faulthandler.cancel_dump_traceback_later()
+                except Exception:
+                    pass
+
+    return wrapped
 
 
 class QwenDirector:
@@ -159,7 +191,7 @@ class QwenDirector:
         )
 
         self._fallback_planner = None
-        self._entity_resolver = EntityResolver(self)
+        self._entity_resolver = EntityResolver()
         self._current_visual_language: dict = {}
         self._reference_visual_context: dict[str, dict] = {}
         self._character_semantic_calls = 0
@@ -308,7 +340,7 @@ class QwenDirector:
             flush=True,
         )
 
-    def _print_qwen_summary(self) -> None:
+    def _print_qwen_summary(self, label: str = "SUMMARY") -> None:
         """Print a compact production-level Qwen accounting summary."""
         calls = list(self._qwen_telemetry.get("calls", []) or [])
         total_elapsed = float(
@@ -326,7 +358,7 @@ class QwenDirector:
             self._qwen_telemetry.get("deterministic_recoveries", 0) or 0
         )
 
-        print("[QWEN] ==================== SUMMARY ====================", flush=True)
+        print(f"[QWEN] ==================== {label} ====================", flush=True)
         print("[QWEN] calls=" + str(len(calls)), flush=True)
         print("[QWEN] prompt_tokens=" + str(prompt_tokens), flush=True)
         print("[QWEN] completion_tokens=" + str(completion_tokens), flush=True)
@@ -4908,6 +4940,7 @@ Return JSON only.
     # GENERATE
     # ========================================================
 
+    @_with_faulthandler_watchdog
     def generate(
         self,
         *,
@@ -4919,20 +4952,8 @@ Return JSON only.
     ) -> dict:
 
         self._character_semantic_calls = 0
-        watchdog_armed = False
-        try:
-            faulthandler.dump_traceback_later(180, repeat=False, file=sys.stderr)
-            watchdog_armed = True
-        except Exception:
-            watchdog_armed = False
-
         if not director_enabled():
 
-            if watchdog_armed:
-                try:
-                    faulthandler.cancel_dump_traceback_later()
-                except Exception:
-                    pass
             return {
                 "enabled": False,
                 "plan": deepcopy(
@@ -5024,6 +5045,27 @@ Return JSON only.
                 "director_complete",
             }
         )
+
+        # Each top-level plan gets an isolated telemetry session. On resume,
+        # carry forward the semantic-call budget recorded in the checkpoint
+        # instead of resetting the character extractor/adjudicator allowance.
+        self._qwen_telemetry = {
+            "calls": [],
+            "total_elapsed_seconds": 0.0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "deterministic_recoveries": 0,
+        }
+        if resuming:
+            try:
+                self._character_semantic_calls = max(
+                    0,
+                    min(2, int(prior_director_plan.get("_character_semantic_calls_used", 0) or 0)),
+                )
+            except (TypeError, ValueError):
+                self._character_semantic_calls = 0
 
         temperature, top_p = (
             self._sampling_for_mode(
@@ -5253,11 +5295,32 @@ Return JSON only.
         else:
             canonical_source_story = user_input
 
-        canonical_characters = planner.create_characters(
-            canonical_source_story,
-            qwen_character_extractor=self.extract_character_entities,
-            qwen_character_adjudicator=self.adjudicate_character_entities,
-        )
+        resume_roster = []
+        if resuming and prior_director_plan.get("_canonical_character_roster_verified") is True:
+            prior_roster = prior_director_plan.get("characters", []) or []
+            if isinstance(prior_roster, list):
+                resume_roster = [dict(item) for item in prior_roster if isinstance(item, dict)]
+
+        if resume_roster:
+            from schemas.character import Character
+            canonical_characters = []
+            for item in resume_roster:
+                allowed = {
+                    "character_id", "name", "role", "description", "personality",
+                    "appearance", "clothing", "distinctive_features", "character_state",
+                    "continuity_rules", "reference_mode", "reference_paths",
+                    "reference_video_paths", "reference_audio_paths", "reference_path",
+                    "reference_video_path", "reference_audio_path", "reference_mask_path",
+                    "identity_profile", "story_state_profile",
+                }
+                payload = {key: deepcopy(value) for key, value in item.items() if key in allowed}
+                canonical_characters.append(Character(**payload))
+        else:
+            canonical_characters = planner.create_characters(
+                canonical_source_story,
+                qwen_character_extractor=self.extract_character_entities,
+                qwen_character_adjudicator=self.adjudicate_character_entities,
+            )
 
         characters = self._sanitize_characters(
             [
@@ -5326,6 +5389,7 @@ Return JSON only.
             # enrich_plan may use this verified roster, but never raw Qwen
             # character metadata from the creative response.
             "_canonical_character_roster_verified": True,
+            "_character_semantic_calls_used": int(self._character_semantic_calls),
             "scenes": deepcopy(scenes),
             "shots": prior_shots,
         }
@@ -5837,7 +5901,10 @@ Return JSON only.
             "shots": all_shots,
         }
 
-        self._print_qwen_summary()
+        self._print_qwen_summary("POST-GENERATION")
+
+        if not os.getenv("H3_DIRECTOR_CRITIC", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            self._print_qwen_summary("FINAL")
 
         self._save_checkpoint(
             checkpoint_store,
@@ -5870,6 +5937,7 @@ Return JSON only.
     # MERGE
     # ========================================================
 
+    @_with_faulthandler_watchdog
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
         """Run an optional read-only cinematic critique.
 
@@ -5943,18 +6011,22 @@ state. Do not invent facts that are not present in the plan.
             },
             "required": ["overall_score", "status", "findings", "shot_findings", "recommended_focus", "shot_patches"],
         }
-        return self._chat_json(
-            system_prompt,
-            json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
-            minimum_completion=300,
-            temperature=0.10,
-            top_p=0.75,
-            call_name="director_critique",
-            max_completion=1000,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=schema,
-        )
+        try:
+            result = self._chat_json(
+                system_prompt,
+                json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
+                minimum_completion=300,
+                temperature=0.10,
+                top_p=0.75,
+                call_name="director_critique",
+                max_completion=1000,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=schema,
+            )
+            return result
+        finally:
+            self._print_qwen_summary("FINAL")
 
     def enrich_plan(
         self,
