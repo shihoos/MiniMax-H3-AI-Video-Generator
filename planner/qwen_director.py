@@ -43,6 +43,7 @@ from planner.config import (
 
 # Qwen3 non-thinking soft switch.
 NO_THINK_SUFFIX = "\n/no_think"
+NO_THINK_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
 def _with_faulthandler_watchdog(func):
     """Arm a long-lived traceback watchdog around one Director operation.
@@ -397,9 +398,8 @@ class QwenDirector:
         raw_content = ""
         if isinstance(response, dict):
             try:
-                raw_content = str(
-                    response["choices"][0]["message"]["content"] or ""
-                )
+                message = response["choices"][0]["message"]
+                raw_content = str(message.get("content") or "")
             except Exception:
                 raw_content = ""
 
@@ -411,6 +411,16 @@ class QwenDirector:
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "raw_content": raw_content,
+            "reasoning_content": (
+                str(
+                    response["choices"][0]["message"].get(
+                        "reasoning_content"
+                    )
+                    or ""
+                )
+                if isinstance(response, dict)
+                else ""
+            ),
             "raw_response": response,
         }
         digest = hashlib.sha256(
@@ -2594,7 +2604,7 @@ terminal and must not trigger another call.
                     temperature=temperature,
                     top_p=top_p,
                     response_format=(
-                        {"type": "json_schema", "schema": response_schema}
+                        {"type": "json_object", "schema": response_schema}
                         if json_mode and response_schema is not None
                         else None
                     ),
@@ -2621,13 +2631,18 @@ terminal and must not trigger another call.
             "max_tokens": max_tokens,
         }
 
+        if disable_thinking:
+            kwargs["chat_template_kwargs"] = dict(
+                NO_THINK_CHAT_TEMPLATE_KWARGS
+            )
+
         if json_mode:
             if response_schema is None:
                 raise RuntimeError(
                     f"No JSON schema supplied for {call_name}."
                 )
             kwargs["response_format"] = {
-                "type": "json_schema",
+                "type": "json_object",
                 "schema": response_schema,
             }
 
@@ -2705,6 +2720,13 @@ terminal and must not trigger another call.
             raise RuntimeError(
                 "Qwen returned an empty response."
             )
+
+        if disable_thinking and re.search(
+            r"<think>",
+            content,
+            flags=re.IGNORECASE,
+        ):
+            content = self._strip_thinking(content)
 
         parsed = self._extract_json(content)
 
@@ -2791,6 +2813,9 @@ terminal and must not trigger another call.
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
+                    chat_template_kwargs=dict(
+                        NO_THINK_CHAT_TEMPLATE_KWARGS
+                    ) if disable_thinking else None,
                 )
             )
         except Exception as exc:
