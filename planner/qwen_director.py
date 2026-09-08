@@ -41,6 +41,9 @@ from planner.config import (
 )
 
 
+# Qwen3 non-thinking soft switch.
+NO_THINK_SUFFIX = "\n/no_think"
+
 def _with_faulthandler_watchdog(func):
     """Arm a long-lived traceback watchdog around one Director operation.
 
@@ -293,9 +296,9 @@ class QwenDirector:
             "temperature": temperature,
             "top_p": top_p,
             "response_format": (
-                "json_schema"
+                "json_object"
                 if isinstance(response_format, dict)
-                and response_format.get("type") == "json_schema"
+                and response_format.get("type") == "json_object"
                 else (
                     response_format.get("type")
                     if isinstance(response_format, dict)
@@ -2478,45 +2481,29 @@ terminal and must not trigger another call.
         text: str,
     ) -> dict:
 
-        value = QwenDirector._strip_thinking(
-            text
-        )
-
-        value = re.sub(
-            r"^```(?:json)?\s*",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-        value = re.sub(
-            r"\s*```$",
-            "",
-            value,
-        ).strip()
+        value = QwenDirector._strip_thinking(text)
+        value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
+        value = re.sub(r"\s*```$", "", value).strip()
 
         try:
             result = json.loads(value)
-            if not isinstance(result, dict):
-                raise RuntimeError(
-                    "Qwen director output must be a JSON object."
-                )
-            return result
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, list):
+                return {"items": result}
+            raise RuntimeError("Qwen director output must be a JSON object or array.")
         except json.JSONDecodeError:
             pass
 
-        # Scan balanced JSON objects so surrounding prose cannot invalidate
-        # an otherwise usable structured response.
         for start_index, char in enumerate(value):
-            if char != "{":
+            if char not in "{[":
                 continue
-
+            close_char = "}" if char == "{" else "]"
             depth = 0
             in_string = False
             escaped = False
-
             for index in range(start_index, len(value)):
                 current = value[index]
-
                 if in_string:
                     if escaped:
                         escaped = False
@@ -2525,32 +2512,25 @@ terminal and must not trigger another call.
                     elif current == '"':
                         in_string = False
                     continue
-
                 if current == '"':
                     in_string = True
                     continue
-
-                if current == "{":
+                if current == char:
                     depth += 1
-                elif current == "}":
+                elif current == close_char:
                     depth -= 1
                     if depth == 0:
-                        candidate = value[
-                            start_index:index + 1
-                        ]
+                        candidate = value[start_index:index + 1]
                         try:
                             result = json.loads(candidate)
                         except json.JSONDecodeError:
                             break
-                        if not isinstance(result, dict):
-                            raise RuntimeError(
-                                "Qwen director output must be a JSON object."
-                            )
-                        return result
-
-        raise RuntimeError(
-            "Qwen director returned invalid JSON."
-        )
+                        if isinstance(result, dict):
+                            return result
+                        if isinstance(result, list):
+                            return {"items": result}
+                        break
+        raise RuntimeError("Qwen director returned invalid JSON.")
 
     def _chat_json(
         self,
@@ -2576,6 +2556,9 @@ terminal and must not trigger another call.
 
         if top_p is None:
             top_p = DIRECTOR_TOP_P
+
+        if disable_thinking:
+            user_prompt = user_prompt.rstrip() + NO_THINK_SUFFIX
 
         _, max_tokens = self._available_output_tokens(
             system_prompt,
@@ -2610,7 +2593,11 @@ terminal and must not trigger another call.
                     max_tokens=0,
                     temperature=temperature,
                     top_p=top_p,
-                    response_format={"type": "json_schema"} if json_mode else None,
+                    response_format=(
+                        {"type": "json_object", "schema": response_schema}
+                        if json_mode and response_schema is not None
+                        else None
+                    ),
                     cache_hit=True,
                 )
                 return cached
@@ -2626,13 +2613,6 @@ terminal and must not trigger another call.
             },
         ]
 
-        if disable_thinking:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": "<think>\n\n</think>\n\n",
-                }
-            )
 
         kwargs = {
             "messages": messages,
@@ -2647,7 +2627,7 @@ terminal and must not trigger another call.
                     f"No JSON schema supplied for {call_name}."
                 )
             kwargs["response_format"] = {
-                "type": "json_schema",
+                "type": "json_object",
                 "schema": response_schema,
             }
 
@@ -2769,6 +2749,9 @@ terminal and must not trigger another call.
         if top_p is None:
             top_p = DIRECTOR_TOP_P
 
+        if disable_thinking:
+            user_prompt = user_prompt.rstrip() + NO_THINK_SUFFIX
+
         _, max_tokens = (
             self._available_output_tokens(
                 system_prompt,
@@ -2794,15 +2777,6 @@ terminal and must not trigger another call.
             },
         ]
 
-        if disable_thinking:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": (
-                        "<think>\n\n</think>\n\n"
-                    ),
-                }
-            )
 
         started = time.perf_counter()
         response = None
@@ -4922,32 +4896,50 @@ Return JSON only.
         if not isinstance(response, dict):
             return {}
 
-        entries = response.get("scene_shots")
+        if (
+            str(response.get("scene_id", "") or "").strip()
+            and isinstance(response.get("shots"), list)
+        ):
+            entries = [response]
+        else:
+            entries = (
+                response.get("scene_shots")
+                or response.get("shots")
+                or response.get("items")
+                or response.get("scene_shot")
+            )
+
+        if entries is None:
+            return {}
+
+        if isinstance(entries, dict):
+            entries = [
+                {"scene_id": str(key), "shots": value}
+                for key, value in entries.items()
+                if isinstance(value, list)
+            ]
 
         if not isinstance(entries, list):
             return {}
 
         result: dict[str, list[dict]] = {}
-
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-
-            scene_id = str(
-                entry.get("scene_id", "") or ""
-            ).strip()
-
+            scene_id = str(entry.get("scene_id", "") or "").strip()
             shots = entry.get("shots")
-
-            if not scene_id or not isinstance(shots, list):
+            if scene_id and isinstance(shots, list):
+                result[scene_id] = [
+                    item for item in shots if isinstance(item, dict)
+                ]
                 continue
-
-            result[scene_id] = [
-                item
-                for item in shots
-                if isinstance(item, dict)
-            ]
-
+            if isinstance(shots, list):
+                for item in shots:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str(item.get("scene_id", "") or "").strip()
+                    if sid:
+                        result.setdefault(sid, []).append(item)
         return result
 
 
@@ -5541,6 +5533,9 @@ Return JSON only.
 
                         batch_scenes.append(candidate_scene)
 
+                    if not batch_scenes:
+                        batch_scenes = [scene]
+
                 generated_by_scene: dict[str, list[dict]] = {}
 
                 # ------------------------------------------------
@@ -5880,6 +5875,22 @@ Return JSON only.
             scenes,
             all_shots,
         )
+
+        fallback_shot_count = sum(
+            1
+            for shot in all_shots
+            if "_shot_fallback_" in str(shot.get("shot_id", ""))
+        )
+        print(
+            "[DIRECTOR] creative shot coverage: "
+            f"{len(all_shots) - fallback_shot_count}/{len(all_shots)} Qwen-generated",
+            flush=True,
+        )
+        if fallback_shot_count:
+            self._record_recovery(
+                "shot_fallback_templates_used",
+                f"count={fallback_shot_count}",
+            )
 
         for scene in scenes:
 
