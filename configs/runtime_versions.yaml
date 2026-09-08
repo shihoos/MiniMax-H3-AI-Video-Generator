@@ -42,6 +42,7 @@ director:
   batch: 512
   gpu_layers: -1
   threads: 8
+  threads_batch: 8
 storyboard:
   host: 0.0.0.0
   port: 8765
