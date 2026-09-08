@@ -749,24 +749,24 @@ class ProductionOrchestrator:
                 reference_audio_by_character={
                     name: (
                         by_name[
-                            name.lower()
+                            EntityResolver.normalize(name)
                         ]
                         .normalized_audio_paths()
                     )
                     for name in names
-                    if name.lower()
+                    if EntityResolver.normalize(name)
                     in by_name
                 },
 
                 reference_video_by_character={
                     name: (
                         by_name[
-                            name.lower()
+                            EntityResolver.normalize(name)
                         ]
                         .normalized_video_paths()
                     )
                     for name in names
-                    if name.lower()
+                    if EntityResolver.normalize(name)
                     in by_name
                 },
 
@@ -780,9 +780,9 @@ class ProductionOrchestrator:
                         or []
                     )
                     if (
-                        str(value).strip().lower()
+                        EntityResolver.normalize(value)
                         in {
-                            item.lower()
+                            EntityResolver.normalize(item)
                             for item in names
                         }
                     )
