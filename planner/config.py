@@ -162,6 +162,44 @@ DIRECTOR_TOP_P = float(
     )
 )
 
+# Quality-safe Qwen prompt controls.
+# These settings reduce repeated prompt text only; they do NOT lower the
+# story or shot completion token budgets.
+DIRECTOR_SHOT_STORY_CONTEXT_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_SHOT_STORY_CONTEXT_CHARS",
+        "850",
+    )
+)
+
+DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS",
+        "900",
+    )
+)
+
+DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS",
+        "220",
+    )
+)
+
+DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS",
+        "180",
+    )
+)
+
+DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS",
+        "180",
+    )
+)
+
 DIRECTOR_THREADS = int(
     os.getenv(
         "H3_DIRECTOR_THREADS",
@@ -346,6 +384,11 @@ def validate_runtime_values() -> None:
         ("DIRECTOR_N_BATCH", DIRECTOR_N_BATCH),
         ("DIRECTOR_MAX_TOKENS", DIRECTOR_MAX_TOKENS),
         ("DIRECTOR_THREADS", DIRECTOR_THREADS),
+        ("DIRECTOR_SHOT_STORY_CONTEXT_CHARS", DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
+        ("DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS", DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS),
+        ("DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS", DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS),
+        ("DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS", DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS),
+        ("DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS", DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS),
         ("STORYBOARD_PORT", STORYBOARD_PORT),
     )
 
