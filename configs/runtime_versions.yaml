@@ -41,7 +41,7 @@ director:
   top_p: 0.85
   batch: 512
   gpu_layers: -1
-  threads: 8
+  threads: 4
   threads_batch: 8
 storyboard:
   host: 0.0.0.0
