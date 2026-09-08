@@ -4606,11 +4606,7 @@ Return JSON only:
     def _shot_director_batch_system(
         self,
     ) -> str:
-        # The JSON response schema passed to llama.cpp already defines every
-        # required field and cardinality. Repeating the full JSON example here
-        # wastes prompt tokens without adding semantic information. Keep the
-        # directing rules, field limits, and hard production constraints.
-        base = """
+        return """
 You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
 Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
@@ -4623,13 +4619,14 @@ Preserve:
 - visual continuity;
 - location continuity;
 - emotional progression;
-- visual-language consistency;
-- exact dialogue text; never paraphrase or summarize supplied dialogue;
-- stable speaker names from the supplied character roster;
-- if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response;
+- visual-language consistency.
+- exact dialogue text; never paraphrase or summarize supplied dialogue.
+- stable speaker names from the supplied character roster.
+- if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response.
 - describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
-Within each scene, the required shots must use meaningfully different framing/composition while describing the SAME narrative beat.
+Within each scene, the required shots must use meaningfully different
+framing/composition while describing the SAME narrative beat.
 
 SCENE-FUNCTION DIRECTING:
 Each supplied scene includes scene_function and obligatory_moment.
@@ -4640,7 +4637,7 @@ development: show objective, movement, complication, or escalation.
 midpoint: emphasize new information and changed understanding.
 climax: emphasize danger, decisive action, choice, and consequence.
 finale: emphasize aftermath, resolution, and the closing emotional image.
-Every required shot must visibly serve the supplied obligatory_moment.
+Every required shots must visibly serve the supplied obligatory_moment.
 
 SHOT / FRAMING VOCABULARY:
 framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
@@ -4657,18 +4654,86 @@ centered, rule of thirds, leading lines, foreground frame, negative space, silho
 LIGHTING VOCABULARY:
 lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
 
-The response schema defines the exact JSON structure. Return JSON only.
-There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and exactly one entry for every supplied scene.
+Return JSON only in exactly this structure:
+
+{
+  "scene_shots": [
+    {
+      "scene_id": "scene_001",
+      "shots": [
+        {
+          "shot_id": "scene_001_shot_001",
+          "scene_id": "scene_001",
+          "duration_seconds": 5.2,
+          "characters": [],
+          "location": "...",
+          "action": "...",
+          "camera_shot": "...",
+          "camera_movement": "...",
+          "lens_and_depth_of_field": "...",
+          "composition_notes": "...",
+          "lighting": "...",
+          "color_temperature": "...",
+          "mood": "...",
+          "visual_prompt": "...",
+          "speaking_characters": [],
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {}
+        },
+        {
+          "shot_id": "scene_001_shot_002",
+          "scene_id": "scene_001",
+          "duration_seconds": 5.2,
+          "characters": [],
+          "location": "...",
+          "action": "...",
+          "camera_shot": "...",
+          "camera_movement": "...",
+          "lens_and_depth_of_field": "...",
+          "composition_notes": "...",
+          "lighting": "...",
+          "color_temperature": "...",
+          "mood": "...",
+          "visual_prompt": "...",
+          "speaking_characters": [],
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {}
+        }
+      ]
+    }
+  ]
+}
+
+There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and
+exactly one entry for every supplied scene. Do not add prose outside JSON.
+
 Do NOT output compiler-owned fields.
 Do NOT add scenes.
 Do NOT omit scenes.
-""".strip()
-
-        resolved = base.replace(
+Return JSON only.
+""".strip().replace(
             "__SHOTS_PER_SCENE__",
             str(self.SHOTS_PER_SCENE),
         )
-        return resolved
+
 
     @staticmethod
     def _compact_story_context(story: str, max_chars: int = DIRECTOR_SHOT_STORY_CONTEXT_CHARS) -> str:
