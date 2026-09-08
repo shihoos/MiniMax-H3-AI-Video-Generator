@@ -2436,155 +2436,74 @@ class ProductionPlanner:
 
         return False
 
-    @staticmethod
-    def _strip_honorific_preserve_case(value: str) -> str:
-        text = str(value or "").strip()
-        return re.sub(
-            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
-            "",
-            text,
-            count=1,
-            flags=re.IGNORECASE,
-        ).strip()
-
-    @staticmethod
-    def _identity_tokens(value: str) -> list[str]:
-        return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split()
-
-    @classmethod
-    def _story_contains_surface_form(cls, story: str, surface: str) -> bool:
-        haystack = cls._identity_tokens(story)
-        needle = cls._identity_tokens(surface)
-        if not haystack or not needle:
-            return False
-        width = len(needle)
-        return any(haystack[i:i + width] == needle for i in range(len(haystack) - width + 1))
-
-    @classmethod
-    def _semantic_records(cls, semantic_result) -> tuple[list[dict], bool]:
-        if not isinstance(semantic_result, dict):
-            return [], False
-        if isinstance(semantic_result.get("candidates"), list):
-            raw = semantic_result["candidates"]
-        elif isinstance(semantic_result.get("characters"), list):
-            raw = semantic_result["characters"]
-        else:
-            return [], False
-        records=[]
-        for item in raw:
-            if isinstance(item, str):
-                records.append({"name": item, "entity_type": "CHARACTER", "is_character": True, "aliases": []})
-            elif isinstance(item, dict):
-                records.append(dict(item))
-        return records, True
-
-    @classmethod
-    def _semantic_anchor_forms(cls, record: dict, canonical_name: str) -> list[str]:
-        forms=[canonical_name]
-        aliases=record.get("aliases", [])
-        if isinstance(aliases, (list, tuple, set)):
-            forms.extend(str(x).strip() for x in aliases if str(x).strip())
-        stripped=cls._strip_honorific_preserve_case(canonical_name)
-        if stripped:
-            forms.append(stripped)
-        out=[]; seen=set()
-        for form in forms:
-            key=tuple(cls._identity_tokens(form))
-            if key and key not in seen:
-                seen.add(key); out.append(form)
-        return out
-
     @classmethod
     def _reconcile_semantic_characters(
         cls,
         story: str,
         deterministic: list[str],
         semantic_result,
-        *,
-        adjudicator=None,
     ) -> list[str]:
-        """Treat Qwen as semantic authority; enforce only terminal deterministic safety checks."""
-        records, valid = cls._semantic_records(semantic_result)
-        if not valid:
+        """Canonicalize the Qwen semantic roster without re-running semantic discovery.
+
+        When a Qwen extraction result is present and well-formed, Qwen owns the
+        semantic decision. The planner only applies production-safety checks:
+        supported entity type, story anchoring, aliases, title stripping, and
+        duplicate/full-name normalization. Deterministic candidates are used
+        only when the semantic result is unusable or absent.
+        """
+        if not isinstance(semantic_result, dict):
             return cls._canonicalize_character_descriptors(deterministic or [])
 
-        allowed_types={"PERSON","CHARACTER","SENTIENT"}
-        accepted=[]
-        qwen_keys=set()
-        qwen_negative_keys=set()
-        for record in records:
-            name=cls._strip_honorific_preserve_case(str(record.get("name", "") or "").strip())
+        semantic_candidates = list(semantic_result.get("candidates", []) or [])
+        if not semantic_candidates:
+            semantic_candidates = list(semantic_result.get("characters", []) or [])
+
+        normalized: list[str] = []
+        for raw in semantic_candidates:
+            if isinstance(raw, str):
+                raw = {
+                    "name": raw,
+                    "entity_type": "CHARACTER",
+                    "is_character": True,
+                    "aliases": [],
+                }
+            if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
+                continue
+
+            entity_type = str(raw.get("entity_type", "")).strip().upper()
+            if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}:
+                continue
+
+            name = str(raw.get("name", "") or "").strip()
             if not name:
                 continue
-            record_key = EntityResolver.normalize(name)
-            if not bool(record.get("is_character", False)):
-                qwen_negative_keys.add(record_key)
-                continue
-            if str(record.get("entity_type", "") or "").strip().upper() not in allowed_types:
-                qwen_negative_keys.add(record_key)
-                continue
-            anchored=any(cls._story_contains_surface_form(story, form) for form in cls._semantic_anchor_forms(record, name))
+
+            aliases = [
+                str(alias or "").strip()
+                for alias in (raw.get("aliases", []) or [])
+                if str(alias or "").strip()
+            ]
+            surfaces = [name, *aliases]
+
+            # Alias/normalization tolerant story anchor. Qwen may canonicalize
+            # a short form to a fuller name, or retain a short surface alias.
+            anchored = any(
+                cls._story_has_character_name(story, surface)
+                for surface in surfaces
+            )
             if not anchored:
                 continue
-            key=EntityResolver.normalize(name)
-            if key and key not in qwen_keys:
-                qwen_keys.add(key); accepted.append(name)
 
-        # Only strong deterministic identities absent from Qwen enter the one-shot
-        # adjudication gate. Weak lexical candidates never override Qwen.
-        disagreements=[]
-        qwen_surface_tokens = []
-        for record in records:
-            name = cls._strip_honorific_preserve_case(str(record.get("name", "") or "").strip())
-            if not name:
-                continue
-            for surface in cls._semantic_anchor_forms(record, name):
-                tokens = cls._identity_tokens(surface)
-                if tokens:
-                    qwen_surface_tokens.append(tokens)
+            canonical = re.sub(
+                r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+                "",
+                name,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip() or name
+            normalized.append(canonical)
 
-        for candidate in deterministic or []:
-            value=str(candidate or "").strip()
-            if not value or not cls._high_confidence_deterministic_character(story, value):
-                continue
-            key=EntityResolver.normalize(value)
-            candidate_tokens=cls._identity_tokens(value)
-            compatible = any(
-                candidate_tokens == surface_tokens
-                or all(token in surface_tokens for token in candidate_tokens)
-                or all(token in candidate_tokens for token in surface_tokens)
-                for surface_tokens in qwen_surface_tokens
-            )
-            if key in qwen_negative_keys or (key not in qwen_keys and not compatible):
-                disagreements.append(value)
-
-        if disagreements and adjudicator is not None:
-            try:
-                result=adjudicator(story, list(dict.fromkeys(disagreements))[:12], records[:32])
-                decisions=result.get("decisions", []) if isinstance(result, dict) else []
-                if isinstance(decisions, list):
-                    by_key={EntityResolver.normalize(x): x for x in accepted}
-                    for decision in decisions:
-                        if not isinstance(decision, dict):
-                            continue
-                        verdict=str(decision.get("verdict", "UNCERTAIN") or "UNCERTAIN").upper()
-                        if verdict != "CHARACTER":
-                            continue
-                        name=cls._strip_honorific_preserve_case(str(decision.get("name", "") or "").strip())
-                        if not name:
-                            continue
-                        aliases=decision.get("aliases", []) or []
-                        anchored=cls._story_contains_surface_form(story, name) or any(
-                            cls._story_contains_surface_form(story, str(a)) for a in aliases if str(a).strip()
-                        )
-                        if anchored:
-                            by_key[EntityResolver.normalize(name)] = name
-                    accepted=list(by_key.values())
-            except Exception as exc:
-                LOGGER.warning("Character adjudication failed; retaining Qwen roster: %s", exc)
-
-        # No deterministic additions, vetoes, or second reconciliation passes.
-        return cls._canonicalize_character_descriptors(accepted)
+        return cls._canonicalize_character_descriptors(normalized)
 
     def create_characters(
         self,
@@ -2593,45 +2512,186 @@ class ProductionPlanner:
         qwen_character_extractor=None,
         qwen_character_adjudicator=None,
     ) -> list[Character]:
-        deterministic = self._canonicalize_character_descriptors(self.detect_character_descriptors(story))
-        descriptors=list(deterministic)
-        semantic_pass_valid=False
+
+        descriptors = (
+            self._canonicalize_character_descriptors(
+                self.detect_character_descriptors(
+                    story
+                )
+            )
+        )
 
         if qwen_character_extractor is not None:
             try:
-                semantic_result=qwen_character_extractor(story, list(deterministic))
-                records, valid_semantic_payload = self._semantic_records(semantic_result)
-                if not valid_semantic_payload:
-                    raise RuntimeError("Qwen character extraction returned neither candidates nor characters.")
-                descriptors=self._reconcile_semantic_characters(
+                semantic_result = qwen_character_extractor(
                     story,
-                    deterministic,
-                    semantic_result,
-                    adjudicator=qwen_character_adjudicator,
+                    list(descriptors),
                 )
-                semantic_pass_valid=True
+
+                semantic_candidates = list(
+                    semantic_result.get("candidates", []) or []
+                ) if isinstance(semantic_result, dict) else []
+                if not semantic_candidates and isinstance(semantic_result, dict):
+                    semantic_candidates = list(semantic_result.get("characters", []) or [])
+
+                needs_adjudication = not isinstance(semantic_result, dict)
+                true_semantic_count = 0
+                invalid_positive = False
+                for raw in semantic_candidates:
+                    if isinstance(raw, str):
+                        raw = {"name": raw, "entity_type": "CHARACTER", "is_character": True}
+                    if not isinstance(raw, dict):
+                        continue
+                    if not bool(raw.get("is_character", False)):
+                        continue
+                    true_semantic_count += 1
+                    entity_type = str(raw.get("entity_type", "")).strip().upper()
+                    name = str(raw.get("name", "") or "").strip()
+                    aliases = [str(a or "").strip() for a in (raw.get("aliases", []) or []) if str(a or "").strip()]
+                    if (
+                        entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}
+                        or not name
+                        or not any(self._story_has_character_name(story, surface) for surface in [name, *aliases])
+                    ):
+                        invalid_positive = True
+
+                deterministic_high_confidence = [
+                    name for name in descriptors
+                    if self._high_confidence_deterministic_character(story, name)
+                ]
+                if true_semantic_count == 0 and deterministic_high_confidence:
+                    needs_adjudication = True
+                elif invalid_positive:
+                    needs_adjudication = True
+
+                if needs_adjudication and qwen_character_adjudicator is not None:
+                    semantic_result = qwen_character_adjudicator(
+                        story,
+                        list(descriptors),
+                        semantic_result,
+                    )
+
+                parsed_descriptors = self._reconcile_semantic_characters(
+                    story,
+                    descriptors,
+                    semantic_result,
+                )
+
+                # A valid semantic response, including a deliberate empty
+                # roster, is authoritative. Deterministic names return only
+                # when Qwen could not produce a usable semantic result.
+                if isinstance(semantic_result, dict):
+                    descriptors = parsed_descriptors
+                else:
+                    descriptors = self._canonicalize_character_descriptors(descriptors)
             except Exception as exc:
-                LOGGER.warning("Semantic character extraction failed; using deterministic fallback: %s", exc)
-                descriptors=list(deterministic)
+                # Deterministic extraction remains the production fallback; a
+                # failed semantic pass must never block offline/CI planning.
+                # Keep the failure observable so semantic degradation is not silent.
+                LOGGER.warning(
+                    "Semantic character extraction failed; using deterministic fallback: %s",
+                    exc,
+                )
 
-        if not descriptors and not semantic_pass_valid:
-            # Deterministic recovery is available only when Qwen extraction
-            # failed or returned an invalid payload. A valid empty Qwen roster
-            # remains terminal and is never repopulated by lexical heuristics.
+        if not descriptors:
+            # High-confidence fallback for ordinary narrative prose.
+            # Example:
+            #   "Mira, a polar systems engineer, ..."
+            #   "Arun, her communications specialist, ..."
+            #
+            # Deliberately do NOT use _proper_names() because that
+            # intentionally recognizes broad capitalized tokens and can
+            # return locations/pronouns such as "Arctic" and "They".
+
             appositive_pattern = re.compile(
-                r"\b(?:(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+)?"
-                r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s*,\s*"
-                r"(?=(?:a|an|the|his|her|their|my|our|whose)\b)"
+                r"\b(?:"
+                r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|"
+                r"Captain|Commander|Detective|Agent)\.?\s+"
+                r")?"
+                r"([A-Z][A-Za-z0-9'_-]+"
+                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+                r",\s*"
+                r"(?=(?:a|an|the|his|her|their|my|our|whose)\b)",
+                flags=0,
             )
-            fallback=[]; seen=set()
-            for match in appositive_pattern.finditer(story):
-                candidate=cls._strip_honorific_preserve_case(match.group(1))
-                key=EntityResolver.normalize(candidate)
-                if key and key not in seen:
-                    seen.add(key); fallback.append(candidate)
-            descriptors=self._canonicalize_character_descriptors(fallback)
 
-        return [self._make_character(name, index, story) for index, name in enumerate(descriptors, start=1)]
+            fallback_names = []
+            seen_names = set()
+
+            pronouns = {
+                "they",
+                "them",
+                "he",
+                "him",
+                "she",
+                "her",
+                "it",
+                "we",
+                "us",
+                "i",
+                "you",
+            }
+
+            for match in appositive_pattern.finditer(story):
+                name = match.group(1).strip()
+
+                if not name:
+                    continue
+
+                if name in self.COMMON_PROPER_WORDS:
+                    continue
+
+                if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+                    continue
+
+                if name.lower() in pronouns:
+                    continue
+
+                key = name.lower()
+
+                if key in seen_names:
+                    continue
+
+                seen_names.add(key)
+                fallback_names.append(name)
+
+            descriptors = (
+                self._canonicalize_character_descriptors(
+                    fallback_names
+                )
+            )
+
+        if not descriptors:
+            return []
+
+        characters = []
+
+        for index, descriptor in enumerate(
+            descriptors,
+            start=1,
+        ):
+            characters.append(
+                self._make_character(
+                    descriptor,
+                    index,
+                    story,
+                )
+            )
+
+        self.references.resolve_characters(
+            characters
+        )
+
+        self.references.validate(
+            characters,
+            require_images=False,
+        )
+
+        return characters
+
+    # ============================================================
+    # SCENE EXTRACTION
+    # ============================================================
 
     @staticmethod
     def _location(
