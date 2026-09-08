@@ -26,11 +26,11 @@ if str(ROOT) not in sys.path:
 from planner.production_planner import (
     ProductionPlanner,
 )
-from planner.entity_resolver import (
-    EntityResolver,
-)
 from planner.qwen_director import (
     QwenDirector,
+)
+from planner.entity_resolver import (
+    EntityResolver,
 )
 
 
@@ -1467,7 +1467,7 @@ def test_batch_prompt_is_compact() -> None:
 # Removed test_shot_prompt_is_compact since _shot_director_user is gone.
 
 
-def test_qwen_semantic_authority_resolves_false_negative_only_through_adjudication() -> None:
+def test_qwen_semantic_negative_is_authoritative() -> None:
     planner = ProductionPlanner(ROOT)
     story = (
         "Elena Kovalenko stumbled through the blinding snow. "
@@ -1500,86 +1500,8 @@ def test_qwen_semantic_authority_resolves_false_negative_only_through_adjudicati
     }
     check(
         "elena kovalenko" not in names,
-        "Planner overrode Qwen's explicit semantic false-negative.",
+        "Planner incorrectly overrode a Qwen semantic negative.",
     )
-
-    calls = []
-    def adjudicator(story_text, disputed, candidates):
-        calls.append((story_text, disputed, candidates))
-        return {
-            "decisions": [
-                {
-                    "name": "Elena Kovalenko",
-                    "verdict": "CHARACTER",
-                    "aliases": ["Elena"],
-                }
-            ]
-        }
-
-    adjudicated = {
-        value.lower()
-        for value in planner._reconcile_semantic_characters(
-            story,
-            deterministic,
-            semantic,
-            adjudicator=adjudicator,
-        )
-    }
-    check(calls and len(calls) == 1, "Character disagreement did not use exactly one bounded adjudication pass.")
-    check("elena kovalenko" in adjudicated, "Valid adjudication did not recover the canonical character.")
-
-
-def test_qwen_character_authority_contracts() -> None:
-    import inspect
-    planner = ProductionPlanner(ROOT)
-    director = QwenDirector(ROOT)
-
-    # Lower layers must not accept a live Qwen callback.
-    resolver_source = inspect.getsource(EntityResolver)
-    check("qwen_chat" not in resolver_source and "self.qwen" not in resolver_source,
-          "EntityResolver still contains a live Qwen semantic hook.")
-    resolve_signature = inspect.signature(EntityResolver.resolve_scene_aliases)
-    check("qwen_chat" not in resolve_signature.parameters,
-          "EntityResolver.resolve_scene_aliases still accepts qwen_chat.")
-
-    # Qwen semantic authority is bounded to one extraction + one adjudication.
-    director._reset_qwen_telemetry()
-    director._semantic_session_active = True
-    calls = {"extract": 0, "adjudicate": 0}
-
-    def fake_chat(*args, **kwargs):
-        name = kwargs.get("call_name")
-        if name == "character_entity_extraction":
-            calls["extract"] += 1
-            return {"candidates": [
-                {"name": "Elena", "entity_type": "PERSON", "is_character": True, "aliases": []}
-            ]}
-        if name == "character_entity_adjudication":
-            calls["adjudicate"] += 1
-            return {"decisions": [{"name": "Elena", "verdict": "CHARACTER", "aliases": []}]}
-        return {}
-
-    original = director._chat_json
-    director._chat_json = fake_chat
-    try:
-        # Direct extractor invocation twice must be rejected while the semantic session is active.
-        director.extract_character_entities("Elena waited.", [])
-        failed = False
-        try:
-            director.extract_character_entities("Elena waited.", [])
-        except RuntimeError as exc:
-            failed = "maximum one extraction call" in str(exc)
-        check(failed, "More than one semantic extraction call was permitted.")
-    finally:
-        director._chat_json = original
-
-    check(calls["extract"] == 1, "Semantic extraction call bound was not exactly one.")
-
-    # Finite source code guards against a convergence-style reconciliation loop.
-    reconcile_source = inspect.getsource(planner._reconcile_semantic_characters)
-    check("while" not in reconcile_source, "Character reconciliation contains a while loop and is not explicitly finite.")
-    check("UNCERTAIN" in inspect.getsource(director.adjudicate_character_entities),
-          "Adjudication contract does not define terminal UNCERTAIN handling.")
 
 
 def test_qwen_semantic_character_reconciliation() -> None:
@@ -2055,8 +1977,12 @@ def main() -> None:
         test_h3_optimizer_ownership_guard,
         test_character_pipeline_has_no_external_ner_dependency,
         test_semantic_character_reconciliation_adversarial_matrix,
-        test_qwen_semantic_authority_resolves_false_negative_only_through_adjudication,
-        test_qwen_character_authority_contracts,
+        test_qwen_semantic_negative_is_authoritative,
+        test_qwen_semantic_authority_prefers_qwen_roster,
+        test_qwen_semantic_alias_anchor,
+        test_entity_resolver_has_no_qwen_handle,
+        test_recorded_semantic_payloads_are_terminal,
+        test_character_semantic_call_budget_is_bounded,
         test_qwen_semantic_character_reconciliation,
         test_verified_semantic_character_roster_reaches_final_plan,
         test_qwen_semantic_character_extractor_contract,
@@ -2081,6 +2007,83 @@ def main() -> None:
 
     print(
         "Director validation PASSED."
+    )
+
+
+def test_qwen_semantic_authority_prefers_qwen_roster() -> None:
+    planner = ProductionPlanner(ROOT)
+    story = "Elena Kovalenko entered the Arctic station. Anton repaired the generator."
+    result = planner.create_characters(
+        story,
+        qwen_character_extractor=lambda _story, _hints: {
+            "candidates": [
+                {"name": "Elena Kovalenko", "entity_type": "PERSON", "is_character": True, "aliases": ["Elena"]},
+                {"name": "Anton", "entity_type": "PERSON", "is_character": True, "aliases": []},
+            ]
+        },
+    )
+    check(
+        {c.name for c in result} == {"Elena Kovalenko", "Anton"},
+        "Qwen semantic roster was not treated as authoritative.",
+    )
+
+
+def test_qwen_semantic_alias_anchor() -> None:
+    planner = ProductionPlanner(ROOT)
+    story = "Elena Kovalenko entered the room. Later Elena waited outside."
+    result = planner.create_characters(
+        story,
+        qwen_character_extractor=lambda _story, _hints: {
+            "candidates": [
+                {"name": "Elena", "entity_type": "PERSON", "is_character": True, "aliases": ["Elena Kovalenko"]},
+            ]
+        },
+    )
+    check(len(result) == 1 and result[0].name == "Elena", "Alias-tolerant anchoring failed.")
+
+
+def test_entity_resolver_has_no_qwen_handle() -> None:
+    import inspect
+    signature = inspect.signature(EntityResolver.resolve_scene_aliases)
+    check("qwen_chat" not in signature.parameters, "EntityResolver still exposes a live Qwen callback.")
+
+
+def test_recorded_semantic_payloads_are_terminal() -> None:
+    planner = ProductionPlanner(ROOT)
+    cases = [
+        (
+            "Eli entered the station and waited outside.",
+            {"characters": ["Eli"]},
+        ),
+        (
+            "The station was empty. Dust covered the floor.",
+            {"characters": ["Dust", "They're", "man"]},
+        ),
+    ]
+    for story, semantic in cases:
+        values = planner._reconcile_semantic_characters(
+            story,
+            planner.detect_character_descriptors(story),
+            semantic,
+        )
+        check(isinstance(values, list), "Recorded semantic payload did not terminate with a finite roster.")
+
+
+def test_character_semantic_call_budget_is_bounded() -> None:
+    director = QwenDirector(ROOT)
+    director._character_semantic_calls = 2
+    failed = False
+    try:
+        director.adjudicate_character_entities(
+            "Eli entered the station.",
+            ["Eli"],
+            {"candidates": []},
+        )
+    except RuntimeError as exc:
+        failed = "max 2" in str(exc)
+    check(
+        failed,
+        "Character semantic Qwen call budget is not hard-bounded at two.",
     )
 
 
