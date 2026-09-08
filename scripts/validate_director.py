@@ -1234,6 +1234,167 @@ def test_verified_roster_flag_propagates_to_orchestrator() -> None:
     )
 
 
+def test_verified_scene_topology_not_orphaned() -> None:
+    # Regression guard for a real production failure reproduced from a
+    # live Kaggle benchmark: AI Story mode produced "scenes=4, shots=8"
+    # when generate() had actually produced a verified 6-scene,
+    # 12-shot topology derived from the final story. Root cause:
+    # enrich_plan() always anchored canonical_scenes to the premise-
+    # derived base_plan (computed by planner.build() before the
+    # director ever ran), discarding any story-derived scene beyond
+    # what the short premise alone produced -- along with the shots
+    # generated for it, silently throwing away real Qwen shot-batch
+    # compute. This mirrors the character-roster fix: a verified
+    # director pass's own scene topology must take priority over the
+    # premise-derived skeleton.
+    director = QwenDirector(ROOT)
+
+    premise = (
+        "A polar systems engineer reaches an abandoned Arctic "
+        "station during a violent storm and discovers a sealed "
+        "underground vault."
+    )
+
+    # What planner.build(premise) actually produces: a short,
+    # premise-derived 4-scene skeleton (the real observed behavior --
+    # a short premise naturally splits into fewer scenes than a full
+    # generated story).
+    base_plan = {
+        "story": premise,
+        "characters": [],
+        "scenes": [
+            {
+                "scene_id": f"scene_{i:03d}",
+                "order": i,
+                "characters": [],
+                "shot_ids": [],
+                "title": f"premise scene {i}",
+            }
+            for i in range(1, 5)
+        ],
+        "shots": [],
+        "visual_language": {},
+    }
+
+    def fake_generate(
+        self,
+        *,
+        mode,
+        user_input,
+        base_plan,
+        checkpoint_session_id=None,
+        resume_state=None,
+    ):
+        scenes = [
+            {
+                "scene_id": f"scene_{i:03d}",
+                "order": i,
+                "characters": ["Elena Kovalenko"],
+                "shot_ids": [],
+                "title": f"story scene {i}",
+                "mood": "tense",
+            }
+            for i in range(1, 7)
+        ]
+        shots = [
+            {
+                "shot_id": f"scene_{i:03d}_shot_{j:03d}",
+                "scene_id": f"scene_{i:03d}",
+                "characters": ["Elena Kovalenko"],
+            }
+            for i in range(1, 7)
+            for j in range(1, 3)
+        ]
+        return {
+            "enabled": True,
+            "plan": {
+                "story": (
+                    "Elena Kovalenko stumbled through the blinding "
+                    "snow toward the Arctic station..."
+                ),
+                "director_notes": "",
+                "visual_language": {},
+                "characters": [
+                    {
+                        "character_id": "char_elena",
+                        "name": "Elena Kovalenko",
+                        "role": "protagonist",
+                        "description": "",
+                        "personality": "",
+                    },
+                ],
+                "_canonical_character_roster_verified": True,
+                "scenes": scenes,
+                "shots": shots,
+            },
+        }
+
+    original_generate = QwenDirector.generate
+    QwenDirector.generate = fake_generate
+    try:
+        merged = director.enrich_plan(
+            mode="ai_story",
+            user_input=premise,
+            base_plan=base_plan,
+        )
+    finally:
+        QwenDirector.generate = original_generate
+
+    check(
+        len(merged["scenes"]) == 6,
+        "Verified story-derived scene topology was truncated to the "
+        f"premise-derived scene count: got {len(merged['scenes'])} "
+        "scenes, expected 6. This silently discards real Qwen "
+        "shot-batch work for the dropped scenes.",
+    )
+
+    check(
+        len(merged["shots"]) == 12,
+        "Shots for story-derived scenes beyond the premise-derived "
+        f"count were dropped: got {len(merged['shots'])} shots, "
+        "expected 12.",
+    )
+
+
+def test_qwen_excluded_candidate_not_silently_readded() -> None:
+    # Regression guard for the live "Arctic" leak: Qwen's character
+    # extraction correctly returned only ["Elena Kovalenko", "Anton"],
+    # but the final roster contained a third, wrong entry ("Arctic")
+    # that neither the deterministic detector nor Qwen's own raw
+    # result actually named. Root cause was the reconciliation layer
+    # silently re-adding deterministically-flagged candidates Qwen had
+    # excluded. Once Qwen produces a usable roster, it is the semantic
+    # authority; deterministic candidates are a fallback only, never a
+    # silent addition on top of a valid Qwen answer.
+    planner = ProductionPlanner(ROOT)
+
+    story = (
+        "The wind screamed like a wounded beast as Elena Kovalenko "
+        "stumbled through the blinding snow. The Arctic station had "
+        "been abandoned for years. Inside, the walls were covered in "
+        "scrawled equations and desperate notes, the handwriting of "
+        "the previous engineer, a man named Anton."
+    )
+
+    def fake_extractor(story_text, descriptors):
+        # Exact recorded Qwen response from the live benchmark run.
+        return {"characters": ["Elena Kovalenko", "Anton"]}
+
+    characters = planner.create_characters(
+        story,
+        qwen_character_extractor=fake_extractor,
+    )
+
+    names = {c.name for c in characters}
+
+    check(
+        names == {"Elena Kovalenko", "Anton"},
+        "A valid Qwen character roster was contaminated by a "
+        f"silently re-added deterministic candidate: got {sorted(names)}, "
+        "expected exactly {'Elena Kovalenko', 'Anton'}.",
+    )
+
+
 def test_entity_resolver_shot_rebinding() -> None:
     # P0 regression guard: shot/scene character references must resolve
     # through EntityResolver (aliases, honorifics) rather than exact-name
@@ -1970,6 +2131,8 @@ def main() -> None:
         test_short_story_rebalances_to_four_units_without_losing_source_text,
         test_canonical_roster_not_overwritten_by_qwen,
         test_verified_roster_flag_propagates_to_orchestrator,
+        test_verified_scene_topology_not_orphaned,
+        test_qwen_excluded_candidate_not_silently_readded,
         test_entity_resolver_shot_rebinding,
         test_entity_resolution_adversarial_regressions,
         test_character_appearance_is_locally_scoped,
