@@ -29,6 +29,11 @@ from planner.config import (
     DIRECTOR_TEMPERATURE,
     DIRECTOR_THREADS,
     DIRECTOR_TOP_P,
+    DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
+    DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
+    DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
+    DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
+    DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
@@ -4599,7 +4604,11 @@ Return JSON only:
     def _shot_director_batch_system(
         self,
     ) -> str:
-        return """
+        # The JSON response schema passed to llama.cpp already defines every
+        # required field and cardinality. Repeating the full JSON example here
+        # wastes prompt tokens without adding semantic information. Keep the
+        # directing rules, field limits, and hard production constraints.
+        base = """
 You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
 Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
@@ -4612,14 +4621,13 @@ Preserve:
 - visual continuity;
 - location continuity;
 - emotional progression;
-- visual-language consistency.
-- exact dialogue text; never paraphrase or summarize supplied dialogue.
-- stable speaker names from the supplied character roster.
-- if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response.
+- visual-language consistency;
+- exact dialogue text; never paraphrase or summarize supplied dialogue;
+- stable speaker names from the supplied character roster;
+- if dialogue is present, represent each line in dialogue_events; do not put timestamps in the response;
 - describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
-Within each scene, the required shots must use meaningfully different
-framing/composition while describing the SAME narrative beat.
+Within each scene, the required shots must use meaningfully different framing/composition while describing the SAME narrative beat.
 
 SCENE-FUNCTION DIRECTING:
 Each supplied scene includes scene_function and obligatory_moment.
@@ -4630,7 +4638,7 @@ development: show objective, movement, complication, or escalation.
 midpoint: emphasize new information and changed understanding.
 climax: emphasize danger, decisive action, choice, and consequence.
 finale: emphasize aftermath, resolution, and the closing emotional image.
-Every required shots must visibly serve the supplied obligatory_moment.
+Every required shot must visibly serve the supplied obligatory_moment.
 
 SHOT / FRAMING VOCABULARY:
 framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
@@ -4647,88 +4655,21 @@ centered, rule of thirds, leading lines, foreground frame, negative space, silho
 LIGHTING VOCABULARY:
 lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.
 
-Return JSON only in exactly this structure:
-
-{
-  "scene_shots": [
-    {
-      "scene_id": "scene_001",
-      "shots": [
-        {
-          "shot_id": "scene_001_shot_001",
-          "scene_id": "scene_001",
-          "duration_seconds": 5.2,
-          "characters": [],
-          "location": "...",
-          "action": "...",
-          "camera_shot": "...",
-          "camera_movement": "...",
-          "lens_and_depth_of_field": "...",
-          "composition_notes": "...",
-          "lighting": "...",
-          "color_temperature": "...",
-          "mood": "...",
-          "visual_prompt": "...",
-          "speaking_characters": [],
-          "speech_text": "",
-          "dialogue_events": [],
-          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "is_scene_boundary": false,
-          "character_spatial_bboxes": {},
-          "character_spatial_regions": {},
-          "character_spatial_bboxes_start": {},
-          "character_spatial_bboxes_end": {},
-          "character_spatial_regions_start": {},
-          "character_spatial_regions_end": {}
-        },
-        {
-          "shot_id": "scene_001_shot_002",
-          "scene_id": "scene_001",
-          "duration_seconds": 5.2,
-          "characters": [],
-          "location": "...",
-          "action": "...",
-          "camera_shot": "...",
-          "camera_movement": "...",
-          "lens_and_depth_of_field": "...",
-          "composition_notes": "...",
-          "lighting": "...",
-          "color_temperature": "...",
-          "mood": "...",
-          "visual_prompt": "...",
-          "speaking_characters": [],
-          "speech_text": "",
-          "dialogue_events": [],
-          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
-          "is_scene_boundary": false,
-          "character_spatial_bboxes": {},
-          "character_spatial_regions": {},
-          "character_spatial_bboxes_start": {},
-          "character_spatial_bboxes_end": {},
-          "character_spatial_regions_start": {},
-          "character_spatial_regions_end": {}
-        }
-      ]
-    }
-  ]
-}
-
-There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and
-exactly one entry for every supplied scene. Do not add prose outside JSON.
-
+The response schema defines the exact JSON structure. Return JSON only.
+There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and exactly one entry for every supplied scene.
 Do NOT output compiler-owned fields.
 Do NOT add scenes.
 Do NOT omit scenes.
-Return JSON only.
-""".strip().replace(
+""".strip()
+
+        resolved = base.replace(
             "__SHOTS_PER_SCENE__",
             str(self.SHOTS_PER_SCENE),
         )
+        return resolved
 
     @staticmethod
-    def _compact_story_context(story: str, max_chars: int = 850) -> str:
+    def _compact_story_context(story: str, max_chars: int = DIRECTOR_SHOT_STORY_CONTEXT_CHARS) -> str:
         """Return a compact narrative spine for repeated shot-planning prompts."""
         value = str(story or "").strip()
         if len(value) <= max_chars:
@@ -4808,71 +4749,79 @@ Return JSON only.
         scene_payloads = []
 
         for scene in scenes:
-            scene_payloads.append(
-                {
-                    "scene_id": str(
-                        scene.get("scene_id", "") or ""
-                    ).strip(),
-                    "title": str(
-                        scene.get("title", "") or ""
-                    ).strip(),
-                    "location": str(
-                        scene.get("location", "") or ""
-                    ).strip(),
-                    "description": self._limit_text(
-                        scene.get("description", ""),
-                        900,
-                    ),
-                    "time_of_day": str(
-                        scene.get("time_of_day", "") or ""
-                    ).strip(),
-                    "weather": str(
-                        scene.get("weather", "") or ""
-                    ).strip(),
-                    "atmosphere": self._limit_text(
-                        scene.get("atmosphere", ""),
-                        180,
-                    ),
-                    "mood": str(
-                        scene.get("mood", "") or ""
-                    ).strip(),
-                    "lighting": self._limit_text(
-                        scene.get("lighting", ""),
-                        180,
-                    ),
-                    "color_temperature": str(
-                        scene.get("color_temperature", "") or ""
-                    ).strip(),
-                    "environment_details": self._clean_list(
-                        scene.get("environment_details", []),
-                        limit=4,
-                    ),
-                    "key_props": self._clean_list(
-                        scene.get("key_props", []),
-                        limit=4,
-                    ),
-                    "characters": self._clean_list(
-                        scene.get("characters", []),
-                        limit=6,
-                    ),
-                    "scene_objective": self._limit_text(
-                        scene.get("scene_objective", ""),
-                        220,
-                    ),
-                    "continuity_notes": self._limit_text(
-                        scene.get("continuity_notes", ""),
-                        180,
-                    ),
-                    "scene_function": str(
-                        scene.get("scene_function", "development")
-                        or "development"
-                    ).strip(),
-                    "obligatory_moment": self._limit_text(
-                        scene.get("obligatory_moment", scene.get("description", "")),
-                        220,
-                    ),
-                }
-            )
+            scene_payload = {
+                "scene_id": str(
+                    scene.get("scene_id", "") or ""
+                ).strip(),
+                "title": str(
+                    scene.get("title", "") or ""
+                ).strip(),
+                "location": str(
+                    scene.get("location", "") or ""
+                ).strip(),
+                "description": self._limit_text(
+                    scene.get("description", ""),
+                    DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
+                ),
+                "time_of_day": str(
+                    scene.get("time_of_day", "") or ""
+                ).strip(),
+                "weather": str(
+                    scene.get("weather", "") or ""
+                ).strip(),
+                "atmosphere": self._limit_text(
+                    scene.get("atmosphere", ""),
+                    DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
+                ),
+                "mood": str(
+                    scene.get("mood", "") or ""
+                ).strip(),
+                "lighting": self._limit_text(
+                    scene.get("lighting", ""),
+                    180,
+                ),
+                "color_temperature": str(
+                    scene.get("color_temperature", "") or ""
+                ).strip(),
+                "environment_details": self._clean_list(
+                    scene.get("environment_details", []),
+                    limit=4,
+                ),
+                "key_props": self._clean_list(
+                    scene.get("key_props", []),
+                    limit=4,
+                ),
+                "characters": self._clean_list(
+                    scene.get("characters", []),
+                    limit=6,
+                ),
+                "scene_objective": self._limit_text(
+                    scene.get("scene_objective", ""),
+                    DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
+                ),
+                "continuity_notes": self._limit_text(
+                    scene.get("continuity_notes", ""),
+                    DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
+                ),
+                "scene_function": str(
+                    scene.get("scene_function", "development")
+                    or "development"
+                ).strip(),
+                "obligatory_moment": self._limit_text(
+                    scene.get("obligatory_moment", scene.get("description", "")),
+                    220,
+                ),
+            }
+
+            # Lossless prompt compaction: omit only fields carrying no
+            # information. Populated semantic/cinematic values are unchanged.
+            scene_payload = {
+                key: value
+                for key, value in scene_payload.items()
+                if value not in ("", [], {})
+            }
+
+            scene_payloads.append(scene_payload)
 
         visual_context = {}
         context_source = reference_visual_context or self._reference_visual_context
@@ -4889,7 +4838,7 @@ Return JSON only.
 
         return json.dumps(
             {
-                "story_context": self._compact_story_context(story, 850),
+                "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
                 "characters": compact_characters,
                 "visual_language": language,
                 "reference_visual_analysis": visual_context,
