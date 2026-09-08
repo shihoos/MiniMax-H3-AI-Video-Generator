@@ -2520,6 +2520,12 @@ class ProductionPlanner:
                 )
             )
         )
+        # Once a well-formed Qwen semantic roster has been obtained, that
+        # roster is terminally authoritative for this invocation. In
+        # particular, an intentionally empty Qwen roster must NOT fall through
+        # into the deterministic fallback below and reintroduce names that
+        # Qwen excluded (for example, the location modifier "Arctic").
+        semantic_roster_authoritative = False
 
         if qwen_character_extractor is not None:
             try:
@@ -2534,7 +2540,21 @@ class ProductionPlanner:
                 if not semantic_candidates and isinstance(semantic_result, dict):
                     semantic_candidates = list(semantic_result.get("characters", []) or [])
 
-                needs_adjudication = not isinstance(semantic_result, dict)
+                # A semantic payload is considered usable when it contains one
+                # of the documented roster fields with a list value. This lets
+                # Qwen deliberately return an empty roster without activating
+                # deterministic discovery, while still treating malformed
+                # payloads as a recoverable failure.
+                semantic_payload_usable = (
+                    isinstance(semantic_result, dict)
+                    and (
+                        isinstance(semantic_result.get("candidates"), list)
+                        or isinstance(semantic_result.get("characters"), list)
+                    )
+                )
+                semantic_roster_authoritative = semantic_payload_usable
+
+                needs_adjudication = not semantic_payload_usable
                 true_semantic_count = 0
                 invalid_positive = False
                 for raw in semantic_candidates:
@@ -2565,35 +2585,44 @@ class ProductionPlanner:
                     needs_adjudication = True
 
                 if needs_adjudication and qwen_character_adjudicator is not None:
-                    semantic_result = qwen_character_adjudicator(
+                    adjudicated = qwen_character_adjudicator(
                         story,
                         list(descriptors),
                         semantic_result,
                     )
+                    # Only replace the primary extraction result when the
+                    # adjudicator itself returns a usable semantic payload. A
+                    # failed/malformed adjudication must never cause a valid
+                    # primary Qwen roster to fall back to deterministic names.
+                    if (
+                        isinstance(adjudicated, dict)
+                        and (
+                            isinstance(adjudicated.get("candidates"), list)
+                            or isinstance(adjudicated.get("characters"), list)
+                        )
+                    ):
+                        semantic_result = adjudicated
+                        semantic_roster_authoritative = True
 
-                parsed_descriptors = self._reconcile_semantic_characters(
-                    story,
-                    descriptors,
-                    semantic_result,
-                )
-
-                # A valid semantic response, including a deliberate empty
-                # roster, is authoritative. Deterministic names return only
-                # when Qwen could not produce a usable semantic result.
-                if isinstance(semantic_result, dict):
-                    descriptors = parsed_descriptors
+                if semantic_roster_authoritative:
+                    descriptors = self._reconcile_semantic_characters(
+                        story,
+                        descriptors,
+                        semantic_result,
+                    )
                 else:
                     descriptors = self._canonicalize_character_descriptors(descriptors)
             except Exception as exc:
-                # Deterministic extraction remains the production fallback; a
-                # failed semantic pass must never block offline/CI planning.
-                # Keep the failure observable so semantic degradation is not silent.
+                # Deterministic extraction remains the production fallback only
+                # when the Qwen semantic pass could not establish an
+                # authoritative roster. If it already did, preserve that roster
+                # rather than reintroducing deterministic identities.
                 LOGGER.warning(
                     "Semantic character extraction failed; using deterministic fallback: %s",
                     exc,
                 )
 
-        if not descriptors:
+        if not descriptors and not semantic_roster_authoritative:
             # High-confidence fallback for ordinary narrative prose.
             # Example:
             #   "Mira, a polar systems engineer, ..."
