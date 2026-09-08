@@ -1283,9 +1283,9 @@ class ProductionOrchestrator:
                 )
             )
 
-            # AI/Expand premises may not name the characters Qwen introduces in
-            # the final story. Until the Director verifies that final roster, the
-            # deterministic premise roster is only an explicit failure fallback.
+            # The planner owns the canonical character roster. Keep an
+            # immutable boundary copy so a director/enrichment pass can never
+            # replace or erase deterministic character identities downstream.
             canonical_characters = (
                 deepcopy(base_plan.get("characters", []) or [])
                 if mode == PRESERVE_USER_STORY_MODE
@@ -1354,12 +1354,20 @@ class ProductionOrchestrator:
                     resume_state=director_resume_state,
                 )
 
+                print(f"[DIRECTOR] roster={len(plan.get('characters', []) or [])} scenes={len(plan.get('scenes', []) or [])}", flush=True)
+
                 # Canonical entity boundary: raw creative output may never
                 # replace the canonical roster. A roster is accepted from the
                 # Director only when generate() explicitly marked it as verified
                 # after deterministic + semantic reconciliation.
-                if not isinstance(plan, dict) or plan.get("_canonical_character_roster_verified") is not True:
-                    plan["characters"] = deepcopy(canonical_characters)
+                if (
+                    isinstance(plan, dict)
+                    and plan.get("_canonical_character_roster_verified") is True
+                    and isinstance(plan.get("characters"), list)
+                ):
+                    canonical_characters = deepcopy(plan.get("characters", []) or [])
+                else:
+                    plan["characters"] = deepcopy(canonical_characters or base_plan.get("characters", []) or [])
 
                 if H3_DIRECTOR_CRITIC:
                     try:
@@ -1411,10 +1419,6 @@ class ProductionOrchestrator:
 
         finally:
 
-            try:
-                self.director.print_qwen_summary()
-            except Exception:
-                pass
             self.director.unload()
 
         if mode == PRESERVE_USER_STORY_MODE:
