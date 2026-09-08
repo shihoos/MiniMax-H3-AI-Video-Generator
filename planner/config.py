@@ -207,6 +207,13 @@ DIRECTOR_THREADS = int(
     )
 )
 
+DIRECTOR_THREADS_BATCH = int(
+    os.getenv(
+        "H3_DIRECTOR_THREADS_BATCH",
+        str(RUNTIME["director"]["threads_batch"]),
+    )
+)
+
 _configured_input_root = os.getenv("H3_INPUT_ROOT", "").strip()
 if _configured_input_root:
     DIRECTOR_KAGGLE_INPUT_ROOT = Path(_configured_input_root).expanduser().resolve()
