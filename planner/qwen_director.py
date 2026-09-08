@@ -28,6 +28,7 @@ from planner.config import (
     DIRECTOR_N_GPU_LAYERS,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_THREADS,
+    DIRECTOR_THREADS_BATCH,
     DIRECTOR_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
@@ -1653,6 +1654,7 @@ class QwenDirector:
                 n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
                 n_batch=DIRECTOR_N_BATCH,
                 n_threads=DIRECTOR_THREADS,
+                n_threads_batch=DIRECTOR_THREADS_BATCH,
                 flash_attn=True,
                 verbose=False,
             )
