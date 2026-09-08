@@ -6096,15 +6096,39 @@ state. Do not invent facts that are not present in the plan.
             creative.get("_canonical_character_roster_verified") is True
         )
 
-        canonical_scenes = deepcopy(
-            base_plan.get("scenes", [])
-            or []
+        # Canonical scene topology defaults to the premise-derived base
+        # plan, but a verified director pass (generate() succeeded and
+        # derived its roster/topology from the FINAL story, not the
+        # premise) produces its own scene topology that must take
+        # priority. Without this, any scene beyond what the short
+        # premise alone produces gets silently dropped later by the
+        # valid_scene_ids filter -- discarding real, already-paid-for
+        # Qwen shot-batch work for those scenes.
+        verified_pass = (
+            creative.get("_canonical_character_roster_verified") is True
         )
 
         creative_scenes = (
             creative.get("scenes", [])
             or []
         )
+
+        premise_scenes = deepcopy(
+            base_plan.get("scenes", [])
+            or []
+        )
+
+        story_derived_scenes = [
+            deepcopy(scene)
+            for scene in creative_scenes
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "") or "").strip()
+        ]
+
+        if verified_pass and story_derived_scenes:
+            canonical_scenes = story_derived_scenes
+        else:
+            canonical_scenes = premise_scenes
 
         creative_by_id = {
             str(scene.get("scene_id", "") or "").strip(): scene
