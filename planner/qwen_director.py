@@ -3692,6 +3692,41 @@ terminal and must not trigger another call.
                 if not str(candidate.get(field, "") or "").strip():
                     candidate[field] = fallback
 
+            shot_location = str(
+                candidate.get("location", "") or ""
+            ).strip()
+            scene_location = str(
+                scene.get("location", "") or ""
+            ).strip()
+
+            if shot_location and scene_location:
+                location_words = shot_location.split()
+                if len(location_words) > 4:
+                    candidate["location"] = scene_location
+                elif any(
+                    word.lower() in {
+                        "the", "a", "an", "of", "she", "he",
+                        "they", "his", "her", "their", "doing",
+                        "response", "hushed", "sharp", "this",
+                        "that", "didn't", "somewhere", "few",
+                        "who", "still", "remembered",
+                    }
+                    for word in location_words
+                ):
+                    candidate["location"] = scene_location
+
+            for state_key in (
+                "continuity_start_state",
+                "continuity_end_state",
+            ):
+                state = candidate.get(state_key)
+                if isinstance(state, dict) and state.get("location"):
+                    state_words = str(state["location"]).split()
+                    if len(state_words) > 4:
+                        state["location"] = candidate.get(
+                            "location", scene_location
+                        )
+
             if not str(candidate.get("visual_prompt", "") or "").strip():
                 continue
 
@@ -4610,6 +4645,7 @@ Only change `location` when the narrative explicitly moves to a different physic
 
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
 Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
+location must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.
 Preserve:
 - character identity;
 - chronology;
