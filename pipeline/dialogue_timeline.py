@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
@@ -67,6 +68,33 @@ class DialogueTimeline:
     @classmethod
     def h3_effective_duration_seconds(cls, requested_seconds: float) -> float:
         return cls.h3_legal_frames(requested_seconds) / cls.FPS
+
+    @classmethod
+    def _minimum_h3_duration_for_required_seconds(cls, required_seconds: float) -> tuple[int, float]:
+        """Return the smallest H3-legal duration that can contain ``required_seconds``.
+
+        H3 durations live on the ``17*n+5`` frame grid. This helper intentionally
+        works from required runtime rather than the caller's requested duration so
+        deterministic dialogue scheduling can expand a short Qwen-selected shot
+        without changing the spoken text.
+        """
+        required = max(0.0, float(required_seconds))
+        required_frames = max(
+            cls.MIN_FRAMES,
+            int(math.ceil(required * cls.FPS - 1e-9)),
+        )
+        minimum_n = (cls.MIN_FRAMES - 5) // 17
+        n = max(
+            minimum_n,
+            int(math.ceil((required_frames - 5) / 17.0)),
+        )
+        frames = 17 * n + 5
+        if frames > cls.MAX_FRAMES:
+            raise ValueError(
+                f"Required H3 runtime {required:.3f}s exceeds the maximum legal "
+                f"duration ({cls.MAX_FRAMES / cls.FPS:.3f}s)."
+            )
+        return frames, frames / cls.FPS
 
     @classmethod
     def _legacy_events(cls, shot: dict) -> list[dict]:
@@ -220,39 +248,92 @@ class DialogueTimeline:
             )
             post = self.DEFAULT_POST_ROLL if index == count else 0.0
 
-            # Preserve exact dialogue text. We never silently truncate speech
-            # to squeeze it into a too-short shot. Instead, reduce optional
-            # breathing margins and then fail with an actionable diagnostic.
+            # Preserve exact dialogue text. Dialogue is never truncated. If the
+            # current H3-legal shot is too short, deterministically promote the
+            # shot to the smallest legal H3 duration that can contain the event
+            # plus any already-reserved future events. Optional breathing margins
+            # are only removed when the maximum legal H3 duration is otherwise
+            # insufficient.
+            required_duration = cursor + pre + speech_duration + post + reserve_for_future
+
+            if required_duration > duration + 1e-6:
+                try:
+                    _, expanded_duration = self._minimum_h3_duration_for_required_seconds(
+                        required_duration
+                    )
+                except ValueError:
+                    expanded_duration = duration
+
+                if expanded_duration > duration + 1e-6:
+                    duration = expanded_duration
+                    effective_frames = int(round(duration * self.FPS))
+                    shot["duration_seconds"] = round(duration, 4)
+                    shot["frames_per_shot"] = effective_frames
+                    shot["h3_effective_frames"] = effective_frames
+                    shot["h3_effective_duration_seconds"] = duration
+                    print(
+                        f"[DIALOGUE] recovery type=shot_duration_extended "
+                        f"shot={shot.get('shot_id', '')} "
+                        f"new_duration={duration:.3f}s",
+                        flush=True,
+                    )
+
+            # Pre/post roll are optional. At the H3 maximum, reclaim those
+            # margins before declaring the dialogue unschedulable.
             available = duration - cursor - pre - post - reserve_for_future
-
-            if available < self.MIN_EVENT_DURATION:
-                if post > 0.0:
-                    post = 0.0
-                    available = duration - cursor - pre - reserve_for_future
-                if available < self.MIN_EVENT_DURATION and pre > 0.0:
-                    pre = 0.0
-                    available = duration - cursor - reserve_for_future
-
-            if available < self.MIN_EVENT_DURATION:
-                raise ValueError(
-                    f"{shot.get('shot_id', '')}: insufficient H3 runtime for "
-                    f"dialogue event {index}; effective_duration={duration:.3f}s, "
-                    f"remaining_capacity={max(0.0, available):.3f}s. "
-                    "Increase shot duration or split/explicitly continue the dialogue."
-                )
+            if speech_duration > available + 1e-6 and post > 0.0:
+                post = 0.0
+                available = duration - cursor - pre - reserve_for_future
+            if speech_duration > available + 1e-6 and pre > 0.0:
+                pre = 0.0
+                available = duration - cursor - reserve_for_future
 
             if speech_duration > available + 1e-6:
-                if continues_next:
-                    raise ValueError(
-                        f"{shot.get('shot_id', '')}: explicit continuation is marked, "
-                        "but the current dialogue segment still exceeds the available "
-                        "runtime. Split the text into shorter events before scheduling."
+                try:
+                    _, max_required_duration = self._minimum_h3_duration_for_required_seconds(
+                        cursor + pre + speech_duration + post + reserve_for_future
                     )
-                raise ValueError(
-                    f"{shot.get('shot_id', '')}: dialogue does not fit the H3-effective "
-                    f"shot duration ({duration:.3f}s). Estimated dialogue duration="
-                    f"{speech_duration:.3f}s; available={available:.3f}s."
+                except ValueError as exc:
+                    detail = (
+                        f" Explicit continuation was requested, but the dialogue segment "
+                        "cannot fit in the maximum legal H3 shot and must be split."
+                        if continues_next
+                        else " Increase shot duration or split the dialogue into shorter events."
+                    )
+                    raise ValueError(
+                        f"{shot.get('shot_id', '')}: dialogue event {index} exceeds "
+                        f"maximum H3 runtime; estimated_dialogue={speech_duration:.3f}s, "
+                        f"available={available:.3f}s.{detail}"
+                    ) from exc
+
+                # Defensive guard: the helper should never report a duration that
+                # still cannot contain the required event. Keep this deterministic
+                # rather than silently clipping or shifting the spoken text.
+                if max_required_duration <= duration + 1e-6:
+                    raise ValueError(
+                        f"{shot.get('shot_id', '')}: dialogue event {index} cannot be "
+                        f"scheduled without exceeding H3 runtime; estimated_dialogue="
+                        f"{speech_duration:.3f}s, available={available:.3f}s."
+                    )
+                duration = max_required_duration
+                effective_frames = int(round(duration * self.FPS))
+                shot["duration_seconds"] = round(duration, 4)
+                shot["frames_per_shot"] = effective_frames
+                shot["h3_effective_frames"] = effective_frames
+                shot["h3_effective_duration_seconds"] = duration
+                print(
+                    f"[DIALOGUE] recovery type=shot_duration_extended "
+                    f"shot={shot.get('shot_id', '')} "
+                    f"new_duration={duration:.3f}s",
+                    flush=True,
                 )
+                available = duration - cursor - pre - post - reserve_for_future
+
+                if speech_duration > available + 1e-6:
+                    raise ValueError(
+                        f"{shot.get('shot_id', '')}: dialogue timing exceeds the "
+                        f"maximum schedulable H3 runtime ({duration:.3f}s)."
+                    )
 
             start = cursor + pre
             end = start + speech_duration
