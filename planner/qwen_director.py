@@ -43,7 +43,6 @@ from planner.config import (
 
 # Qwen3 non-thinking soft switch.
 NO_THINK_SUFFIX = "\n/no_think"
-NO_THINK_CHAT_TEMPLATE_KWARGS = {"enable_thinking": False}
 
 def _with_faulthandler_watchdog(func):
     """Arm a long-lived traceback watchdog around one Director operation.
@@ -214,7 +213,7 @@ class QwenDirector:
         self._cache_dir = self._optional_directory_env(
             "H3_DIRECTOR_CACHE_DIR"
         )
-        self._cache_namespace = "minimax-h3-qwen-schema-v2"
+        self._cache_namespace = "minimax-h3-qwen-schema-v3-direct-python-no-chat-template-kwargs"
 
         # Runtime Qwen telemetry is intentionally lightweight: keep only
         # aggregate/per-call metrics needed to diagnose latency, token usage,
@@ -2631,10 +2630,6 @@ terminal and must not trigger another call.
             "max_tokens": max_tokens,
         }
 
-        if disable_thinking:
-            kwargs["chat_template_kwargs"] = dict(
-                NO_THINK_CHAT_TEMPLATE_KWARGS
-            )
 
         if json_mode:
             if response_schema is None:
@@ -2813,9 +2808,6 @@ terminal and must not trigger another call.
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
-                    chat_template_kwargs=dict(
-                        NO_THINK_CHAT_TEMPLATE_KWARGS
-                    ) if disable_thinking else None,
                 )
             )
         except Exception as exc:
