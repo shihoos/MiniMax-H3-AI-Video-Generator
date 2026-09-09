@@ -342,9 +342,6 @@ class ProductionPlanner:
         "brigade", "battalion", "squadron", "fleet", "regiment",
     }
 
-    LOCATION_PATTERNS = (
-        r"\b(?:in|at|on|inside|near|through|into|within|outside|beneath|under|across|along|around)\b",
-    )
 
     TIME_WORDS = {
         "sunrise": "sunrise",
@@ -2718,90 +2715,6 @@ class ProductionPlanner:
     # ============================================================
 
     @staticmethod
-    def _location(
-        text: str,
-    ) -> str:
-        """Extract a defensible physical-setting phrase from prose.
-
-        The previous implementation treated every prepositional complement
-        as a location. This version only accepts candidates that resolve to
-        an existing semantic non-person head or to a multi-token proper-name
-        location, and it preserves the surrounding scene continuity when no
-        defensible location is present.
-        """
-        source = str(text or "").strip()
-        if not source:
-            return ""
-
-        clause_break = re.compile(
-            r"\b(?:because|although|though|while|when|where|who|whom|whose|that|which|as)\b",
-            flags=re.IGNORECASE,
-        )
-
-        for pattern in ProductionPlanner.LOCATION_PATTERNS:
-            for prep_match in re.finditer(
-                pattern,
-                source,
-                flags=re.IGNORECASE,
-            ):
-                tail = source[prep_match.end():].lstrip()
-                if not tail:
-                    continue
-
-                tail = re.split(
-                    r"[,.!?;:]",
-                    tail,
-                    maxsplit=1,
-                )[0].strip()
-
-                boundary = clause_break.search(tail)
-                if boundary:
-                    tail = tail[:boundary.start()].strip()
-
-                if not tail:
-                    continue
-
-                tail = re.sub(
-                    r"^(?:the|a|an)\s+",
-                    "",
-                    tail,
-                    flags=re.IGNORECASE,
-                ).strip()
-
-                if not tail:
-                    continue
-
-                words = [
-                    token.strip(" ,.;:!?()[]{}\\\"'")
-                    for token in tail.split()
-                    if token.strip(" ,.;:!?()[]{}\\\"'")
-                ]
-
-                if not words:
-                    continue
-
-                head = words[-1].lower()
-                semantic_head = head in ProductionPlanner.NON_PERSON_HEAD_WORDS
-
-                # A multi-token capitalized span is valid proper-name
-                # evidence (e.g. New York, Frozen Lake) without requiring
-                # a hard-coded place-name vocabulary.
-                proper_name_span = (
-                    len(words) >= 2
-                    and sum(
-                        bool(word) and word[0].isupper()
-                        for word in words
-                    ) >= 2
-                )
-
-                if not (semantic_head or proper_name_span):
-                    continue
-
-                return " ".join(words)
-
-        return ""
-
-    @staticmethod
     def _time_of_day(
         text: str,
     ) -> str:
@@ -2993,7 +2906,6 @@ class ProductionPlanner:
         )
 
         scenes = []
-        previous_location = ""
 
         for index, unit in enumerate(
             units,
@@ -3004,19 +2916,10 @@ class ProductionPlanner:
                 unit.text
             )
 
-            location = self._location(
-                unit.text
-            )
-
-            # Preserve physical-setting continuity when a scene unit does
-            # not contain an explicit, defensible location phrase. This is a
-            # fallback only; it never overrides a newly detected location.
-            if location:
-                previous_location = location
-            elif previous_location:
-                location = previous_location
-            else:
-                location = "cinematic environment"
+            # Physical scene location is semantic metadata. The deterministic
+            # planner must not infer it from arbitrary prepositional phrases.
+            # The existing Qwen cinematography pass supplies this field.
+            location = ""
 
             scenes.append(
                 Scene(
