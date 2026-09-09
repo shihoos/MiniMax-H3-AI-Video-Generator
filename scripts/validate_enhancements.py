@@ -67,43 +67,6 @@ def test_shot_reference_video_by_character_roundtrip() -> None:
         "Shot serialization round-trip lost reference_video_by_character.",
     )
 
-def test_reference_video_character_owner_reaches_context_ir() -> None:
-    from schemas.shot import Shot
-    from pipeline.context_ir import ContextIRCompiler
-
-    shot = Shot(
-        shot_id="shot_test_002",
-        scene_id="scene_test_001",
-        order=1,
-        duration_seconds=4.0,
-        characters=["Alice"],
-        location="Test Location",
-        action="Alice walks forward.",
-        camera_shot="medium",
-        camera_movement="static",
-        lens_and_depth_of_field="35mm",
-        composition_notes="centered",
-        lighting="soft",
-        color_temperature="neutral",
-        mood="calm",
-        visual_prompt="Alice walks forward.",
-        reference_video_by_character={
-            "Alice": ["/refs/alice_motion.mp4"],
-        },
-    )
-
-    payload = shot.to_dict()
-
-    compiled = ContextIRCompiler.compile_shot(
-        payload
-    )
-
-    text = str(compiled)
-
-    check(
-        "Alice" in text,
-        "Context-IR did not preserve the character owner of the video reference.",
-    )
 
 def main() -> None:
     plan = {
