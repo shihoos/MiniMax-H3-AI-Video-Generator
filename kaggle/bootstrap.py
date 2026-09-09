@@ -728,9 +728,25 @@ def install_storyboard_runtime(
         "-m",
         "pip",
         "install",
+        "--no-cache-dir",
+        "--force-reinstall",
         "-q",
         "--disable-pip-version-check",
         *packages,
+    )
+    
+    # Verify Pillow in a fresh subprocess
+    verify_script = (
+        "from PIL import Image; "
+        "from PIL._typing import _Ink; "
+        "print('Pillow', Image.__version__, 'OK')"
+    )
+    run(
+        [
+            sys.executable,
+            "-c",
+            verify_script,
+        ]
     )
 
 
