@@ -4602,6 +4602,11 @@ You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
 Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
 
+For the `location` field, use ONLY the physical setting where the shot occurs.
+The value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.
+When the shot remains in the same physical setting, preserve the supplied scene location exactly.
+Only change `location` when the narrative explicitly moves to a different physical place.
+
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
 Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
 Preserve:
@@ -4657,7 +4662,7 @@ Return JSON only in exactly this structure:
           "scene_id": "scene_001",
           "duration_seconds": 5.2,
           "characters": [],
-          "location": "...",
+          "location": "<physical setting only>",
           "action": "...",
           "camera_shot": "...",
           "camera_movement": "...",
@@ -4685,7 +4690,7 @@ Return JSON only in exactly this structure:
           "scene_id": "scene_001",
           "duration_seconds": 5.2,
           "characters": [],
-          "location": "...",
+          "location": "<physical setting only>",
           "action": "...",
           "camera_shot": "...",
           "camera_movement": "...",
