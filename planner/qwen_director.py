@@ -4605,6 +4605,7 @@ Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scen
 For the `location` field, use ONLY the physical setting where the shot occurs.
 The value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.
 When the shot remains in the same physical setting, preserve the supplied scene location exactly.
+When the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.
 Only change `location` when the narrative explicitly moves to a different physical place.
 
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
