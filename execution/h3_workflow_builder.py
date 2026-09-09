@@ -204,6 +204,8 @@ class H3WorkflowBuilder:
         l3 = add_link(ids["optimizer"], ids["scheduler"], scheduler_slot)
         l4 = add_link(ids["optimizer"], ids["guider"], guider_slot)
 
+        workflow["last_link_id"] = next_link - 1
+
         turbo["inputs"][turbo_slot]["link"] = l1
         optimizer["inputs"][optimizer_slot]["link"] = l2
         scheduler["inputs"][scheduler_slot]["link"] = l3
