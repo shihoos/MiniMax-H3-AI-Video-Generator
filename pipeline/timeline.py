@@ -72,7 +72,22 @@ class ProductionTimeline:
             shot for shot in (self.plan.get("shots", []) or [])
             if isinstance(shot, dict)
         ]
-        shots.sort(key=lambda item: (int(item.get("order", 0) or 0), str(item.get("shot_id", ""))))
+        scene_order = {
+            str(scene.get("scene_id", "")).strip(): index
+            for index, scene in enumerate(
+                self.plan.get("scenes", []) or []
+            )
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "")).strip()
+        }
+        shots.sort(
+            key=lambda item: (
+                scene_order.get(
+                    str(item.get("scene_id", "")).strip(), 10**9
+                ),
+                int(item.get("order", 0) or 0),
+            )
+        )
         cursor = 0.0
         previous: dict[str, Any] | None = None
         segments: list[TimelineSegment] = []
