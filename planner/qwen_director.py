@@ -4,6 +4,7 @@ from copy import deepcopy
 from pathlib import Path
 import os
 import json
+import re
 
 from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
@@ -206,11 +207,23 @@ class QwenDirector(
         self._character_semantic_calls = 0
         if not director_enabled():
 
+            plan = deepcopy(base_plan)
+            scenes = list(plan.get("scenes", []) or [])
+            shots = list(plan.get("shots", []) or [])
+            characters = {
+                str(character.get("name", "")).strip()
+                for character in plan.get("characters", []) or []
+                if isinstance(character, dict)
+                and str(character.get("name", "")).strip()
+            }
+            if scenes and shots:
+                plan["shots"] = CinematicCompiler(
+                    character_names=characters
+                ).compile_all(scenes, shots)
+
             return {
                 "enabled": False,
-                "plan": deepcopy(
-                    base_plan
-                ),
+                "plan": plan,
                 "director_notes": "",
             }
 
@@ -1216,6 +1229,11 @@ class QwenDirector(
             all_shots,
             characters,
         )
+        self._validate_dialogue_speaker_contract(
+            story,
+            all_shots,
+            characters,
+        )
 
         self._validate_production_quality(
             mode=mode,
@@ -1272,6 +1290,123 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
+    def _validate_dialogue_speaker_contract(
+        self,
+        story: str,
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Canonicalize dialogue speakers and prevent narrative-as-speech leakage."""
+        allowed_names = [
+            str(value.get("name", "")).strip()
+            for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
+        ]
+        if not allowed_names:
+            return
+
+        canonical_by_norm = {name.lower(): name for name in allowed_names}
+        aliases = EntityResolver.build_alias_map({name.lower() for name in allowed_names})
+
+        def _resolve(value: str) -> str | None:
+            normalized = str(value or "").strip().lower()
+            if normalized in canonical_by_norm:
+                return canonical_by_norm[normalized]
+            resolved = aliases.get(normalized)
+            if resolved and resolved in canonical_by_norm:
+                return canonical_by_norm[resolved]
+            stripped = EntityResolver.strip_honorific(normalized)
+            resolved = aliases.get(stripped)
+            if resolved and resolved in canonical_by_norm:
+                return canonical_by_norm[resolved]
+            return None
+
+        def _norm_text(value: str) -> str:
+            return re.sub(
+                r"\s+",
+                " ",
+                str(value or "").strip().strip('\"“”‘’'),
+            ).lower()
+
+        story_text = str(story or "").strip()
+        quoted_groups = re.findall(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’',
+            story_text,
+        )
+        quoted_texts = [
+            _norm_text(next(part for part in group if part))
+            for group in quoted_groups
+        ]
+
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+
+            shot_id = str(shot.get("shot_id", "")).strip()
+            bound = {
+                canonical.lower()
+                for canonical in (
+                    _resolve(str(name))
+                    for name in (shot.get("characters", []) or [])
+                )
+                if canonical
+            }
+
+            raw_events = shot.get("dialogue_events", [])
+            events = raw_events if isinstance(raw_events, list) else []
+            repaired_events = []
+
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+
+                speaker = str(event.get("speaker", "") or "").strip()
+                text = str(event.get("text", "") or "").strip()
+                if not speaker or not text:
+                    continue
+
+                canonical = _resolve(speaker)
+                if canonical is None:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains unknown dialogue speaker '{speaker}'."
+                    )
+
+                normalized = canonical.lower()
+                if bound and normalized not in bound:
+                    raise RuntimeError(
+                        f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
+                    )
+
+                # When the source story contains explicit quoted dialogue, only
+                # quoted speech may become audio. This prevents narrative prose,
+                # action, and internal exposition from entering DialogueTimeline.
+                if quoted_texts:
+                    normalized_text = _norm_text(text)
+                    if not any(
+                        normalized_text == quoted
+                        or normalized_text in quoted
+                        or quoted in normalized_text
+                        for quoted in quoted_texts
+                    ):
+                        continue
+
+                repaired = dict(event)
+                repaired["speaker"] = canonical
+                repaired_events.append(repaired)
+
+            shot["dialogue_events"] = repaired_events
+            shot["speaking_characters"] = list(dict.fromkeys(
+                str(event["speaker"]).strip()
+                for event in repaired_events
+                if str(event.get("speaker", "")).strip()
+            ))
+            shot["speech_text"] = " ".join(
+                str(event.get("text", "")).strip()
+                for event in repaired_events
+                if str(event.get("text", "")).strip()
+            )
+
     @_with_faulthandler_watchdog
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
         """Run an optional read-only cinematic critique.
@@ -1287,12 +1422,51 @@ class QwenDirector(
     identity, shot identity, characters, reference bindings, timing, or continuity
     state. Do not invent facts that are not present in the plan.
     """.strip()
+        def _slim_shot(shot: dict) -> dict:
+            return {
+                "shot_id": str(shot.get("shot_id", "") or ""),
+                "scene_id": str(shot.get("scene_id", "") or ""),
+                "camera_shot": str(shot.get("camera_shot", "") or ""),
+                "camera_movement": str(shot.get("camera_movement", "") or ""),
+                "lens_and_depth_of_field": str(shot.get("lens_and_depth_of_field", "") or ""),
+                "lighting": str(shot.get("lighting", "") or ""),
+                "mood": str(shot.get("mood", "") or ""),
+                "visual_prompt": str(shot.get("visual_prompt", "") or "")[:400],
+                "action": str(shot.get("action", "") or "")[:300],
+                "dialogue_events": [
+                    {
+                        "speaker": str(event.get("speaker", "") or ""),
+                        "text": str(event.get("text", "") or "")[:240],
+                    }
+                    for event in (shot.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                ][:4],
+            }
+
+        def _slim_scene(scene: dict) -> dict:
+            return {
+                "scene_id": str(scene.get("scene_id", "") or ""),
+                "title": str(scene.get("title", "") or ""),
+                "description": str(scene.get("description", "") or "")[:500],
+                "scene_objective": str(scene.get("scene_objective", "") or "")[:300],
+                "location": str(scene.get("location", "") or ""),
+                "characters": scene.get("characters", []) or [],
+            }
+
         compact = {
             "mode": mode,
-            "story": str(user_input or "")[:5000],
+            "story": str(plan.get("story", user_input) or "")[:3500],
             "visual_language": plan.get("visual_language", {}) or {},
-            "scenes": plan.get("scenes", []) or [],
-            "shots": plan.get("shots", []) or [],
+            "scenes": [
+                _slim_scene(scene)
+                for scene in (plan.get("scenes", []) or [])
+                if isinstance(scene, dict)
+            ],
+            "shots": [
+                _slim_shot(shot)
+                for shot in (plan.get("shots", []) or [])
+                if isinstance(shot, dict)
+            ],
         }
         schema = {
             "type": "object",
