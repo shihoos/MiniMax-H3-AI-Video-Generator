@@ -822,13 +822,8 @@ class QwenDirector(
                             visual_language,
                         )
 
-                        desired_completion = min(
-                            DIRECTOR_MAX_TOKENS,
-    DIRECTOR_SHOTS_PER_SCENE,
-                            max(
-                                320,
-                                1400 * len(batch_scenes),
-                            ),
+                        desired_completion = self._shot_batch_completion_budget(
+                            len(batch_scenes)
                         )
 
                         prompt_tokens = self._count_tokens(
@@ -868,10 +863,8 @@ class QwenDirector(
                                 "shot_batch:"
                                 + "_".join(batch_ids)
                             ),
-                            max_completion=min(
-                                DIRECTOR_MAX_TOKENS,
-    DIRECTOR_SHOTS_PER_SCENE,
-                                1400 * len(batch_scenes),
+                            max_completion=self._shot_batch_completion_budget(
+                                len(batch_scenes)
                             ),
                             json_mode=True,
                             disable_thinking=True,
@@ -1538,6 +1531,19 @@ class QwenDirector(
                 raise RuntimeError(
                     f"Shot {shot_id} speech_text is inconsistent with dialogue_events."
                 )
+
+    @staticmethod
+    def _shot_batch_completion_budget(scene_count: int) -> int:
+        """Return the completion-token cap for one batched shot request.
+
+        SHOTS_PER_SCENE is a topology constraint, not a token budget.
+        Never use it as a completion-token cap.
+        """
+        count = max(1, int(scene_count))
+        return min(
+            int(DIRECTOR_MAX_TOKENS),
+            max(320, 1400 * count),
+        )
 
     @_with_faulthandler_watchdog
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
