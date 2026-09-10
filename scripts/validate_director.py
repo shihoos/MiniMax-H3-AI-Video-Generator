@@ -204,6 +204,79 @@ def test_expand_preservation_gates() -> None:
         )
 
 
+def test_dialogue_speaker_contract() -> None:
+    director = QwenDirector(ROOT)
+
+    director._validate_dialogue_speaker_contract(
+        'Eli Voss said, "We have to go."',
+        [
+            {
+                "shot_id": "scene_001_shot_001",
+                "characters": ["Eli Voss"],
+                "dialogue_events": [
+                    {"speaker": "Eli", "text": "We have to go."},
+                ],
+            }
+        ],
+        [{"name": "Eli Voss"}],
+    )
+
+    shots = [
+        {
+            "shot_id": "scene_005_shot_001",
+            "characters": ["Eli"],
+            "dialogue_events": [
+                {"speaker": "uncle", "text": "Do not open it."},
+            ],
+        }
+    ]
+    try:
+        director._validate_dialogue_speaker_contract(
+            'Eli heard his uncle say, "Do not open it."',
+            shots,
+            [{"name": "Eli"}],
+        )
+    except RuntimeError as exc:
+        check(
+            "unknown dialogue speaker" in str(exc),
+            "Unknown dialogue speaker was rejected with the wrong contract error.",
+        )
+    else:
+        raise RuntimeError(
+            "Dialogue contract accepted a role-only speaker outside the canonical roster."
+        )
+
+
+def test_narrative_prose_is_not_promoted_to_dialogue() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_006_shot_002",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {
+                "speaker": "Eli",
+                "text": "Eli left the station, carrying the choice with him.",
+            },
+            {
+                "speaker": "Eli",
+                "text": "I know what I have to do.",
+            },
+        ],
+    }]
+
+    director._validate_dialogue_speaker_contract(
+        'Eli left the station. "I know what I have to do."',
+        shots,
+        [{"name": "Eli"}],
+    )
+
+    events = shots[0]["dialogue_events"]
+    check(len(events) == 1, "Narrative prose was incorrectly retained as dialogue.")
+    check(
+        events[0]["text"] == "I know what I have to do.",
+        "Quoted dialogue was incorrectly modified.",
+    )
+
 def test_shot_batch_contract() -> None:
     director = QwenDirector(
         ROOT
@@ -1607,6 +1680,69 @@ def test_batch_planning_runtime_contract() -> None:
         "Five-scene batch schema is missing.",
     )
 
+def test_critic_payload_is_compact() -> None:
+    director = QwenDirector(ROOT)
+    captured = {}
+
+    def fake_chat_json(system_prompt, user_prompt, **kwargs):
+        captured["prompt"] = user_prompt
+        return {
+            "overall_score": 1.0,
+            "status": "pass",
+            "findings": [],
+            "shot_findings": [],
+            "recommended_focus": [],
+            "shot_patches": [],
+        }
+
+    original = director._chat_json
+    director._chat_json = fake_chat_json
+    try:
+        plan = {
+            "story": "A complete cinematic story with a beginning, climax, and resolution.",
+            "visual_language": {"genre_tone": "cinematic"},
+            "characters": [{"name": "Eli", "identity_locks": ["heavy"]}],
+            "scenes": [{
+                "scene_id": "scene_001",
+                "title": "Arrival",
+                "description": "Eli reaches the station.",
+                "scene_objective": "Establish the threat.",
+                "location": "station entrance",
+                "characters": ["Eli"],
+                "heavy_prompt": "x" * 5000,
+            }],
+            "shots": [{
+                "shot_id": "scene_001_shot_001",
+                "scene_id": "scene_001",
+                "camera_shot": "wide",
+                "camera_movement": "push-in",
+                "lens_and_depth_of_field": "wide-angle, deep focus",
+                "lighting": "blue-hour",
+                "mood": "tense",
+                "visual_prompt": "Eli enters the station.",
+                "action": "Eli reaches the door.",
+                "dialogue_events": [{"speaker": "Eli", "text": "We are here.", "extra": "ignored"}],
+                "h3_prompt": "x" * 10000,
+                "identity_locks": ["x"] * 10,
+                "reference_bindings": ["x"] * 10,
+            }],
+        }
+        result = director.critique_plan(
+            mode="ai_story",
+            user_input="premise",
+            plan=plan,
+        )
+    finally:
+        director._chat_json = original
+
+    prompt = captured.get("prompt", "")
+    check(result.get("status") == "pass", "Critic stub did not return the expected result.")
+    check("h3_prompt" not in prompt, "Critic payload still includes compiler/runtime prompt data.")
+    check("identity_locks" not in prompt, "Critic payload still includes identity locks.")
+    check("reference_bindings" not in prompt, "Critic payload still includes heavy reference bindings.")
+    check(len(prompt) < 20000, "Critic payload remains too large for the fixed context budget.")
+
+
 def test_batch_prompt_is_compact() -> None:
     director = QwenDirector(ROOT)
     scenes = [
@@ -2115,6 +2251,8 @@ def main() -> None:
         test_story_modes,
         test_expand_preservation_gates,
         test_shot_batch_contract,
+        test_dialogue_speaker_contract,
+        test_narrative_prose_is_not_promoted_to_dialogue,
         test_text_generation_disables_thinking_by_default,
         test_character_sanitization,
         test_scene_id_sanitization_before_batching,
@@ -2156,6 +2294,7 @@ def main() -> None:
         test_scene_budget_contract_and_fallback,
         test_scene_budget_semantic_repair_contract,
         test_batch_planning_runtime_contract,
+        test_critic_payload_is_compact,
         test_batch_prompt_is_compact,
         test_resume_does_not_rewrite_scene_ids,
     ]
