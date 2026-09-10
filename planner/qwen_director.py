@@ -273,6 +273,7 @@ class QwenDirector:
         temperature: float | None = None,
         top_p: float | None = None,
         response_format=None,
+        finish_reason: str = "",
         cache_hit: bool = False,
         error: str = "",
     ) -> None:
@@ -305,6 +306,7 @@ class QwenDirector:
                     else None
                 )
             ),
+            "finish_reason": str(finish_reason or ""),
             "cache_hit": bool(cache_hit),
             "error": str(error or ""),
         }
@@ -330,6 +332,7 @@ class QwenDirector:
             f"total_tokens={prompt_tokens + completion_tokens}",
             f"decode_tps={record['decode_tps']:.2f}",
             f"max_tokens={int(max_tokens or 0)}",
+            (f"finish_reason={record['finish_reason']}" if record["finish_reason"] else ""),
             (f"cache_hit={cache_hit}" if cache_hit else ""),
             (f"error={error}" if error else ""),
             flush=True,
@@ -1892,36 +1895,64 @@ You are the narrative writer for MiniMax H3.
 
 The user provides a premise.
 
-Write a complete cinematic short-film story.
-Add a protagonist objective, meaningful conflict,
-escalation, character reactions, a climax, and a resolution.
-Add substantive events; do not merely paraphrase the premise.
+Write a complete cinematic short-film story with a clear beginning,
+escalating middle, irreversible choice or point of no return, climax,
+consequence, and explicit resolution. Completion is more important than
+reaching a target word count.
+
+Hard requirements:
+1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal that
+   is caused by a concrete detail established earlier in the story. Do not
+   rely on a familiar default twist or introduce a random secret, artifact,
+   monster, or organization only for surprise.
+2. INTERIORITY. Include at least two sentences that reveal the protagonist's
+   specific fear, memory, desire, or private realization through concrete
+   imagery or sensory association. Show why the moment matters to them.
+3. DIALOGUE. Include at least one short line of spoken dialogue by a named
+   character. The line must change a decision, reveal information, create
+   conflict, or foreshadow the central reversal. No filler dialogue.
+4. RESOLUTION. End with a complete aftermath paragraph showing what happened
+   to the protagonist and what changed. Do not stop mid-action, mid-sentence,
+   mid-word, or on an ellipsis.
+
+Additional constraints:
+- Aim for 400-650 words, but always finish the story completely.
+- Third person past tense.
+- One protagonist whose goal is stated in the first two sentences.
+- No camera directions, scene headings, shot descriptions, labels, or meta commentary.
 
 Output ONLY the story prose.
-Do not output JSON.
-Do not output labels, analysis, notes, camera directions,
-or explanations.
 """.strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return """
 You are the narrative expansion writer for MiniMax H3.
 
-Expand the supplied story substantially while preserving
-its important characters, events, chronology, setting,
-outcome, and explicit constraints.
+Expand the supplied story while preserving its important characters, events,
+chronology, setting, outcome, and explicit constraints. Build a complete arc
+with escalation, point of no return, climax, consequence, and resolution.
+Completion is more important than reaching a target word count.
 
-Add motivation, emotional depth, cause and effect,
-transitions, intermediate events, stakes, tension,
-sensory detail, character reactions, stronger escalation,
-and richer consequences.
+Hard requirements for the expansion:
+1. Preserve an existing twist if one exists. If none exists, introduce one
+   unexpected reveal or reversal that is caused by a concrete detail already
+   established in the source; do not add a random secret, artifact, monster,
+   or organization solely for surprise.
+2. Add at least two sentences of meaningful interiority for the protagonist,
+   tied to a specific fear, memory, desire, or private realization.
+3. Preserve or add at least one short line of spoken dialogue by a named
+   character. The line must advance conflict, reveal information, or connect
+   to the central reversal.
+4. End with a complete resolution paragraph describing the aftermath and what
+   changed. Do not stop mid-action, mid-sentence, mid-word, or on an ellipsis.
 
-Do not merely add adjectives.
-Do not replace the original plot.
-Do not convert the story into camera directions.
+Additional constraints:
+- Aim for 400-650 words, but always finish the story completely.
+- Preserve source meaning and chronology; do not replace the original plot.
+- Do not merely add adjectives.
+- Do not convert the story into camera directions, scene headings, or shot descriptions.
 
 Output ONLY the expanded story prose.
-Do not output JSON, labels, analysis, notes, or explanations.
 """.strip()
 
         raise ValueError(
@@ -1934,14 +1965,18 @@ Do not output JSON, labels, analysis, notes, or explanations.
         story: str,
     ) -> str:
 
+        source_text = self._limit_text(
+            story,
+            7000,
+        )
         return (
             "MODE: "
             + str(mode)
             + "\n\nSOURCE STORY / PREMISE:\n"
-            + self._limit_text(
-                story,
-                7000,
-            )
+            + source_text
+            + "\n\nFINAL OUTPUT REQUIREMENTS:\n"
+            + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
+            + "End on a complete sentence with terminal punctuation. Include the required causal reversal, protagonist interiority, and functional dialogue."
         )
 
    
@@ -2192,9 +2227,11 @@ Do NOT invent names. Every returned name must literally occur in the story text,
 case/punctuation/possessive normalization. Do NOT treat locations, organizations, facilities, projects,
 missions, events, objects, calendar words, weather, or unnamed role descriptors as characters.
 Titles such as Dr., Captain, Commander, etc. are not part of the canonical name. Preserve full names when
-present and use the most complete canonical name actually present in the story. Review the deterministic
-candidate hints and explicitly mark any that are not characters, while also recovering named characters
-that the deterministic scan missed.
+present and use the most complete canonical name actually present in the story. When a character's full
+name and a shorter form (such as first name only or a title fragment) both appear as candidates, return
+only the single most complete canonical form; do not return the short form as a separate candidate. Review
+the deterministic candidate hints and explicitly mark any that are not characters, while also recovering
+named characters that the deterministic scan missed.
 """.strip()
 
         user_payload = json.dumps(
@@ -2679,6 +2716,15 @@ terminal and must not trigger another call.
                 if elapsed > 0 and completion_tokens > 0
                 else 0.0
             )
+            finish_reason = ""
+            if isinstance(response, dict):
+                try:
+                    finish_reason = str(
+                        response["choices"][0].get("finish_reason", "")
+                        or ""
+                    )
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    finish_reason = ""
 
             self._record_qwen_call(
                 call_name=call_name,
@@ -2689,6 +2735,7 @@ terminal and must not trigger another call.
                 temperature=temperature,
                 top_p=top_p,
                 response_format=kwargs.get("response_format"),
+                finish_reason=finish_reason,
                 error=error_text,
             )
 
@@ -2838,6 +2885,15 @@ terminal and must not trigger another call.
                 if elapsed > 0 and completion_tokens > 0
                 else 0.0
             )
+            finish_reason = ""
+            if isinstance(response, dict):
+                try:
+                    finish_reason = str(
+                        response["choices"][0].get("finish_reason", "")
+                        or ""
+                    )
+                except (KeyError, IndexError, TypeError, AttributeError):
+                    finish_reason = ""
             self._record_qwen_call(
                 call_name=call_name,
                 elapsed=elapsed,
@@ -2847,6 +2903,7 @@ terminal and must not trigger another call.
                 temperature=temperature,
                 top_p=top_p,
                 response_format=None,
+                finish_reason=finish_reason,
                 error=error_text,
             )
 
@@ -4068,6 +4125,13 @@ terminal and must not trigger another call.
         coverage = covered / max(1, len(source_sentences))
         return coverage, missing
 
+    @staticmethod
+    def _ends_cleanly(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        return bool(re.search(r"[.!?][\"')\]]*$", value))
+
     def _validate_mode_output(
         self,
         mode: str,
@@ -4142,6 +4206,12 @@ terminal and must not trigger another call.
             if source_tokens and not (result_tokens - source_tokens):
                 raise RuntimeError(
                     "AI Story mode did not add meaningful narrative content."
+                )
+
+            if not self._ends_cleanly(result):
+                raise RuntimeError(
+                    "Story text does not end in a complete sentence "
+                    "(the model stopped generating before finishing)."
                 )
 
             return
@@ -4228,6 +4298,12 @@ terminal and must not trigger another call.
                 raise RuntimeError(
                     "Expand Story mode did not "
                     "provide enough narrative development."
+                )
+
+            if not self._ends_cleanly(result):
+                raise RuntimeError(
+                    "Story text does not end in a complete sentence "
+                    "(the model stopped generating before finishing)."
                 )
 
             return
@@ -5276,7 +5352,8 @@ Return JSON only.
                         + "\n\n"
                         "REPAIR REQUIRED.\n"
                         + f"Previous validation failure: {failure_text}\n"
-                        + "Write the complete narrative again. "
+                        + "Write a complete, shorter story of about 350-450 words. "
+                        "Prioritize reaching the resolution and ending on a complete sentence over extra detail. "
                         "Return ONLY the story prose. "
                         "Do not output JSON or commentary."
                     )
