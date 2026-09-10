@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import tempfile
+
+import yaml
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +43,34 @@ class ProductionManifest:
                 temporary.unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+    def default_model_manifest(self) -> dict[str, Any]:
+        """Return authoritative model provenance from the repository inventories."""
+        inventory_path = self.project_root / "configs" / "model_inventory.yaml"
+        runtime_path = self.project_root / "configs" / "runtime_versions.yaml"
+        inventory: dict[str, Any] = {}
+        runtime: dict[str, Any] = {}
+        if inventory_path.is_file():
+            with inventory_path.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle)
+            if isinstance(data, dict):
+                inventory = data
+        if runtime_path.is_file():
+            with runtime_path.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle)
+            if isinstance(data, dict):
+                runtime = data
+        production_models = dict(inventory.get("models", {}) or {})
+        director = dict((inventory.get("policy", {}) or {}).get("director_model", {}) or {})
+        runtime_director = dict(runtime.get("director", {}) or {})
+        if runtime_director.get("model_filename"):
+            director["filename"] = str(runtime_director["model_filename"])
+        return {
+            "production": production_models,
+            "director": director,
+            "inventory_policy": dict(inventory.get("policy", {}) or {}),
+        }
 
     def build(self, plan: dict[str, Any]) -> dict[str, Any]:
         files = {}
@@ -82,7 +112,7 @@ class ProductionManifest:
             "story_sha256": ProductionCheckpoint.digest_text(str(plan.get("story", "") or "")),
             "director_notes_sha256": ProductionCheckpoint.digest_text(str(plan.get("director_notes", "") or "")),
             "files": files,
-            "models": plan.get("model_manifest", plan.get("models", {})) or {},
+            "models": plan.get("model_manifest") or plan.get("models") or self.default_model_manifest(),
             "runtime": plan.get("runtime_diagnostics", {}) or {},
             "timeline_version": (plan.get("timeline", {}) or {}).get("version", 1),
             "execution": {
