@@ -953,14 +953,37 @@ class QwenDirectorSanitizeMixin:
                 })
             if not normalized_dialogue:
                 legacy_speakers = candidate.get("speaking_characters", []) or []
-                legacy_text = str(candidate.get("speech_text", "") or "")
-                if legacy_text.strip() and legacy_speakers:
-                    normalized_dialogue = [{
-                        "speaker": str(legacy_speakers[0]).strip(),
-                        "text": legacy_text,
-                        "continues_from_previous_shot": False,
-                        "continues_to_next_shot": False,
-                    }]
+                legacy_text = str(candidate.get("speech_text", "") or "").strip()
+                if legacy_text and legacy_speakers:
+                    # Keep the compatibility bridge, but never manufacture a
+                    # dialogue event from obviously long narrative prose. The
+                    # Director's semantic normalizer remains the final gate.
+                    word_count = len(legacy_text.split())
+                    quoted = re.findall(r'“([^”\n]+)”|"([^"\n]+)"|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)', legacy_text)
+                    quoted_texts = [next((part for part in group if part), "").strip() for group in quoted]
+                    quoted_texts = [value for value in quoted_texts if value]
+                    direct_speech_like = bool(
+                        re.match(
+                            r"^(?:i|we|you|your|why|what|how|when|where|please|do not|don't|let's|can|could|would|will|is|are|did|have|has)\b",
+                            legacy_text,
+                            re.IGNORECASE,
+                        )
+                    )
+                    if quoted_texts:
+                        legacy_text = " ".join(quoted_texts)
+                        normalized_dialogue = [{
+                            "speaker": str(legacy_speakers[0]).strip(),
+                            "text": legacy_text,
+                            "continues_from_previous_shot": False,
+                            "continues_to_next_shot": False,
+                        }]
+                    elif 0 < word_count <= 32 and direct_speech_like:
+                        normalized_dialogue = [{
+                            "speaker": str(legacy_speakers[0]).strip(),
+                            "text": legacy_text,
+                            "continues_from_previous_shot": False,
+                            "continues_to_next_shot": False,
+                        }]
             candidate["dialogue_events"] = normalized_dialogue
 
             def _normalize_continuity(value) -> dict:
