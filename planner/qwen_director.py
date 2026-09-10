@@ -3858,6 +3858,37 @@ terminal and must not trigger another call.
                 candidate
             )
 
+        # Canonicalize dialogue continuation across adjacent shots in the same
+        # scene. Qwen may independently set the two boundary flags; the plan
+        # must expose one consistent boundary state to DialogueTimeline.
+        for index, candidate in enumerate(result):
+            events = candidate.get("dialogue_events", [])
+            if not isinstance(events, list) or not events:
+                if index > 0:
+                    previous_events = result[index - 1].get("dialogue_events", [])
+                    if isinstance(previous_events, list) and previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                continue
+
+            if index == 0 or bool(candidate.get("is_scene_boundary", False)):
+                events[0]["continues_from_previous_shot"] = False
+                if index > 0:
+                    previous_events = result[index - 1].get("dialogue_events", [])
+                    if isinstance(previous_events, list) and previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                continue
+
+            previous_events = result[index - 1].get("dialogue_events", [])
+            if not isinstance(previous_events, list) or not previous_events:
+                events[0]["continues_from_previous_shot"] = False
+                continue
+
+            previous_flag = bool(previous_events[-1].get("continues_to_next_shot", False))
+            current_flag = bool(events[0].get("continues_from_previous_shot", False))
+            continuation = previous_flag or current_flag
+            previous_events[-1]["continues_to_next_shot"] = continuation
+            events[0]["continues_from_previous_shot"] = continuation
+
         return result
 
     @staticmethod
