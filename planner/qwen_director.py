@@ -1951,7 +1951,7 @@ Hard requirements for the expansion:
 
 Additional constraints:
 - Aim for 400-650 words, but always finish the story completely.
-- Preserve source meaning and chronology; do not replace the original plot.
+- Preserve source meaning and chronology; Do not replace the original plot.
 - Do not merely add adjectives.
 - Do not convert the story into camera directions, scene headings, or shot descriptions.
 
