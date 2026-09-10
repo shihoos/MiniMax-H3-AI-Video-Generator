@@ -1595,10 +1595,18 @@ class ProductionOrchestrator:
         except Exception as diagnostics_error:
             plan["runtime_diagnostics_warning"] = str(diagnostics_error)
 
-        plan.setdefault(
-            "model_manifest",
-            self.manifest.default_model_manifest(),
-        )
+        model_manifest = plan.get("model_manifest")
+        if not isinstance(model_manifest, dict):
+            model_manifest = self.manifest.default_model_manifest()
+        if not model_manifest.get("production") or not model_manifest.get("director"):
+            fallback_model_manifest = self.manifest.default_model_manifest()
+            if fallback_model_manifest.get("production") and fallback_model_manifest.get("director"):
+                model_manifest = fallback_model_manifest
+            else:
+                raise RuntimeError(
+                    "Production model provenance is incomplete before manifest creation."
+                )
+        plan["model_manifest"] = deepcopy(model_manifest)
         plan["production_manifest"] = self.manifest.build(plan)
         plan["preview_ready"] = True
         plan["created_at"] = datetime.now().isoformat()
