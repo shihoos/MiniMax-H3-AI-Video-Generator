@@ -1595,6 +1595,10 @@ class ProductionOrchestrator:
         except Exception as diagnostics_error:
             plan["runtime_diagnostics_warning"] = str(diagnostics_error)
 
+        plan.setdefault(
+            "model_manifest",
+            self.manifest.default_model_manifest(),
+        )
         plan["production_manifest"] = self.manifest.build(plan)
         plan["preview_ready"] = True
         plan["created_at"] = datetime.now().isoformat()
