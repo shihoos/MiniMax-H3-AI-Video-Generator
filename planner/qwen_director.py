@@ -1922,6 +1922,7 @@ Additional constraints:
 - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
 
 Output ONLY the story prose.
+Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
 """.strip()
 
         if mode == EXPAND_USER_STORY_MODE:
@@ -1953,6 +1954,7 @@ Additional constraints:
 - Do not convert the story into camera directions, scene headings, or shot descriptions.
 
 Output ONLY the expanded story prose.
+Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
 """.strip()
 
         raise ValueError(
