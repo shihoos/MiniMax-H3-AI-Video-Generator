@@ -414,6 +414,9 @@ def validate_runtime_values() -> None:
         ("DIRECTOR_MAX_TOKENS", DIRECTOR_MAX_TOKENS),
         ("DIRECTOR_THREADS", DIRECTOR_THREADS),
         ("DIRECTOR_THREADS_BATCH", DIRECTOR_THREADS_BATCH),
+        ("DIRECTOR_SHOTS_PER_SCENE", DIRECTOR_SHOTS_PER_SCENE),
+        ("DIRECTOR_STORY_CONTEXT_CHARS", DIRECTOR_STORY_CONTEXT_CHARS),
+        ("DIRECTOR_CRITIC_STORY_CONTEXT_CHARS", DIRECTOR_CRITIC_STORY_CONTEXT_CHARS),
         ("DIRECTOR_SHOT_STORY_CONTEXT_CHARS", DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
         ("DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS", DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS),
         ("DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS", DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS),
@@ -432,6 +435,11 @@ def validate_runtime_values() -> None:
         raise RuntimeError(
             "Runtime configuration contains non-positive values: "
             + ", ".join(invalid)
+        )
+
+    if DIRECTOR_SHOTS_PER_SCENE < 1:
+        raise RuntimeError(
+            "DIRECTOR_SHOTS_PER_SCENE must be >= 1."
         )
 
     if not 0.0 <= DIRECTOR_TOP_P <= 1.0:
