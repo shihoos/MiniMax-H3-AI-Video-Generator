@@ -162,6 +162,10 @@ DIRECTOR_TOP_P = float(
     )
 )
 
+# Locked Director topology. Keep this centralized so prompt grammar, Director
+# batching, and validation cannot silently drift apart.
+DIRECTOR_SHOTS_PER_SCENE = 2
+
 # Quality-safe Qwen prompt controls.
 # These settings reduce repeated prompt text only; they do NOT lower the
 # story or shot completion token budgets.
@@ -197,6 +201,24 @@ DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS = int(
     os.getenv(
         "H3_DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS",
         "180",
+    )
+)
+
+# Semantic story-context budgets shared by character/entity extraction,
+# dialogue validation, and critic payload construction. Keep these bounded
+# for the 8K Director context window; callers should prefer complete
+# sentence boundaries where possible.
+DIRECTOR_STORY_CONTEXT_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_STORY_CONTEXT_CHARS",
+        "7000",
+    )
+)
+
+DIRECTOR_CRITIC_STORY_CONTEXT_CHARS = int(
+    os.getenv(
+        "H3_DIRECTOR_CRITIC_STORY_CONTEXT_CHARS",
+        "3500",
     )
 )
 
