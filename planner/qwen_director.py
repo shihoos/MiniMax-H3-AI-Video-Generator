@@ -6032,6 +6032,69 @@ Return JSON only.
 
         all_shots = repaired_shots
 
+        # Final whole-plan dialogue boundary normalization. Individual
+        # sanitizer passes can operate on partial scene batches; this pass
+        # canonicalizes continuation flags after all Qwen and fallback shots
+        # have been assembled. Dialogue continuation is never allowed to
+        # cross a scene boundary or start on the first shot of a scene.
+        shots_by_scene_order: dict[str, list[dict]] = {}
+        for shot in all_shots:
+            sid = str(shot.get("scene_id", "") or "").strip()
+            if sid:
+                shots_by_scene_order.setdefault(sid, []).append(shot)
+
+        normalized_all_shots: list[dict] = []
+        for scene in scenes:
+            sid = str(scene.get("scene_id", "") or "").strip()
+            scene_shots = shots_by_scene_order.get(sid, [])
+            previous_events: list[dict] = []
+            for position, shot in enumerate(scene_shots):
+                events = shot.get("dialogue_events", [])
+                if not isinstance(events, list) or not events:
+                    if previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                    previous_events = []
+                    normalized_all_shots.append(shot)
+                    continue
+
+                for event in events:
+                    if isinstance(event, dict):
+                        event["continues_from_previous_shot"] = bool(
+                            event.get("continues_from_previous_shot", False)
+                        )
+                        event["continues_to_next_shot"] = bool(
+                            event.get("continues_to_next_shot", False)
+                        )
+
+                if position == 0:
+                    events[0]["continues_from_previous_shot"] = False
+                    if len(events) > 1:
+                        for event in events[1:]:
+                            event["continues_from_previous_shot"] = False
+                else:
+                    previous_flag = bool(
+                        previous_events[-1].get("continues_to_next_shot", False)
+                    ) if previous_events else False
+                    current_flag = bool(
+                        events[0].get("continues_from_previous_shot", False)
+                    )
+                    continuation = previous_flag or current_flag
+                    if not previous_events:
+                        continuation = False
+                    if previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = continuation
+                    events[0]["continues_from_previous_shot"] = continuation
+                    if len(events) > 1:
+                        for event in events[1:]:
+                            event["continues_from_previous_shot"] = False
+
+                previous_events = [
+                    event for event in events if isinstance(event, dict)
+                ]
+                normalized_all_shots.append(shot)
+
+        all_shots = normalized_all_shots
+
         # No Qwen-shot failure is fatal here: the deterministic compiler
         # completes production fields while preserving every valid creative
         # shot Qwen produced.
