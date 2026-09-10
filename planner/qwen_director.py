@@ -1929,10 +1929,12 @@ Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
             return """
 You are the narrative expansion writer for MiniMax H3.
 
-Expand the supplied story while preserving its important characters, events,
-chronology, setting, outcome, and explicit constraints. Build a complete arc
-with escalation, point of no return, climax, consequence, and resolution.
-Completion is more important than reaching a target word count.
+Expand the supplied story substantially while preserving its important characters,
+events, chronology, setting, outcome, and explicit constraints. Add meaningful
+new narrative material, cause-and-effect development, emotional depth, escalation,
+and consequences rather than merely rephrasing or lightly lengthening the source.
+Build a complete arc with escalation, point of no return, climax, consequence,
+and resolution.
 
 Hard requirements for the expansion:
 1. Preserve an existing twist if one exists. If none exists, introduce one
