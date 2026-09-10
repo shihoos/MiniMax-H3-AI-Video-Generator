@@ -207,7 +207,7 @@ def test_expand_preservation_gates() -> None:
 def test_dialogue_speaker_contract() -> None:
     director = QwenDirector(ROOT)
 
-    director._validate_dialogue_speaker_contract(
+    director._normalize_dialogue_speakers(
         'Eli Voss said, "We have to go."',
         [
             {
@@ -231,7 +231,7 @@ def test_dialogue_speaker_contract() -> None:
         }
     ]
     try:
-        director._validate_dialogue_speaker_contract(
+        director._normalize_dialogue_speakers(
             'Eli heard his uncle say, "Do not open it."',
             shots,
             [{"name": "Eli"}],
@@ -264,7 +264,7 @@ def test_narrative_prose_is_not_promoted_to_dialogue() -> None:
         ],
     }]
 
-    director._validate_dialogue_speaker_contract(
+    director._normalize_dialogue_speakers(
         'Eli left the station. "I know what I have to do."',
         shots,
         [{"name": "Eli"}],
@@ -276,6 +276,170 @@ def test_narrative_prose_is_not_promoted_to_dialogue() -> None:
         events[0]["text"] == "I know what I have to do.",
         "Quoted dialogue was incorrectly modified.",
     )
+
+    director._validate_dialogue_speaker_contract(
+        shots,
+        [{"name": "Eli"}],
+    )
+
+
+def test_unquoted_narrative_is_not_promoted() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "Eli walked toward the vault."},
+        ],
+    }]
+    director._normalize_dialogue_speakers(
+        "Eli walked toward the vault.",
+        shots,
+        [{"name": "Eli"}],
+    )
+    check(not shots[0]["dialogue_events"], "Unquoted narrative was promoted to dialogue.")
+
+
+def test_screen_text_is_not_treated_as_speech() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "Project Echo—Initiated."},
+            {"speaker": "Eli", "text": "We need to leave."},
+        ],
+    }]
+    story = 'A message appeared on the screen: "Project Echo—Initiated." Then Eli said, "We need to leave."'
+    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
+    check(
+        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
+        "Screen text was incorrectly treated as spoken dialogue.",
+    )
+
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "Project Echo—Initiated."},
+            {"speaker": "Eli", "text": "We need to leave."},
+        ],
+    }]
+    story = 'The terminal displayed "Project Echo—Initiated." Then Eli said, "We need to leave."'
+    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
+    check(
+        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
+        "Terminal display text was incorrectly treated as spoken dialogue.",
+    )
+
+
+def test_no_explicit_speech_anchor_means_no_dialogue() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "I will open the vault."},
+        ],
+    }]
+    director._normalize_dialogue_speakers(
+        "Eli approached the sealed vault in silence.",
+        shots,
+        [{"name": "Eli"}],
+    )
+    check(not shots[0]["dialogue_events"], "Dialogue was invented without a source speech anchor.")
+
+
+def test_dialogue_screen_context_is_sentence_local() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "Project Echo—Initiated."},
+            {"speaker": "Eli", "text": "We need to leave."},
+        ],
+    }]
+    story = 'A message appeared on the screen: “Project Echo—Initiated.” Then Eli said, “We need to leave.”'
+    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
+    check(
+        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
+        "Screen context from an earlier sentence leaked into spoken dialogue classification.",
+    )
+
+
+def test_story_context_budget_preserves_head_and_tail() -> None:
+    director = QwenDirector(ROOT)
+    long_story = "Opening character and goal. " + ("middle detail. " * 1200) + "Final outcome and resolution."
+    compact = director._compact_story_context(long_story, 900)
+    check(
+        "Opening character and goal." in compact and "Final outcome and resolution." in compact,
+        "Bounded story context lost either the narrative head or resolution tail.",
+    )
+
+
+def test_legacy_speech_text_does_not_promote_long_narrative() -> None:
+    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+
+    candidate = {
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "speaking_characters": ["Eli"],
+        "speech_text": "Eli walked toward the vault and felt the cold air tighten around him as the storm grew louder.",
+        "visual_prompt": "Eli approaches the sealed vault in the cold abandoned station.",
+    }
+    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
+        [candidate],
+        {"scene_id": "scene_001", "description": "Eli approaches the sealed vault."},
+        {"eli"},
+    )
+    check(
+        not sanitized[0].get("dialogue_events"),
+        "Legacy narrative speech_text was promoted to dialogue.",
+    )
+
+
+def test_dialogue_normalization_happens_before_compiler() -> None:
+    import inspect
+    source = inspect.getsource(QwenDirector.generate)
+    normalize_pos = source.find("self._normalize_dialogue_speakers(")
+    compile_pos = source.find("CinematicCompiler(")
+    check(
+        normalize_pos >= 0 and compile_pos > normalize_pos,
+        "Dialogue normalization occurs after compilation.",
+    )
+
+
+def test_dialogue_contract_sync() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{"speaker": "Eli", "text": "Go."}],
+        "speaking_characters": ["Eli"],
+        "speech_text": "Go.",
+    }]
+    director._validate_dialogue_speaker_contract(shots, [{"name": "Eli"}])
+
+
+def test_prompt_uses_topology_constant() -> None:
+    director = QwenDirector(ROOT)
+    schema = director._shot_batch_json_schema()
+    nested = schema["properties"]["scene_shots"]["items"]["properties"]["shots"]
+    check(
+        nested["minItems"] == QwenDirector.SHOTS_PER_SCENE
+        and nested["maxItems"] == QwenDirector.SHOTS_PER_SCENE,
+        "Shot-batch JSON schema is not tied to SHOTS_PER_SCENE.",
+    )
+
+
+def test_manifest_has_model_provenance() -> None:
+    from pipeline.production_manifest import ProductionManifest
+    manifest = ProductionManifest(ROOT).build({"production_id": "test"})
+    models = manifest.get("models", {})
+    check(bool(models.get("production")), "Production model provenance is missing from manifest.")
+    check(bool(models.get("director")), "Director model provenance is missing from manifest.")
 
 def test_shot_batch_contract() -> None:
     director = QwenDirector(
@@ -2083,15 +2247,16 @@ def test_visual_language_partial_merge_preserves_base_fields() -> None:
     )
 
 
-def test_final_generation_uses_compiler_before_quality_validation() -> None:
+def test_final_generation_uses_dialogue_normalization_before_compiler() -> None:
     director = QwenDirector(ROOT)
     import inspect
     source = inspect.getsource(director.generate)
-    compile_pos = source.find("CinematicCompiler(")
-    quality_pos = source.find("self._validate_production_quality(")
+    normalize_pos = source.find("self._normalize_dialogue_speakers(")
+    compile_pos = source.find("all_shots = CinematicCompiler(", normalize_pos)
+    quality_pos = source.find("self._validate_production_quality(", compile_pos)
     check(
-        compile_pos >= 0 and quality_pos > compile_pos,
-        "Final generation validates production quality before deterministic compilation.",
+        normalize_pos >= 0 and compile_pos > normalize_pos and quality_pos > compile_pos,
+        "Final generation order is not dialogue-normalize -> compile -> quality validation.",
     )
 
 
@@ -2253,6 +2418,9 @@ def main() -> None:
         test_shot_batch_contract,
         test_dialogue_speaker_contract,
         test_narrative_prose_is_not_promoted_to_dialogue,
+        test_dialogue_screen_context_is_sentence_local,
+        test_legacy_speech_text_does_not_promote_long_narrative,
+        test_story_context_budget_preserves_head_and_tail,
         test_text_generation_disables_thinking_by_default,
         test_character_sanitization,
         test_scene_id_sanitization_before_batching,
@@ -2289,7 +2457,7 @@ def main() -> None:
         test_qwen_semantic_character_extractor_contract,
         test_mult_word_character_extraction_regression,
         test_visual_language_partial_merge_preserves_base_fields,
-        test_final_generation_uses_compiler_before_quality_validation,
+        test_final_generation_uses_dialogue_normalization_before_compiler,
         test_cinematic_compiler_deterministic_fallback,
         test_scene_budget_contract_and_fallback,
         test_scene_budget_semantic_repair_contract,
