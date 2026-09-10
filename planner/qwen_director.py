@@ -12,7 +12,9 @@ from pipeline.production_checkpoint import ProductionCheckpoint
 
 from planner.config import (
     AI_STORY_MODE,
+    DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
     DIRECTOR_MAX_TOKENS,
+    DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_N_CTX,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
@@ -23,7 +25,9 @@ from planner.qwen_director_runtime import (
     _with_faulthandler_watchdog,
     QwenDirectorRuntimeMixin,
 )
-from planner.qwen_director_prompts import QwenDirectorPromptMixin
+from planner.qwen_director_prompts import (
+    QwenDirectorPromptMixin,
+)
 from planner.qwen_director_scene import QwenDirectorSceneMixin
 from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
@@ -39,7 +43,7 @@ class QwenDirector(
     # production graph so an LLM cannot accidentally explode a short film
     # into dozens of scenes and therefore dozens of expensive Qwen calls.
     MAX_SCENES = 6
-    SHOTS_PER_SCENE = 2
+    SHOTS_PER_SCENE = DIRECTOR_SHOTS_PER_SCENE
     # Creative shot batching may cover up to two fresh adjacent scenes.
     # The runtime selects the largest batch that still fits the 8K context
     # budget with a bounded completion reserve. Missing shots are deterministic
@@ -820,6 +824,7 @@ class QwenDirector(
 
                         desired_completion = min(
                             DIRECTOR_MAX_TOKENS,
+    DIRECTOR_SHOTS_PER_SCENE,
                             max(
                                 320,
                                 1400 * len(batch_scenes),
@@ -865,6 +870,7 @@ class QwenDirector(
                             ),
                             max_completion=min(
                                 DIRECTOR_MAX_TOKENS,
+    DIRECTOR_SHOTS_PER_SCENE,
                                 1400 * len(batch_scenes),
                             ),
                             json_mode=True,
@@ -1194,6 +1200,18 @@ class QwenDirector(
 
         all_shots = normalized_all_shots
 
+        # Canonicalize and semantically filter dialogue BEFORE compilation so
+        # CinematicCompiler can never embed invalid speech into h3_prompt.
+        self._normalize_dialogue_speakers(
+            story,
+            all_shots,
+            characters,
+        )
+        self._validate_dialogue_speaker_contract(
+            all_shots,
+            characters,
+        )
+
         all_shots = CinematicCompiler(
             character_names=character_names,
         ).compile_all(
@@ -1230,7 +1248,6 @@ class QwenDirector(
             characters,
         )
         self._validate_dialogue_speaker_contract(
-            story,
             all_shots,
             characters,
         )
@@ -1290,13 +1307,72 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
-    def _validate_dialogue_speaker_contract(
+    @staticmethod
+    def _normalize_dialogue_text(value: str) -> str:
+        return re.sub(
+            r"\s+",
+            " ",
+            str(value or "").strip().strip('"“”‘’'),
+        ).lower()
+
+    @classmethod
+    def _extract_story_spoken_texts(cls, story: str) -> list[str]:
+        """Extract explicit spoken-text anchors without treating screen text as speech.
+
+        AI/expand story writers are instructed to quote spoken dialogue. Preserve mode
+        may also use simple script labels such as ``Eli: Hello`` or ``Eli — Hello``.
+        Screen/UI text inside quotes is excluded from the spoken anchors.
+        """
+        text = str(story or "")
+        anchors: list[str] = []
+
+        quote_pattern = re.compile(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        screen_context = re.compile(
+            r"\b(?:on|from|across|over|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b|"
+            r"\b(?:screen|monitor|display|terminal)\b.{0,80}\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears|message|text)\b|"
+            r"\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears)\b.{0,80}\b(?:screen|monitor|display|terminal)\b|"
+            r"\b(?:message|text|label|caption)\b.{0,80}\b(?:on|over|across|inside|appeared|displayed|flashed|read|shows|shown)\b.{0,40}\b(?:screen|monitor|display|terminal)\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        for match in quote_pattern.finditer(text):
+            value = next((part for part in match.groups() if part), "")
+            if not value.strip():
+                continue
+            prefix_window = text[max(0, match.start() - 180):match.start()]
+            prefix = re.split(r"[.!?][\"”’]?\s+", prefix_window)[-1]
+            suffix_window = text[match.end():match.end() + 100]
+            suffix = re.split(r"[.!?]\s+", suffix_window, maxsplit=1)[0]
+            suffix_context = re.sub(r"^[,;:\s]+", "", suffix)
+            if screen_context.search(prefix) or re.search(
+                r"^(?:is|was|were|appears|appeared|appearing|shows|showed|display|displayed|displays|displaying|reads|read|flashed|flashes|shown|showing)\b.{0,80}\b(?:on|in|across|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b",
+                suffix_context,
+                flags=re.IGNORECASE | re.DOTALL,
+            ):
+                continue
+            anchors.append(cls._normalize_dialogue_text(value))
+
+        label_pattern = re.compile(
+            r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
+        )
+        for match in label_pattern.finditer(text):
+            speaker = match.group(1).strip()
+            spoken = match.group(2).strip()
+            if speaker and spoken:
+                anchors.append(cls._normalize_dialogue_text(spoken))
+
+        # Stable order, deterministic de-duplication.
+        return list(dict.fromkeys(anchor for anchor in anchors if anchor))
+
+    def _normalize_dialogue_speakers(
         self,
         story: str,
         shots: list[dict],
         characters: list[dict],
     ) -> None:
-        """Canonicalize dialogue speakers and prevent narrative-as-speech leakage."""
+        """Canonicalize speakers and remove dialogue not anchored in explicit speech."""
         allowed_names = [
             str(value.get("name", "")).strip()
             for value in characters
@@ -1307,10 +1383,11 @@ class QwenDirector(
             return
 
         canonical_by_norm = {name.lower(): name for name in allowed_names}
-        aliases = EntityResolver.build_alias_map({name.lower() for name in allowed_names})
+        aliases = EntityResolver.build_alias_map(allowed_names)
+        spoken_anchors = self._extract_story_spoken_texts(story)
 
         def _resolve(value: str) -> str | None:
-            normalized = str(value or "").strip().lower()
+            normalized = EntityResolver.normalize(value)
             if normalized in canonical_by_norm:
                 return canonical_by_norm[normalized]
             resolved = aliases.get(normalized)
@@ -1321,23 +1398,6 @@ class QwenDirector(
             if resolved and resolved in canonical_by_norm:
                 return canonical_by_norm[resolved]
             return None
-
-        def _norm_text(value: str) -> str:
-            return re.sub(
-                r"\s+",
-                " ",
-                str(value or "").strip().strip('\"“”‘’'),
-            ).lower()
-
-        story_text = str(story or "").strip()
-        quoted_groups = re.findall(
-            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’',
-            story_text,
-        )
-        quoted_texts = [
-            _norm_text(next(part for part in group if part))
-            for group in quoted_groups
-        ]
 
         for shot in shots:
             if not isinstance(shot, dict):
@@ -1360,7 +1420,6 @@ class QwenDirector(
             for event in events:
                 if not isinstance(event, dict):
                     continue
-
                 speaker = str(event.get("speaker", "") or "").strip()
                 text = str(event.get("text", "") or "").strip()
                 if not speaker or not text:
@@ -1372,24 +1431,26 @@ class QwenDirector(
                         f"Shot {shot_id} contains unknown dialogue speaker '{speaker}'."
                     )
 
-                normalized = canonical.lower()
-                if bound and normalized not in bound:
+                normalized_speaker = canonical.lower()
+                if bound and normalized_speaker not in bound:
                     raise RuntimeError(
                         f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
                     )
 
-                # When the source story contains explicit quoted dialogue, only
-                # quoted speech may become audio. This prevents narrative prose,
-                # action, and internal exposition from entering DialogueTimeline.
-                if quoted_texts:
-                    normalized_text = _norm_text(text)
-                    if not any(
-                        normalized_text == quoted
-                        or normalized_text in quoted
-                        or quoted in normalized_text
-                        for quoted in quoted_texts
-                    ):
-                        continue
+                # When the source story contains explicit speech anchors, only
+                # anchored speech can become audio. Substring matching supports
+                # a quoted line split into multiple valid events while still
+                # rejecting whole narrative/action sentences.
+                normalized_text = self._normalize_dialogue_text(text)
+                if not spoken_anchors:
+                    continue
+                if not any(
+                    normalized_text == anchor
+                    or normalized_text in anchor
+                    or anchor in normalized_text
+                    for anchor in spoken_anchors
+                ):
+                    continue
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
@@ -1406,6 +1467,77 @@ class QwenDirector(
                 for event in repaired_events
                 if str(event.get("text", "")).strip()
             )
+
+    def _validate_dialogue_speaker_contract(
+        self,
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Pure post-normalization dialogue contract validation."""
+        allowed_names = {
+            str(value.get("name", "")).strip().lower()
+            for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
+        }
+        if not allowed_names:
+            return
+
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            shot_id = str(shot.get("shot_id", "")).strip()
+            bound = {
+                str(name).strip().lower()
+                for name in (shot.get("characters", []) or [])
+                if str(name).strip()
+            }
+            events = shot.get("dialogue_events", [])
+            if not isinstance(events, list):
+                raise RuntimeError(
+                    f"Shot {shot_id} dialogue_events must be a list."
+                )
+            expected_speakers = []
+            for event in events:
+                if not isinstance(event, dict):
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains a non-object dialogue event."
+                    )
+                speaker = str(event.get("speaker", "") or "").strip().lower()
+                text = str(event.get("text", "") or "").strip()
+                if not speaker or not text:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains an empty dialogue speaker/text."
+                    )
+                if speaker not in allowed_names:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains unknown dialogue speaker '{event.get('speaker', '')}'."
+                    )
+                if bound and speaker not in bound:
+                    raise RuntimeError(
+                        f"Shot {shot_id} has dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
+                    )
+                expected_speakers.append(event["speaker"])
+
+            actual_speakers = [
+                str(name).strip()
+                for name in (shot.get("speaking_characters", []) or [])
+                if str(name).strip()
+            ]
+            if actual_speakers != list(dict.fromkeys(expected_speakers)):
+                raise RuntimeError(
+                    f"Shot {shot_id} speaking_characters is inconsistent with dialogue_events."
+                )
+
+            expected_speech_text = " ".join(
+                str(event.get("text", "")).strip()
+                for event in events
+                if str(event.get("text", "")).strip()
+            )
+            if str(shot.get("speech_text", "") or "").strip() != expected_speech_text:
+                raise RuntimeError(
+                    f"Shot {shot_id} speech_text is inconsistent with dialogue_events."
+                )
 
     @_with_faulthandler_watchdog
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
@@ -1455,7 +1587,10 @@ class QwenDirector(
 
         compact = {
             "mode": mode,
-            "story": str(plan.get("story", user_input) or "")[:3500],
+            "story": self._compact_story_context(
+                str(plan.get("story", user_input) or ""),
+                DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
+            ),
             "visual_language": plan.get("visual_language", {}) or {},
             "scenes": [
                 _slim_scene(scene)
