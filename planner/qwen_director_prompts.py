@@ -1,35 +1,13 @@
 from __future__ import annotations
 
-import ctypes
-import faulthandler
-import sys
-import gc
-import hashlib
 import json
 import os
 import re
 import textwrap
-import time
-from functools import wraps
-from copy import deepcopy
-from pathlib import Path
-
-from planner.cinematic_compiler import CinematicCompiler
-from planner.entity_resolver import EntityResolver
-from pipeline.production_checkpoint import ProductionCheckpoint
 
 from planner.config import (
     AI_STORY_MODE,
-    DIRECTOR_KAGGLE_INPUT_ROOT,
-    DIRECTOR_MAX_TOKENS,
-    DIRECTOR_MODEL_ENV,
-    DIRECTOR_MODEL_FILENAME,
-    DIRECTOR_N_BATCH,
-    DIRECTOR_N_CTX,
-    DIRECTOR_N_GPU_LAYERS,
     DIRECTOR_TEMPERATURE,
-    DIRECTOR_THREADS,
-    DIRECTOR_THREADS_BATCH,
     DIRECTOR_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
@@ -38,7 +16,6 @@ from planner.config import (
     DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
-    director_enabled,
 )
 
 
@@ -710,8 +687,8 @@ class QwenDirectorPromptMixin:
             "additionalProperties": False,
         }
 
+    @staticmethod
     def _shot_batch_json_schema(
-        self,
         scene_count: int = 2,
     ) -> dict:
         shot_schema = QwenDirectorPromptMixin._shot_json_schema()[
@@ -730,8 +707,8 @@ class QwenDirectorPromptMixin:
                             "scene_id": {"type": "string"},
                             "shots": {
                                 "type": "array",
-                                "minItems": self.SHOTS_PER_SCENE,
-                                "maxItems": self.SHOTS_PER_SCENE,
+                                "minItems": 2,
+                                "maxItems": 2,
                                 "items": shot_schema,
                             },
                         },
