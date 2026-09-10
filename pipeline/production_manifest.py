@@ -105,6 +105,16 @@ class ProductionManifest:
             "ui/shot_view_model.py",
         ):
             files[rel] = self._file_hash(self.project_root / rel)
+        model_manifest = plan.get("model_manifest") or plan.get("models") or self.default_model_manifest()
+        if not isinstance(model_manifest, dict):
+            raise RuntimeError("Production model provenance must be a mapping.")
+        production_models = model_manifest.get("production")
+        director_model = model_manifest.get("director")
+        if not isinstance(production_models, dict) or not production_models:
+            raise RuntimeError("Production model provenance is missing the production model inventory.")
+        if not isinstance(director_model, dict) or not director_model.get("filename"):
+            raise RuntimeError("Production model provenance is missing the Director model.")
+
         manifest = {
             "version": self.VERSION,
             "production_id": str(plan.get("production_id", "")),
@@ -112,7 +122,7 @@ class ProductionManifest:
             "story_sha256": ProductionCheckpoint.digest_text(str(plan.get("story", "") or "")),
             "director_notes_sha256": ProductionCheckpoint.digest_text(str(plan.get("director_notes", "") or "")),
             "files": files,
-            "models": plan.get("model_manifest") or plan.get("models") or self.default_model_manifest(),
+            "models": model_manifest,
             "runtime": plan.get("runtime_diagnostics", {}) or {},
             "timeline_version": (plan.get("timeline", {}) or {}).get("version", 1),
             "execution": {
