@@ -434,6 +434,99 @@ def test_prompt_uses_topology_constant() -> None:
     )
 
 
+def test_shot_batch_completion_budget_not_bound_to_topology() -> None:
+    director = QwenDirector(ROOT)
+    check(
+        director._shot_batch_completion_budget(1) == 1400,
+        "Single-scene shot batch completion budget is incorrect.",
+    )
+    check(
+        director._shot_batch_completion_budget(2) == 2800,
+        "Two-scene shot batch completion budget is incorrectly capped by SHOTS_PER_SCENE.",
+    )
+    check(
+        director._shot_batch_completion_budget(2) > QwenDirector.SHOTS_PER_SCENE,
+        "Shot topology constant was reused as a token budget.",
+    )
+
+
+def test_sanitize_synchronizes_legacy_dialogue_fields() -> None:
+    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+
+    candidate = {
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "speaking_characters": ["Eli"],
+        "speech_text": "stale text that must not survive",
+        "dialogue_events": [
+            {
+                "speaker": "Eli",
+                "text": "Go.",
+                "continues_from_previous_shot": False,
+                "continues_to_next_shot": False,
+            }
+        ],
+        "visual_prompt": "Eli stands at the sealed vault.",
+    }
+    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
+        [candidate],
+        {"scene_id": "scene_001", "description": "Eli stands at the sealed vault."},
+        {"eli"},
+    )[0]
+    check(
+        sanitized["speaking_characters"] == ["Eli"],
+        "Sanitizer failed to synchronize speaking_characters from dialogue_events.",
+    )
+    check(
+        sanitized["speech_text"] == "Go.",
+        "Sanitizer left stale speech_text instead of synchronizing dialogue metadata.",
+    )
+
+
+def test_legacy_speech_text_direct_speech_bridge_is_bounded() -> None:
+    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+    base = {
+        "scene_id": "scene_001",
+        "description": "Eli waits at the vault.",
+    }
+    candidate = {
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "speaking_characters": ["Eli"],
+        "speech_text": "I will open the vault.",
+        "visual_prompt": "Eli studies the sealed vault.",
+    }
+    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
+        [candidate], base, {"eli"}
+    )[0]
+    check(
+        sanitized["dialogue_events"],
+        "Bounded direct-speech legacy bridge rejected valid direct speech.",
+    )
+    check(
+        sanitized["speaking_characters"] == ["Eli"]
+        and sanitized["speech_text"] == "I will open the vault.",
+        "Legacy direct-speech bridge did not synchronize metadata.",
+    )
+
+
+def test_dialogue_validator_is_pure() -> None:
+    import copy
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{"speaker": "Eli", "text": "Go."}],
+        "speaking_characters": ["Eli"],
+        "speech_text": "Go.",
+    }]
+    before = copy.deepcopy(shots)
+    director._validate_dialogue_speaker_contract(shots, [{"name": "Eli"}])
+    check(shots == before, "Dialogue validator unexpectedly mutated the plan.")
+
+
 def test_manifest_has_model_provenance() -> None:
     from pipeline.production_manifest import ProductionManifest
     manifest = ProductionManifest(ROOT).build({"production_id": "test"})
@@ -864,8 +957,8 @@ def test_shot_schema_cardinality_is_grammar_constrained() -> None:
     # than by another Qwen recovery call.
     normal = QwenDirector._shot_json_schema()
     check(
-        normal["properties"]["shots"]["minItems"] == 2
-        and normal["properties"]["shots"]["maxItems"] == 2,
+        normal["properties"]["shots"]["minItems"] == QwenDirector.SHOTS_PER_SCENE
+        and normal["properties"]["shots"]["maxItems"] == QwenDirector.SHOTS_PER_SCENE,
         "Normal/retry shot schema must constrain to exactly "
         "SHOTS_PER_SCENE shots.",
     )
@@ -2417,6 +2510,10 @@ def main() -> None:
         test_expand_preservation_gates,
         test_shot_batch_contract,
         test_dialogue_speaker_contract,
+        test_shot_batch_completion_budget_not_bound_to_topology,
+        test_sanitize_synchronizes_legacy_dialogue_fields,
+        test_legacy_speech_text_direct_speech_bridge_is_bounded,
+        test_dialogue_validator_is_pure,
         test_narrative_prose_is_not_promoted_to_dialogue,
         test_dialogue_screen_context_is_sentence_local,
         test_legacy_speech_text_does_not_promote_long_narrative,
