@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import textwrap
 import time
 from functools import wraps
 from copy import deepcopy
@@ -709,8 +710,8 @@ class QwenDirectorPromptMixin:
             "additionalProperties": False,
         }
 
-    @staticmethod
     def _shot_batch_json_schema(
+        self,
         scene_count: int = 2,
     ) -> dict:
         shot_schema = QwenDirectorPromptMixin._shot_json_schema()[
@@ -729,8 +730,8 @@ class QwenDirectorPromptMixin:
                             "scene_id": {"type": "string"},
                             "shots": {
                                 "type": "array",
-                                "minItems": cls.SHOTS_PER_SCENE,
-                                "maxItems": cls.SHOTS_PER_SCENE,
+                                "minItems": self.SHOTS_PER_SCENE,
+                                "maxItems": self.SHOTS_PER_SCENE,
                                 "items": shot_schema,
                             },
                         },
