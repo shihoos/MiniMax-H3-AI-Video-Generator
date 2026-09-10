@@ -984,7 +984,21 @@ class QwenDirectorSanitizeMixin:
                             "continues_from_previous_shot": False,
                             "continues_to_next_shot": False,
                         }]
+            # Keep all legacy dialogue fields synchronized with the canonical
+            # event list. This prevents stale speaking_characters/speech_text
+            # metadata from surviving when Qwen returns invalid JSON and the
+            # deterministic fallback path is used.
             candidate["dialogue_events"] = normalized_dialogue
+            candidate["speaking_characters"] = list(dict.fromkeys(
+                str(event.get("speaker", "") or "").strip()
+                for event in normalized_dialogue
+                if str(event.get("speaker", "") or "").strip()
+            ))
+            candidate["speech_text"] = " ".join(
+                str(event.get("text", "") or "").strip()
+                for event in normalized_dialogue
+                if str(event.get("text", "") or "").strip()
+            )
 
             def _normalize_continuity(value) -> dict:
                 if isinstance(value, dict):
