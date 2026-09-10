@@ -971,6 +971,23 @@ class ProductionOrchestrator:
             self.project_root
         )
 
+    @staticmethod
+    def _director_fingerprint(project_root: Path, checkpoint: ProductionCheckpoint) -> str:
+        """Return a stable fingerprint covering the complete split Director."""
+        director_root = Path(project_root).resolve() / "planner"
+        module_names = (
+            "qwen_director.py",
+            "qwen_director_runtime.py",
+            "qwen_director_prompts.py",
+            "qwen_director_scene.py",
+            "qwen_director_sanitize.py",
+        )
+        material = "".join(
+            f"{name}:{checkpoint.digest_file(director_root / name)}\n"
+            for name in module_names
+        )
+        return checkpoint.digest_text(material)
+
     def _save_checkpoint(
         self,
         session_id: str,
@@ -997,8 +1014,9 @@ class ProductionOrchestrator:
                 if isinstance(director_plan, dict) and director_plan
                 else ""
             ),
-            "director_sha256": store.digest_file(
-                self.project_root / "planner" / "qwen_director.py"
+            "director_sha256": self._director_fingerprint(
+                self.project_root,
+                store,
             ),
             "workflow_mode": workflow_mode,
             "profile": profile,
@@ -1051,8 +1069,9 @@ class ProductionOrchestrator:
                 "Checkpoint profile does not match the requested profile."
             )
 
-        expected_director = store.digest_file(
-            self.project_root / "planner" / "qwen_director.py"
+        expected_director = self._director_fingerprint(
+            self.project_root,
+            store,
         )
         if state.get("director_sha256") != expected_director:
             raise RuntimeError(
