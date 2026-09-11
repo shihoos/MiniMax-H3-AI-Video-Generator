@@ -236,16 +236,29 @@ def test_dialogue_speaker_contract() -> None:
         [{"name": "Eli"}],
     )
     check(
-        shots[0]["dialogue_events"] == [],
-        "Unresolved grounded role speaker was not safely dropped.",
+        not shots[0]["dialogue_events"],
+        "Unresolved grounded role speaker was not dropped safely.",
+    )
+
+
+def test_grounding_precedes_binding_failure() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_007_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Lena Kovalenko", "text": "This line is not in the story."},
+        ],
+    }]
+
+    director._normalize_dialogue_speakers(
+        'Eli stood beside the vault in silence.',
+        shots,
+        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
     )
     check(
-        shots[0]["speaking_characters"] == [],
-        "Speaking-character metadata was not synchronized after recovery.",
-    )
-    director._validate_dialogue_speaker_contract(
-        shots,
-        [{"name": "Eli"}],
+        not shots[0]["dialogue_events"],
+        "Ungrounded dialogue reached speaker-binding validation.",
     )
 
 
@@ -2512,6 +2525,7 @@ def main() -> None:
         test_expand_preservation_gates,
         test_shot_batch_contract,
         test_dialogue_speaker_contract,
+        test_grounding_precedes_binding_failure,
         test_shot_batch_completion_budget_not_bound_to_topology,
         test_sanitize_synchronizes_legacy_dialogue_fields,
         test_legacy_speech_text_direct_speech_bridge_is_bounded,
