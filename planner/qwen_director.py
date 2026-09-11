@@ -1309,15 +1309,27 @@ class QwenDirector(
         ).lower()
 
     @classmethod
-    def _extract_story_spoken_texts(cls, story: str) -> list[str]:
-        """Extract explicit spoken-text anchors without treating screen text as speech.
+    def _extract_story_spoken_texts(cls, story: str) -> dict[str, set[str]]:
+        """Extract spoken-text anchors and preserve explicit source speaker labels.
 
-        AI/expand story writers are instructed to quote spoken dialogue. Preserve mode
-        may also use simple script labels such as ``Eli: Hello`` or ``Eli — Hello``.
-        Screen/UI text inside quotes is excluded from the spoken anchors.
+        Quoted speech contributes an anchor with no explicit source speaker. Simple
+        script labels such as ``Eli: Hello`` or ``Eli — Hello`` contribute the same
+        normalized anchor plus the normalized source speaker label. Multiple source
+        labels for the same text are preserved so repeated dialogue never gets
+        silently assigned to one speaker. Screen/UI text inside quotes is excluded.
         """
         text = str(story or "")
-        anchors: list[str] = []
+        anchors: dict[str, set[str]] = {}
+
+        def _add_anchor(spoken: str, source_speaker: str | None = None) -> None:
+            normalized = cls._normalize_dialogue_text(spoken)
+            if not normalized:
+                return
+            speakers = anchors.setdefault(normalized, set())
+            if source_speaker:
+                normalized_speaker = EntityResolver.normalize(source_speaker)
+                if normalized_speaker:
+                    speakers.add(normalized_speaker)
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
@@ -1345,7 +1357,7 @@ class QwenDirector(
                 flags=re.IGNORECASE | re.DOTALL,
             ):
                 continue
-            anchors.append(cls._normalize_dialogue_text(value))
+            _add_anchor(value)
 
         label_pattern = re.compile(
             r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
@@ -1354,10 +1366,9 @@ class QwenDirector(
             speaker = match.group(1).strip()
             spoken = match.group(2).strip()
             if speaker and spoken:
-                anchors.append(cls._normalize_dialogue_text(spoken))
+                _add_anchor(spoken, speaker)
 
-        # Stable order, deterministic de-duplication.
-        return list(dict.fromkeys(anchor for anchor in anchors if anchor))
+        return anchors
 
     def _normalize_dialogue_speakers(
         self,
@@ -1425,12 +1436,18 @@ class QwenDirector(
                 normalized_text = self._normalize_dialogue_text(text)
                 if not spoken_anchors:
                     continue
-                if not any(
-                    normalized_text == anchor
-                    or normalized_text in anchor
-                    or anchor in normalized_text
-                    for anchor in spoken_anchors
-                ):
+
+                matched_source_speakers: set[str] = set()
+                matched_any = False
+                for anchor, source_speakers in spoken_anchors.items():
+                    if (
+                        normalized_text == anchor
+                        or normalized_text in anchor
+                        or anchor in normalized_text
+                    ):
+                        matched_any = True
+                        matched_source_speakers.update(source_speakers)
+                if not matched_any:
                     continue
 
                 canonical = _resolve(speaker)
@@ -1445,7 +1462,32 @@ class QwenDirector(
                     )
                     continue
 
+                explicit_source_canonicals = {
+                    resolved.lower()
+                    for source_speaker in matched_source_speakers
+                    if (resolved := _resolve(source_speaker)) is not None
+                }
+                if matched_source_speakers and not explicit_source_canonicals:
+                    # The source explicitly labels this line, but that label does
+                    # not resolve to a canonical character. Never guess which
+                    # canonical character Qwen intended.
+                    self._record_recovery(
+                        "dialogue_source_speaker_unresolved",
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}",
+                    )
+                    continue
+
                 normalized_speaker = canonical.lower()
+                if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
+                    # The source gives explicit speaker provenance that conflicts
+                    # with Qwen's attribution. Preserve the source contract rather
+                    # than silently remapping the line to another character.
+                    self._record_recovery(
+                        "dialogue_speaker_source_mismatch",
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}",
+                    )
+                    continue
+
                 if bound and normalized_speaker not in bound:
                     # The line is real speech and the identity is canonical, but
                     # Qwen bound it to a character that is not present in this
