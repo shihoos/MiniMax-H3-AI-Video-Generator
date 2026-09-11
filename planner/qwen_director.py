@@ -1418,6 +1418,21 @@ class QwenDirector(
                 if not speaker or not text:
                     continue
 
+                # Reject ungrounded/generated narration before speaker resolution.
+                # This prevents role-only labels such as "father"/"uncle" used for
+                # narrative prose from becoming hard failures, while keeping the
+                # canonical roster authoritative for actual spoken lines.
+                normalized_text = self._normalize_dialogue_text(text)
+                if not spoken_anchors:
+                    continue
+                if not any(
+                    normalized_text == anchor
+                    or normalized_text in anchor
+                    or anchor in normalized_text
+                    for anchor in spoken_anchors
+                ):
+                    continue
+
                 canonical = _resolve(speaker)
                 if canonical is None:
                     raise RuntimeError(
@@ -1429,21 +1444,6 @@ class QwenDirector(
                     raise RuntimeError(
                         f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
                     )
-
-                # When the source story contains explicit speech anchors, only
-                # anchored speech can become audio. Substring matching supports
-                # a quoted line split into multiple valid events while still
-                # rejecting whole narrative/action sentences.
-                normalized_text = self._normalize_dialogue_text(text)
-                if not spoken_anchors:
-                    continue
-                if not any(
-                    normalized_text == anchor
-                    or normalized_text in anchor
-                    or anchor in normalized_text
-                    for anchor in spoken_anchors
-                ):
-                    continue
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
