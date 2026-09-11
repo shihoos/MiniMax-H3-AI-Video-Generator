@@ -1447,9 +1447,16 @@ class QwenDirector(
 
                 normalized_speaker = canonical.lower()
                 if bound and normalized_speaker not in bound:
-                    raise RuntimeError(
-                        f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
+                    # The line is real speech and the identity is canonical, but
+                    # Qwen bound it to a character that is not present in this
+                    # shot. Do not invent a new binding or abort the production;
+                    # discard only the inconsistent dialogue event and preserve
+                    # the strict post-normalization validator as a safety net.
+                    self._record_recovery(
+                        "dialogue_speaker_unbound",
+                        f"shot={shot_id} speaker={speaker!r}",
                     )
+                    continue
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
