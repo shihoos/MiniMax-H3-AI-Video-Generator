@@ -1418,25 +1418,6 @@ class QwenDirector(
                 if not speaker or not text:
                     continue
 
-                canonical = _resolve(speaker)
-                if canonical is None:
-                    # A grounded dialogue line can still carry an unbound role
-                    # label (for example, "father") that Qwen inferred from
-                    # the story but that is not a canonical character identity.
-                    # Never invent or remap that identity. Drop only this
-                    # event and keep the production plan valid.
-                    self._record_recovery(
-                        "dialogue_speaker_unresolved",
-                        f"shot={shot_id} speaker={speaker!r}",
-                    )
-                    continue
-
-                normalized_speaker = canonical.lower()
-                if bound and normalized_speaker not in bound:
-                    raise RuntimeError(
-                        f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
-                    )
-
                 # When the source story contains explicit speech anchors, only
                 # anchored speech can become audio. Substring matching supports
                 # a quoted line split into multiple valid events while still
@@ -1451,6 +1432,24 @@ class QwenDirector(
                     for anchor in spoken_anchors
                 ):
                     continue
+
+                canonical = _resolve(speaker)
+                if canonical is None:
+                    # Qwen may attribute grounded speech to a role label that
+                    # never became a canonical character. Do not invent an
+                    # identity or abort the whole production; discard only the
+                    # unresolved dialogue event and record the recovery.
+                    self._record_recovery(
+                        "dialogue_speaker_unresolved",
+                        f"shot={shot_id} speaker={speaker!r}",
+                    )
+                    continue
+
+                normalized_speaker = canonical.lower()
+                if bound and normalized_speaker not in bound:
+                    raise RuntimeError(
+                        f"Shot {shot_id} has dialogue speaker '{speaker}' not present in its character bindings."
+                    )
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
