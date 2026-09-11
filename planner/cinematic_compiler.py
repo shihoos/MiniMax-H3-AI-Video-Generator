@@ -1,5 +1,6 @@
 from __future__ import annotations
 from planner.entity_resolver import EntityResolver
+from planner.config import DIRECTOR_SHOTS_PER_SCENE
 
 import json
 from copy import deepcopy
@@ -903,12 +904,23 @@ class CinematicCompiler:
                 ),
 
             "speaking_characters":
-                self._canonical_characters(
-                    shot.get(
-                        "speaking_characters",
-                        [],
-                    ),
-                    characters,
+                (
+                    []
+                    if (
+                        "speaking_characters" in shot
+                        and isinstance(
+                            shot.get("speaking_characters"),
+                            list,
+                        )
+                        and not shot.get("speaking_characters")
+                    )
+                    else self._canonical_characters(
+                        shot.get(
+                            "speaking_characters",
+                            [],
+                        ),
+                        characters,
+                    )
                 ),
 
             "speech_text":
@@ -1059,15 +1071,19 @@ class CinematicCompiler:
             if not scene_id:
                 continue
 
+            shot_count = int(
+                DIRECTOR_SHOTS_PER_SCENE
+            )
+
             scene_shots = list(
                 grouped.get(
                     scene_id,
                     [],
-                )[:2]
+                )[:shot_count]
             )
 
             missing = (
-                2
+                shot_count
                 - len(scene_shots)
             )
 
@@ -1080,17 +1096,17 @@ class CinematicCompiler:
                     )
                 )
 
-            if len(scene_shots) < 2:
+            if len(scene_shots) < shot_count:
 
                 raise RuntimeError(
                     "CinematicCompiler could not produce "
-                    f"two shots for scene {scene_id}."
+                    f"{shot_count} shots for scene {scene_id}."
                 )
 
             compiled.extend(
                 self.compile_scene(
                     scene,
-                    scene_shots[:2],
+                    scene_shots[:shot_count],
                 )
             )
 
