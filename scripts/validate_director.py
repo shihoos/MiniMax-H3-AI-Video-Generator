@@ -230,21 +230,23 @@ def test_dialogue_speaker_contract() -> None:
             ],
         }
     ]
-    try:
-        director._normalize_dialogue_speakers(
-            'Eli heard his uncle say, "Do not open it."',
-            shots,
-            [{"name": "Eli"}],
-        )
-    except RuntimeError as exc:
-        check(
-            "unknown dialogue speaker" in str(exc),
-            "Unknown dialogue speaker was rejected with the wrong contract error.",
-        )
-    else:
-        raise RuntimeError(
-            "Dialogue contract accepted a role-only speaker outside the canonical roster."
-        )
+    director._normalize_dialogue_speakers(
+        'Eli heard his uncle say, "Do not open it."',
+        shots,
+        [{"name": "Eli"}],
+    )
+    check(
+        shots[0]["dialogue_events"] == [],
+        "Unresolved grounded role speaker was not safely dropped.",
+    )
+    check(
+        shots[0]["speaking_characters"] == [],
+        "Speaking-character metadata was not synchronized after recovery.",
+    )
+    director._validate_dialogue_speaker_contract(
+        shots,
+        [{"name": "Eli"}],
+    )
 
 
 def test_narrative_prose_is_not_promoted_to_dialogue() -> None:
