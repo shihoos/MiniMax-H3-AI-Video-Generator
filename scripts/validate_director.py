@@ -241,6 +241,69 @@ def test_dialogue_speaker_contract() -> None:
     )
 
 
+def test_explicit_source_speaker_provenance() -> None:
+    director = QwenDirector(ROOT)
+
+    anchors = director._extract_story_spoken_texts(
+        'Eli Voss: "We have to go."'
+    )
+    check(
+        anchors.get("we have to go.") == {"eli voss"},
+        f"Explicit source speaker provenance was lost: {anchors}",
+    )
+
+    shots = [{
+        "shot_id": "scene_008_shot_001",
+        "characters": ["Lena Kovalenko"],
+        "dialogue_events": [
+            {"speaker": "Lena Kovalenko", "text": "We have to go."},
+        ],
+    }]
+    director._normalize_dialogue_speakers(
+        'Eli Voss: "We have to go."',
+        shots,
+        [{"name": "Eli Voss"}, {"name": "Lena Kovalenko"}],
+    )
+    check(
+        not shots[0]["dialogue_events"],
+        "Qwen speaker contradicted an explicit source speaker label.",
+    )
+
+    shots = [{
+        "shot_id": "scene_009_shot_001",
+        "characters": ["Eli Voss"],
+        "dialogue_events": [
+            {"speaker": "Eli", "text": "We have to go."},
+        ],
+    }]
+    director._normalize_dialogue_speakers(
+        'Eli Voss: "We have to go."',
+        shots,
+        [{"name": "Eli Voss"}],
+    )
+    check(
+        shots[0]["dialogue_events"][0]["speaker"] == "Eli Voss",
+        "Canonical speaker matching failed for an explicit source label.",
+    )
+
+    shots = [{
+        "shot_id": "scene_010_shot_001",
+        "characters": ["Eli Voss"],
+        "dialogue_events": [
+            {"speaker": "Eli Voss", "text": "Take the chip and run."},
+        ],
+    }]
+    director._normalize_dialogue_speakers(
+        'Father: "Take the chip and run."',
+        shots,
+        [{"name": "Eli Voss"}],
+    )
+    check(
+        not shots[0]["dialogue_events"],
+        "Unresolved explicit role speaker was incorrectly attributed to a canonical character.",
+    )
+
+
 def test_grounding_precedes_binding_failure() -> None:
     director = QwenDirector(ROOT)
     shots = [{
@@ -259,6 +322,32 @@ def test_grounding_precedes_binding_failure() -> None:
     check(
         not shots[0]["dialogue_events"],
         "Ungrounded dialogue reached speaker-binding validation.",
+    )
+
+
+def test_grounded_but_unbound_dialogue_is_recovered() -> None:
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [
+            {"speaker": "Lena Kovalenko", "text": "We need to leave."},
+        ],
+    }]
+
+    director._normalize_dialogue_speakers(
+        'Lena Kovalenko said, "We need to leave."',
+        shots,
+        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
+    )
+
+    check(
+        not shots[0]["dialogue_events"],
+        "Grounded but unbound dialogue was not recovered.",
+    )
+    director._validate_dialogue_speaker_contract(
+        shots,
+        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
     )
 
 
@@ -2525,6 +2614,7 @@ def main() -> None:
         test_expand_preservation_gates,
         test_shot_batch_contract,
         test_dialogue_speaker_contract,
+        test_explicit_source_speaker_provenance,
         test_grounding_precedes_binding_failure,
         test_shot_batch_completion_budget_not_bound_to_topology,
         test_sanitize_synchronizes_legacy_dialogue_fields,
