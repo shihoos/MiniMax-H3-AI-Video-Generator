@@ -54,7 +54,7 @@ policy:
   allow_director_qwen: true
 
   director_model:
-    filename: "Qwen3-14B-Q4_K_M.gguf"
+    filename: "Qwen3-14B-AWQ"
     runtime: "llama-cpp-python"
     purpose: >
       Local story writer, character planner,
