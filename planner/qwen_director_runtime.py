@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import faulthandler
 import sys
 import gc
@@ -8,23 +7,29 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
+import subprocess
 import time
 from functools import wraps
 from pathlib import Path
+
+import requests
 
 
 from planner.config import (
     DIRECTOR_KAGGLE_INPUT_ROOT,
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_MODEL_ENV,
-    DIRECTOR_MODEL_FILENAME,
-    DIRECTOR_N_BATCH,
+    DIRECTOR_MODEL_PATH,
     DIRECTOR_N_CTX,
-    DIRECTOR_N_GPU_LAYERS,
     DIRECTOR_TEMPERATURE,
-    DIRECTOR_THREADS,
-    DIRECTOR_THREADS_BATCH,
     DIRECTOR_TOP_P,
+    DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION,
+    DIRECTOR_VLLM_MAX_MODEL_LEN,
+    DIRECTOR_VLLM_PORT,
+    DIRECTOR_VLLM_HOST,
+    DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE,
     director_enabled,
 )
 
@@ -355,120 +360,70 @@ class QwenDirectorRuntimeMixin:
     def _find_model(
         self,
     ) -> Path:
-
-        explicit = os.getenv(
-            DIRECTOR_MODEL_ENV,
-            "",
-        ).strip()
-
+        """Resolve the directory containing the sharded AWQ Director checkpoint."""
+        explicit = os.getenv(DIRECTOR_MODEL_ENV, "").strip()
         candidates: list[Path] = []
 
         if explicit:
+            candidates.append(Path(explicit).expanduser())
 
-            candidates.append(
-                Path(
-                    explicit
-                )
-            )
-
-        candidates.extend(
-            [
-                (
-                    self.project_root
-                    / "data"
-                    / "models"
-                    / DIRECTOR_MODEL_FILENAME
-                ),
-                (
-                    self.project_root
-                    / DIRECTOR_MODEL_FILENAME
-                ),
-                (
-                    DIRECTOR_KAGGLE_INPUT_ROOT
-                    / DIRECTOR_MODEL_FILENAME
-                ),
-            ]
+        candidates.append(Path(DIRECTOR_MODEL_PATH))
+        candidates.append(
+            DIRECTOR_KAGGLE_INPUT_ROOT / Path(DIRECTOR_MODEL_PATH).name
         )
 
+        # Backwards-compatible search for the exact dataset directory name.
         for root in (
             self.project_root,
             DIRECTOR_KAGGLE_INPUT_ROOT,
         ):
-
             if not root.exists():
                 continue
-
             try:
-
                 candidates.extend(
-                    root.rglob(
-                        DIRECTOR_MODEL_FILENAME
-                    )
+                    path
+                    for path in root.rglob(Path(DIRECTOR_MODEL_PATH).name)
+                    if path.is_dir()
                 )
-
             except OSError:
-
                 continue
 
         unique: list[Path] = []
         seen: set[str] = set()
 
         for candidate in candidates:
-
-            candidate = Path(
-                candidate
-            )
-
+            candidate = Path(candidate)
             try:
-
-                key = str(
-                    candidate.resolve()
-                )
-
+                key = str(candidate.resolve())
             except OSError:
-
-                key = str(
-                    candidate
-                )
-
+                key = str(candidate)
             if key in seen:
                 continue
+            seen.add(key)
+            unique.append(candidate)
 
-            seen.add(
-                key
-            )
+        required = (
+            "config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "tokenizer.json",
+        )
 
-            unique.append(
-                candidate
-            )
+        for path in unique:
+            if not path.is_dir():
+                continue
+            if all((path / item).is_file() for item in required):
+                return path
 
-        existing = [
-            path
-            for path in unique
-            if path.is_file()
-        ]
-
-        if not existing:
-
-            raise FileNotFoundError(
-                "Qwen director model was not found.\n"
-                f"Expected filename: "
-                f"{DIRECTOR_MODEL_FILENAME}\n"
-                "Attach the Kaggle director-model dataset "
-                "or set H3_DIRECTOR_MODEL_PATH."
-            )
-
-        if len(existing) > 1:
-
-            raise RuntimeError(
-                "Multiple Qwen director models were found:\n"
-                + "\n".join(
-                    str(path)
-                    for path in existing
-                )
-            )
-
-        return existing[0]
+        raise FileNotFoundError(
+            "Qwen3-14B-AWQ director model was not found as a complete "
+            "sharded checkpoint.\n"
+            f"Expected directory: {DIRECTOR_MODEL_PATH}\n"
+            f"Required files: {', '.join(required)}\n"
+            "Attach the Kaggle qwen3-14b-awq dataset or set "
+            f"{DIRECTOR_MODEL_ENV} to its directory."
+        )
 
     @property
     def model_path(
@@ -485,217 +440,59 @@ class QwenDirectorRuntimeMixin:
         return bool(
             director_enabled()
             and self._model_path is not None
-            and self._model_path.is_file()
+            and self._model_path.is_dir()
+            and (self._model_path / "model.safetensors.index.json").is_file()
         )
 
-    @staticmethod
-    def _load_nvidia_cuda_libraries() -> None:
+    def _vllm_base_url(self) -> str:
+        return os.getenv(
+            "H3_DIRECTOR_VLLM_BASE_URL",
+            f"http://{DIRECTOR_VLLM_HOST}:{DIRECTOR_VLLM_PORT}/v1",
+        ).rstrip("/")
 
-        import site
+    def _vllm_model_name(self) -> str:
+        return os.getenv(
+            "H3_DIRECTOR_VLLM_MODEL_NAME",
+            self._model_path.name if self._model_path is not None else "Qwen3-14B-AWQ",
+        )
 
-        site_roots: list[Path] = []
+    def _wait_for_vllm(self, session: requests.Session, process: subprocess.Popen) -> None:
+        health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
+        models_url = self._vllm_base_url() + "/models"
+        deadline = time.monotonic() + float(
+            os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "600")
+        )
 
-        try:
-
-            site_roots.extend(
-                Path(path)
-                for path
-                in site.getsitepackages()
-                if path
-            )
-
-        except Exception:
-            pass
-
-        try:
-
-            user_site = (
-                site.getusersitepackages()
-            )
-
-            if user_site:
-
-                site_roots.append(
-                    Path(
-                        user_site
-                    )
+        last_error = ""
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError(
+                    "vLLM Director server exited during startup "
+                    f"with code {process.returncode}. "
+                    f"See {getattr(self, '_vllm_log_path', 'vLLM log')}."
                 )
+            for url in (health_url, models_url):
+                try:
+                    response = session.get(url, timeout=5)
+                    if response.status_code == 200:
+                        if url.endswith("/models"):
+                            payload = response.json()
+                            data = payload.get("data", [])
+                            if data and self._vllm_model_name() in {
+                                str(item.get("id", "")) for item in data
+                            }:
+                                return
+                        else:
+                            return
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+            time.sleep(2.0)
 
-        except Exception:
-            pass
-
-        # The pinned llama-cpp-python wheel is cu130.
-        # Never allow CUDA 12 userspace to be selected accidentally.
-        cudart: list[Path] = []
-        cublas: list[Path] = []
-        cublaslt: list[Path] = []
-
-        for site_root in site_roots:
-
-            nvidia_root = (
-                site_root
-                / "nvidia"
-            )
-
-            if not nvidia_root.is_dir():
-                continue
-
-            try:
-
-                cudart.extend(
-                    path
-                    for path
-                    in nvidia_root.rglob(
-                        "libcudart.so.13*"
-                    )
-                    if path.is_file()
-                    and re.match(
-                        r"libcudart\.so\.13(?:\.[0-9]+)*$",
-                        path.name,
-                    )
-                )
-
-                cublas.extend(
-                    path
-                    for path
-                    in nvidia_root.rglob(
-                        "libcublas.so.13*"
-                    )
-                    if path.is_file()
-                    and re.match(
-                        r"libcublas\.so\.13(?:\.[0-9]+)*$",
-                        path.name,
-                    )
-                )
-
-                cublaslt.extend(
-                    path
-                    for path
-                    in nvidia_root.rglob(
-                        "libcublasLt.so.13*"
-                    )
-                    if path.is_file()
-                    and re.match(
-                        r"libcublasLt\.so\.13(?:\.[0-9]+)*$",
-                        path.name,
-                    )
-                )
-
-            except OSError:
-
-                continue
-
-        if not cudart:
-
-            raise RuntimeError(
-                "No compatible libcudart.so.13 runtime was found."
-            )
-
-        if not cublas:
-
-            raise RuntimeError(
-                "No compatible libcublas.so.13 runtime was found."
-            )
-
-        if not cublaslt:
-
-            raise RuntimeError(
-                "No compatible libcublasLt.so.13 runtime was found."
-            )
-
-        cudart_lib = cudart[0]
-
-        matching_cublas = [
-            path
-            for path
-            in cublas
-            if path.parent
-            == cudart_lib.parent
-        ]
-
-        cublas_lib = (
-            matching_cublas[0]
-            if matching_cublas
-            else cublas[0]
+        raise RuntimeError(
+            "Timed out waiting for the Qwen3-14B-AWQ vLLM server. "
+            f"Last error: {last_error}. "
+            f"Log: {getattr(self, '_vllm_log_path', 'unknown')}"
         )
-
-        matching_cublaslt = [
-            path
-            for path
-            in cublaslt
-            if path.parent
-            == cudart_lib.parent
-        ]
-
-        cublaslt_lib = (
-            matching_cublaslt[0]
-            if matching_cublaslt
-            else cublaslt[0]
-        )
-
-        directories = [
-            str(
-                cudart_lib.parent
-            ),
-            str(
-                cublas_lib.parent
-            ),
-            str(
-                cublaslt_lib.parent
-            ),
-        ]
-
-        old_ld = os.environ.get(
-            "LD_LIBRARY_PATH",
-            "",
-        )
-
-        if old_ld:
-
-            directories.append(
-                old_ld
-            )
-
-        # Put the CUDA 13 userspace directories first so a
-        # pre-existing CUDA 12 path cannot win resolution.
-        os.environ[
-            "LD_LIBRARY_PATH"
-        ] = ":".join(
-            directories
-        )
-
-        try:
-
-            ctypes.CDLL(
-                str(
-                    cudart_lib
-                ),
-                mode=ctypes.RTLD_GLOBAL,
-            )
-
-            ctypes.CDLL(
-                str(
-                    cublas_lib
-                ),
-                mode=ctypes.RTLD_GLOBAL,
-            )
-
-            ctypes.CDLL(
-                str(
-                    cublaslt_lib
-                ),
-                mode=ctypes.RTLD_GLOBAL,
-            )
-
-        except OSError as exc:
-
-            raise RuntimeError(
-                "Unable to load NVIDIA CUDA 13 libraries:\n"
-                f"CUDA runtime: {cudart_lib}\n"
-                f"cuBLAS: {cublas_lib}\n"
-                f"cuBLASLt: {cublaslt_lib}\n"
-                f"{exc}"
-            ) from exc
 
     def load(
         self,
@@ -707,70 +504,181 @@ class QwenDirectorRuntimeMixin:
         if self._llama is not None:
             return
 
-        self._load_nvidia_cuda_libraries()
+        if os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }:
+            session = requests.Session()
+            try:
+                self._wait_for_vllm(
+                    session,
+                    subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(10**9)"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    ),
+                )
+            except Exception:
+                session.close()
+                raise
+            self._llama = session
+        else:
+            session = requests.Session()
+            host = DIRECTOR_VLLM_HOST
+            port = DIRECTOR_VLLM_PORT
+            model_name = self._vllm_model_name()
+            log_path = Path(
+                os.getenv(
+                    "H3_DIRECTOR_VLLM_LOG",
+                    str(self.project_root / "qwen3_vllm_server.log"),
+                )
+            )
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = log_path.open("ab")
 
-        try:
+            vllm_bin = shutil.which("vllm")
+            if vllm_bin:
+                command = [vllm_bin, "serve"]
+            else:
+                command = [
+                    sys.executable,
+                    "-m",
+                    "vllm.entrypoints.openai.api_server",
+                ]
 
-            from llama_cpp import Llama
-
-        except ImportError as exc:
-
-            raise RuntimeError(
-                "llama-cpp-python is not installed."
-            ) from exc
-
-        try:
-
-            self._llama = Llama(
-                model_path=str(
-                    self._model_path
-                ),
-                n_ctx=DIRECTOR_N_CTX,
-                n_gpu_layers=DIRECTOR_N_GPU_LAYERS,
-                n_batch=DIRECTOR_N_BATCH,
-                n_threads=DIRECTOR_THREADS,
-                n_threads_batch=DIRECTOR_THREADS_BATCH,
-                flash_attn=True,
-                verbose=False,
+            command.extend(
+                [
+                    str(self._model_path),
+                    "--host",
+                    host,
+                    "--port",
+                    str(port),
+                    "--served-model-name",
+                    model_name,
+                    "--tensor-parallel-size",
+                    str(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
+                    "--max-model-len",
+                    str(DIRECTOR_VLLM_MAX_MODEL_LEN),
+                    "--gpu-memory-utilization",
+                    str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
+                    "--max-num-seqs",
+                    "1",
+                    "--dtype",
+                    "half",
+                    "--trust-remote-code",
+                    "--disable-log-requests",
+                ]
             )
 
-        except Exception as exc:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+                self._vllm_process = process
+                self._vllm_log_handle = log_handle
+                self._vllm_log_path = log_path
+                self._vllm_session = session
 
-            raise RuntimeError(
-                "Failed to initialize Qwen3-14B director.\n"
-                f"Model: {self._model_path}\n"
-                f"Error: {exc}"
-            ) from exc
+                self._wait_for_vllm(
+                    session,
+                    process,
+                )
+
+                try:
+                    from transformers import AutoTokenizer
+                    self._tokenizer = AutoTokenizer.from_pretrained(
+                        str(self._model_path),
+                        local_files_only=True,
+                        trust_remote_code=True,
+                        use_fast=True,
+                    )
+                except Exception as exc:
+                    self._shutdown_vllm()
+                    raise RuntimeError(
+                        "Qwen3-14B-AWQ tokenizer initialization failed."
+                    ) from exc
+
+                self._llama = session
+
+                print(
+                    "[QWEN] vLLM Director ready",
+                    f"model={model_name}",
+                    f"tp={DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE}",
+                    f"context={DIRECTOR_VLLM_MAX_MODEL_LEN}",
+                    f"log={log_path}",
+                    flush=True,
+                )
+
+            except Exception as exc:
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
+                if self._vllm_process is not None:
+                    try:
+                        self._shutdown_vllm()
+                    except Exception:
+                        pass
+                raise RuntimeError(
+                    "Failed to initialize Qwen3-14B-AWQ vLLM director. "
+                    f"Model: {self._model_path}\nError: {exc}"
+                ) from exc
+
+    def _shutdown_vllm(self) -> None:
+        process = getattr(self, "_vllm_process", None)
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+            except Exception:
+                pass
+        self._vllm_process = None
+
+        log_handle = getattr(self, "_vllm_log_handle", None)
+        if log_handle is not None:
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+        self._vllm_log_handle = None
 
     def unload(
         self,
     ) -> None:
 
-        model = self._llama
-
+        session = self._llama
         self._llama = None
 
-        if model is not None:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
-            del model
+        self._shutdown_vllm()
+
+        tokenizer = getattr(self, "_tokenizer", None)
+        self._tokenizer = None
+        if tokenizer is not None:
+            del tokenizer
 
         gc.collect()
 
         try:
-
             import torch
-
             if torch.cuda.is_available():
-
                 torch.cuda.empty_cache()
-
                 try:
-
                     torch.cuda.ipc_collect()
-
                 except Exception:
                     pass
-
         except Exception:
             pass
 
@@ -780,18 +688,22 @@ class QwenDirectorRuntimeMixin:
     ) -> int:
 
         if self._llama is None:
-
             raise RuntimeError(
                 "Qwen director model is not loaded."
             )
 
-        return len(
-            self._llama.tokenize(
-                text.encode(
-                    "utf-8"
-                ),
-                add_bos=True,
-                special=True,
+        tokenizer = getattr(self, "_tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError(
+                "Qwen director tokenizer is not loaded."
+            )
+
+        return int(
+            len(
+                tokenizer.encode(
+                    text,
+                    add_special_tokens=True,
+                )
             )
         )
 
@@ -918,6 +830,48 @@ class QwenDirectorRuntimeMixin:
                         break
         raise RuntimeError("Qwen director returned invalid JSON.")
 
+    def _post_chat(
+        self,
+        *,
+        messages: list[dict],
+        temperature: float,
+        top_p: float,
+        max_tokens: int,
+        response_format: dict | None = None,
+    ) -> dict:
+        if self._llama is None:
+            raise RuntimeError("Qwen director model is not loaded.")
+
+        payload = {
+            "model": self._vllm_model_name(),
+            "messages": messages,
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "max_tokens": int(max_tokens),
+        }
+        if response_format is not None:
+            payload["response_format"] = response_format
+
+        url = self._vllm_base_url() + "/chat/completions"
+        response = self._llama.post(
+            url,
+            json=payload,
+            timeout=float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800")),
+        )
+
+        if response.status_code >= 400:
+            body = response.text[:4000]
+            raise RuntimeError(
+                f"vLLM request failed with HTTP {response.status_code}: {body}"
+            )
+
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "vLLM returned a non-JSON response."
+            ) from exc
+
     def _chat_json(
         self,
         system_prompt: str,
@@ -1014,8 +968,11 @@ class QwenDirectorRuntimeMixin:
                     f"No JSON schema supplied for {call_name}."
                 )
             kwargs["response_format"] = {
-                "type": "json_object",
-                "schema": response_schema,
+                "type": "json_schema",
+                "json_schema": {
+                    "name": re.sub(r"[^a-zA-Z0-9_-]+", "_", call_name)[:64] or "director_json",
+                    "schema": response_schema,
+                },
             }
 
         started = time.perf_counter()
@@ -1025,8 +982,12 @@ class QwenDirectorRuntimeMixin:
         print(f"[QWEN] START {call_name}", flush=True)
 
         try:
-            response = self._llama.create_chat_completion(
-                **kwargs
+            response = self._post_chat(
+                messages=messages,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                response_format=kwargs.get("response_format"),
             )
         except Exception as exc:
             error_text = (
@@ -1189,13 +1150,11 @@ class QwenDirectorRuntimeMixin:
         print(f"[QWEN] START {call_name}", flush=True)
 
         try:
-            response = (
-                self._llama.create_chat_completion(
-                    messages=messages,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                )
+            response = self._post_chat(
+                messages=messages,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
