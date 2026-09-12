@@ -103,64 +103,94 @@ H3_LATENT_UPSCALER_3D = (
     "minimax_h3_latent_upscaler_3d_fp16.safetensors"
 )
 
-DIRECTOR_MODEL_FILENAME = str(
-    RUNTIME["director"]["model_filename"]
-).strip()
-
-if not DIRECTOR_MODEL_FILENAME:
-    raise RuntimeError(
-        "runtime_versions.yaml director.model_filename is empty."
-    )
-
-
-# ============================================================
-# DIRECTOR MODEL
-# ============================================================
-
 DIRECTOR_MODEL_ENV = "H3_DIRECTOR_MODEL_PATH"
 DIRECTOR_ENABLED_ENV = "H3_DIRECTOR_ENABLED"
+
+_configured_director_path = os.getenv(
+    DIRECTOR_MODEL_ENV,
+    str(RUNTIME["director"].get("model_path", "")).strip(),
+).strip()
+
+if not _configured_director_path:
+    raise RuntimeError(
+        "runtime_versions.yaml director.model_path is empty."
+    )
+
+DIRECTOR_MODEL_PATH = Path(
+    _configured_director_path
+).expanduser().resolve()
+
+# Kept as compatibility aliases for existing diagnostics; the Director runtime
+# now loads a sharded AWQ checkpoint directory rather than a GGUF file.
+DIRECTOR_MODEL_FILENAME = DIRECTOR_MODEL_PATH.name
 
 DIRECTOR_N_CTX = int(
     os.getenv(
         "H3_DIRECTOR_N_CTX",
-        str(RUNTIME["director"]["context"]),
-    )
-)
-
-DIRECTOR_N_GPU_LAYERS = int(
-    os.getenv(
-        "H3_DIRECTOR_N_GPU_LAYERS",
-        str(RUNTIME["director"]["gpu_layers"]),
-    )
-)
-
-DIRECTOR_N_BATCH = int(
-    os.getenv(
-        "H3_DIRECTOR_N_BATCH",
-        str(RUNTIME["director"]["batch"]),
+        str(RUNTIME["director"].get("context", 8192)),
     )
 )
 
 DIRECTOR_MAX_TOKENS = int(
     os.getenv(
         "H3_DIRECTOR_MAX_TOKENS",
-        str(RUNTIME["director"]["max_tokens"]),
+        str(RUNTIME["director"].get("max_tokens", 7000)),
     )
 )
 
 DIRECTOR_TEMPERATURE = float(
     os.getenv(
         "H3_DIRECTOR_TEMPERATURE",
-        str(RUNTIME["director"]["temperature"]),
+        str(RUNTIME["director"].get("temperature", 0.2)),
     )
 )
 
 DIRECTOR_TOP_P = float(
     os.getenv(
         "H3_DIRECTOR_TOP_P",
-        str(RUNTIME["director"]["top_p"]),
+        str(RUNTIME["director"].get("top_p", 0.85)),
     )
 )
+
+DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE = int(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE",
+        str(RUNTIME["director"].get("tensor_parallel_size", 2)),
+    )
+)
+
+DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION = float(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION",
+        str(RUNTIME["director"].get("gpu_memory_utilization", 0.90)),
+    )
+)
+
+DIRECTOR_VLLM_MAX_MODEL_LEN = int(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_MAX_MODEL_LEN",
+        str(RUNTIME["director"].get("context", 8192)),
+    )
+)
+
+DIRECTOR_VLLM_HOST = os.getenv(
+    "H3_DIRECTOR_VLLM_HOST",
+    str(RUNTIME["director"].get("host", "127.0.0.1")),
+)
+
+DIRECTOR_VLLM_PORT = int(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_PORT",
+        str(RUNTIME["director"].get("port", 8000)),
+    )
+)
+
+# Backward-compatible legacy constants. The vLLM runtime does not use these
+# llama.cpp-specific settings, but keeping them avoids breaking older diagnostics.
+DIRECTOR_N_GPU_LAYERS = -1
+DIRECTOR_N_BATCH = 0
+DIRECTOR_THREADS = int(os.getenv("H3_DIRECTOR_THREADS", "8"))
+DIRECTOR_THREADS_BATCH = int(os.getenv("H3_DIRECTOR_THREADS_BATCH", "8"))
 
 # Locked Director topology. Keep this centralized so prompt grammar, Director
 # batching, and validation cannot silently drift apart.
