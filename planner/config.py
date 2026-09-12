@@ -185,6 +185,20 @@ DIRECTOR_VLLM_PORT = int(
     )
 )
 
+DIRECTOR_VLLM_ENV_DIR = Path(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_ENV_DIR",
+        str(RUNTIME["director"].get("vllm_env_dir", "/kaggle/working/.qwen_vllm")),
+    )
+).expanduser()
+
+DIRECTOR_VLLM_MAX_NUM_SEQS = int(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_MAX_NUM_SEQS",
+        str(RUNTIME["director"].get("max_num_seqs", 1)),
+    )
+)
+
 # Backward-compatible legacy constants. The vLLM runtime does not use these
 # llama.cpp-specific settings, but keeping them avoids breaking older diagnostics.
 DIRECTOR_N_GPU_LAYERS = -1
@@ -252,19 +266,6 @@ DIRECTOR_CRITIC_STORY_CONTEXT_CHARS = int(
     )
 )
 
-DIRECTOR_THREADS = int(
-    os.getenv(
-        "H3_DIRECTOR_THREADS",
-        str(RUNTIME["director"]["threads"]),
-    )
-)
-
-DIRECTOR_THREADS_BATCH = int(
-    os.getenv(
-        "H3_DIRECTOR_THREADS_BATCH",
-        str(RUNTIME["director"]["threads_batch"]),
-    )
-)
 
 _configured_input_root = os.getenv("H3_INPUT_ROOT", "").strip()
 if _configured_input_root:
