@@ -34,15 +34,14 @@ delivery:
   height: 720
   fps: 24
 director:
-  model_filename: Qwen3-14B-Q4_K_M.gguf
+  model_path: /kaggle/input/qwen3-14b-awq
+  backend: vllm
   context: 8192
   max_tokens: 7000
   temperature: 0.2
   top_p: 0.85
-  batch: 512
-  gpu_layers: -1
-  threads: 4
-  threads_batch: 8
+  tensor_parallel_size: 2
+  gpu_memory_utilization: <chosen value>
 storyboard:
   host: 0.0.0.0
   port: 8765
