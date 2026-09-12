@@ -287,117 +287,36 @@ def _prepare_cuda_environment() -> tuple[
 # ============================================================
 
 def find_director_model() -> Path:
-
-    runtime = load_yaml(
-        RUNTIME_MANIFEST
-    )
-
-    filename = (
-        runtime[
-            "director"
-        ][
-            "model_filename"
-        ]
-    )
-
-    matches = []
-
-    for path in KAGGLE_INPUT.rglob(
-        "*"
-    ):
-
-        if (
-            path.is_file()
-            and path.name.lower()
-            == filename.lower()
-        ):
-            matches.append(
-                path
-            )
-
-    if len(matches) != 1:
-
-        raise RuntimeError(
-            "Expected exactly one Qwen director model.\n"
-            f"Filename: {filename}\n"
-            f"Found: {len(matches)}\n"
-            + (
-                "\n".join(
-                    str(path)
-                    for path in matches
-                )
-                if matches
-                else
-                "No matching model was found."
-            )
-        )
-
-    model = matches[0]
-
-    if model.stat().st_size <= 0:
-        raise RuntimeError(
-            f"Qwen director model is empty: {model}"
-        )
-
-    return model
+    runtime = load_yaml(RUNTIME_MANIFEST)
+    director = dict(runtime.get("director", {}) or {})
+    if str(director.get("backend", "") or "").strip().lower() != "vllm":
+        raise RuntimeError("Director backend must be vllm.")
+    configured = str(director.get("model_path", "") or "").strip()
+    if not configured:
+        raise RuntimeError("runtime_versions.yaml director.model_path is empty.")
+    candidates = [Path(configured).expanduser(), KAGGLE_INPUT / Path(configured).name]
+    required = ("config.json", "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "tokenizer.json")
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate.is_dir() and all((candidate / name).is_file() for name in required):
+            return candidate
+    raise RuntimeError("Complete Qwen3-14B-AWQ checkpoint was not found at " + configured)
 
 
 def check_director() -> None:
-
-    model = (
-        find_director_model()
-    )
-
-    print(
-        "DIRECTOR MODEL:",
-        model,
-    )
-
-    try:
-
-        cudart, cublas = (
-            _prepare_cuda_environment()
-        )
-
-        print(
-            "CUDA RUNTIME:",
-            cudart,
-        )
-
-        print(
-            "CUBLAS:",
-            cublas,
-        )
-
-        from llama_cpp import (
-            Llama,
-        )
-
-    except ImportError as exc:
-
-        raise RuntimeError(
-            "llama-cpp-python is unavailable."
-        ) from exc
-
-    except OSError as exc:
-
-        raise RuntimeError(
-            "llama-cpp-python native CUDA library "
-            "could not be loaded:\n"
-            f"{exc}"
-        ) from exc
-
-    except RuntimeError:
-        raise
-
-    if Llama is None:
-        raise RuntimeError(
-            "llama_cpp.Llama is unavailable."
-        )
-
-    print(
-        "DIRECTOR RUNTIME: PASS"
-    )
+    model = find_director_model()
+    print("DIRECTOR MODEL:", model)
+    director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
+    version = str(director.get("vllm_version", "") or "").strip()
+    env_dir = Path(str(director.get("vllm_env_dir", "/kaggle/working/.qwen_vllm"))).expanduser()
+    venv_python = env_dir / "bin" / "python"
+    if not version or not venv_python.is_file():
+        raise RuntimeError("Pinned vLLM environment is missing; run bootstrap first.")
+    result = subprocess.run([str(venv_python), "-c", "import vllm; print(vllm.__version__)"], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError("vLLM Director runtime is unavailable.\n" + (result.stderr or result.stdout))
+    print("DIRECTOR RUNTIME: PASS")
+    print("DIRECTOR VLLM:", result.stdout.strip(), "expected:", version)
 
 
 # ============================================================
