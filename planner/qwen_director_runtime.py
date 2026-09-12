@@ -374,22 +374,6 @@ class QwenDirectorRuntimeMixin:
             DIRECTOR_KAGGLE_INPUT_ROOT / Path(DIRECTOR_MODEL_PATH).name
         )
 
-        # Backwards-compatible search for the exact dataset directory name.
-        for root in (
-            self.project_root,
-            DIRECTOR_KAGGLE_INPUT_ROOT,
-        ):
-            if not root.exists():
-                continue
-            try:
-                candidates.extend(
-                    path
-                    for path in root.rglob(Path(DIRECTOR_MODEL_PATH).name)
-                    if path.is_dir()
-                )
-            except OSError:
-                continue
-
         unique: list[Path] = []
         seen: set[str] = set()
 
@@ -458,38 +442,53 @@ class QwenDirectorRuntimeMixin:
             self._model_path.name if self._model_path is not None else "Qwen3-14B-AWQ",
         )
 
-    def _wait_for_vllm(self, session: requests.Session, process: subprocess.Popen) -> None:
-        health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
+    def _wait_for_vllm(
+        self,
+        session: requests.Session,
+        process: subprocess.Popen | None = None,
+    ) -> None:
+        """Wait until vLLM is healthy and serving the locked Director model."""
+        base_url = self._vllm_base_url().rsplit("/v1", 1)[0]
+        health_url = base_url + "/health"
         models_url = self._vllm_base_url() + "/models"
         deadline = time.monotonic() + float(
             os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "600")
         )
-
         last_error = ""
         while time.monotonic() < deadline:
-            if process.poll() is not None:
+            if process is not None and process.poll() is not None:
                 raise RuntimeError(
                     "vLLM Director server exited during startup "
                     f"with code {process.returncode}. "
                     f"See {getattr(self, '_vllm_log_path', 'vLLM log')}."
                 )
-            for url in (health_url, models_url):
-                try:
-                    response = session.get(url, timeout=5)
-                    if response.status_code == 200:
-                        if url.endswith("/models"):
-                            payload = response.json()
-                            data = payload.get("data", [])
-                            if data and self._vllm_model_name() in {
-                                str(item.get("id", "")) for item in data
-                            }:
-                                return
-                        else:
-                            return
-                except Exception as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
+            try:
+                health = session.get(health_url, timeout=5)
+                if health.status_code != 200:
+                    last_error = f"health HTTP {health.status_code}"
+                    time.sleep(2.0)
+                    continue
+                models = session.get(models_url, timeout=5)
+                if models.status_code != 200:
+                    last_error = f"models HTTP {models.status_code}"
+                    time.sleep(2.0)
+                    continue
+                payload = models.json()
+                data = payload.get("data", [])
+                served = {
+                    str(item.get("id", ""))
+                    for item in data
+                    if isinstance(item, dict)
+                }
+                if self._vllm_model_name() in served:
+                    return
+                last_error = (
+                    "vLLM is healthy but the locked model is not served; "
+                    f"served={sorted(served)} expected={self._vllm_model_name()}"
+                )
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
             time.sleep(2.0)
-
         raise RuntimeError(
             "Timed out waiting for the Qwen3-14B-AWQ vLLM server. "
             f"Last error: {last_error}. "
@@ -503,7 +502,7 @@ class QwenDirectorRuntimeMixin:
         if not self.available:
             return
 
-        if self._llama is not None:
+        if self._vllm_session is not None:
             return
 
         if os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "").strip().lower() in {
@@ -511,18 +510,11 @@ class QwenDirectorRuntimeMixin:
         }:
             session = requests.Session()
             try:
-                self._wait_for_vllm(
-                    session,
-                    subprocess.Popen(
-                        [sys.executable, "-c", "import time; time.sleep(10**9)"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    ),
-                )
+                self._wait_for_vllm(session)
             except Exception:
                 session.close()
                 raise
-            self._llama = session
+            self._vllm_session = session
         else:
             session = requests.Session()
             host = DIRECTOR_VLLM_HOST
@@ -548,6 +540,7 @@ class QwenDirectorRuntimeMixin:
                 str(vllm_python),
                 "-m",
                 "vllm.entrypoints.openai.api_server",
+                "--model",
                 str(self._model_path),
                 "--host",
                 host,
@@ -600,7 +593,7 @@ class QwenDirectorRuntimeMixin:
                         "Qwen3-14B-AWQ tokenizer initialization failed."
                     ) from exc
 
-                self._llama = session
+                self._vllm_session = session
 
                 print(
                     "[QWEN] vLLM Director ready",
@@ -653,8 +646,8 @@ class QwenDirectorRuntimeMixin:
         self,
     ) -> None:
 
-        session = self._llama
-        self._llama = None
+        session = self._vllm_session
+        self._vllm_session = None
 
         if session is not None:
             try:
@@ -687,9 +680,9 @@ class QwenDirectorRuntimeMixin:
         text: str,
     ) -> int:
 
-        if self._llama is None:
+        if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen director model is not loaded."
+                "Qwen Director runtime is not loaded."
             )
 
         tokenizer = getattr(self, "_tokenizer", None)
@@ -839,8 +832,8 @@ class QwenDirectorRuntimeMixin:
         max_tokens: int,
         response_format: dict | None = None,
     ) -> dict:
-        if self._llama is None:
-            raise RuntimeError("Qwen director model is not loaded.")
+        if self._vllm_session is None:
+            raise RuntimeError("Qwen Director runtime is not loaded.")
 
         payload = {
             "model": self._vllm_model_name(),
@@ -853,7 +846,7 @@ class QwenDirectorRuntimeMixin:
             payload["response_format"] = response_format
 
         url = self._vllm_base_url() + "/chat/completions"
-        response = self._llama.post(
+        response = self._vllm_session.post(
             url,
             json=payload,
             timeout=float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800")),
@@ -886,9 +879,9 @@ class QwenDirectorRuntimeMixin:
         response_schema: dict | None = None,
     ) -> dict:
 
-        if self._llama is None:
+        if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen director model is not loaded."
+                "Qwen Director runtime is not loaded."
             )
 
         if temperature is None:
@@ -1103,9 +1096,9 @@ class QwenDirectorRuntimeMixin:
         disable_thinking: bool = True,
     ) -> str:
 
-        if self._llama is None:
+        if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen director model is not loaded."
+                "Qwen Director runtime is not loaded."
             )
 
         if temperature is None:
