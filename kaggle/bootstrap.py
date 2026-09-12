@@ -573,6 +573,11 @@ def install_director_runtime(
         )
     )
 
+    # _configure_cuda_environment() returns a copy of os.environ. Persist the
+    # CUDA 13 library path so every subprocess started later by this process
+    # inherits the same native-library search path.
+    os.environ["LD_LIBRARY_PATH"] = environment["LD_LIBRARY_PATH"]
+
     print(
         "[CUDA RUNTIME LIBRARIES]"
     )
@@ -801,7 +806,13 @@ def install_embedded_context_ir_node(runtime: dict) -> None:
     print("[NODE] embedded official MiniMax H3 Context-IR bridge")
 
 def verify_h3_optimization_runtime(runtime: dict) -> None:
-    """Validate the installed H3 optimizer before any model generation runs."""
+    """Validate H3 optimization in a fresh Python process.
+
+    Kaggle notebooks may already have imported a different Torch/CUDA build in
+    the long-lived kernel. Native CUDA Python modules must not be hot-reloaded
+    after pip replaces their shared objects, so the capability import is done
+    in a clean child interpreter.
+    """
     cfg = dict(runtime.get("h3_optimization", {}) or {})
     expected_revision = str(cfg.get("revision", "")).strip()
     expected_version = str(cfg.get("version", "")).strip()
@@ -812,102 +823,140 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
     if len(expected_revision) != 40:
         raise RuntimeError("runtime_versions.yaml contains no valid H3-Optimizations SHA")
 
-    try:
-        actual_revision = subprocess.check_output(
-            ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
-            text=True,
-            stderr=subprocess.STDOUT,
-        ).strip()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Unable to read installed H3-Optimizations revision: {exc}"
-        ) from exc
-
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
     if actual_revision != expected_revision:
         raise RuntimeError(
             "Installed H3-Optimizations revision does not match the runtime lock: "
             f"expected={expected_revision}, actual={actual_revision}"
         )
 
-    # The H3 optimizer is a ComfyUI custom node, not a separately installed
-    # site-package. Its Python package lives inside the custom-node directory,
-    # while its implementation imports the sibling ComfyUI ``comfy`` package.
-    # Expose both roots only for this verification import so the checker tests
-    # the exact installed sources without changing the persistent process path.
-    import_roots = [
-        str(COMFY),
-        str(node_dir),
-    ]
-    original_sys_path = list(sys.path)
-    try:
-        for import_root in reversed(import_roots):
-            if import_root not in sys.path:
-                sys.path.insert(0, import_root)
-
-        import h3_optimizations
-        from h3_optimizations.memory import forward as h3_forward
-        from h3_optimizations.memory import linear as h3_linear
-        from h3_optimizations.qkv import providers as h3_providers
-
-        package_file = Path(
-            getattr(h3_optimizations, "__file__", "")
-        ).resolve()
-        expected_package_root = (node_dir / "h3_optimizations").resolve()
-        if not package_file.is_relative_to(expected_package_root):
-            raise RuntimeError(
-                "H3-Optimizations import resolved outside the pinned custom-node "
-                f"directory: {package_file}"
-            )
-    except Exception as exc:
+    library_dirs = _cuda_library_dirs()
+    if not library_dirs:
         raise RuntimeError(
-            "H3-Optimizations installed but bounded execution modules could not "
-            f"be imported: {exc}"
-        ) from exc
-    finally:
-        sys.path[:] = original_sys_path
-
-    package_version = str(getattr(h3_optimizations, "__version__", "")).strip()
-    if expected_version and package_version != expected_version:
-        raise RuntimeError(
-            "Installed H3-Optimizations version does not match the runtime lock: "
-            f"expected={expected_version}, actual={package_version}"
+            "Fresh H3 verification could not locate the installed CUDA runtime libraries."
         )
 
-    required_symbols = (
-        (h3_linear, "ConvRotTwoSliceMLP"),
-        (h3_linear, "HeldMLP"),
-        (h3_linear, "acquire_linear"),
-        (h3_linear, "bind_convrot_mlp"),
-        (h3_forward, "make_forward"),
-        (h3_forward, "iter_mod_chunks"),
-        (h3_providers, "MLP_CONVROT_INT8_TWO_SLICE"),
-        (h3_providers, "resolve_mlp_provider"),
+    environment = _configure_cuda_environment(library_dirs)
+    environment.update({
+        "H3_EXPECTED_TORCH": "2.10.0+cu130",
+        "H3_EXPECTED_CUDA": "13.0",
+        "H3_EXPECTED_H3_REVISION": expected_revision,
+        "H3_EXPECTED_H3_VERSION": expected_version,
+        "H3_COMFY_ROOT": str(COMFY),
+        "H3_NODE_ROOT": str(node_dir),
+    })
+
+    verify_script = """
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+expected_torch = os.environ["H3_EXPECTED_TORCH"]
+expected_cuda = os.environ["H3_EXPECTED_CUDA"]
+expected_revision = os.environ["H3_EXPECTED_H3_REVISION"]
+expected_version = os.environ["H3_EXPECTED_H3_VERSION"]
+comfy = Path(os.environ["H3_COMFY_ROOT"]).resolve()
+node_dir = Path(os.environ["H3_NODE_ROOT"]).resolve()
+
+import torch
+actual_torch = str(torch.__version__)
+actual_cuda = str(torch.version.cuda)
+if actual_torch != expected_torch:
+    raise RuntimeError(f"Torch mismatch: expected={expected_torch}, actual={actual_torch}")
+if actual_cuda != expected_cuda:
+    raise RuntimeError(f"Torch CUDA mismatch: expected={expected_cuda}, actual={actual_cuda}")
+if not torch.cuda.is_available():
+    raise RuntimeError("Torch CUDA is unavailable in the fresh verification process")
+major, minor = torch.cuda.get_device_capability(0)
+if (major, minor) != (7, 5):
+    raise RuntimeError(f"Unexpected GPU capability: {(major, minor)}; expected Tesla T4 SM75")
+
+sys.path.insert(0, str(node_dir))
+sys.path.insert(0, str(comfy))
+
+import h3_optimizations
+from h3_optimizations.memory import forward as h3_forward
+from h3_optimizations.memory import linear as h3_linear
+from h3_optimizations.qkv import providers as h3_providers
+
+package_file = Path(getattr(h3_optimizations, "__file__", "")).resolve()
+expected_package_root = (node_dir / "h3_optimizations").resolve()
+if not package_file.is_relative_to(expected_package_root):
+    raise RuntimeError(
+        "H3-Optimizations import resolved outside the pinned custom-node directory: "
+        f"{package_file}"
     )
-    missing = [name for module, name in required_symbols if not hasattr(module, name)]
-    if missing:
+
+package_version = str(getattr(h3_optimizations, "__version__", "")).strip()
+if expected_version and package_version != expected_version:
+    raise RuntimeError(
+        "Installed H3-Optimizations version does not match the runtime lock: "
+        f"expected={expected_version}, actual={package_version}"
+    )
+
+required_symbols = (
+    (h3_linear, "ConvRotTwoSliceMLP"),
+    (h3_linear, "HeldMLP"),
+    (h3_linear, "acquire_linear"),
+    (h3_linear, "bind_convrot_mlp"),
+    (h3_forward, "make_forward"),
+    (h3_forward, "iter_mod_chunks"),
+    (h3_providers, "MLP_CONVROT_INT8_TWO_SLICE"),
+    (h3_providers, "resolve_mlp_provider"),
+)
+missing = [name for module, name in required_symbols if not hasattr(module, name)]
+if missing:
+    raise RuntimeError(
+        "H3-Optimizations bounded MLP capability check failed; missing symbols: "
+        f"{missing}"
+    )
+
+provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
+if provider_id != "convrot_int8_two_slice":
+    raise RuntimeError(f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}")
+
+actual_revision = subprocess.check_output(
+    ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+    text=True,
+).strip()
+if actual_revision != expected_revision:
+    raise RuntimeError(
+        "Fresh-process H3 revision mismatch: "
+        f"expected={expected_revision}, actual={actual_revision}"
+    )
+
+print(f"[FRESH RUNTIME] torch={actual_torch} cuda={actual_cuda} gpu=SM{major}{minor}")
+print(
+    "[H3 OPT] revision={} version={} bounded_mlp=PASS ConvRotTwoSliceMLP=PASS provider={}".format(
+        actual_revision, package_version, provider_id
+    )
+)
+print("[H3 OPT] fresh-process runtime capability check passed; no H3 model generation was run.")
+"""
+
+    verification = subprocess.run(
+        [sys.executable, "-c", verify_script],
+        env=environment,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verification.stdout:
+        print(verification.stdout, end="")
+    if verification.stderr:
+        print(verification.stderr, end="")
+    if verification.returncode != 0:
         raise RuntimeError(
-            "H3-Optimizations bounded MLP capability check failed; missing symbols: "
-            f"{missing}"
+            "Fresh-process H3 runtime verification failed.\n"
+            + (verification.stdout or "")
+            + (verification.stderr or "")
         )
-
-    provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
-    if provider_id != "convrot_int8_two_slice":
-        raise RuntimeError(
-            f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}"
-        )
-
-    print(
-        "[H3 OPT] revision={} version={} bounded_mlp=PASS "
-        "ConvRotTwoSliceMLP=PASS provider={}".format(
-            actual_revision, package_version, provider_id
-        ),
-        flush=True,
-    )
-    print(
-        "[H3 OPT] runtime capability check passed; no H3 model generation was run.",
-        flush=True,
-    )
-
 
 def install_nodes() -> None:
 
@@ -1176,7 +1225,23 @@ def verify_runtime_files(runtime: dict) -> None:
         )
 
 
+def _warn_if_torch_already_imported() -> None:
+    """Warn when bootstrap is running in a process that already imported Torch."""
+    if "torch" not in sys.modules:
+        return
+
+    print("=" * 80)
+    print("[BOOTSTRAP WARNING] torch is already imported in this process.")
+    print("Reinstalling PyTorch changes files on disk, not the native Torch runtime")
+    print("already loaded into this Python process.")
+    print("GPU-dependent validation/work must run in a FRESH subprocess after bootstrap.")
+    print("Do NOT import or reload torch directly in this same kernel after reinstall.")
+    print("=" * 80)
+
+
 def main():
+
+    _warn_if_torch_already_imported()
 
     runtime = load_yaml(
         RUNTIME_MANIFEST
