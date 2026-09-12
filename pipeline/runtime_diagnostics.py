@@ -28,6 +28,30 @@ class RuntimeDiagnostics:
             return f"unavailable: {exc}"
 
     @staticmethod
+    def _isolated_vllm_version() -> str:
+        runtime = dict(RUNTIME.get("director", {}) or {})
+        env_dir = Path(
+            str(runtime.get("vllm_env_dir", "/kaggle/working/.qwen_vllm"))
+        ).expanduser()
+        python = env_dir / "bin" / "python"
+        if not python.is_file():
+            return f"unavailable: {python}"
+        try:
+            result = subprocess.run(
+                [str(python), "-c", "import vllm; print(vllm.__version__)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return f"unavailable: {result.stdout.strip()[-1000:]}"
+            return result.stdout.strip().splitlines()[-1].strip()
+        except Exception as exc:
+            return f"unavailable: {exc}"
+
+    @staticmethod
     def _command(command: list[str]) -> str:
         try:
             result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=10)
@@ -87,7 +111,7 @@ class RuntimeDiagnostics:
             "websocket_client": self._version("websocket"),
             "director_backend": str((RUNTIME.get("director", {}) or {}).get("backend", "")),
             "director_model_path": str((RUNTIME.get("director", {}) or {}).get("model_path", "")),
-            "vllm": self._version("vllm"),
+            "vllm": self._isolated_vllm_version(),
             "environment": {key: value for key, value in os.environ.items() if key.startswith("H3_")},
             "nvidia_smi": self._command(["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version", "--format=csv,noheader"]),
         }
