@@ -54,8 +54,9 @@ policy:
   allow_director_qwen: true
 
   director_model:
-    filename: "Qwen3-14B-AWQ"
-    runtime: "llama-cpp-python"
+    path: "/kaggle/input/qwen3-14b-awq"
+    runtime: "vllm"
+    format: "safetensors-awq"
     purpose: >
       Local story writer, character planner,
       scene planner, shot planner and cinematic director.
