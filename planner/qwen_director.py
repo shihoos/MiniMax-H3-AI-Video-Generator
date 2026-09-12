@@ -153,7 +153,7 @@ class QwenDirector(
             .resolve()
         )
 
-        self._llama = None
+        self._vllm_session = None
 
         self._model_path = (
             self._find_model()
@@ -175,7 +175,7 @@ class QwenDirector(
         self._cache_dir = self._optional_directory_env(
             "H3_DIRECTOR_CACHE_DIR"
         )
-        self._cache_namespace = "minimax-h3-qwen-schema-v3-direct-python-no-chat-template-kwargs"
+        self._cache_namespace = "minimax-h3-qwen-vllm-json-v1"
 
         # Runtime Qwen telemetry is intentionally lightweight: keep only
         # aggregate/per-call metrics needed to diagnose latency, token usage,
@@ -263,7 +263,7 @@ class QwenDirector(
 
         self.load()
 
-        if self._llama is None:
+        if self._vllm_session is None:
 
             raise RuntimeError(
                 "Qwen director model failed to load."
