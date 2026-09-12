@@ -2567,7 +2567,7 @@ def test_expand_failure_is_source_fallback_without_retry() -> None:
     original_load = director.load
 
     def fake_load():
-        director._llama = object()
+        director._vllm_session = object()
 
     director.load = fake_load
     director._count_tokens = lambda text: 100
@@ -2597,7 +2597,7 @@ def test_expand_failure_is_source_fallback_without_retry() -> None:
     finally:
         director._chat_text = original
         director.load = original_load
-        director._llama = None
+        director._vllm_session = None
 
     check(
         "expand_story_text_retry" not in calls,
