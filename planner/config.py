@@ -122,7 +122,6 @@ DIRECTOR_MODEL_PATH = Path(
 
 # Kept as compatibility aliases for existing diagnostics; the Director runtime
 # now loads a sharded AWQ checkpoint directory rather than a GGUF file.
-DIRECTOR_MODEL_FILENAME = DIRECTOR_MODEL_PATH.name
 
 DIRECTOR_N_CTX = int(
     os.getenv(
@@ -198,13 +197,6 @@ DIRECTOR_VLLM_MAX_NUM_SEQS = int(
         str(RUNTIME["director"].get("max_num_seqs", 1)),
     )
 )
-
-# Backward-compatible legacy constants. The vLLM runtime does not use these
-# llama.cpp-specific settings, but keeping them avoids breaking older diagnostics.
-DIRECTOR_N_GPU_LAYERS = -1
-DIRECTOR_N_BATCH = 0
-DIRECTOR_THREADS = int(os.getenv("H3_DIRECTOR_THREADS", "8"))
-DIRECTOR_THREADS_BATCH = int(os.getenv("H3_DIRECTOR_THREADS_BATCH", "8"))
 
 # Locked Director topology. Keep this centralized so prompt grammar, Director
 # batching, and validation cannot silently drift apart.
@@ -441,10 +433,7 @@ def validate_runtime_values() -> None:
         ("DELIVERY_HEIGHT", DELIVERY_HEIGHT),
         ("DELIVERY_FPS", DELIVERY_FPS),
         ("DIRECTOR_N_CTX", DIRECTOR_N_CTX),
-        ("DIRECTOR_N_BATCH", DIRECTOR_N_BATCH),
         ("DIRECTOR_MAX_TOKENS", DIRECTOR_MAX_TOKENS),
-        ("DIRECTOR_THREADS", DIRECTOR_THREADS),
-        ("DIRECTOR_THREADS_BATCH", DIRECTOR_THREADS_BATCH),
         ("DIRECTOR_SHOTS_PER_SCENE", DIRECTOR_SHOTS_PER_SCENE),
         ("DIRECTOR_STORY_CONTEXT_CHARS", DIRECTOR_STORY_CONTEXT_CHARS),
         ("DIRECTOR_CRITIC_STORY_CONTEXT_CHARS", DIRECTOR_CRITIC_STORY_CONTEXT_CHARS),
