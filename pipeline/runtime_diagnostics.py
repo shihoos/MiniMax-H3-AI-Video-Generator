@@ -85,7 +85,9 @@ class RuntimeDiagnostics:
             "pillow": self._version("PIL"),
             "yaml": self._version("yaml"),
             "websocket_client": self._version("websocket"),
-            "llama_cpp": self._version("llama_cpp"),
+            "director_backend": str((RUNTIME.get("director", {}) or {}).get("backend", "")),
+            "director_model_path": str((RUNTIME.get("director", {}) or {}).get("model_path", "")),
+            "vllm": self._version("vllm"),
             "environment": {key: value for key, value in os.environ.items() if key.startswith("H3_")},
             "nvidia_smi": self._command(["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version", "--format=csv,noheader"]),
         }
