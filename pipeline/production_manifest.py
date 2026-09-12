@@ -64,8 +64,14 @@ class ProductionManifest:
         production_models = dict(inventory.get("models", {}) or {})
         director = dict((inventory.get("policy", {}) or {}).get("director_model", {}) or {})
         runtime_director = dict(runtime.get("director", {}) or {})
-        if runtime_director.get("model_filename"):
-            director["filename"] = str(runtime_director["model_filename"])
+        if runtime_director.get("model_path"):
+            director["path"] = str(runtime_director["model_path"])
+        if runtime_director.get("backend"):
+            director["runtime"] = str(runtime_director["backend"])
+        if runtime_director.get("format"):
+            director["format"] = str(runtime_director["format"])
+        if runtime_director.get("vllm_version"):
+            director["runtime_version"] = str(runtime_director["vllm_version"])
         return {
             "production": production_models,
             "director": director,
@@ -112,8 +118,10 @@ class ProductionManifest:
         director_model = model_manifest.get("director")
         if not isinstance(production_models, dict) or not production_models:
             raise RuntimeError("Production model provenance is missing the production model inventory.")
-        if not isinstance(director_model, dict) or not director_model.get("filename"):
+        if not isinstance(director_model, dict):
             raise RuntimeError("Production model provenance is missing the Director model.")
+        if not director_model.get("path") and not director_model.get("filename"):
+            raise RuntimeError("Production model provenance is missing the Director model path.")
 
         manifest = {
             "version": self.VERSION,
