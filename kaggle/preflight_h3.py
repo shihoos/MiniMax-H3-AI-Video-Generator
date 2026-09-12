@@ -315,8 +315,13 @@ def check_director() -> None:
     result = subprocess.run([str(venv_python), "-c", "import vllm; print(vllm.__version__)"], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError("vLLM Director runtime is unavailable.\n" + (result.stderr or result.stdout))
+    actual = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
+    if actual != version:
+        raise RuntimeError(
+            f"vLLM version mismatch: expected {version}, got {actual or 'unknown'}."
+        )
     print("DIRECTOR RUNTIME: PASS")
-    print("DIRECTOR VLLM:", result.stdout.strip(), "expected:", version)
+    print("DIRECTOR VLLM:", actual)
 
 
 # ============================================================
