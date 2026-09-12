@@ -30,6 +30,8 @@ from planner.config import (
     DIRECTOR_VLLM_PORT,
     DIRECTOR_VLLM_HOST,
     DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE,
+    DIRECTOR_VLLM_ENV_DIR,
+    DIRECTOR_VLLM_MAX_NUM_SEQS,
     director_enabled,
 )
 
@@ -535,39 +537,37 @@ class QwenDirectorRuntimeMixin:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = log_path.open("ab")
 
-            vllm_bin = shutil.which("vllm")
-            if vllm_bin:
-                command = [vllm_bin, "serve"]
-            else:
-                command = [
-                    sys.executable,
-                    "-m",
-                    "vllm.entrypoints.openai.api_server",
-                ]
+            vllm_python = DIRECTOR_VLLM_ENV_DIR / "bin" / "python"
+            if not vllm_python.is_file():
+                raise RuntimeError(
+                    "Qwen Director vLLM environment is missing: "
+                    f"{vllm_python}. Run kaggle/bootstrap.py first."
+                )
 
-            command.extend(
-                [
-                    str(self._model_path),
-                    "--host",
-                    host,
-                    "--port",
-                    str(port),
-                    "--served-model-name",
-                    model_name,
-                    "--tensor-parallel-size",
-                    str(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
-                    "--max-model-len",
-                    str(DIRECTOR_VLLM_MAX_MODEL_LEN),
-                    "--gpu-memory-utilization",
-                    str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
-                    "--max-num-seqs",
-                    "1",
-                    "--dtype",
-                    "half",
-                    "--trust-remote-code",
-                    "--disable-log-requests",
-                ]
-            )
+            command = [
+                str(vllm_python),
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                str(self._model_path),
+                "--host",
+                host,
+                "--port",
+                str(port),
+                "--served-model-name",
+                model_name,
+                "--tensor-parallel-size",
+                str(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
+                "--max-model-len",
+                str(DIRECTOR_VLLM_MAX_MODEL_LEN),
+                "--gpu-memory-utilization",
+                str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
+                "--max-num-seqs",
+                str(DIRECTOR_VLLM_MAX_NUM_SEQS),
+                "--dtype",
+                "half",
+                "--trust-remote-code",
+                "--disable-log-requests",
+            ]
 
             try:
                 process = subprocess.Popen(
