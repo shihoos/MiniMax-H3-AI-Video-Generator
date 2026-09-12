@@ -275,7 +275,6 @@ def main() -> None:
     assert "turbo_scheduler: simple" in runtime
     print("PASS: Kaggle/runtime configuration contract")
 
-    import yaml
     runtime_features = yaml.safe_load(runtime)["features"]
     assert runtime_features["context_ir_official_api"] is True
     assert runtime_features["context_ir_official_preferred"] is True
