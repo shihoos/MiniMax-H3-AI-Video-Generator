@@ -36,12 +36,15 @@ delivery:
 director:
   model_path: /kaggle/input/qwen3-14b-awq
   backend: vllm
+  vllm_version: 0.23.0
   context: 8192
   max_tokens: 7000
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
-  gpu_memory_utilization: <chosen value>
+  gpu_memory_utilization: 0.90
+  host: 127.0.0.1
+  port: 8000
 storyboard:
   host: 0.0.0.0
   port: 8765
