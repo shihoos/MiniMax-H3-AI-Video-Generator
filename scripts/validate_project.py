@@ -45,6 +45,7 @@ REQUIRED_FILES = [
     "planner/config.py",
     "planner/production_planner.py",
     "planner/qwen_director.py",
+    "planner/qwen_director_runtime.py",
 
     # --------------------------------------------------------
     # PIPELINE
@@ -1176,6 +1177,79 @@ def validate_model_inventory() -> None:
     )
 
 
+def validate_director_runtime_manifest() -> None:
+    import yaml
+
+    runtime_path = ROOT / "configs" / "runtime_versions.yaml"
+    inventory_path = ROOT / "configs" / "model_inventory.yaml"
+
+    runtime = yaml.safe_load(
+        runtime_path.read_text(encoding="utf-8")
+    )
+    director = runtime.get("director", {}) or {}
+
+    require(
+        director.get("backend") == "vllm",
+        "Director backend must be vllm.",
+    )
+    require(
+        str(director.get("model_path", "")).strip()
+        == "/kaggle/input/qwen3-14b-awq",
+        "Director model_path must target the locked Qwen3-14B-AWQ Kaggle dataset.",
+    )
+    require(
+        int(director.get("tensor_parallel_size", 0)) == 2,
+        "Director tensor_parallel_size must be 2.",
+    )
+    require(
+        float(director.get("gpu_memory_utilization", 0.0)) > 0.0,
+        "Director gpu_memory_utilization must be positive.",
+    )
+
+    inventory = yaml.safe_load(
+        inventory_path.read_text(encoding="utf-8")
+    )
+    policy = inventory.get("policy", {}) or {}
+    director_policy = policy.get("director_model", {}) or {}
+
+    require(
+        director_policy.get("runtime") == "vllm",
+        "model_inventory director runtime must be vllm.",
+    )
+    require(
+        director_policy.get("format") == "safetensors-awq",
+        "model_inventory director format must be safetensors-awq.",
+    )
+
+    model_env = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip()
+    model_path = (
+        Path(model_env).expanduser().resolve()
+        if model_env
+        else Path(str(director.get("model_path", "")))
+    )
+
+    if model_path.is_dir():
+        required = (
+            "config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00002.safetensors",
+            "model-00002-of-00002.safetensors",
+            "tokenizer.json",
+        )
+        missing = [
+            name
+            for name in required
+            if not (model_path / name).is_file()
+        ]
+        require(
+            not missing,
+            "Qwen3-14B-AWQ checkpoint is incomplete: "
+            + ", ".join(missing),
+        )
+
+    print("PASS Director vLLM/AWQ runtime manifest")
+
+
 def validate_config() -> None:
 
     from planner.config import (
@@ -1666,6 +1740,7 @@ def main() -> None:
     validate_upscale_audio_semantics()
     validate_production_templates()
     validate_model_inventory()
+    validate_director_runtime_manifest()
     validate_config()
     validate_runtime_imports()
     validate_execution_runtime_contracts()
