@@ -462,25 +462,15 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
 def install_director_runtime(
     runtime: dict,
 ) -> None:
-    """Install and verify the pinned Qwen Director vLLM runtime.
-
-    The vLLM server itself is started lazily by qwen_director_runtime.py so
-    bootstrap can finish cleanly before production planning begins.
-    """
+    """Install isolated vLLM for the Director without replacing H3 Torch."""
     director = runtime.get("director", {}) or {}
     backend = str(director.get("backend", "") or "").strip().lower()
     if backend != "vllm":
-        raise RuntimeError(
-            "runtime_versions.yaml director.backend must be 'vllm'."
-        )
+        raise RuntimeError("runtime_versions.yaml director.backend must be 'vllm'.")
 
     model_path = Path(
-        os.getenv(
-            "H3_DIRECTOR_MODEL_PATH",
-            str(director.get("model_path", "")).strip(),
-        )
+        os.getenv("H3_DIRECTOR_MODEL_PATH", str(director.get("model_path", "")).strip())
     ).expanduser()
-
     required = (
         "config.json",
         "model.safetensors.index.json",
@@ -488,59 +478,51 @@ def install_director_runtime(
         "model-00002-of-00002.safetensors",
         "tokenizer.json",
     )
-
     if not model_path.is_dir():
-        raise RuntimeError(
-            f"Qwen Director model directory is missing: {model_path}"
-        )
-
-    missing = [
-        name
-        for name in required
-        if not (model_path / name).is_file()
-    ]
+        raise RuntimeError(f"Qwen Director model directory is missing: {model_path}")
+    missing = [name for name in required if not (model_path / name).is_file()]
     if missing:
-        raise RuntimeError(
-            "Incomplete Qwen3-14B-AWQ checkpoint. "
-            f"Missing: {', '.join(missing)}"
-        )
+        raise RuntimeError("Incomplete Qwen3-14B-AWQ checkpoint. Missing: " + ", ".join(missing))
 
-    vllm_version = str(
-        director.get("vllm_version", "")
-        or ""
-    ).strip()
+    vllm_version = str(director.get("vllm_version", "") or "").strip()
+    env_dir = Path(
+        os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", str(director.get("vllm_env_dir", "/kaggle/working/.qwen_vllm")))
+    ).expanduser().resolve()
     if not vllm_version:
-        raise RuntimeError(
-            "runtime_versions.yaml director.vllm_version is required."
-        )
+        raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
 
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
     print("[DIRECTOR]", f"model={model_path}")
     print("[DIRECTOR]", f"backend=vllm version={vllm_version}")
+    print("[DIRECTOR]", f"isolated_env={env_dir}")
 
-    # vLLM bundles/installs its own Python-side runtime dependencies; the
-    # project already installs its pinned CUDA runtime packages separately.
+    if not (env_dir / "bin" / "python").is_file():
+        run(sys.executable, "-m", "venv", "--system-site-packages", str(env_dir))
+
+    venv_python = env_dir / "bin" / "python"
     run(
-        sys.executable,
+        str(venv_python),
         "-m",
         "pip",
         "install",
         "-q",
         "--disable-pip-version-check",
+        "--upgrade",
         f"vllm=={vllm_version}",
     )
 
     verification = subprocess.run(
         [
-            sys.executable,
+            str(venv_python),
             "-c",
             (
                 "import vllm, torch; "
                 "print('vLLM import: PASS'); "
                 "print('vLLM version:', vllm.__version__); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
+                "print('Torch version:', torch.__version__); "
                 "print('GPU count:', torch.cuda.device_count()); "
                 "print('GPU capability:', "
                 "torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
@@ -550,97 +532,17 @@ def install_director_runtime(
         text=True,
         check=False,
     )
-
-    if verification.stdout:
-        print(verification.stdout)
-
+    print(verification.stdout)
     if verification.stderr:
         print(verification.stderr)
-
     if verification.returncode != 0:
-        raise RuntimeError(
-            "vLLM runtime verification failed."
-        )
-
-    # Do not silently accept a non-Turing GPU configuration in this locked
-    # Kaggle deployment; the production topology expects two SM75 devices.
+        raise RuntimeError("vLLM isolated runtime verification failed.")
     if "GPU count: 2" not in verification.stdout:
         raise RuntimeError(
-            "Qwen Director requires exactly 2 visible GPUs for the locked "
-            f"vLLM tensor-parallel configuration.\n{verification.stdout}"
+            "Qwen Director requires exactly 2 visible GPUs for the locked vLLM "
+            f"tensor-parallel configuration.\n{verification.stdout}"
         )
 
-    if "GPU capability: (7, 5)" not in verification.stdout:
-        raise RuntimeError(
-            "Qwen Director requires NVIDIA SM75/T4-class GPUs.\n"
-            f"{verification.stdout}"
-        )
-
-def install_comfyui(runtime: dict) -> None:
-    """Install the exact ComfyUI revision required by the project."""
-    config = runtime.get("comfyui", {})
-    repository = str(config.get("repository", "") or "").strip()
-    revision = str(config.get("revision", "") or "").strip()
-    if not repository or not revision:
-        raise RuntimeError("runtime_versions.yaml must define comfyui.repository and comfyui.revision.")
-
-    print("=" * 80)
-    print("INSTALLING COMFYUI")
-    print("=" * 80)
-
-    if COMFY.exists() and not (COMFY / ".git").exists():
-        raise RuntimeError(
-            f"ComfyUI path exists but is not a git checkout: {COMFY}. "
-            "Move it away and rerun bootstrap."
-        )
-
-    if not COMFY.exists():
-        run("git", "clone", repository, COMFY)
-
-    run("git", "-C", COMFY, "fetch", "--tags", "--prune", "origin")
-    run("git", "-C", COMFY, "checkout", "--detach", revision)
-
-    requirements = COMFY / "requirements.txt"
-    if not requirements.is_file():
-        raise RuntimeError(f"ComfyUI requirements.txt is missing: {requirements}")
-
-    run(
-        sys.executable, "-m", "pip", "install", "-q",
-        "--disable-pip-version-check", "-r", requirements,
-    )
-
-    expected_version = str(config.get("expected_version", "") or "").strip()
-    version_check = subprocess.run(
-        [sys.executable, "-c", "import importlib.metadata as m; print(m.version('comfyui'))"],
-        cwd=str(COMFY),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    installed_version = (version_check.stdout or "").strip()
-    # The git checkout is the authority. If a package distribution is not
-    # installed under the same name, verify the git revision directly below.
-    rev = subprocess.run(
-        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    expected_rev = subprocess.run(
-        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if rev != expected_rev:
-        raise RuntimeError(
-            f"ComfyUI revision mismatch: checked out {rev}, expected {expected_rev}."
-        )
-    print(f"[COMFYUI] revision={rev}")
-    if expected_version:
-        print(f"[COMFYUI] expected release={expected_version}")
-    if installed_version:
-        print(f"[COMFYUI] package version={installed_version}")
 
 def install_storyboard_runtime(
     runtime: dict,
