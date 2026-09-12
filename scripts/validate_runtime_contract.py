@@ -20,6 +20,15 @@ def main() -> int:
         yaml.safe_load(path.read_text(encoding="utf-8"))
 
     runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8"))
+    director = dict(runtime.get("director", {}) or {})
+    if str(director.get("backend", "") or "").strip().lower() != "vllm":
+        raise RuntimeError("Director backend must be vllm.")
+    if str(director.get("model_path", "") or "").strip() != "/kaggle/input/qwen3-14b-awq":
+        raise RuntimeError("Director model_path must be /kaggle/input/qwen3-14b-awq.")
+    if str(director.get("vllm_version", "") or "").strip() != "0.23.0":
+        raise RuntimeError("Director vllm_version must remain pinned to 0.23.0 for the locked SM75 runtime.")
+    if int(director.get("tensor_parallel_size", 0) or 0) != 2:
+        raise RuntimeError("Director tensor_parallel_size must be 2.")
     comfy = runtime.get("comfyui", {})
     required = ("repository", "revision", "expected_version")
     missing = [key for key in required if not str(comfy.get(key, "") or "").strip()]
