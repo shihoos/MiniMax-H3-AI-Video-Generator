@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -262,8 +263,12 @@ def main() -> None:
     assert "Pillow==12.3.0" in requirements
     assert "websocket-client==1.9.1" in requirements
     runtime = (ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")
-    assert "cuda_wheel: cu130" in runtime
-    assert "cuda_index: https://abetlen.github.io/llama-cpp-python/whl/cu130" in runtime
+    runtime_config = yaml.safe_load(runtime)
+    director_runtime = runtime_config["director"]
+    assert director_runtime["backend"] == "vllm"
+    assert director_runtime["model_path"] == "/kaggle/input/qwen3-14b-awq"
+    assert int(director_runtime["tensor_parallel_size"]) == 2
+    assert float(director_runtime["gpu_memory_utilization"]) > 0
     assert "director_critic: true" in runtime
     assert "timeline_version: 1" in runtime
     assert "ref2va_scheduler: beta" in runtime
