@@ -462,55 +462,66 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
 def install_director_runtime(
     runtime: dict,
 ) -> None:
+    """Install and verify the pinned Qwen Director vLLM runtime.
 
-    llama_config = runtime[
-        "llama_cpp"
-    ]
+    The vLLM server itself is started lazily by qwen_director_runtime.py so
+    bootstrap can finish cleanly before production planning begins.
+    """
+    director = runtime.get("director", {}) or {}
+    backend = str(director.get("backend", "") or "").strip().lower()
+    if backend != "vllm":
+        raise RuntimeError(
+            "runtime_versions.yaml director.backend must be 'vllm'."
+        )
 
-    cuda_config = runtime[
-        "cuda_runtime"
-    ]
+    model_path = Path(
+        os.getenv(
+            "H3_DIRECTOR_MODEL_PATH",
+            str(director.get("model_path", "")).strip(),
+        )
+    ).expanduser()
 
-    llama_package = llama_config[
-        "package"
-    ]
-
-    llama_version = llama_config[
-        "version"
-    ]
-
-    cuda_index = llama_config[
-        "cuda_index"
-    ]
-
-    cuda_runtime_package = cuda_config[
-        "runtime_package"
-    ]
-
-    cuda_runtime_version = cuda_config[
-        "runtime_version"
-    ]
-
-    cublas_package = cuda_config[
-        "cublas_package"
-    ]
-
-    cublas_version = cuda_config[
-        "cublas_version"
-    ]
-
-    print(
-        "=" * 80
+    required = (
+        "config.json",
+        "model.safetensors.index.json",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "tokenizer.json",
     )
 
-    print(
-        "INSTALLING QWEN DIRECTOR RUNTIME"
-    )
+    if not model_path.is_dir():
+        raise RuntimeError(
+            f"Qwen Director model directory is missing: {model_path}"
+        )
 
-    print(
-        "=" * 80
-    )
+    missing = [
+        name
+        for name in required
+        if not (model_path / name).is_file()
+    ]
+    if missing:
+        raise RuntimeError(
+            "Incomplete Qwen3-14B-AWQ checkpoint. "
+            f"Missing: {', '.join(missing)}"
+        )
 
+    vllm_version = str(
+        director.get("vllm_version", "")
+        or ""
+    ).strip()
+    if not vllm_version:
+        raise RuntimeError(
+            "runtime_versions.yaml director.vllm_version is required."
+        )
+
+    print("=" * 80)
+    print("INSTALLING QWEN DIRECTOR RUNTIME")
+    print("=" * 80)
+    print("[DIRECTOR]", f"model={model_path}")
+    print("[DIRECTOR]", f"backend=vllm version={vllm_version}")
+
+    # vLLM bundles/installs its own Python-side runtime dependencies; the
+    # project already installs its pinned CUDA runtime packages separately.
     run(
         sys.executable,
         "-m",
@@ -518,88 +529,7 @@ def install_director_runtime(
         "install",
         "-q",
         "--disable-pip-version-check",
-        f"{cuda_runtime_package}=={cuda_runtime_version}",
-        f"{cublas_package}=={cublas_version}",
-    )
-
-    library_dirs = (
-        _cuda_library_dirs()
-    )
-
-    if not library_dirs:
-
-        raise RuntimeError(
-            "NVIDIA CUDA runtime packages installed, "
-            "but no native CUDA library directories were found."
-        )
-
-    has_cudart = any(
-        any(
-            path.name.startswith(
-                "libcudart.so.13"
-            )
-            for path in directory.iterdir()
-            if path.is_file()
-        )
-        for directory in library_dirs
-    )
-
-    has_cublas = any(
-        any(
-            path.name.startswith(
-                "libcublas.so.13"
-            )
-            for path in directory.iterdir()
-            if path.is_file()
-        )
-        for directory in library_dirs
-    )
-
-    if not has_cudart:
-
-        raise RuntimeError(
-            "libcudart.so.13 was not found."
-        )
-
-    if not has_cublas:
-
-        raise RuntimeError(
-            "libcublas.so.13 was not found."
-        )
-
-    environment = (
-        _configure_cuda_environment(
-            library_dirs
-        )
-    )
-
-    # _configure_cuda_environment() returns a copy of os.environ. Persist the
-    # CUDA 13 library path so every subprocess started later by this process
-    # inherits the same native-library search path.
-    os.environ["LD_LIBRARY_PATH"] = environment["LD_LIBRARY_PATH"]
-
-    print(
-        "[CUDA RUNTIME LIBRARIES]"
-    )
-
-    for directory in library_dirs:
-
-        print(
-            " ",
-            directory,
-        )
-
-    run(
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "--only-binary=:all:",
-        "--disable-pip-version-check",
-        f"{llama_package}=={llama_version}",
-        "--extra-index-url",
-        cuda_index,
+        f"vllm=={vllm_version}",
     )
 
     verification = subprocess.run(
@@ -607,34 +537,44 @@ def install_director_runtime(
             sys.executable,
             "-c",
             (
-                "from llama_cpp import Llama; "
-                "print('llama-cpp-python CUDA import: PASS')"
+                "import vllm, torch; "
+                "print('vLLM import: PASS'); "
+                "print('vLLM version:', vllm.__version__); "
+                "print('Torch CUDA:', torch.cuda.is_available()); "
+                "print('GPU count:', torch.cuda.device_count()); "
+                "print('GPU capability:', "
+                "torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
             ),
         ],
-        env=environment,
         capture_output=True,
         text=True,
         check=False,
     )
 
     if verification.stdout:
-        print(
-            verification.stdout
-        )
+        print(verification.stdout)
 
     if verification.stderr:
-        print(
-            verification.stderr
-        )
+        print(verification.stderr)
 
     if verification.returncode != 0:
-
         raise RuntimeError(
-            "llama-cpp-python CUDA import failed."
+            "vLLM runtime verification failed."
         )
 
+    # Do not silently accept a non-Turing GPU configuration in this locked
+    # Kaggle deployment; the production topology expects two SM75 devices.
+    if "GPU count: 2" not in verification.stdout:
+        raise RuntimeError(
+            "Qwen Director requires exactly 2 visible GPUs for the locked "
+            f"vLLM tensor-parallel configuration.\n{verification.stdout}"
+        )
 
-
+    if "GPU capability: (7, 5)" not in verification.stdout:
+        raise RuntimeError(
+            "Qwen Director requires NVIDIA SM75/T4-class GPUs.\n"
+            f"{verification.stdout}"
+        )
 
 def install_comfyui(runtime: dict) -> None:
     """Install the exact ComfyUI revision required by the project."""
@@ -1247,19 +1187,12 @@ def main():
         RUNTIME_MANIFEST
     )
 
-    director_filename = (
-        runtime[
-            "director"
-        ][
-            "model_filename"
-        ]
-    )
-
-    director_model = (
-        find_kaggle_file(
-            director_filename
+    director_model = Path(
+        os.getenv(
+            "H3_DIRECTOR_MODEL_PATH",
+            str(runtime["director"]["model_path"]),
         )
-    )
+    ).expanduser().resolve()
 
     print(
         "[DIRECTOR MODEL]",
@@ -1269,6 +1202,10 @@ def main():
     install_base_requirements()
 
     install_comfyui(runtime)
+
+    # vLLM must be installed after the pinned PyTorch/CUDA runtime so its
+    # compiled extensions bind against the intended torch/CUDA stack.
+    install_pytorch_runtime(runtime)
 
     install_director_runtime(
         runtime
@@ -1280,10 +1217,6 @@ def main():
 
     install_nodes()
     install_embedded_context_ir_node(runtime)
-
-    # Re-assert the locked PyTorch CUDA build after every package that can
-    # mutate the Python runtime has been installed.
-    install_pytorch_runtime(runtime)
 
     # Pillow is enforced at the final dependency boundary because downstream
     # package installers can otherwise replace it after an earlier verification.
