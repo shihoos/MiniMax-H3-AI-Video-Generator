@@ -6,11 +6,6 @@ comfyui:
   expected_version: 0.34.0
   revision: v0.34.0
   h3_t4_value_clone_workaround: true
-llama_cpp:
-  package: llama-cpp-python
-  version: 0.3.35
-  cuda_wheel: cu130
-  cuda_index: https://abetlen.github.io/llama-cpp-python/whl/cu130
 cuda_runtime:
   runtime_package: nvidia-cuda-runtime
   runtime_version: 13.3.29
@@ -35,8 +30,10 @@ delivery:
   fps: 24
 director:
   model_path: /kaggle/input/qwen3-14b-awq
+  format: safetensors-awq
   backend: vllm
   vllm_version: 0.23.0
+  vllm_env_dir: /kaggle/working/.qwen_vllm
   context: 8192
   max_tokens: 7000
   temperature: 0.2
@@ -45,6 +42,7 @@ director:
   gpu_memory_utilization: 0.90
   host: 127.0.0.1
   port: 8000
+  max_num_seqs: 1
 storyboard:
   host: 0.0.0.0
   port: 8765
