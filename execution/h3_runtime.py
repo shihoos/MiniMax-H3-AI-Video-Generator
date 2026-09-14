@@ -105,8 +105,8 @@ class H3Runtime:
         port: int,
         log_path: Path,
         *,
-        lowvram: bool = True,
-        cpu_vae: bool = True,
+        lowvram: bool | None = None,
+        cpu_vae: bool | None = None,
         extra_args: list[str] | None = None,
         vram_profile: VRAMProfile | None = None,
     ):
@@ -214,8 +214,8 @@ class H3Runtime:
         gpu_ids: list[int],
         base_port: int = 8188,
         *,
-        lowvram: bool = True,
-        cpu_vae: bool = True,
+        lowvram: bool | None = None,
+        cpu_vae: bool | None = None,
         startup_timeout: float | None = None,
     ) -> dict[int, dict[str, Any]]:
         if startup_timeout is None:
@@ -226,12 +226,21 @@ class H3Runtime:
                     str(runtime_cfg.get("comfyui_startup_timeout_seconds", 300)),
                 )
             )
-        lowvram = H3Runtime._resolve_bool(
-            os.getenv("H3_COMFY_LOWVRAM"), lowvram
-        )
-        cpu_vae_env = os.getenv("H3_COMFY_CPU_VAE")
-        if cpu_vae_env is not None:
-            cpu_vae = H3Runtime._resolve_bool(cpu_vae_env, cpu_vae)
+        runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+        configured_lowvram = bool(runtime_cfg.get("lowvram", True))
+        lowvram = configured_lowvram if lowvram is None else bool(lowvram)
+        lowvram = H3Runtime._resolve_bool(os.getenv("H3_COMFY_LOWVRAM"), lowvram)
+
+        configured_cpu_vae = runtime_cfg.get("cpu_vae", "auto")
+        if cpu_vae is None:
+            # Preserve the tri-state `auto` policy for resolve_vram_profile(),
+            # which decides CPU-VAE placement from the actual worker GPU.
+            cpu_vae_policy = os.getenv(
+                "H3_COMFY_CPU_VAE",
+                str(configured_cpu_vae),
+            )
+        else:
+            cpu_vae_policy = "true" if bool(cpu_vae) else "false"
         import torch
 
         # Fail closed before launching any worker if the live interpreter does
@@ -254,11 +263,10 @@ class H3Runtime:
             raise RuntimeError(f"Failed to validate locked PyTorch runtime: {exc}") from exc
 
         try:
-            runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
             vram_cfg = dict(runtime_cfg.get("vram", {}) or {})
-            vram_cfg["cpu_vae"] = runtime_cfg.get("cpu_vae", cpu_vae)
+            vram_cfg["cpu_vae"] = cpu_vae_policy
         except Exception:
-            vram_cfg = {"cpu_vae": cpu_vae}
+            vram_cfg = {"cpu_vae": cpu_vae_policy}
 
         if not torch.cuda.is_available():
             raise RuntimeError("NVIDIA CUDA is required for the production H3 runtime.")
