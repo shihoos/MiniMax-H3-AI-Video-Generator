@@ -73,19 +73,9 @@ policy:
   # outside the ComfyUI production model inventory.
   allow_director_qwen: true
 
-  director_model:
-    path: "/kaggle/input/qwen3-14b-awq"
-    runtime: "vllm"
-    format: "safetensors-awq"
-    purpose: >
-      Local story writer, character planner,
-      scene planner, shot planner and cinematic director.
-    loaded_during:
-      - planning
-    unloaded_before:
-      - h3_generation
-      - upscale
-      - final_assembly
+  # Director runtime metadata lives in the top-level director_model block.
+  # The Director and its Eagle3 speculative decoder are runtime assets, not
+  # additional ComfyUI production models.
 
   # No additional Qwen model is required.
   # The existing H3 Qwen3-VL checkpoint remains the
