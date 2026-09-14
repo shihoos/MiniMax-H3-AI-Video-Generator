@@ -36,6 +36,7 @@ from planner.config import (
     DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH,
     DIRECTOR_VLLM_SPECULATIVE_TOKENS,
     DIRECTOR_VLLM_GENERATION_CONFIG,
+    DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE,
     director_enabled,
 )
 
@@ -416,9 +417,25 @@ class QwenDirectorRuntimeMixin:
         )
 
     def _find_speculator_model(self) -> Path:
-        """Resolve a complete local Qwen3-14B EAGLE-3 speculator checkpoint."""
+        """Resolve the pinned local Qwen3-14B EAGLE-3 speculator checkpoint.
+
+        Eagle3 is a speculative-decoding accelerator for the Qwen Director; it
+        has no semantic authority of its own. Production therefore stays pinned
+        to /kaggle/input/eagle-3 unless an explicit development override is
+        enabled with H3_DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE=1.
+        """
         explicit = os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", "").strip()
-        configured = (Path(explicit).expanduser() if explicit else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH)
+        if explicit and not DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE:
+            raise RuntimeError(
+                "H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH is set, but speculative-model "
+                "overrides are disabled. Set H3_DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE=1 "
+                "only for a deliberate non-production checkpoint override."
+            )
+        configured = (
+            Path(explicit).expanduser()
+            if explicit and DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE
+            else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
+        )
         candidates = [configured]
         if not configured.is_absolute() or not configured.is_dir():
             candidates.append(DIRECTOR_KAGGLE_INPUT_ROOT / configured.name)
@@ -429,7 +446,7 @@ class QwenDirectorRuntimeMixin:
                 "for the locked EAGLE-3 Director runtime."
             )
 
-        if not explicit and str(DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH) != "/kaggle/input/eagle-3":
+        if not DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE and str(DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH) != "/kaggle/input/eagle-3":
             raise RuntimeError(
                 "runtime_versions.yaml director.speculative_model_path must be /kaggle/input/eagle-3 "
                 "for the locked Eagle-3 Kaggle dataset."
@@ -452,20 +469,36 @@ class QwenDirectorRuntimeMixin:
             if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
                 continue
 
-            for index_path in candidate.glob("*.index.json"):
-                try:
-                    index = json.loads(index_path.read_text(encoding="utf-8"))
-                except Exception:
-                    continue
-                weight_map = index.get("weight_map") if isinstance(index, dict) else None
-                if isinstance(weight_map, dict) and weight_map:
-                    missing = sorted({str(name) for name in weight_map.values() if not (candidate / str(name)).is_file()})
+            index_files = list(candidate.glob("*.index.json"))
+            if index_files:
+                # If a model index exists, it is the authoritative file list.
+                # Do not accept a partial checkpoint merely because some weight
+                # file happens to exist in the directory.
+                for index_path in index_files:
+                    try:
+                        index = json.loads(index_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Invalid EAGLE-3 model index: {index_path}"
+                        ) from exc
+                    weight_map = index.get("weight_map") if isinstance(index, dict) else None
+                    if not isinstance(weight_map, dict) or not weight_map:
+                        raise RuntimeError(
+                            f"EAGLE-3 model index has no usable weight_map: {index_path}"
+                        )
+                    missing = sorted(
+                        {
+                            str(name)
+                            for name in weight_map.values()
+                            if not (candidate / str(name)).is_file()
+                        }
+                    )
                     if missing:
                         raise RuntimeError(
                             "EAGLE-3 checkpoint is incomplete; missing indexed weight files: "
                             + ", ".join(missing)
                         )
-                    return candidate.resolve()
+                return candidate.resolve()
 
             if any(any(candidate.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")):
                 return candidate.resolve()
