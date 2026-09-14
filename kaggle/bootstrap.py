@@ -462,86 +462,163 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
 def install_director_runtime(
     runtime: dict,
 ) -> None:
-    """Install isolated vLLM for the Director without replacing H3 Torch."""
+    """Install isolated vLLM + EAGLE-3 Director runtime without mutating H3 Torch."""
     director = runtime.get("director", {}) or {}
-    backend = str(director.get("backend", "") or "").strip().lower()
-    if backend != "vllm":
+    if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("runtime_versions.yaml director.backend must be 'vllm'.")
 
-    model_path = Path(
-        os.getenv("H3_DIRECTOR_MODEL_PATH", str(director.get("model_path", "")).strip())
-    ).expanduser()
-    required = (
-        "config.json",
-        "model.safetensors.index.json",
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-        "tokenizer.json",
+    def resolve_checkpoint(configured: str, required: tuple[str, ...], label: str) -> Path:
+        configured_path = Path(configured).expanduser()
+        candidates = [configured_path]
+        if Path("/kaggle/input").is_dir():
+            candidates.append(Path("/kaggle/input") / configured_path.name)
+        for root in (Path("/kaggle/input"),):
+            if root.is_dir():
+                try:
+                    candidates.extend(
+                        p for p in root.rglob(configured_path.name) if p.is_dir()
+                    )
+                except OSError:
+                    pass
+        seen = set()
+        for candidate in candidates:
+            try:
+                candidate = candidate.resolve()
+            except OSError:
+                continue
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_dir() and all((candidate / name).is_file() for name in required):
+                return candidate
+        raise RuntimeError(f"Complete {label} checkpoint was not found: {configured}")
+
+    model_path = resolve_checkpoint(
+        os.getenv("H3_DIRECTOR_MODEL_PATH", str(director.get("model_path", "")).strip()),
+        ("config.json", "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "tokenizer.json"),
+        "Qwen3-14B-AWQ",
     )
-    if not model_path.is_dir():
-        raise RuntimeError(f"Qwen Director model directory is missing: {model_path}")
-    missing = [name for name in required if not (model_path / name).is_file()]
-    if missing:
-        raise RuntimeError("Incomplete Qwen3-14B-AWQ checkpoint. Missing: " + ", ".join(missing))
+    spec_path = resolve_checkpoint(
+        os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", str(director.get("speculative_model_path", "")).strip()),
+        ("config.json",),
+        "Qwen3-14B EAGLE-3 speculator",
+    )
+    try:
+        spec_config = yaml.safe_load((spec_path / "config.json").read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        raise RuntimeError(f"Unable to read EAGLE-3 speculator config: {spec_path / 'config.json'}") from exc
+    spec_meta = spec_config.get("speculators_config", {}) or {}
+    verifier = spec_meta.get("verifier", {}) or {}
+
+    speculative_method = str(director.get("speculative_method", "") or "").strip().lower()
+    if not speculative_method:
+        raise RuntimeError("runtime_versions.yaml director.speculative_method is required.")
+    if str(spec_meta.get("algorithm", "")).strip().lower() != speculative_method:
+        raise RuntimeError(
+            "Configured speculator algorithm does not match runtime_versions.yaml "
+            f"director.speculative_method={speculative_method!r}."
+        )
+    if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
+        raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
 
     vllm_version = str(director.get("vllm_version", "") or "").strip()
-    env_dir = Path(
-        os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", str(director.get("vllm_env_dir", "/kaggle/working/.qwen_vllm")))
-    ).expanduser().resolve()
+    env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
+    tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not vllm_version:
         raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
+    if not env_dir_value:
+        raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
+    if tensor_parallel_size <= 0:
+        raise RuntimeError("runtime_versions.yaml director.tensor_parallel_size must be positive.")
+    env_dir = Path(
+        os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
+    ).expanduser().resolve()
 
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
     print("[DIRECTOR]", f"model={model_path}")
+    print("[DIRECTOR]", f"speculator={spec_path}")
     print("[DIRECTOR]", f"backend=vllm version={vllm_version}")
     print("[DIRECTOR]", f"isolated_env={env_dir}")
 
+    uv = shutil.which("uv")
+    if uv is None:
+        run(sys.executable, "-m", "pip", "install", "-q", "uv")
+        uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required to create the isolated Director environment.")
+
     if not (env_dir / "bin" / "python").is_file():
-        run(sys.executable, "-m", "venv", "--system-site-packages", str(env_dir))
+        env_dir.parent.mkdir(parents=True, exist_ok=True)
+        run(uv, "venv", str(env_dir), "--python", sys.executable, "--seed", "--link-mode", "copy")
 
     venv_python = env_dir / "bin" / "python"
-    run(
-        str(venv_python),
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "--disable-pip-version-check",
-        "--upgrade",
-        f"vllm=={vllm_version}",
+    if not venv_python.is_file() or not os.access(venv_python, os.X_OK):
+        raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
+
+    env = os.environ.copy()
+    env["UV_LINK_MODE"] = "copy"
+    install = subprocess.run(
+        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}"],
+        env=env,
+        check=False,
+        text=True,
     )
+    if install.returncode != 0:
+        raise RuntimeError("Failed to install isolated vLLM runtime.")
 
     verification = subprocess.run(
         [
-            str(venv_python),
-            "-c",
+            str(venv_python), "-c",
             (
-                "import vllm, torch; "
+                "import vllm, torch, inspect; "
+                "from vllm.config import SpeculativeConfig; "
                 "print('vLLM import: PASS'); "
                 "print('vLLM version:', vllm.__version__); "
+                "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
-                "print('Torch version:', torch.__version__); "
                 "print('GPU count:', torch.cuda.device_count()); "
-                "print('GPU capability:', "
-                "torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
+                "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
             ),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
+        capture_output=True, text=True, check=False, env=env,
     )
     print(verification.stdout)
     if verification.stderr:
         print(verification.stderr)
     if verification.returncode != 0:
         raise RuntimeError("vLLM isolated runtime verification failed.")
-    if "GPU count: 2" not in verification.stdout:
+    observed_version = None
+    for line in verification.stdout.splitlines():
+        if line.startswith("vLLM version:"):
+            observed_version = line.split(":", 1)[1].strip()
+            break
+    if observed_version != vllm_version:
         raise RuntimeError(
-            "Qwen Director requires exactly 2 visible GPUs for the locked vLLM "
-            f"tensor-parallel configuration.\n{verification.stdout}"
+            "Director runtime verification version mismatch: "
+            f"observed={observed_version!r}, configured={vllm_version!r}."
         )
+    if f"EAGLE-3 supported: True" not in verification.stdout:
+        raise RuntimeError(
+            f"Director runtime verification did not confirm speculative method {speculative_method!r}."
+        )
+    observed_gpu_count = None
+    for line in verification.stdout.splitlines():
+        if line.startswith("GPU count:"):
+            try:
+                observed_gpu_count = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                observed_gpu_count = None
+            break
+    if observed_gpu_count != tensor_parallel_size:
+        raise RuntimeError(
+            "Qwen Director GPU topology mismatch: "
+            f"observed={observed_gpu_count}, configured tensor_parallel_size={tensor_parallel_size}."
+        )
+
+    print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
 
 
 def install_storyboard_runtime(
