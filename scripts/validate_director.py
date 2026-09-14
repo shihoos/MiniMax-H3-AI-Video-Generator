@@ -636,7 +636,21 @@ def test_manifest_has_model_provenance() -> None:
     manifest = ProductionManifest(ROOT).build({"production_id": "test"})
     models = manifest.get("models", {})
     check(bool(models.get("production")), "Production model provenance is missing from manifest.")
-    check(bool(models.get("director")), "Director model provenance is missing from manifest.")
+    director = models.get("director") or {}
+    check(bool(director), "Director model provenance is missing from manifest.")
+    speculative = director.get("speculative") or {}
+    check(
+        str(speculative.get("method", "")).strip().lower() == "eagle3",
+        "Director provenance must record Eagle3 speculative decoding.",
+    )
+    check(
+        str(speculative.get("path", "")).strip() == "/kaggle/input/eagle-3",
+        "Director provenance must record the locked Eagle3 dataset path.",
+    )
+    check(
+        int(speculative.get("tokens", 0) or 0) > 0,
+        "Director provenance must record positive Eagle3 speculative tokens.",
+    )
 
 def test_shot_batch_contract() -> None:
     director = QwenDirector(
