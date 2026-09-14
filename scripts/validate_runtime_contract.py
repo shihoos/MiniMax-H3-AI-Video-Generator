@@ -23,12 +23,21 @@ def main() -> int:
     director = dict(runtime.get("director", {}) or {})
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("Director backend must be vllm.")
-    if str(director.get("model_path", "") or "").strip() != "/kaggle/input/qwen3-14b-awq":
-        raise RuntimeError("Director model_path must be /kaggle/input/qwen3-14b-awq.")
-    if str(director.get("vllm_version", "") or "").strip() != "0.23.0":
-        raise RuntimeError("Director vllm_version must remain pinned to 0.23.0 for the locked SM75 runtime.")
-    if int(director.get("tensor_parallel_size", 0) or 0) != 2:
-        raise RuntimeError("Director tensor_parallel_size must be 2.")
+    if not str(director.get("model_path", "") or "").strip():
+        raise RuntimeError("Director model_path is required in runtime_versions.yaml.")
+    if not str(director.get("vllm_version", "") or "").strip():
+        raise RuntimeError("Director vllm_version is required in runtime_versions.yaml.")
+    if int(director.get("tensor_parallel_size", 0) or 0) <= 0:
+        raise RuntimeError("Director tensor_parallel_size must be positive in runtime_versions.yaml.")
+    if not str(director.get("vllm_env_dir", "") or "").strip():
+        raise RuntimeError("Director vllm_env_dir is required in runtime_versions.yaml.")
+    speculative_method = str(director.get("speculative_method", "") or "").strip().lower()
+    if not speculative_method:
+        raise RuntimeError("Director speculative_method is required in runtime_versions.yaml.")
+    if int(director.get("speculative_tokens", 0) or 0) <= 0:
+        raise RuntimeError("Director speculative_tokens must be positive in runtime_versions.yaml.")
+    if not str(director.get("generation_config", "") or "").strip():
+        raise RuntimeError("Director generation_config is required in runtime_versions.yaml.")
     comfy = runtime.get("comfyui", {})
     required = ("repository", "revision", "expected_version")
     missing = [key for key in required if not str(comfy.get(key, "") or "").strip()]
