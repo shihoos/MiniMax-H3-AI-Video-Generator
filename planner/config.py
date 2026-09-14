@@ -184,11 +184,11 @@ DIRECTOR_VLLM_PORT = int(
     )
 )
 
+_director_vllm_env_dir = str(RUNTIME["director"].get("vllm_env_dir", "") or "").strip()
+if not _director_vllm_env_dir:
+    raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
 DIRECTOR_VLLM_ENV_DIR = Path(
-    os.getenv(
-        "H3_DIRECTOR_VLLM_ENV_DIR",
-        str(RUNTIME["director"].get("vllm_env_dir", "/kaggle/working/.qwen_vllm")),
-    )
+    os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", _director_vllm_env_dir)
 ).expanduser()
 
 DIRECTOR_VLLM_MAX_NUM_SEQS = int(
@@ -197,6 +197,35 @@ DIRECTOR_VLLM_MAX_NUM_SEQS = int(
         str(RUNTIME["director"].get("max_num_seqs", 1)),
     )
 )
+
+_director_speculative_method = str(RUNTIME["director"].get("speculative_method", "") or "").strip().lower()
+if not _director_speculative_method:
+    raise RuntimeError("runtime_versions.yaml director.speculative_method is required.")
+DIRECTOR_VLLM_SPECULATIVE_METHOD = str(
+    os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_METHOD", _director_speculative_method)
+).strip().lower()
+
+DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH = Path(
+    os.getenv(
+        "H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH",
+        str(RUNTIME["director"].get("speculative_model_path", "")),
+    )
+).expanduser()
+
+_director_speculative_tokens = RUNTIME["director"].get("speculative_tokens")
+if _director_speculative_tokens is None:
+    raise RuntimeError("runtime_versions.yaml director.speculative_tokens is required.")
+DIRECTOR_VLLM_SPECULATIVE_TOKENS = int(
+    os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_TOKENS", str(_director_speculative_tokens))
+)
+
+_director_generation_config = str(RUNTIME["director"].get("generation_config", "") or "").strip()
+if not _director_generation_config:
+    raise RuntimeError("runtime_versions.yaml director.generation_config is required.")
+DIRECTOR_VLLM_GENERATION_CONFIG = str(
+    os.getenv("H3_DIRECTOR_VLLM_GENERATION_CONFIG", _director_generation_config)
+).strip()
+
 
 # Locked Director topology. Keep this centralized so prompt grammar, Director
 # batching, and validation cannot silently drift apart.
