@@ -44,7 +44,7 @@ director:
   port: 8000
   max_num_seqs: 1
   speculative_method: eagle3
-  speculative_model_path: /kaggle/input/qwen3-14b-speculator-eagle3
+  speculative_model_path: /kaggle/input/eagle-3
   speculative_tokens: 2
   generation_config: vllm
 storyboard:
