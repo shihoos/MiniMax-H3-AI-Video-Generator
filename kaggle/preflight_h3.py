@@ -303,9 +303,73 @@ def find_director_model() -> Path:
     raise RuntimeError("Complete Qwen3-14B-AWQ checkpoint was not found at " + configured)
 
 
+def find_director_speculator() -> Path:
+    runtime = load_yaml(RUNTIME_MANIFEST)
+    director = dict(runtime.get("director", {}) or {})
+    configured = str(director.get("speculative_model_path", "") or "").strip()
+    if configured != "/kaggle/input/eagle-3":
+        raise RuntimeError(
+            "runtime_versions.yaml director.speculative_model_path must be /kaggle/input/eagle-3 for the locked Eagle-3 Kaggle dataset."
+        )
+
+    candidates = [
+        Path(configured).expanduser(),
+        KAGGLE_INPUT / Path(configured).name,
+    ]
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        config_path = candidate / "config.json"
+        if not (candidate.is_dir() and config_path.is_file()):
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Invalid Eagle-3 config: {config_path}") from exc
+        spec = config.get("speculators_config", {}) or {}
+        verifier = spec.get("verifier", {}) or {}
+        if str(spec.get("algorithm", "")).strip().lower() != "eagle3":
+            raise RuntimeError(
+                f"Eagle-3 checkpoint has unexpected algorithm: {spec.get('algorithm')!r}."
+            )
+        if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
+            raise RuntimeError(
+                "Eagle-3 checkpoint is not paired with Qwen/Qwen3-14B."
+            )
+
+        index_files = tuple(candidate.glob("*.index.json"))
+        for index_path in index_files:
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            weight_map = index.get("weight_map") if isinstance(index, dict) else None
+            if isinstance(weight_map, dict) and weight_map:
+                missing = sorted({str(name) for name in weight_map.values() if not (candidate / str(name)).is_file()})
+                if missing:
+                    raise RuntimeError(
+                        "Eagle-3 checkpoint is incomplete; missing indexed weight files: "
+                        + ", ".join(missing)
+                    )
+                return candidate
+
+        if any(any(candidate.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")):
+            return candidate
+
+        raise RuntimeError(
+            f"Eagle-3 checkpoint has config.json but no model weight files: {candidate}"
+        )
+
+    raise RuntimeError(
+        "Complete Eagle-3 checkpoint was not found at /kaggle/input/eagle-3. "
+        "Attach the Kaggle dataset named 'eagle-3'."
+    )
+
+
 def check_director() -> None:
     model = find_director_model()
+    speculator = find_director_speculator()
     print("DIRECTOR MODEL:", model)
+    print("DIRECTOR SPECULATOR:", speculator)
     director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
     version = str(director.get("vllm_version", "") or "").strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
@@ -315,8 +379,8 @@ def check_director() -> None:
         raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
     if not env_dir_value:
         raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
-    if not method:
-        raise RuntimeError("runtime_versions.yaml director.speculative_method is required.")
+    if method != "eagle3":
+        raise RuntimeError("runtime_versions.yaml director.speculative_method must be eagle3.")
     if tokens <= 0:
         raise RuntimeError("runtime_versions.yaml director.speculative_tokens must be positive.")
     env_dir = Path(env_dir_value).expanduser()
@@ -331,7 +395,7 @@ def check_director() -> None:
         raise RuntimeError(f"Director vLLM version mismatch: observed={observed}, expected={version}")
     print("DIRECTOR RUNTIME: PASS")
     print("DIRECTOR VLLM:", observed, "expected:", version)
-    print("DIRECTOR SPECULATION: PASS", f"method={method}", f"tokens={tokens}")
+    print("DIRECTOR SPECULATION: PASS", f"method={method}", f"tokens={tokens}", f"speculator={speculator}")
 
 
 # ============================================================
