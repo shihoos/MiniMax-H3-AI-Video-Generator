@@ -32,8 +32,8 @@ director:
   model_path: /kaggle/input/qwen3-14b-awq
   format: safetensors-awq
   backend: vllm
-  vllm_version: 0.23.0
-  vllm_env_dir: /kaggle/working/.qwen_vllm
+  vllm_version: 0.29.0
+  vllm_env_dir: /tmp/qwen_vllm_latest
   context: 8192
   max_tokens: 7000
   temperature: 0.2
@@ -43,6 +43,10 @@ director:
   host: 127.0.0.1
   port: 8000
   max_num_seqs: 1
+  speculative_method: eagle3
+  speculative_model_path: /kaggle/input/qwen3-14b-speculator-eagle3
+  speculative_tokens: 2
+  generation_config: vllm
 storyboard:
   host: 0.0.0.0
   port: 8765
