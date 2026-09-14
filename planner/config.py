@@ -227,6 +227,89 @@ DIRECTOR_VLLM_GENERATION_CONFIG = str(
 ).strip()
 
 
+# ============================================================
+# H3 RUNTIME / DELIVERY CONTRACT
+# ============================================================
+# These values are defaults from runtime_versions.yaml. Explicit environment
+# overrides remain supported for controlled development/diagnostic runs, but
+# normal production callers do not need to pass these settings around.
+_runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
+_assembly_cfg = dict(RUNTIME.get("assembly", {}) or {})
+_generation_cfg = dict(RUNTIME.get("generation", {}) or {})
+delivery_cfg = dict(RUNTIME.get("delivery", {}) or {})
+
+
+def _resolve_env_default(name: str, default: object) -> str:
+    return os.getenv(name, str(default)).strip()
+
+
+def _resolve_bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+H3_COMFY_LOWVRAM = _resolve_bool_env(
+    "H3_COMFY_LOWVRAM",
+    bool(_runtime_cfg.get("lowvram", True)),
+)
+
+# cpu_vae intentionally remains tri-state because the VRAM profile resolver
+# owns the meaning of `auto` and can evaluate it per physical GPU.
+H3_COMFY_CPU_VAE_POLICY = _resolve_env_default(
+    "H3_COMFY_CPU_VAE",
+    _runtime_cfg.get("cpu_vae", "auto"),
+).lower()
+if H3_COMFY_CPU_VAE_POLICY not in {"auto", "1", "true", "yes", "on", "0", "false", "no", "off"}:
+    raise RuntimeError(
+        "H3_COMFY_CPU_VAE must be one of auto/true/false when provided. "
+        f"Got {H3_COMFY_CPU_VAE_POLICY!r}."
+    )
+
+H3_ASSEMBLY_VIDEO_CODEC = _resolve_env_default(
+    "H3_FFMPEG_VIDEO_CODEC",
+    _assembly_cfg.get("video_codec", "libx264"),
+)
+H3_ASSEMBLY_PRESET = _resolve_env_default(
+    "H3_FFMPEG_PRESET",
+    _assembly_cfg.get("preset", "medium"),
+)
+try:
+    H3_ASSEMBLY_CRF = int(
+        _resolve_env_default("H3_FFMPEG_CRF", _assembly_cfg.get("crf", 17))
+    )
+except ValueError as exc:
+    raise RuntimeError("H3_FFMPEG_CRF must be an integer.") from exc
+H3_ASSEMBLY_AUDIO_CODEC = _resolve_env_default(
+    "H3_FFMPEG_AUDIO_CODEC",
+    _assembly_cfg.get("audio_codec", "aac"),
+)
+H3_ASSEMBLY_AUDIO_BITRATE = _resolve_env_default(
+    "H3_FFMPEG_AUDIO_BITRATE",
+    _assembly_cfg.get("audio_bitrate", "192k"),
+)
+
+if H3_ASSEMBLY_CRF < 0 or H3_ASSEMBLY_CRF > 51:
+    raise RuntimeError(
+        f"Configured assembly CRF must be between 0 and 51, got {H3_ASSEMBLY_CRF}."
+    )
+
+# Production delivery defaults come from runtime_versions.yaml. Callers may
+# still provide explicit dimensions/fps for a deliberate per-run override.
+DELIVERY_DEFAULT_WIDTH = int(delivery_cfg.get("width", 1280))
+DELIVERY_DEFAULT_HEIGHT = int(delivery_cfg.get("height", 720))
+DELIVERY_DEFAULT_FPS = int(delivery_cfg.get("fps", 24))
+if min(DELIVERY_DEFAULT_WIDTH, DELIVERY_DEFAULT_HEIGHT, DELIVERY_DEFAULT_FPS) <= 0:
+    raise RuntimeError("Configured delivery width/height/fps must be positive.")
+
+# Explicit override is opt-in so a production run cannot silently switch to an
+# unrelated EAGLE-3 checkpoint while the repository is pinned to /kaggle/input/eagle-3.
+DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE = _resolve_bool_env(
+    "H3_DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE",
+    False,
+)
+
 # Locked Director topology. Keep this centralized so prompt grammar, Director
 # batching, and validation cannot silently drift apart.
 DIRECTOR_SHOTS_PER_SCENE = 2
