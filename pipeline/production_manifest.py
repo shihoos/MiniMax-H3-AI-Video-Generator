@@ -62,7 +62,11 @@ class ProductionManifest:
             if isinstance(data, dict):
                 runtime = data
         production_models = dict(inventory.get("models", {}) or {})
-        director = dict((inventory.get("policy", {}) or {}).get("director_model", {}) or {})
+        # The Director is a non-ComfyUI runtime asset. Keep its provenance in
+        # the top-level inventory block, with Eagle3 recorded as its speculative
+        # decoding companion rather than as a standalone H3 production model.
+        director = dict(inventory.get("director_model", {}) or {})
+        speculative = dict(director.get("speculative", {}) or {})
         runtime_director = dict(runtime.get("director", {}) or {})
         if runtime_director.get("model_path"):
             director["path"] = str(runtime_director["model_path"])
@@ -72,6 +76,14 @@ class ProductionManifest:
             director["format"] = str(runtime_director["format"])
         if runtime_director.get("vllm_version"):
             director["runtime_version"] = str(runtime_director["vllm_version"])
+        if runtime_director.get("speculative_method"):
+            speculative["method"] = str(runtime_director["speculative_method"])
+        if runtime_director.get("speculative_model_path"):
+            speculative["path"] = str(runtime_director["speculative_model_path"])
+        if runtime_director.get("speculative_tokens") is not None:
+            speculative["tokens"] = int(runtime_director["speculative_tokens"])
+        if speculative:
+            director["speculative"] = speculative
         return {
             "production": production_models,
             "director": director,
