@@ -32,6 +32,10 @@ from planner.config import (
     DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE,
     DIRECTOR_VLLM_ENV_DIR,
     DIRECTOR_VLLM_MAX_NUM_SEQS,
+    DIRECTOR_VLLM_SPECULATIVE_METHOD,
+    DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH,
+    DIRECTOR_VLLM_SPECULATIVE_TOKENS,
+    DIRECTOR_VLLM_GENERATION_CONFIG,
     director_enabled,
 )
 
@@ -411,6 +415,39 @@ class QwenDirectorRuntimeMixin:
             f"{DIRECTOR_MODEL_ENV} to its directory."
         )
 
+    def _find_speculator_model(self) -> Path:
+        """Resolve the complete local Qwen3-14B EAGLE-3 speculator checkpoint."""
+        explicit = os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", "").strip()
+        configured = Path(explicit).expanduser() if explicit else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
+        candidates = [configured]
+        if not configured.is_absolute() or not configured.is_dir():
+            candidates.append(
+                DIRECTOR_KAGGLE_INPUT_ROOT / configured.name
+            )
+        required_any = ("config.json",)
+        required_config = "config.json"
+        for candidate in candidates:
+            candidate = Path(candidate)
+            config_path = candidate / required_config
+            if not (candidate.is_dir() and config_path.is_file()):
+                continue
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            spec = config.get("speculators_config", {}) or {}
+            verifier = spec.get("verifier", {}) or {}
+            if (
+                str(spec.get("algorithm", "")).strip().lower() == DIRECTOR_VLLM_SPECULATIVE_METHOD
+                and str(verifier.get("name_or_path", "")).strip() == "Qwen/Qwen3-14B"
+            ):
+                return candidate.resolve()
+        raise FileNotFoundError(
+            "Qwen3-14B EAGLE-3 speculator checkpoint was not found. "
+            f"Expected: {configured}. Set H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH "
+            "or attach the corresponding Kaggle dataset."
+        )
+
     @property
     def model_path(
         self,
@@ -442,19 +479,16 @@ class QwenDirectorRuntimeMixin:
             self._model_path.name if self._model_path is not None else "Qwen3-14B-AWQ",
         )
 
-    def _wait_for_vllm(
-        self,
-        session: requests.Session,
-        process: subprocess.Popen | None = None,
-    ) -> None:
-        """Wait until vLLM is healthy and serving the locked Director model."""
-        base_url = self._vllm_base_url().rsplit("/v1", 1)[0]
-        health_url = base_url + "/health"
+    def _wait_for_vllm(self, session: requests.Session, process: subprocess.Popen | None) -> None:
+        health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
         models_url = self._vllm_base_url() + "/models"
         deadline = time.monotonic() + float(
-            os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "600")
+            os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "900")
         )
+
         last_error = ""
+        health_ok = False
+        model_ok = False
         while time.monotonic() < deadline:
             if process is not None and process.poll() is not None:
                 raise RuntimeError(
@@ -463,35 +497,28 @@ class QwenDirectorRuntimeMixin:
                     f"See {getattr(self, '_vllm_log_path', 'vLLM log')}."
                 )
             try:
-                health = session.get(health_url, timeout=5)
-                if health.status_code != 200:
-                    last_error = f"health HTTP {health.status_code}"
-                    time.sleep(2.0)
-                    continue
-                models = session.get(models_url, timeout=5)
-                if models.status_code != 200:
-                    last_error = f"models HTTP {models.status_code}"
-                    time.sleep(2.0)
-                    continue
-                payload = models.json()
-                data = payload.get("data", [])
-                served = {
-                    str(item.get("id", ""))
-                    for item in data
-                    if isinstance(item, dict)
-                }
-                if self._vllm_model_name() in served:
-                    return
-                last_error = (
-                    "vLLM is healthy but the locked model is not served; "
-                    f"served={sorted(served)} expected={self._vllm_model_name()}"
-                )
+                response = session.get(health_url, timeout=5)
+                health_ok = response.status_code == 200
             except Exception as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+                last_error = f"health {type(exc).__name__}: {exc}"
+                health_ok = False
+            try:
+                response = session.get(models_url, timeout=5)
+                if response.status_code == 200:
+                    data = response.json().get("data", [])
+                    model_ok = bool(data) and self._vllm_model_name() in {
+                        str(item.get("id", "")) for item in data
+                    }
+            except Exception as exc:
+                last_error = f"models {type(exc).__name__}: {exc}"
+                model_ok = False
+            if health_ok and model_ok:
+                return
             time.sleep(2.0)
+
         raise RuntimeError(
             "Timed out waiting for the Qwen3-14B-AWQ vLLM server. "
-            f"Last error: {last_error}. "
+            f"health_ok={health_ok}, model_ok={model_ok}, last_error={last_error}. "
             f"Log: {getattr(self, '_vllm_log_path', 'unknown')}"
         )
 
@@ -510,7 +537,7 @@ class QwenDirectorRuntimeMixin:
         }:
             session = requests.Session()
             try:
-                self._wait_for_vllm(session)
+                self._wait_for_vllm(session, None)
             except Exception:
                 session.close()
                 raise
@@ -536,11 +563,23 @@ class QwenDirectorRuntimeMixin:
                     f"{vllm_python}. Run kaggle/bootstrap.py first."
                 )
 
+            speculator_model = self._find_speculator_model()
+            if DIRECTOR_VLLM_SPECULATIVE_TOKENS <= 0:
+                raise RuntimeError(
+                    "Director speculative_tokens must be positive in runtime configuration."
+                )
+
+            speculative_config = json.dumps({
+                "model": str(speculator_model),
+                "method": DIRECTOR_VLLM_SPECULATIVE_METHOD,
+                "num_speculative_tokens": DIRECTOR_VLLM_SPECULATIVE_TOKENS,
+            }, separators=(",", ":"))
+
             command = [
                 str(vllm_python),
                 "-m",
-                "vllm.entrypoints.openai.api_server",
-                "--model",
+                "vllm.entrypoints.cli.main",
+                "serve",
                 str(self._model_path),
                 "--host",
                 host,
@@ -556,8 +595,10 @@ class QwenDirectorRuntimeMixin:
                 str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
                 "--max-num-seqs",
                 str(DIRECTOR_VLLM_MAX_NUM_SEQS),
-                "--dtype",
-                "half",
+                "--generation-config",
+                DIRECTOR_VLLM_GENERATION_CONFIG,
+                "--speculative-config",
+                speculative_config,
                 "--trust-remote-code",
                 "--disable-log-requests",
             ]
@@ -682,7 +723,7 @@ class QwenDirectorRuntimeMixin:
 
         if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen Director runtime is not loaded."
+                "Qwen director model is not loaded."
             )
 
         tokenizer = getattr(self, "_tokenizer", None)
@@ -833,7 +874,7 @@ class QwenDirectorRuntimeMixin:
         response_format: dict | None = None,
     ) -> dict:
         if self._vllm_session is None:
-            raise RuntimeError("Qwen Director runtime is not loaded.")
+            raise RuntimeError("Qwen director model is not loaded.")
 
         payload = {
             "model": self._vllm_model_name(),
@@ -881,7 +922,7 @@ class QwenDirectorRuntimeMixin:
 
         if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen Director runtime is not loaded."
+                "Qwen director model is not loaded."
             )
 
         if temperature is None:
@@ -1098,7 +1139,7 @@ class QwenDirectorRuntimeMixin:
 
         if self._vllm_session is None:
             raise RuntimeError(
-                "Qwen Director runtime is not loaded."
+                "Qwen director model is not loaded."
             )
 
         if temperature is None:
