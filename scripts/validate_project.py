@@ -1222,15 +1222,36 @@ def validate_director_runtime_manifest() -> None:
         inventory_path.read_text(encoding="utf-8")
     )
     policy = inventory.get("policy", {}) or {}
-    director_policy = policy.get("director_model", {}) or {}
+    director_inventory = inventory.get("director_model", {}) or {}
+    director_speculative = director_inventory.get("speculative", {}) or {}
 
     require(
-        director_policy.get("runtime") == "vllm",
+        policy.get("allow_director_qwen") is True,
+        "model_inventory must explicitly allow the Director Qwen runtime.",
+    )
+    require(
+        director_inventory.get("runtime") == "vllm",
         "model_inventory director runtime must be vllm.",
     )
     require(
-        director_policy.get("format") == "safetensors-awq",
+        director_inventory.get("format") == "safetensors-awq",
         "model_inventory director format must be safetensors-awq.",
+    )
+    require(
+        str(director_inventory.get("path", "")).strip() == str(director.get("model_path", "")).strip(),
+        "model_inventory Director path must match runtime_versions.yaml.",
+    )
+    require(
+        str(director_speculative.get("method", "")).strip().lower() == str(director.get("speculative_method", "")).strip().lower(),
+        "model_inventory Eagle3 method must match runtime_versions.yaml.",
+    )
+    require(
+        str(director_speculative.get("path", "")).strip() == str(director.get("speculative_model_path", "")).strip(),
+        "model_inventory Eagle3 path must match runtime_versions.yaml.",
+    )
+    require(
+        int(director_speculative.get("tokens", 0) or 0) == int(director.get("speculative_tokens", 0) or 0),
+        "model_inventory Eagle3 token count must match runtime_versions.yaml.",
     )
 
     model_env = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip()
