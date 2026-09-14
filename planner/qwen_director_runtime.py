@@ -416,36 +416,68 @@ class QwenDirectorRuntimeMixin:
         )
 
     def _find_speculator_model(self) -> Path:
-        """Resolve the complete local Qwen3-14B EAGLE-3 speculator checkpoint."""
+        """Resolve a complete local Qwen3-14B EAGLE-3 speculator checkpoint."""
         explicit = os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", "").strip()
-        configured = Path(explicit).expanduser() if explicit else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
+        configured = (Path(explicit).expanduser() if explicit else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH)
         candidates = [configured]
         if not configured.is_absolute() or not configured.is_dir():
-            candidates.append(
-                DIRECTOR_KAGGLE_INPUT_ROOT / configured.name
+            candidates.append(DIRECTOR_KAGGLE_INPUT_ROOT / configured.name)
+
+        if DIRECTOR_VLLM_SPECULATIVE_METHOD != "eagle3":
+            raise RuntimeError(
+                "runtime_versions.yaml director.speculative_method must be eagle3 "
+                "for the locked EAGLE-3 Director runtime."
             )
-        required_any = ("config.json",)
-        required_config = "config.json"
+
+        if not explicit and str(DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH) != "/kaggle/input/eagle-3":
+            raise RuntimeError(
+                "runtime_versions.yaml director.speculative_model_path must be /kaggle/input/eagle-3 "
+                "for the locked Eagle-3 Kaggle dataset."
+            )
+
         for candidate in candidates:
             candidate = Path(candidate)
-            config_path = candidate / required_config
+            config_path = candidate / "config.json"
             if not (candidate.is_dir() and config_path.is_file()):
                 continue
             try:
                 config = json.loads(config_path.read_text(encoding="utf-8"))
-            except Exception:
-                continue
+            except Exception as exc:
+                raise RuntimeError(f"Invalid Eagle-3 speculator config: {config_path}") from exc
+
             spec = config.get("speculators_config", {}) or {}
             verifier = spec.get("verifier", {}) or {}
-            if (
-                str(spec.get("algorithm", "")).strip().lower() == DIRECTOR_VLLM_SPECULATIVE_METHOD
-                and str(verifier.get("name_or_path", "")).strip() == "Qwen/Qwen3-14B"
-            ):
+            if str(spec.get("algorithm", "")).strip().lower() != DIRECTOR_VLLM_SPECULATIVE_METHOD:
+                continue
+            if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
+                continue
+
+            for index_path in candidate.glob("*.index.json"):
+                try:
+                    index = json.loads(index_path.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                weight_map = index.get("weight_map") if isinstance(index, dict) else None
+                if isinstance(weight_map, dict) and weight_map:
+                    missing = sorted({str(name) for name in weight_map.values() if not (candidate / str(name)).is_file()})
+                    if missing:
+                        raise RuntimeError(
+                            "EAGLE-3 checkpoint is incomplete; missing indexed weight files: "
+                            + ", ".join(missing)
+                        )
+                    return candidate.resolve()
+
+            if any(any(candidate.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")):
                 return candidate.resolve()
+
+            raise RuntimeError(
+                f"EAGLE-3 checkpoint has config.json but no model weight files: {candidate}"
+            )
+
         raise FileNotFoundError(
             "Qwen3-14B EAGLE-3 speculator checkpoint was not found. "
-            f"Expected: {configured}. Set H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH "
-            "or attach the corresponding Kaggle dataset."
+            "Expected Kaggle dataset path: /kaggle/input/eagle-3. "
+            f"Resolved configuration path: {configured}."
         )
 
     @property
