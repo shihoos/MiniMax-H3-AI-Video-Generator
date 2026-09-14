@@ -308,20 +308,30 @@ def check_director() -> None:
     print("DIRECTOR MODEL:", model)
     director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
     version = str(director.get("vllm_version", "") or "").strip()
-    env_dir = Path(str(director.get("vllm_env_dir", "/kaggle/working/.qwen_vllm"))).expanduser()
+    env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
+    method = str(director.get("speculative_method", "") or "").strip().lower()
+    tokens = int(director.get("speculative_tokens", 0) or 0)
+    if not version:
+        raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
+    if not env_dir_value:
+        raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
+    if not method:
+        raise RuntimeError("runtime_versions.yaml director.speculative_method is required.")
+    if tokens <= 0:
+        raise RuntimeError("runtime_versions.yaml director.speculative_tokens must be positive.")
+    env_dir = Path(env_dir_value).expanduser()
     venv_python = env_dir / "bin" / "python"
     if not version or not venv_python.is_file():
         raise RuntimeError("Pinned vLLM environment is missing; run bootstrap first.")
     result = subprocess.run([str(venv_python), "-c", "import vllm; print(vllm.__version__)"], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError("vLLM Director runtime is unavailable.\n" + (result.stderr or result.stdout))
-    actual = result.stdout.strip().splitlines()[-1].strip() if result.stdout.strip() else ""
-    if actual != version:
-        raise RuntimeError(
-            f"vLLM version mismatch: expected {version}, got {actual or 'unknown'}."
-        )
+    observed = result.stdout.strip()
+    if observed != version:
+        raise RuntimeError(f"Director vLLM version mismatch: observed={observed}, expected={version}")
     print("DIRECTOR RUNTIME: PASS")
-    print("DIRECTOR VLLM:", actual)
+    print("DIRECTOR VLLM:", observed, "expected:", version)
+    print("DIRECTOR SPECULATION: PASS", f"method={method}", f"tokens={tokens}")
 
 
 # ============================================================
