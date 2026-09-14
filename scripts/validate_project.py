@@ -1205,6 +1205,18 @@ def validate_director_runtime_manifest() -> None:
         float(director.get("gpu_memory_utilization", 0.0)) > 0.0,
         "Director gpu_memory_utilization must be positive.",
     )
+    require(
+        str(director.get("speculative_method", "")).strip().lower() == "eagle3",
+        "Director speculative_method must be eagle3.",
+    )
+    require(
+        str(director.get("speculative_model_path", "")).strip() == "/kaggle/input/eagle-3",
+        "Director speculative_model_path must be /kaggle/input/eagle-3.",
+    )
+    require(
+        int(director.get("speculative_tokens", 0) or 0) > 0,
+        "Director speculative_tokens must be positive.",
+    )
 
     inventory = yaml.safe_load(
         inventory_path.read_text(encoding="utf-8")
@@ -1227,6 +1239,48 @@ def validate_director_runtime_manifest() -> None:
         if model_env
         else Path(str(director.get("model_path", "")))
     )
+
+    spec_env = os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", "").strip()
+    spec_path = (
+        Path(spec_env).expanduser().resolve()
+        if spec_env
+        else Path(str(director.get("speculative_model_path", "")))
+    )
+    if spec_path.is_dir():
+        config_path = spec_path / "config.json"
+        require(config_path.is_file(), "Eagle-3 speculator checkpoint is missing config.json.")
+        try:
+            spec_config = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            fail(f"Eagle-3 speculator config is invalid: {config_path} ({exc})")
+        spec_meta = spec_config.get("speculators_config", {}) or {}
+        verifier = spec_meta.get("verifier", {}) or {}
+        require(
+            str(spec_meta.get("algorithm", "")).strip().lower() == "eagle3",
+            "Eagle-3 speculator config must declare algorithm=eagle3.",
+        )
+        require(
+            str(verifier.get("name_or_path", "")).strip() == "Qwen/Qwen3-14B",
+            "Eagle-3 speculator must declare verifier Qwen/Qwen3-14B.",
+        )
+        index_files = tuple(spec_path.glob("*.index.json"))
+        checked_weights = False
+        for index_path in index_files:
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            weight_map = index.get("weight_map") if isinstance(index, dict) else None
+            if isinstance(weight_map, dict) and weight_map:
+                missing = sorted({str(name) for name in weight_map.values() if not (spec_path / str(name)).is_file()})
+                require(not missing, "Eagle-3 checkpoint is incomplete: " + ", ".join(missing))
+                checked_weights = True
+                break
+        if not checked_weights:
+            require(
+                any(any(spec_path.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")),
+                "Eagle-3 checkpoint has config.json but no model weight files.",
+            )
 
     if model_path.is_dir():
         required = (
