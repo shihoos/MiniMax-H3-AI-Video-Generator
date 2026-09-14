@@ -32,8 +32,11 @@ def main() -> int:
     if not str(director.get("vllm_env_dir", "") or "").strip():
         raise RuntimeError("Director vllm_env_dir is required in runtime_versions.yaml.")
     speculative_method = str(director.get("speculative_method", "") or "").strip().lower()
-    if not speculative_method:
-        raise RuntimeError("Director speculative_method is required in runtime_versions.yaml.")
+    if speculative_method != "eagle3":
+        raise RuntimeError("Director speculative_method must be eagle3 in runtime_versions.yaml.")
+    speculative_model_path = str(director.get("speculative_model_path", "") or "").strip()
+    if speculative_model_path != "/kaggle/input/eagle-3":
+        raise RuntimeError("Director speculative_model_path must be /kaggle/input/eagle-3 in runtime_versions.yaml.")
     if int(director.get("speculative_tokens", 0) or 0) <= 0:
         raise RuntimeError("Director speculative_tokens must be positive in runtime_versions.yaml.")
     if not str(director.get("generation_config", "") or "").strip():
