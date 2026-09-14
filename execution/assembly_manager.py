@@ -8,6 +8,17 @@ import tempfile
 from pathlib import Path
 from typing import Iterable
 
+from planner.config import (
+    DELIVERY_DEFAULT_FPS,
+    DELIVERY_DEFAULT_HEIGHT,
+    DELIVERY_DEFAULT_WIDTH,
+    H3_ASSEMBLY_AUDIO_BITRATE,
+    H3_ASSEMBLY_AUDIO_CODEC,
+    H3_ASSEMBLY_CRF,
+    H3_ASSEMBLY_PRESET,
+    H3_ASSEMBLY_VIDEO_CODEC,
+)
+
 
 class AssemblyManager:
     """Validate, concatenate and atomically publish the final video."""
@@ -151,9 +162,9 @@ class AssemblyManager:
         self,
         videos: list[Path],
         final_name: str = "final_video.mp4",
-        width: int = 1280,
-        height: int = 720,
-        fps: int = 24,
+        width: int | None = None,
+        height: int | None = None,
+        fps: int | None = None,
         *,
         video_preset: str | None = None,
         video_crf: int | None = None,
@@ -161,15 +172,21 @@ class AssemblyManager:
         audio_codec: str | None = None,
         audio_bitrate: str | None = None,
     ) -> Path:
-        video_preset = str(video_preset or os.getenv("H3_FFMPEG_PRESET", "medium"))
+        # runtime_versions.yaml is the production default authority. The
+        # planner config module resolves deliberate environment overrides once,
+        # while explicit per-call arguments still win for a controlled run.
+        width = DELIVERY_DEFAULT_WIDTH if width is None else int(width)
+        height = DELIVERY_DEFAULT_HEIGHT if height is None else int(height)
+        fps = DELIVERY_DEFAULT_FPS if fps is None else int(fps)
+        video_preset = str(video_preset or H3_ASSEMBLY_PRESET)
         try:
-            video_crf = int(video_crf if video_crf is not None else os.getenv("H3_FFMPEG_CRF", "17"))
+            video_crf = int(H3_ASSEMBLY_CRF if video_crf is None else video_crf)
             nvenc_cq = int(os.getenv("H3_FFMPEG_NVENC_CQ", "19"))
         except (TypeError, ValueError) as exc:
-            raise ValueError("FFmpeg CRF/CQ environment values must be integers.") from exc
-        video_codec = str(video_codec or os.getenv("H3_FFMPEG_VIDEO_CODEC", "libx264"))
-        audio_codec = str(audio_codec or os.getenv("H3_FFMPEG_AUDIO_CODEC", "aac"))
-        audio_bitrate = str(audio_bitrate or os.getenv("H3_FFMPEG_AUDIO_BITRATE", "192k"))
+            raise ValueError("FFmpeg CRF/CQ values must be integers.") from exc
+        video_codec = str(video_codec or H3_ASSEMBLY_VIDEO_CODEC)
+        audio_codec = str(audio_codec or H3_ASSEMBLY_AUDIO_CODEC)
+        audio_bitrate = str(audio_bitrate or H3_ASSEMBLY_AUDIO_BITRATE)
         self.check_ffmpeg()
         inputs = self._validate_inputs(videos)
 
