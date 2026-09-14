@@ -467,7 +467,7 @@ def install_director_runtime(
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("runtime_versions.yaml director.backend must be 'vllm'.")
 
-    def resolve_checkpoint(configured: str, required: tuple[str, ...], label: str) -> Path:
+    def resolve_checkpoint(configured: str, required: tuple[str, ...], label: str, *, require_weights: bool = False) -> Path:
         configured_path = Path(configured).expanduser()
         candidates = [configured_path]
         if Path("/kaggle/input").is_dir():
@@ -480,6 +480,29 @@ def install_director_runtime(
                     )
                 except OSError:
                     pass
+
+        def has_weights(path: Path) -> bool:
+            # Prefer an explicit index when present so every referenced shard is verified.
+            index_files = tuple(path.glob("*.index.json"))
+            for index_path in index_files:
+                try:
+                    index = yaml.safe_load(index_path.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    continue
+                if not isinstance(index, dict):
+                    continue
+                weight_map = index.get("weight_map")
+                if isinstance(weight_map, dict) and weight_map:
+                    referenced = {str(name) for name in weight_map.values()}
+                    if referenced and all((path / name).is_file() for name in referenced):
+                        return True
+
+            # Some EAGLE checkpoints are single-file checkpoints and do not ship an index.
+            return any(
+                any(path.glob(pattern))
+                for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
+            )
+
         seen = set()
         for candidate in candidates:
             try:
@@ -490,8 +513,13 @@ def install_director_runtime(
             if key in seen:
                 continue
             seen.add(key)
-            if candidate.is_dir() and all((candidate / name).is_file() for name in required):
-                return candidate
+            if not candidate.is_dir():
+                continue
+            if not all((candidate / name).is_file() for name in required):
+                continue
+            if require_weights and not has_weights(candidate):
+                continue
+            return candidate
         raise RuntimeError(f"Complete {label} checkpoint was not found: {configured}")
 
     model_path = resolve_checkpoint(
@@ -503,7 +531,13 @@ def install_director_runtime(
         os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", str(director.get("speculative_model_path", "")).strip()),
         ("config.json",),
         "Qwen3-14B EAGLE-3 speculator",
+        require_weights=True,
     )
+    configured_speculator = str(director.get("speculative_model_path", "")).strip()
+    if configured_speculator != "/kaggle/input/eagle-3":
+        raise RuntimeError(
+            "runtime_versions.yaml director.speculative_model_path must be /kaggle/input/eagle-3 for the locked Eagle-3 Kaggle dataset."
+        )
     try:
         spec_config = yaml.safe_load((spec_path / "config.json").read_text(encoding="utf-8")) or {}
     except Exception as exc:
@@ -512,8 +546,8 @@ def install_director_runtime(
     verifier = spec_meta.get("verifier", {}) or {}
 
     speculative_method = str(director.get("speculative_method", "") or "").strip().lower()
-    if not speculative_method:
-        raise RuntimeError("runtime_versions.yaml director.speculative_method is required.")
+    if speculative_method != "eagle3":
+        raise RuntimeError("runtime_versions.yaml director.speculative_method must be eagle3.")
     if str(spec_meta.get("algorithm", "")).strip().lower() != speculative_method:
         raise RuntimeError(
             "Configured speculator algorithm does not match runtime_versions.yaml "
