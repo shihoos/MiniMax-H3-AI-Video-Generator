@@ -1130,68 +1130,13 @@ class QwenDirector(
             all_shots,
         )
 
-        # Final whole-plan dialogue boundary normalization. Individual
-        # sanitizer passes can operate on partial scene batches; this pass
-        # canonicalizes continuation flags after all Qwen and fallback shots
-        # have been assembled. Dialogue continuation is never allowed to
-        # cross a scene boundary or start on the first shot of a scene.
-        shots_by_scene_order: dict[str, list[dict]] = {}
-        for shot in all_shots:
-            sid = str(shot.get("scene_id", "") or "").strip()
-            if sid:
-                shots_by_scene_order.setdefault(sid, []).append(shot)
-
-        normalized_all_shots: list[dict] = []
-        for scene in scenes:
-            sid = str(scene.get("scene_id", "") or "").strip()
-            scene_shots = shots_by_scene_order.get(sid, [])
-            previous_events: list[dict] = []
-            for position, shot in enumerate(scene_shots):
-                events = shot.get("dialogue_events", [])
-                if not isinstance(events, list) or not events:
-                    if previous_events:
-                        previous_events[-1]["continues_to_next_shot"] = False
-                    previous_events = []
-                    normalized_all_shots.append(shot)
-                    continue
-
-                for event in events:
-                    if isinstance(event, dict):
-                        event["continues_from_previous_shot"] = bool(
-                            event.get("continues_from_previous_shot", False)
-                        )
-                        event["continues_to_next_shot"] = bool(
-                            event.get("continues_to_next_shot", False)
-                        )
-
-                if position == 0:
-                    events[0]["continues_from_previous_shot"] = False
-                    if len(events) > 1:
-                        for event in events[1:]:
-                            event["continues_from_previous_shot"] = False
-                else:
-                    previous_flag = bool(
-                        previous_events[-1].get("continues_to_next_shot", False)
-                    ) if previous_events else False
-                    current_flag = bool(
-                        events[0].get("continues_from_previous_shot", False)
-                    )
-                    continuation = previous_flag or current_flag
-                    if not previous_events:
-                        continuation = False
-                    if previous_events:
-                        previous_events[-1]["continues_to_next_shot"] = continuation
-                    events[0]["continues_from_previous_shot"] = continuation
-                    if len(events) > 1:
-                        for event in events[1:]:
-                            event["continues_from_previous_shot"] = False
-
-                previous_events = [
-                    event for event in events if isinstance(event, dict)
-                ]
-                normalized_all_shots.append(shot)
-
-        all_shots = normalized_all_shots
+        # Canonicalize continuation flags before semantic speaker filtering.
+        # A second final pass is performed after filtering below because dialogue
+        # normalization may remove boundary events.
+        self._normalize_dialogue_continuations(
+            scenes,
+            all_shots,
+        )
 
         # Canonicalize and semantically filter dialogue BEFORE compilation so
         # CinematicCompiler can never embed invalid speech into h3_prompt.
@@ -1199,6 +1144,17 @@ class QwenDirector(
             story,
             all_shots,
             characters,
+        )
+
+        # Dialogue speaker normalization may remove or replace events. That can
+        # change which event is actually at a shot boundary, so continuation
+        # flags must be canonicalized again against the FINAL dialogue event
+        # lists before the timeline scheduler sees the plan. Without this second
+        # pass, a removed boundary event can leave stale continuation metadata
+        # on either side of a shot boundary.
+        self._normalize_dialogue_continuations(
+            scenes,
+            all_shots,
         )
         self._validate_dialogue_speaker_contract(
             all_shots,
@@ -1299,6 +1255,73 @@ class QwenDirector(
             "plan": final_director_plan,
             "director_notes": director_notes,
         }
+
+    @staticmethod
+    def _normalize_dialogue_continuations(
+        scenes: list[dict],
+        shots: list[dict],
+    ) -> None:
+        """Canonicalize final dialogue continuation flags after all filtering.
+
+        Speaker/entity normalization can remove dialogue events. This pass runs
+        after that filtering, so continuation metadata always reflects the final
+        surviving first/last events at each shot boundary. Continuation is never
+        allowed across scene boundaries or from the first shot of a scene.
+        """
+        shots_by_scene_order: dict[str, list[dict]] = {}
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            scene_id = str(shot.get("scene_id", "") or "").strip()
+            if scene_id:
+                shots_by_scene_order.setdefault(scene_id, []).append(shot)
+
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            scene_shots = shots_by_scene_order.get(scene_id, [])
+            previous_events: list[dict] | None = None
+
+            for position, shot in enumerate(scene_shots):
+                events = shot.get("dialogue_events", [])
+                if not isinstance(events, list):
+                    events = []
+                    shot["dialogue_events"] = events
+
+                events[:] = [event for event in events if isinstance(event, dict)]
+
+                if not events:
+                    if previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                    previous_events = None
+                    continue
+
+                for event in events:
+                    event["continues_from_previous_shot"] = bool(
+                        event.get("continues_from_previous_shot", False)
+                    )
+                    event["continues_to_next_shot"] = bool(
+                        event.get("continues_to_next_shot", False)
+                    )
+
+                if position == 0 or previous_events is None:
+                    events[0]["continues_from_previous_shot"] = False
+                else:
+                    previous_flag = bool(
+                        previous_events[-1].get("continues_to_next_shot", False)
+                    )
+                    current_flag = bool(
+                        events[0].get("continues_from_previous_shot", False)
+                    )
+                    continuation = previous_flag or current_flag
+                    previous_events[-1]["continues_to_next_shot"] = continuation
+                    events[0]["continues_from_previous_shot"] = continuation
+
+                for event in events[1:]:
+                    event["continues_from_previous_shot"] = False
+
+                previous_events = events
 
     @staticmethod
     def _normalize_dialogue_text(value: str) -> str:
