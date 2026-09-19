@@ -61,10 +61,18 @@ class ProductionTimeline:
     @staticmethod
     def _mode_for_shot(shot: dict[str, Any], previous: dict[str, Any] | None) -> str:
         explicit = str(shot.get("continuity_mode", "") or "").strip().lower()
+        boundary = bool(shot.get("is_scene_boundary", False)) or previous is None
+
+        if boundary:
+            # A scene boundary cannot inherit an intra-scene continuity mode.
+            # Keep only explicit reset-style edit modes as intentional overrides;
+            # stale "chained"/"anchored" values are canonicalized to scene_reset.
+            if explicit in {"independent", "hard_cut", "scene_reset"}:
+                return explicit
+            return "scene_reset"
+
         if explicit in VALID_CONTINUITY_MODES:
             return explicit
-        if bool(shot.get("is_scene_boundary", False)) or previous is None:
-            return "scene_reset"
         return "chained"
 
     def build(self) -> list[TimelineSegment]:
