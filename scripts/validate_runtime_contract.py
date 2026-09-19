@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import sys
@@ -57,10 +58,22 @@ def main() -> int:
         if not isinstance(data, dict) or not data.get("nodes"):
             raise RuntimeError(f"Invalid workflow root: {workflow}")
 
-    bootstrap = (ROOT / "kaggle/bootstrap.py").read_text(encoding="utf-8")
-    for token in ("install_comfyui", "verify_runtime_files", "git", "checkout"):
-        if token not in bootstrap:
-            raise RuntimeError(f"bootstrap contract missing: {token}")
+    bootstrap_path = ROOT / "kaggle/bootstrap.py"
+    bootstrap_source = bootstrap_path.read_text(encoding="utf-8")
+    bootstrap_tree = ast.parse(bootstrap_source, filename=str(bootstrap_path))
+    bootstrap_defs = {
+        node.name
+        for node in ast.walk(bootstrap_tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for required_function in ("install_comfyui", "verify_runtime_files"):
+        if required_function not in bootstrap_defs:
+            raise RuntimeError(
+                f"bootstrap contract missing function definition: {required_function}"
+            )
+    for required_token in ("git", "checkout"):
+        if required_token not in bootstrap_source:
+            raise RuntimeError(f"bootstrap contract missing: {required_token}")
 
     runtime = runtime
     print("Runtime install contract PASSED.")
