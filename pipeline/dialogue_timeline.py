@@ -380,21 +380,51 @@ class DialogueTimeline:
         continuation_by_scene: dict[str, bool] = {}
         previous_shot_by_scene: dict[str, dict | None] = {}
 
-        for shot in plan.get("shots", []) or []:
+        shots = [
+            shot
+            for shot in (plan.get("shots", []) or [])
+            if isinstance(shot, dict)
+        ]
+        last_shot_by_scene: dict[str, dict] = {}
+        for shot in shots:
+            scene_id = str(shot.get("scene_id", ""))
+            if scene_id:
+                last_shot_by_scene[scene_id] = shot
+
+        for shot in shots:
             scene_id = str(shot.get("scene_id", ""))
             boundary = bool(shot.get("is_scene_boundary", False))
             previous = None if boundary else previous_by_scene.get(scene_id)
 
             requested = self._raw_events(shot)
+
+            # Normalize event-level continuation ownership before scheduling.
+            # Only the first event may continue from a prior shot, and only the
+            # final event may continue to the next shot. Scene boundaries never
+            # inherit dialogue continuation from an earlier scene.
+            for event in requested:
+                event["continues_from_previous_shot"] = bool(
+                    event.get("continues_from_previous_shot", False)
+                )
+                event["continues_to_next_shot"] = bool(
+                    event.get("continues_to_next_shot", False)
+                )
+            for event in requested[1:]:
+                event["continues_from_previous_shot"] = False
+            for event in requested[:-1]:
+                event["continues_to_next_shot"] = False
+
             current_continues_from = bool(
                 requested and requested[0].get("continues_from_previous_shot", False)
             )
 
-            if boundary and current_continues_from:
-                raise ValueError(
-                    f"{shot.get('shot_id', '')}: a scene-boundary shot cannot continue "
-                    "dialogue from the previous scene."
-                )
+            if boundary:
+                # A scene-boundary shot starts a new dialogue segment.
+                if requested:
+                    requested[0]["continues_from_previous_shot"] = False
+                current_continues_from = False
+                continuation_by_scene[scene_id] = False
+                previous = None
 
             if previous is not None:
                 previous_flag = bool(
@@ -439,6 +469,12 @@ class DialogueTimeline:
                 f"({event['speaker_id']}) says: <d>[English] {event['text']}</d>"
                 for event in events
             )
+
+            if shot is last_shot_by_scene.get(scene_id) and events:
+                # A scene has no legal dialogue continuation edge to another
+                # scene. Persist the invariant in the canonical event payload.
+                for event in events:
+                    event["continues_to_next_shot"] = False
 
             previous_by_scene[scene_id] = (
                 DialogueEvent(**events[-1]) if events else None
