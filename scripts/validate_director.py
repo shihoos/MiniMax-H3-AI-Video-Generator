@@ -32,6 +32,8 @@ from planner.qwen_director import (
 from planner.entity_resolver import (
     EntityResolver,
 )
+from pipeline.dialogue_timeline import DialogueTimeline
+from pipeline.production_orchestrator import ProductionOrchestrator
 
 
 def check(
@@ -2573,6 +2575,132 @@ def test_abbreviation_safe_story_split() -> None:
     )
 
 
+def test_scene_boundary_dialogue_continuation_is_closed() -> None:
+    director = QwenDirector(ROOT)
+    scenes = [
+        {"scene_id": "scene_001"},
+        {"scene_id": "scene_002"},
+    ]
+    shots = [
+        {
+            "shot_id": "scene_001_shot_001",
+            "scene_id": "scene_001",
+            "order": 1,
+            "dialogue_events": [
+                {
+                    "speaker": "Eli",
+                    "text": "Stay here.",
+                    "continues_from_previous_shot": False,
+                    "continues_to_next_shot": False,
+                }
+            ],
+        },
+        {
+            "shot_id": "scene_001_shot_002",
+            "scene_id": "scene_001",
+            "order": 2,
+            "dialogue_events": [
+                {
+                    "speaker": "Eli",
+                    "text": "I will go.",
+                    "continues_from_previous_shot": True,
+                    "continues_to_next_shot": True,
+                }
+            ],
+        },
+        {
+            "shot_id": "scene_002_shot_001",
+            "scene_id": "scene_002",
+            "order": 1,
+            "dialogue_events": [
+                {
+                    "speaker": "Eli",
+                    "text": "I am back.",
+                    "continues_from_previous_shot": True,
+                    "continues_to_next_shot": True,
+                }
+            ],
+        },
+    ]
+    director._normalize_dialogue_continuations(scenes, shots)
+    check(
+        shots[0]["dialogue_events"][0]["continues_to_next_shot"] is True,
+        "Intra-scene dialogue continuation was incorrectly cleared.",
+    )
+    check(
+        shots[1]["dialogue_events"][0]["continues_to_next_shot"] is False,
+        "Final shot of a scene still carries continues_to_next_shot.",
+    )
+    check(
+        shots[2]["dialogue_events"][0]["continues_from_previous_shot"] is False,
+        "First shot of a scene still carries continues_from_previous_shot.",
+    )
+
+    plan = {
+        "shots": [
+            {
+                **shots[0],
+                "characters": ["Eli"],
+                "is_scene_boundary": True,
+            },
+            {
+                **shots[1],
+                "characters": ["Eli"],
+                "is_scene_boundary": False,
+            },
+            {
+                **shots[2],
+                "characters": ["Eli"],
+                "is_scene_boundary": True,
+            },
+        ]
+    }
+    DialogueTimeline([{"name": "Eli", "character_id": "char_eli"}]).apply_to_plan(plan)
+    check(
+        plan["shots"][1]["dialogue_events"][-1]["continues_to_next_shot"] is False,
+        "DialogueTimeline reintroduced scene-end continuation metadata.",
+    )
+    check(
+        plan["shots"][2]["dialogue_events"][0]["continues_from_previous_shot"] is False,
+        "DialogueTimeline allowed continuation into a new scene.",
+    )
+
+
+def test_final_plan_metadata_and_scene_character_sync() -> None:
+    character = make_character()
+    plan = {
+        "characters": [],
+        "scenes": [
+            {"scene_id": "scene_001", "characters": []},
+            {"scene_id": "scene_002", "characters": ["Alex"]},
+        ],
+        "shots": [
+            {"shot_id": "scene_001_shot_001", "scene_id": "scene_001", "characters": ["Alex"]},
+            {"shot_id": "scene_001_shot_002", "scene_id": "scene_001", "characters": ["Alex"]},
+            {"shot_id": "scene_002_shot_001", "scene_id": "scene_002", "characters": ["Alex"]},
+        ],
+        "director_pending": True,
+        "preview_ready": False,
+        "character_count": 0,
+        "scene_count": 4,
+        "shot_count": 4,
+    }
+    ProductionOrchestrator._finalize_plan_metadata(plan, [character])
+    check(plan["character_count"] == 1, "Final character_count was not recomputed.")
+    check(plan["scene_count"] == 2, "Final scene_count was not recomputed.")
+    check(plan["shot_count"] == 3, "Final shot_count was not recomputed.")
+    check(plan["director_pending"] is False, "director_pending remained true after Director completion.")
+    check(plan["preview_ready"] is True, "Final enriched plan is not marked preview_ready.")
+    check(
+        plan["scenes"][0]["characters"] == ["Alex"],
+        "Scene roster was not synchronized from final shot-level character bindings.",
+    )
+    check(
+        set(plan["shots"][0]["characters"]) <= set(plan["scenes"][0]["characters"]),
+        "Final shot character is still absent from its scene roster.",
+    )
+
+
 def test_expand_failure_is_source_fallback_without_retry() -> None:
     director = QwenDirector(ROOT)
     source = "Eli enters the abandoned station and finds a sealed vault."
@@ -2622,6 +2750,8 @@ def main() -> None:
     test_deterministic_foundation_when_director_enabled()
     test_abbreviation_safe_story_split()
     test_expand_failure_is_source_fallback_without_retry()
+    test_scene_boundary_dialogue_continuation_is_closed()
+    test_final_plan_metadata_and_scene_character_sync()
 
     tests = [
         test_story_modes,
