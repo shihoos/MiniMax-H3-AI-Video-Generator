@@ -1197,6 +1197,83 @@ class ProductionOrchestrator:
         shot_obj = Shot(**payload)
         shot["h3_prompt"] = shot_obj.h3_prompt()
 
+    @staticmethod
+    def _synchronize_scene_characters(
+        plan: dict,
+        characters: list[Character],
+    ) -> None:
+        """Keep each scene roster a superset of the final shot-level roster.
+
+        Shot-level entity binding is authoritative after Director enrichment.
+        Scene metadata must therefore be synchronized from those final bindings
+        before persistence so a scene cannot claim no characters while its shots
+        reference canonical identities. Existing canonical scene members are
+        preserved even when they do not appear in a particular shot.
+        """
+        canonical_by_name = {
+            EntityResolver.normalize(character.name): character.name
+            for character in characters
+            if str(character.name or "").strip()
+        }
+        desired_by_scene: dict[str, set[str]] = {}
+
+        for scene in plan.get("scenes", []) or []:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            if not scene_id:
+                continue
+            desired = desired_by_scene.setdefault(scene_id, set())
+            existing = scene.get("characters", []) or []
+            if not isinstance(existing, (list, tuple, set)):
+                existing = [existing]
+            for value in existing:
+                key = EntityResolver.normalize(value)
+                canonical = canonical_by_name.get(key)
+                if canonical:
+                    desired.add(EntityResolver.normalize(canonical))
+
+        for shot in plan.get("shots", []) or []:
+            if not isinstance(shot, dict):
+                continue
+            scene_id = str(shot.get("scene_id", "") or "").strip()
+            if not scene_id:
+                continue
+            desired = desired_by_scene.setdefault(scene_id, set())
+            raw_characters = shot.get("characters", []) or []
+            if not isinstance(raw_characters, (list, tuple, set)):
+                raw_characters = [raw_characters]
+            for value in raw_characters:
+                key = EntityResolver.normalize(value)
+                canonical = canonical_by_name.get(key)
+                if canonical:
+                    desired.add(EntityResolver.normalize(canonical))
+
+        for scene in plan.get("scenes", []) or []:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            desired = desired_by_scene.get(scene_id, set())
+            scene["characters"] = [
+                character.name
+                for character in characters
+                if EntityResolver.normalize(character.name) in desired
+            ]
+
+    @staticmethod
+    def _finalize_plan_metadata(
+        plan: dict,
+        characters: list[Character],
+    ) -> None:
+        """Refresh durable plan metadata after all Director enrichment passes."""
+        ProductionOrchestrator._synchronize_scene_characters(plan, characters)
+        plan["characters"] = [character.to_dict() for character in characters]
+        plan["character_count"] = len(plan.get("characters", []) or [])
+        plan["scene_count"] = len(plan.get("scenes", []) or [])
+        plan["shot_count"] = len(plan.get("shots", []) or [])
+        plan["director_pending"] = False
+        plan["preview_ready"] = True
+
     def _enforce_production_contracts(
         self,
         plan: dict,
@@ -1565,6 +1642,14 @@ class ProductionOrchestrator:
         plan["parallel_safe"] = not shared
         ProductionTimeline(plan).build()
         ProductionTimeline.validate(plan)
+
+        # Persist only metadata that reflects the fully enriched, rebound and
+        # timeline-canonicalized production plan. The planner's initial counts
+        # describe the pre-Director skeleton and are therefore stale here.
+        self._finalize_plan_metadata(
+            plan,
+            characters,
+        )
 
         plan["delivery_width"] = DELIVERY_WIDTH
         plan["delivery_height"] = DELIVERY_HEIGHT
