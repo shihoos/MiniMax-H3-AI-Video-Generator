@@ -291,6 +291,69 @@ def main() -> None:
 
 
 
+def validate_scene_boundary_timeline_mode() -> None:
+    plan = {
+        "scenes": [
+            {"scene_id": "scene_001"},
+            {"scene_id": "scene_002"},
+        ],
+        "shots": [
+            {
+                "shot_id": "scene_001_shot_001",
+                "scene_id": "scene_001",
+                "order": 1,
+                "duration_seconds": 5.0,
+                "is_scene_boundary": True,
+                "continuity_mode": "chained",
+            },
+            {
+                "shot_id": "scene_001_shot_002",
+                "scene_id": "scene_001",
+                "order": 2,
+                "duration_seconds": 5.0,
+                "is_scene_boundary": False,
+                "continuity_mode": "chained",
+            },
+            {
+                "shot_id": "scene_002_shot_001",
+                "scene_id": "scene_002",
+                "order": 1,
+                "duration_seconds": 5.0,
+                "is_scene_boundary": True,
+                "continuity_mode": "chained",
+            },
+            {
+                "shot_id": "scene_002_shot_002",
+                "scene_id": "scene_002",
+                "order": 2,
+                "duration_seconds": 5.0,
+                "is_scene_boundary": False,
+                "continuity_mode": "chained",
+            },
+        ],
+    }
+    ProductionTimeline(plan).build()
+    assert [
+        shot["continuity_mode"] for shot in plan["shots"]
+    ] == ["scene_reset", "chained", "scene_reset", "chained"]
+
+    hard_cut_plan = {
+        "scenes": [{"scene_id": "scene_001"}],
+        "shots": [
+            {
+                "shot_id": "scene_001_shot_001",
+                "scene_id": "scene_001",
+                "order": 1,
+                "duration_seconds": 5.0,
+                "is_scene_boundary": True,
+                "continuity_mode": "hard_cut",
+            }
+        ],
+    }
+    ProductionTimeline(hard_cut_plan).build()
+    assert hard_cut_plan["shots"][0]["continuity_mode"] == "hard_cut"
+
+
 def validate_production_isolation(root: Path) -> None:
     from pipeline.h3_scene_continuity import H3SceneContinuity
     from pipeline.identity_anchor_store import IdentityAnchorStore
@@ -392,6 +455,7 @@ def validate_ffprobe_stream_duration() -> None:
 if __name__ == "__main__":
     main()
     # P0/P1/P2 regression gates.
+    validate_scene_boundary_timeline_mode()
     validate_production_isolation(ROOT)
     validate_reference_manifest_semantics(ROOT)
     validate_ffprobe_stream_duration()
