@@ -1321,7 +1321,21 @@ class QwenDirector(
                 for event in events[1:]:
                     event["continues_from_previous_shot"] = False
 
+                # Only the final surviving event in a shot may carry the
+                # continuation-to-next-shot flag. Clear any stale flags on
+                # earlier events before storing the shot as the boundary state.
+                for event in events[:-1]:
+                    event["continues_to_next_shot"] = False
+
                 previous_events = events
+
+            # A scene boundary is a hard semantic boundary for dialogue. The
+            # final event of the final shot in this scene can never continue
+            # into another scene, even if Qwen emitted a stale continuation
+            # flag or an earlier reconciliation left one behind.
+            if previous_events:
+                for event in previous_events:
+                    event["continues_to_next_shot"] = False
 
     @staticmethod
     def _normalize_dialogue_text(value: str) -> str:
