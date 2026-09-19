@@ -375,9 +375,18 @@ class QwenDirectorRuntimeMixin:
             candidates.append(Path(explicit).expanduser())
 
         candidates.append(Path(DIRECTOR_MODEL_PATH))
-        candidates.append(
-            DIRECTOR_KAGGLE_INPUT_ROOT / Path(DIRECTOR_MODEL_PATH).name
-        )
+
+        if DIRECTOR_KAGGLE_INPUT_ROOT.is_dir():
+            try:
+                candidates.extend(
+                    p
+                    for p in DIRECTOR_KAGGLE_INPUT_ROOT.rglob(
+                        Path(DIRECTOR_MODEL_PATH).name
+                    )
+                    if p.is_dir()
+                )
+            except OSError:
+                pass
 
         unique: list[Path] = []
         seen: set[str] = set()
@@ -436,10 +445,21 @@ class QwenDirectorRuntimeMixin:
             if explicit and DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE
             else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
         )
-        candidates = [configured]
-        if not configured.is_absolute() or not configured.is_dir():
-            candidates.append(DIRECTOR_KAGGLE_INPUT_ROOT / configured.name)
 
+        candidates = [configured]
+
+        if DIRECTOR_KAGGLE_INPUT_ROOT.is_dir():
+            try:
+                candidates.extend(
+                    p
+                    for p in DIRECTOR_KAGGLE_INPUT_ROOT.rglob(
+                        configured.name
+                    )
+                    if p.is_dir()
+                )
+            except OSError:
+                pass
+                
         if DIRECTOR_VLLM_SPECULATIVE_METHOD != "eagle3":
             raise RuntimeError(
                 "runtime_versions.yaml director.speculative_method must be eagle3 "
