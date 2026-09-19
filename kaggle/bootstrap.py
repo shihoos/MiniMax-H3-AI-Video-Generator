@@ -639,33 +639,8 @@ def install_director_runtime(
             f"Director runtime verification did not confirm speculative method {speculative_method!r}."
         )
 
-    # vLLM 0.29.0 exposes request logging as --enable-log-requests /
-    # --no-enable-log-requests. Validate the exact installed CLI before any
-    # production Director subprocess attempts to use it.
-    cli_help = subprocess.run(
-        [str(venv_python), "-m", "vllm.entrypoints.cli.main", "serve", "--help"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    cli_text = (cli_help.stdout or "") + "\n" + (cli_help.stderr or "")
-    if cli_help.returncode != 0:
-        raise RuntimeError(
-            "Unable to validate the installed vLLM serve CLI before Director startup.\n"
-            f"{cli_text[-4000:]}"
-        )
-    if "--no-enable-log-requests" not in cli_text:
-        raise RuntimeError(
-            "Installed vLLM serve CLI does not expose the required "
-            "--no-enable-log-requests option."
-        )
-    if "--disable-log-requests" in cli_text:
-        raise RuntimeError(
-            "Installed vLLM serve CLI unexpectedly exposes the obsolete "
-            "--disable-log-requests option."
-        )
-
+    # Request logging is disabled by default in the pinned vLLM runtime.
+    # Do not pass a version-sensitive logging flag to the Director subprocess.
     observed_gpu_count = None
     for line in verification.stdout.splitlines():
         if line.startswith("GPU count:"):
