@@ -65,13 +65,12 @@ def main() -> int:
     bootstrap_source = bootstrap_path.read_text(encoding="utf-8")
     if "--disable-log-requests" in qwen_runtime_source:
         raise RuntimeError(
-            "Obsolete vLLM --disable-log-requests flag is forbidden; "
-            "use --no-enable-log-requests for the pinned Director runtime."
+            "Obsolete vLLM --disable-log-requests flag is forbidden in the Director command."
         )
-    if "--no-enable-log-requests" not in qwen_runtime_source:
+    if "--no-enable-log-requests" in qwen_runtime_source:
         raise RuntimeError(
-            "Qwen Director vLLM command must explicitly use "
-            "--no-enable-log-requests."
+            "The pinned Director runtime must not depend on the optional "
+            "--no-enable-log-requests flag; request logging is already disabled by default."
         )
     bootstrap_tree = ast.parse(bootstrap_source, filename=str(bootstrap_path))
     bootstrap_defs = {
