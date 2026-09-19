@@ -576,10 +576,20 @@ class QwenDirectorRuntimeMixin:
         model_ok = False
         while time.monotonic() < deadline:
             if process is not None and process.poll() is not None:
+                log_path = Path(getattr(self, "_vllm_log_path", ""))
+                log_tail = ""
+                if log_path.is_file():
+                    try:
+                        lines = log_path.read_text(errors="replace").splitlines()
+                        log_tail = "\n".join(lines[-120:])
+                    except Exception:
+                        log_tail = "<unable to read vLLM startup log>"
                 raise RuntimeError(
                     "vLLM Director server exited during startup "
                     f"with code {process.returncode}. "
-                    f"See {getattr(self, '_vllm_log_path', 'vLLM log')}."
+                    f"See {log_path or 'vLLM log'}.\n"
+                    "Last vLLM log lines:\n"
+                    f"{log_tail}"
                 )
             try:
                 response = session.get(health_url, timeout=5)
@@ -685,7 +695,7 @@ class QwenDirectorRuntimeMixin:
                 "--speculative-config",
                 speculative_config,
                 "--trust-remote-code",
-                "--disable-log-requests",
+                "--no-enable-log-requests",
             ]
 
             try:
