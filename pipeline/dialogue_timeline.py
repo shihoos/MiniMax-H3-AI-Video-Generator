@@ -378,6 +378,7 @@ class DialogueTimeline:
     def apply_to_plan(self, plan: dict) -> None:
         previous_by_scene: dict[str, DialogueEvent | None] = {}
         continuation_by_scene: dict[str, bool] = {}
+        previous_shot_by_scene: dict[str, dict | None] = {}
 
         for shot in plan.get("shots", []) or []:
             scene_id = str(shot.get("scene_id", ""))
@@ -396,11 +397,37 @@ class DialogueTimeline:
                 )
 
             if previous is not None:
-                if continuation_by_scene.get(scene_id, False) != current_continues_from:
-                    raise ValueError(
-                        f"{shot.get('shot_id', '')}: dialogue continuation flags do not "
-                        "match across the shot boundary."
-                    )
+                previous_flag = bool(
+                    continuation_by_scene.get(scene_id, False)
+                )
+                previous_shot = previous_shot_by_scene.get(scene_id)
+
+                if not requested:
+                    # A shot with no dialogue cannot continue an earlier speech
+                    # segment. Clear the previous boundary explicitly so stale
+                    # continuation metadata cannot leak into the next shot.
+                    previous.continues_to_next_shot = False
+                    previous_shot = previous_shot_by_scene.get(scene_id)
+                    if previous_shot is not None:
+                        previous_events = previous_shot.get("dialogue_events", [])
+                        if previous_events:
+                            previous_events[-1]["continues_to_next_shot"] = False
+                else:
+                    # Boundary metadata may disagree after upstream dialogue
+                    # filtering. Reconcile it deterministically rather than
+                    # failing on stale flags. The OR preserves any explicit
+                    # continuation request; schedule_shot() then enforces the
+                    # semantic same-speaker requirement.
+                    continuation = previous_flag or current_continues_from
+                    requested[0]["continues_from_previous_shot"] = continuation
+                    # _raw_events() returns defensive copies. Persist the
+                    # reconciled boundary flag on the shot so schedule_shot()
+                    # sees the corrected value when it reads the events again.
+                    shot["dialogue_events"] = requested
+                    if previous_shot is not None:
+                        previous_events = previous_shot.get("dialogue_events", [])
+                        if previous_events:
+                            previous_events[-1]["continues_to_next_shot"] = continuation
 
             events = self.schedule_shot(
                 shot,
@@ -416,6 +443,7 @@ class DialogueTimeline:
             previous_by_scene[scene_id] = (
                 DialogueEvent(**events[-1]) if events else None
             )
+            previous_shot_by_scene[scene_id] = shot if events else None
             continuation_by_scene[scene_id] = bool(
                 events and events[-1]["continues_to_next_shot"]
             )
