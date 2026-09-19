@@ -1269,6 +1269,100 @@ class QwenDirectorSanitizeMixin:
             return False
         return bool(re.search(r"[.!?][\"')\]]*$", value))
 
+    @staticmethod
+    def _named_character_identity_candidates(text: str) -> list[str]:
+        """Extract conservative name-like identity anchors from completed story prose.
+
+        This is a production-safety gate, not a semantic character detector.
+        It only looks for explicit naming/direct-address/predicate structures that
+        can distinguish a named supporting identity from generic roles or places.
+        """
+        value = str(text or "")
+        candidates: list[str] = []
+
+        def add(raw: str) -> None:
+            name = re.sub(r"\s+", " ", str(raw or "").strip(" \t\r\n,.;:!?\"'“”‘’()[]{}"))
+            if not name:
+                return
+            # Strip honorifics from the identity key; keep the most complete name.
+            name = re.sub(
+                r"^(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+",
+                "",
+                name,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip()
+            if not name:
+                return
+            if name.lower() in {
+                "the", "a", "an", "arctic", "station", "vault", "father",
+                "mother", "man", "woman", "boy", "girl", "child", "person",
+                "doctor", "detective", "scientist", "pilot", "stranger",
+            }:
+                return
+            if not re.fullmatch(r"[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}", name):
+                return
+            candidates.append(name)
+
+        # Explicit naming constructions.
+        for match in re.finditer(
+            r"\b(?:named|called)\s+((?:[A-Z][A-Za-z'-]*)(?:\s+[A-Z][A-Za-z'-]*){0,3})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Honorific + proper name.
+        for match in re.finditer(
+            r"\b(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+            r"((?:[A-Z][A-Za-z'-]*)(?:\s+[A-Z][A-Za-z'-]*){0,3})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Proper multi-token names, excluding obvious location/setting phrases.
+        for match in re.finditer(
+            r"\b([A-Z][A-Za-z'-]+\s+[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Single-token names grounded by a narrative/dialogue predicate.
+        verbs = (
+            "said", "asked", "replied", "answered", "whispered", "shouted", "called",
+            "told", "warned", "entered", "arrived", "left", "ran", "walked", "looked",
+            "turned", "stepped", "followed", "waited", "stood", "sat", "moved", "opened",
+            "closed", "found", "took", "held", "carried", "grabbed", "saw", "heard",
+            "knew", "felt", "remembered", "returned", "stared", "smiled", "nodded",
+        )
+        verb_alt = "|".join(re.escape(v) for v in verbs)
+        for match in re.finditer(
+            rf"(?<![A-Za-z0-9'_-])([A-Z][A-Za-z'-]{{2,}})\s+(?:{verb_alt})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Direct-address names in dialogue.
+        for match in re.finditer(
+            r"(?:^|[\"'“”])\s*([A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2})\s*,",
+            value,
+            flags=re.MULTILINE,
+        ):
+            add(match.group(1))
+
+        # Deduplicate short forms against a more complete full name.
+        normalized: list[str] = []
+        for candidate in sorted(set(candidates), key=lambda item: (-len(item.split()), -len(item), item.lower())):
+            lower = candidate.lower()
+            if any(
+                lower == existing.lower()
+                or lower in {part.lower() for part in existing.split()}
+                for existing in normalized
+            ):
+                continue
+            if not any(candidate.lower() == existing.lower() for existing in normalized):
+                normalized.append(candidate)
+        return normalized
+
     def _validate_mode_output(
         self,
         mode: str,
@@ -1349,6 +1443,21 @@ class QwenDirectorSanitizeMixin:
                 raise RuntimeError(
                     "Story text does not end in a complete sentence "
                     "(the model stopped generating before finishing)."
+                )
+
+            named_identities = self._named_character_identity_candidates(result)
+            # A fully anonymous premise/story may legitimately contain no named
+            # supporting identity, so do not invent a failure for one-character
+            # test fixtures. Once the generated story establishes at least one
+            # explicit named identity, however, require a second stable named
+            # identity so the production roster can represent a real supporting
+            # character rather than generic roles such as "man" or "boy".
+            if named_identities and len(named_identities) < 2:
+                raise RuntimeError(
+                    "AI Story mode established only one stable named character identity "
+                    f"({named_identities[0]!r}) but the narrative contract requires at least "
+                    "one additional meaningful named supporting character. Add a distinct named "
+                    "supporting identity and connect that character to the story conflict or objective."
                 )
 
             return
