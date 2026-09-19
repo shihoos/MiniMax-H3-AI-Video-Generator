@@ -695,7 +695,6 @@ class QwenDirectorRuntimeMixin:
                 "--speculative-config",
                 speculative_config,
                 "--trust-remote-code",
-                "--no-enable-log-requests",
             ]
 
             try:
