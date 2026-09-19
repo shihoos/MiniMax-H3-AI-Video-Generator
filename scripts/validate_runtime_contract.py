@@ -58,8 +58,21 @@ def main() -> int:
         if not isinstance(data, dict) or not data.get("nodes"):
             raise RuntimeError(f"Invalid workflow root: {workflow}")
 
+    qwen_runtime_path = ROOT / "planner/qwen_director_runtime.py"
+    qwen_runtime_source = qwen_runtime_path.read_text(encoding="utf-8")
+
     bootstrap_path = ROOT / "kaggle/bootstrap.py"
     bootstrap_source = bootstrap_path.read_text(encoding="utf-8")
+    if "--disable-log-requests" in qwen_runtime_source:
+        raise RuntimeError(
+            "Obsolete vLLM --disable-log-requests flag is forbidden; "
+            "use --no-enable-log-requests for the pinned Director runtime."
+        )
+    if "--no-enable-log-requests" not in qwen_runtime_source:
+        raise RuntimeError(
+            "Qwen Director vLLM command must explicitly use "
+            "--no-enable-log-requests."
+        )
     bootstrap_tree = ast.parse(bootstrap_source, filename=str(bootstrap_path))
     bootstrap_defs = {
         node.name
