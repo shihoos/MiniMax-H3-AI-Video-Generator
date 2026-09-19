@@ -911,6 +911,105 @@ print("[H3 OPT] fresh-process runtime capability check passed; no H3 model gener
             + (verification.stderr or "")
         )
 
+
+def install_comfyui(runtime: dict) -> None:
+    """Install the locked ComfyUI checkout and its Python dependencies.
+
+    ComfyUI is an external runtime dependency, so it is cloned into the Kaggle
+    working directory at bootstrap time. The checkout is pinned to the exact
+    revision declared in runtime_versions.yaml and its own requirements are
+    installed before the project's locked PyTorch runtime is re-applied.
+    """
+    config = dict(runtime.get("comfyui", {}) or {})
+    repository = str(config.get("repository", "") or "").strip()
+    revision = str(config.get("revision", "") or "").strip()
+    expected_version = str(config.get("expected_version", "") or "").strip()
+
+    if not repository:
+        raise RuntimeError("runtime_versions.yaml comfyui.repository is required.")
+    if not revision:
+        raise RuntimeError("runtime_versions.yaml comfyui.revision is required.")
+
+    COMFY.parent.mkdir(parents=True, exist_ok=True)
+
+    if COMFY.exists():
+        if not (COMFY / ".git").is_dir():
+            raise RuntimeError(
+                f"ComfyUI path exists but is not a git checkout: {COMFY}. "
+                "Remove it before rerunning bootstrap."
+            )
+    else:
+        run("git", "clone", repository, COMFY)
+
+    # Fetch the locked tag/revision before checking it out. This also makes
+    # rerunning bootstrap against a pre-existing checkout deterministic.
+    run(
+        "git",
+        "-C",
+        COMFY,
+        "fetch",
+        "--all",
+        "--tags",
+        "--prune",
+    )
+    run(
+        "git",
+        "-C",
+        COMFY,
+        "checkout",
+        "--detach",
+        revision,
+    )
+
+    head = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    expected_head = subprocess.run(
+        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if head != expected_head:
+        raise RuntimeError(
+            "ComfyUI checkout is not at the locked revision: "
+            f"expected={expected_head}, actual={head}"
+        )
+
+    tagged = subprocess.run(
+        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
+        raise RuntimeError(
+            "ComfyUI checkout is not the expected release tag: "
+            f"HEAD={tagged or 'untagged'}, expected={expected_version}"
+        )
+
+    requirements = COMFY / "requirements.txt"
+    if requirements.is_file():
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--disable-pip-version-check",
+            "-r",
+            requirements,
+        )
+
+    print(
+        "[COMFYUI]",
+        f"revision={head}",
+        f"version={tagged or expected_version or 'untagged'}",
+    )
+
 def install_nodes() -> None:
 
     manifest = load_yaml(
