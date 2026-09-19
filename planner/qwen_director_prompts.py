@@ -39,8 +39,8 @@ class QwenDirectorPromptMixin:
     Create a genuinely developed cinematic narrative.
 
     Build:
-    - a memorable protagonist;
-    - meaningful supporting characters;
+    - a memorable protagonist with a stable proper name when the narrative supports named identity;
+    - meaningful supporting characters with stable proper names when they are part of the production story;
     - a clear desire or objective;
     - conflict;
     - escalating complications;
@@ -408,7 +408,7 @@ class QwenDirectorPromptMixin:
                             "is_character": {"type": "boolean"},
                             "aliases": {
                                 "type": "array",
-                                "maxItems": 6,
+                                "maxItems": 4,
                                 "items": {"type": "string"},
                             },
                         },
@@ -482,7 +482,7 @@ class QwenDirectorPromptMixin:
             temperature=0.05,
             top_p=0.70,
             call_name="character_entity_extraction",
-            max_completion=384,
+            max_completion=768,
             json_mode=True,
             disable_thinking=True,
             response_schema=self._character_extraction_json_schema(),
