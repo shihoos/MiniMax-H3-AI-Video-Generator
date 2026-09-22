@@ -88,6 +88,7 @@ class ProductionRunner:
 
         self.production_id = None
         self._active_story = ""
+        self._active_plan = {}
         self._active_plan_sha256 = ""
         self._completed_shots_lock = threading.RLock()
         self._manifest_lock = threading.RLock()
@@ -993,8 +994,11 @@ class ProductionRunner:
                 )
             )
 
+            context_plan = dict(self._active_plan or {})
+            context_plan["story"] = self._active_story
+            context_plan["language"] = shot.get("language", shot.get("dialogue_language", ""))
             shot["h3_context_ir"] = self.context_ir.compile(
-                {"story": self._active_story, "language": shot.get("language", shot.get("dialogue_language", ""))},
+                context_plan,
                 shot,
             )
 
@@ -1137,6 +1141,7 @@ class ProductionRunner:
                                 shot_executor=executor,
                                 workflow_mode=workflow_mode,
                                 upscale=upscale_enabled,
+                                production_plan=production_plan,
                             )
                         finally:
                             executor.execution_policy = production_policy
@@ -1314,6 +1319,7 @@ class ProductionRunner:
             "production_id"
         ] = production_id
         self._active_story = str(production_plan.get("story", "") or "")
+        self._active_plan = production_plan
         self._active_profile = str(production_plan.get("profile", PROFILE_BASE) or PROFILE_BASE).strip().lower()
         try:
             self.production_manifest.write(
