@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Optional
 import hashlib
 import json
@@ -138,21 +138,61 @@ class Character:
             "continuity_rules",
         )
 
-        self.semantic_aliases = list(dict.fromkeys(
-            value.strip()
-            for value in _as_string_list(self.semantic_aliases, "semantic_aliases")
-            if value.strip()
-        ))
+        aliases = []
+        seen_aliases = set()
+        for value in _as_string_list(self.semantic_aliases, "semantic_aliases"):
+            text = value.strip()
+            key = text.casefold()
+            if text and key not in seen_aliases:
+                seen_aliases.add(key)
+                aliases.append(text)
+        self.semantic_aliases = aliases
         self.identity_type = str(self.identity_type or "named_character").strip().lower() or "named_character"
-        if self.identity_type not in {"named_character", "relational_character"}:
-            raise ValueError("identity_type must be 'named_character' or 'relational_character'.")
         for field_name in ("relationship_to", "relationship"):
             value = getattr(self, field_name)
             if value is not None:
                 value = str(value).strip()
                 setattr(self, field_name, value or None)
+
+        self.identity_profile = _as_dict(
+            self.identity_profile,
+            "identity_profile",
+        )
+        profile = self.identity_profile
+        # identity_profile is the persisted semantic identity contract.  The
+        # top-level fields are the convenient runtime projection of the same
+        # contract.  On restore, prefer explicit profile values over stale
+        # default top-level values, then synchronize both representations.
+        if profile:
+            profile_aliases = profile.get("semantic_aliases")
+            if profile_aliases is not None and not self.semantic_aliases:
+                self.semantic_aliases = list(dict.fromkeys(
+                    str(value).strip()
+                    for value in _as_string_list(profile_aliases, "identity_profile.semantic_aliases")
+                    if str(value).strip()
+                ))
+            profile_type = str(profile.get("identity_type", "") or "").strip().lower()
+            if profile_type:
+                if self.identity_type == "named_character" and profile_type != "named_character":
+                    self.identity_type = profile_type
+                elif profile_type == self.identity_type:
+                    self.identity_type = profile_type
+            for field_name in ("relationship_to", "relationship"):
+                profile_value = str(profile.get(field_name, "") or "").strip()
+                if profile_value and not getattr(self, field_name):
+                    setattr(self, field_name, profile_value)
+
+        if self.identity_type not in {"named_character", "relational_character"}:
+            raise ValueError("identity_type must be 'named_character' or 'relational_character'.")
         if self.identity_type == "relational_character" and (not self.relationship_to or not self.relationship):
             raise ValueError("relational_character requires relationship_to and relationship.")
+        self.identity_profile.update({
+            "name": self.name,
+            "semantic_aliases": list(self.semantic_aliases),
+            "identity_type": self.identity_type,
+            "relationship_to": self.relationship_to,
+            "relationship": self.relationship,
+        })
 
         self.reference_mode = str(
             self.reference_mode or "missing"
@@ -200,6 +240,20 @@ class Character:
             self.story_state_profile,
             "story_state_profile",
         )
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "Character":
+        """Reconstruct a Character from its persisted dict without feeding derived fields back into __init__."""
+        if not isinstance(value, dict):
+            raise TypeError("Character.from_dict expects a mapping.")
+        allowed = {item.name for item in fields(cls) if item.init}
+        payload = {key: value[key] for key in allowed if key in value}
+        profile = payload.get("identity_profile")
+        if isinstance(profile, dict):
+            payload["identity_profile"] = dict(profile)
+        else:
+            payload["identity_profile"] = {}
+        return cls(**payload)
 
     def normalized_reference_paths(self) -> list[str]:
         values = list(self.reference_paths or [])
