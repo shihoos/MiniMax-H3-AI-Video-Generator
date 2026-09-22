@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
+import json
 import re
+from datetime import datetime, timezone
 
 
 class H3ContextIRCompiler:
@@ -45,6 +48,7 @@ class H3ContextIRCompiler:
     REF_PATTERN = re.compile(r"^<(Picture|Video|Audio)\s+(\d+)>$")
     REF_TOKEN_PATTERN = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>")
     SPEAKER_TOKEN_PATTERN = re.compile(r"\(S\d+\)")
+    OFFICIAL_CAPTURE_MARKER = "H3_CONTEXT_IR_CAPTURE_PATH"
 
     @staticmethod
     def _clean(value: Any) -> str:
@@ -794,8 +798,26 @@ class H3ContextIRCompiler:
         return str(context_ir["context_ir_input"]).strip()
 
     @classmethod
+    def workflow_prompt(cls, context_ir: dict[str, Any]) -> str:
+        """Return the canonical prompt plus a runtime-only capture marker.
+
+        The embedded official Context-IR node strips this marker before making
+        the MiniMax API request, so the marker can never become part of the
+        semantic prompt seen by H3.  It exists only to bind the asynchronous
+        official result to the exact production shot that requested it.
+        """
+        base = cls.input_prompt(context_ir)
+        official = context_ir.get("official_context_ir", {}) or {}
+        capture_path = cls._clean(official.get("capture_path"))
+        if not capture_path:
+            return base
+        return f"[[{cls.OFFICIAL_CAPTURE_MARKER}:{capture_path}]]\n{base}"
+
+    @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
-        # Backward-compatible method name; it returns the single canonical API input.
+        # Preserve the public prompt contract: callers receive the exact clean
+        # semantic Context-IR prompt. The runtime capture marker is injected only
+        # at the official pre-generation workflow boundary via workflow_prompt().
         return cls.input_prompt(context_ir)
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
@@ -816,6 +838,14 @@ class H3ContextIRCompiler:
             raw=self._clean(event.get("speaker_id") or event.get("speaker_name") or event.get("speaker"))
             if not raw: continue
             dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0)})
+        production_id = self._clean(plan.get("production_id"))
+        capture_root = ""
+        if production_id:
+            capture_root = str((Path(__file__).resolve().parents[1] / "data" / "production" / production_id / "context_ir").resolve())
+        capture_path = ""
+        if capture_root:
+            safe_shot_id = re.sub(r"[^A-Za-z0-9._-]+", "_", self._clean(shot.get("shot_id"))) or "shot"
+            capture_path = str((Path(capture_root).resolve() / f"{safe_shot_id}.json").resolve())
         result={
             "version":self.VERSION,"mode":"ref2va","story":str(plan.get("story","") or ""),
             "subject_definitions":subject_definitions,
@@ -828,7 +858,19 @@ class H3ContextIRCompiler:
             "context_ir_input":self._canonical_input_prompt(plan,shot,refs),
             "shot":{"shot_id":self._clean(shot.get("shot_id")),"duration_seconds":float(shot.get("duration_seconds",0.0) or 0.0),"camera":{"shot":self._clean(shot.get("camera_shot")),"movement":self._clean(shot.get("camera_movement")),"lens":self._clean(shot.get("lens_and_depth_of_field"))},"composition":self._clean(shot.get("composition_notes")),"lighting":self._clean(shot.get("lighting")),"action":self._clean(shot.get("action"))},
             "continuity":shot.get("continuity_start_state",{}) or {},"references":reference_rows,"speakers":speaker_map,"dialogue":dialogue_rows,"audio":{"soundscape":self._soundscape(shot,refs),"music":self._music(shot,refs)},
-            "official_context_ir":{"status":"not_requested","task_id":"","prompt":""},
+            "official_context_ir": {
+                "status": "required_pending",
+                "task_id": "",
+                "prompt": "",
+                "enhanced_prompt": "",
+                "capture_path": "",
+                "base_prompt_sha256": hashlib.sha256(
+                    self._canonical_input_prompt(plan, shot, refs).encode("utf-8")
+                ).hexdigest(),
+                "effective_prompt_sha256": "",
+                "captured_at": "",
+                "capture_path": capture_path,
+            },
         }
         self.validate(result); return result
 
