@@ -161,17 +161,21 @@ class ProductionPlanner:
         ),
     )
 
-    STABLE_RELATIONSHIPS = {
-        "father", "mother", "dad", "mom", "parent", "son", "daughter",
-        "child", "brother", "sister", "husband", "wife", "spouse", "partner",
-        "uncle", "aunt", "grandfather", "grandmother", "cousin", "nephew",
-        "niece", "mentor", "teacher", "student", "commander", "captain",
-        "officer", "colleague", "friend",
+    RELATIONSHIP_TERMS = {
+        "father", "mother", "dad", "mom", "parent",
+        "son", "daughter", "child", "brother", "sister",
+        "husband", "wife", "partner", "fiance", "fiancee",
+        "uncle", "aunt", "cousin", "grandfather", "grandmother",
+        "grandson", "granddaughter", "nephew", "niece",
+        "commander", "captain", "mentor", "teacher", "guardian",
+        "assistant", "handler", "colleague", "friend",
     }
+
     GENERIC_PERSON_LABELS = {
-        "man", "woman", "boy", "girl", "child", "person", "doctor", "guard",
-        "scientist", "soldier", "stranger", "pilot", "detective", "explorer",
-        "warrior", "hero", "heroine", "king", "queen", "robot", "android",
+        "man", "woman", "boy", "girl", "child", "person",
+        "hero", "heroine", "explorer", "detective", "scientist",
+        "soldier", "warrior", "king", "queen", "robot", "android",
+        "pilot", "doctor", "guard", "officer", "stranger",
     }
 
     COMMON_PROPER_WORDS = {
@@ -2442,127 +2446,274 @@ class ProductionPlanner:
         return False
 
     @classmethod
-    def _known_named_character_targets(cls, names: list[str]) -> list[str]:
-        return [
-            str(name).strip()
-            for name in (names or [])
-            if str(name).strip()
-            and str(name).strip().lower() not in cls.GENERIC_PERSON_LABELS
-            and str(name).strip().lower() not in cls.STABLE_RELATIONSHIPS
-        ]
-
-    @classmethod
-    def _detect_relational_character_candidates(cls, story: str, known_names: list[str]) -> list[dict]:
-        """Detect persistent relationship identities without canonizing bare roles."""
-        text=str(story or "")
-        targets=cls._known_named_character_targets(known_names)
-        if not text or not targets:
+    def _extract_relational_character_hints(
+        cls,
+        story: str,
+        canonical_names: list[str],
+    ) -> list[dict]:
+        """Recover strongly grounded relational identities as semantic hints."""
+        story = str(story or "")
+        if not story:
             return []
-        found={}
-        relation_alt="|".join(sorted((re.escape(v) for v in cls.STABLE_RELATIONSHIPS),key=len,reverse=True))
 
-        def add(target, relation, alias, strong):
-            target=str(target).strip(); relation=str(relation).strip().lower()
-            if not target or relation not in cls.STABLE_RELATIONSHIPS:
+        actual_by_norm = {
+            EntityResolver.normalize(name): str(name).strip()
+            for name in canonical_names
+            if str(name or "").strip()
+        }
+        aliases = EntityResolver.build_alias_map(actual_by_norm.values())
+        records: dict[str, dict] = {}
+        relation_alt = "|".join(
+            sorted(
+                (re.escape(term) for term in cls.RELATIONSHIP_TERMS),
+                key=len,
+                reverse=True,
+            )
+        )
+
+        def add(owner: str, relation: str, alias: str, strong: bool) -> None:
+            owner_norm = aliases.get(EntityResolver.normalize(owner))
+            owner_canonical = actual_by_norm.get(owner_norm or "")
+            relation_norm = str(relation or "").strip().lower()
+            if not owner_canonical or relation_norm not in cls.RELATIONSHIP_TERMS:
                 return
-            key=(target.lower(),relation)
-            item=found.setdefault(key,{"name":f"{target}'s {relation}","entity_type":"PERSON","is_character":True,"aliases":[],"identity_type":"relational_character","relationship_to":target,"relationship":relation,"strong":False})
-            for value in (alias,re.sub(r"^the\s+","",str(alias or ""),flags=re.IGNORECASE)):
-                value=str(value or "").strip()
-                if value and value not in item["aliases"]:
-                    item["aliases"].append(value)
-            if relation not in item["aliases"]:
-                item["aliases"].append(relation)
-            item["strong"]=bool(item["strong"] or strong)
+            canonical = f"{owner_canonical}'s {relation_norm}"
+            key = EntityResolver.normalize(canonical)
+            entry = records.setdefault(
+                key,
+                {
+                    "name": canonical,
+                    "relationship_to": owner_canonical,
+                    "relationship": relation_norm,
+                    "aliases": [],
+                    "strong": False,
+                },
+            )
+            if alias and EntityResolver.normalize(alias) != key:
+                entry["aliases"].append(str(alias).strip())
+            entry["strong"] = bool(entry["strong"] or strong)
 
-        for target in targets:
-            for m in re.finditer(rf"(?<![A-Za-z0-9'_-]){re.escape(target)}(?:'s|’s)\s+(?P<rel>{relation_alt})(?![A-Za-z0-9'_-])",text,flags=re.IGNORECASE):
-                add(target,m.group("rel"),m.group(0),True)
-            for m in re.finditer(rf"(?<![A-Za-z0-9'_-])(?P<rel>{relation_alt})\s+of\s+{re.escape(target)}(?![A-Za-z0-9'_-])",text,flags=re.IGNORECASE):
-                add(target,m.group("rel"),m.group(0),True)
+        possessive = re.compile(
+            r"\b([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
+            r"(?:'s|’s)\s+(" + relation_alt + r")\b"
+        )
+        for match in possessive.finditer(story):
+            add(match.group(1), match.group(2), match.group(0), True)
 
-        for m in re.finditer(rf"\b(?:his|her|their|my|our|your)\s+(?P<rel>{relation_alt})\b",text,flags=re.IGNORECASE):
-            window=text[max(0,m.start()-500):m.start()]
-            nearby=[target for target in targets if re.search(rf"(?<![A-Za-z0-9'_-]){re.escape(target)}(?![A-Za-z0-9'_-])",window,flags=re.IGNORECASE)]
-            nearby=list(dict.fromkeys(nearby))
-            if len(nearby)==1:
-                add(nearby[0],m.group("rel"),m.group(0),False)
+        of_pattern = re.compile(
+            r"\b(?:the|a|an)\s+(" + relation_alt + r")\s+of\s+"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\b"
+        )
+        for match in of_pattern.finditer(story):
+            add(match.group(2), match.group(1), match.group(0), True)
 
-        surface_pattern=re.compile(r"\b(?:the\s+)?(?:(?:older|elder|younger)\s+)?(?:man|woman|boy|girl)\b",flags=re.IGNORECASE)
-        for item in found.values():
-            target=item["relationship_to"]; relation=item["relationship"]
-            relation_positions=[m.start() for m in re.finditer(rf"(?<![A-Za-z0-9'_-]){re.escape(target)}(?:'s|’s)\s+{re.escape(relation)}(?![A-Za-z0-9'_-])|\b(?:his|her|their|my|our|your)\s+{re.escape(relation)}\b",text,flags=re.IGNORECASE)]
-            for sm in surface_pattern.finditer(text):
-                nearby_relation = False
-                for pos in relation_positions:
-                    if abs(sm.start() - pos) > 450:
-                        continue
-                    between = text[min(pos, sm.start()):max(pos, sm.start())]
-                    sentence_breaks = len(re.findall(r"[.!?]", between))
-                    if sentence_breaks <= 1:
-                        nearby_relation = True
-                        break
-                if nearby_relation:
-                    # A nearby generic surface is not itself an identity, but it
-                    # is enough evidence to require Qwen adjudication because the
-                    # relationship may denote a persistent person who later speaks
-                    # or acts (e.g. "the man said ...").
-                    add(target,relation,sm.group(0),True)
-            item["aliases"]=list(dict.fromkeys(item["aliases"]))[:8]
-        return list(found.values())
+        pronoun_pattern = re.compile(
+            r"\b(his|her|their)\s+(" + relation_alt + r")\b",
+            flags=re.IGNORECASE,
+        )
+        for match in pronoun_pattern.finditer(story):
+            window_start = max(0, match.start() - 420)
+            window = story[window_start:match.start()]
+            candidates = []
+            for canonical in actual_by_norm.values():
+                positions = [
+                    m.start()
+                    for m in re.finditer(
+                        re.escape(canonical),
+                        window,
+                        flags=re.IGNORECASE,
+                    )
+                ]
+                if positions:
+                    candidates.append((positions[-1], canonical))
+            if not candidates:
+                continue
+            candidates.sort(reverse=True)
+            nearest_pos, nearest_owner = candidates[0]
+            if len(candidates) > 1 and candidates[1][0] == nearest_pos:
+                continue
+            sentence_gap = window[nearest_pos:]
+            if sum(sentence_gap.count(mark) for mark in '.!?') > 2:
+                continue
+            add(nearest_owner, match.group(2), match.group(0), True)
 
-    @classmethod
-    def _relational_candidate_is_grounded(cls, story: str, candidate: dict, known_names: list[str]) -> bool:
-        if not isinstance(candidate,dict) or str(candidate.get("identity_type","")).strip().lower()!="relational_character":
-            return False
-        target=str(candidate.get("relationship_to","") or "").strip(); relation=str(candidate.get("relationship","") or "").strip().lower()
-        if not target or relation not in cls.STABLE_RELATIONSHIPS:
-            return False
-        known={x.lower() for x in cls._known_named_character_targets(known_names)}
-        if target.lower() not in known:
-            return False
-        expected=next((x for x in cls._detect_relational_character_candidates(story,[target]) if x["relationship"]==relation),None)
-        if expected is None:
-            return False
-        surfaces=[str(candidate.get("name","") or "").strip(),*[str(v or "").strip() for v in (candidate.get("aliases",[]) or []) if str(v or "").strip()]]
-        if not any(cls._story_has_character_name(story,v) for v in surfaces if v):
-            return False
-        expected_aliases={EntityResolver.normalize(v) for v in expected.get("aliases",[]) if v}
-        supplied_aliases={EntityResolver.normalize(v) for v in surfaces if v}
-        return bool(expected_aliases & supplied_aliases)
+        for item in records.values():
+            item["aliases"] = list(dict.fromkeys(item["aliases"]))
+        return list(records.values())
 
     @classmethod
-    def _semantic_character_metadata(cls, story: str, deterministic: list[str], semantic_result) -> dict[str,dict]:
-        result={}
-        if not isinstance(semantic_result,dict):
-            return result
-        candidates=list(semantic_result.get("candidates",[]) or [])
-        if not candidates:
-            candidates=list(semantic_result.get("characters",[]) or [])
+    def _relational_candidate_is_grounded(
+        cls,
+        story: str,
+        raw: dict,
+        canonical_names: list[str],
+    ) -> tuple[bool, str | None, dict]:
+        if not isinstance(raw, dict):
+            return False, None, {}
+        identity_type = str(raw.get("identity_type", "") or "").strip().lower()
+        if identity_type != "relational_character":
+            return False, None, {}
+
+        actual_by_norm = {
+            EntityResolver.normalize(name): str(name).strip()
+            for name in canonical_names
+            if str(name or "").strip()
+        }
+        aliases = EntityResolver.build_alias_map(actual_by_norm.values())
+        owner_norm = aliases.get(
+            EntityResolver.normalize(str(raw.get("relationship_to", "") or ""))
+        )
+        owner = actual_by_norm.get(owner_norm or "")
+        relationship = str(raw.get("relationship", "") or "").strip().lower()
+        if not owner or relationship not in cls.RELATIONSHIP_TERMS:
+            return False, None, {}
+
+        canonical = f"{owner}'s {relationship}"
+        supplied_name = str(raw.get("name", "") or "").strip()
+        raw_aliases = [
+            str(value or "").strip()
+            for value in (raw.get("aliases", []) or [])
+            if str(value or "").strip()
+        ]
+        surfaces = [supplied_name, *raw_aliases]
+        story_lower = story.lower()
+
+        exact_pair = bool(re.search(
+            re.escape(owner.lower()) + r"(?:'s|’s)\s+" + re.escape(relationship) + r"\b",
+            story_lower,
+        ))
+        of_form = bool(re.search(
+            r"\b(?:the|a|an)\s+" + re.escape(relationship) + r"\s+of\s+"
+            + re.escape(owner.lower()) + r"\b",
+            story_lower,
+        ))
+        alias_anchor = any(
+            cls._story_has_character_name(story, surface)
+            for surface in surfaces
+            if surface
+        )
+
+        pronoun_relation = False
+        for surface in raw_aliases:
+            normalized = EntityResolver.normalize(surface)
+            parts = normalized.split()
+            if len(parts) != 2 or parts[0] not in {"his", "her", "their"} or parts[1] != relationship:
+                continue
+            for owner_match in re.finditer(re.escape(owner), story, flags=re.IGNORECASE):
+                window = story[owner_match.end():owner_match.end() + 420]
+                if re.search(
+                    r"\b" + re.escape(parts[0]) + r"\s+" + re.escape(relationship) + r"\b",
+                    window,
+                    flags=re.IGNORECASE,
+                ):
+                    pronoun_relation = True
+                    break
+            if pronoun_relation:
+                break
+
+        grounded = bool(exact_pair or of_form or alias_anchor or pronoun_relation)
+        if not grounded:
+            return False, None, {}
+
+        semantic_aliases = []
+        for surface in raw_aliases:
+            if EntityResolver.normalize(surface) != EntityResolver.normalize(canonical):
+                semantic_aliases.append(surface)
+        if supplied_name and EntityResolver.normalize(supplied_name) != EntityResolver.normalize(canonical):
+            semantic_aliases.append(supplied_name)
+
+        return True, canonical, {
+            "identity_type": "relational_character",
+            "relationship_to": owner,
+            "relationship": relationship,
+            "semantic_aliases": list(dict.fromkeys(semantic_aliases)),
+        }
+
+    @classmethod
+    def _semantic_character_metadata(
+        cls,
+        story: str,
+        canonical_names: list[str],
+        semantic_result,
+        relational_hints: list[dict] | None = None,
+    ) -> dict[str, dict]:
+        """Return validated semantic identity metadata keyed by canonical name."""
+        result: dict[str, dict] = {}
+        candidates = []
+        if isinstance(semantic_result, dict):
+            candidates = list(semantic_result.get("candidates", []) or [])
+            if not candidates:
+                candidates = list(semantic_result.get("characters", []) or [])
+
         for raw in candidates:
-            if isinstance(raw,str):
-                raw={"name":raw,"entity_type":"CHARACTER","is_character":True,"aliases":[]}
-            if not isinstance(raw,dict) or not bool(raw.get("is_character",False)):
+            if isinstance(raw, str):
+                raw = {
+                    "name": raw,
+                    "entity_type": "CHARACTER",
+                    "is_character": True,
+                    "aliases": [],
+                    "identity_type": "named_character",
+                }
+            if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                 continue
-            if str(raw.get("entity_type","")).strip().upper() not in {"PERSON","CHARACTER","SENTIENT"}:
+            identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
+            if identity_type == "relational_character":
+                valid, canonical, metadata = cls._relational_candidate_is_grounded(
+                    story, raw, canonical_names
+                )
+                if valid and canonical:
+                    result[EntityResolver.normalize(canonical)] = metadata
                 continue
-            identity_type=str(raw.get("identity_type","named_character")).strip().lower()
-            name=str(raw.get("name","") or "").strip()
-            aliases=[str(v or "").strip() for v in (raw.get("aliases",[]) or []) if str(v or "").strip()]
-            if identity_type=="relational_character":
-                if not cls._relational_candidate_is_grounded(story,raw,deterministic):
-                    continue
-                target=str(raw.get("relationship_to","")).strip(); relation=str(raw.get("relationship","")).strip().lower(); canonical=f"{target}'s {relation}"
-                expected=next((x for x in cls._detect_relational_character_candidates(story,[target]) if x["relationship"]==relation),{})
-                aliases=list(dict.fromkeys([*aliases,*expected.get("aliases",[]),relation]))[:8]
-                result[canonical.lower()]={"semantic_aliases":aliases,"identity_type":"relational_character","relationship_to":target,"relationship":relation}
+
+            entity_type = str(raw.get("entity_type", "") or "").strip().upper()
+            name = str(raw.get("name", "") or "").strip()
+            aliases = [
+                str(alias or "").strip()
+                for alias in (raw.get("aliases", []) or [])
+                if str(alias or "").strip()
+            ]
+            if (
+                entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}
+                or not name
+                or name.lower() in cls.GENERIC_PERSON_LABELS
+                or name.lower() in cls.RELATIONSHIP_TERMS
+                or not any(cls._story_has_character_name(story, surface) for surface in [name, *aliases])
+            ):
                 continue
-            if name.lower() in cls.GENERIC_PERSON_LABELS or name.lower() in cls.STABLE_RELATIONSHIPS:
+            canonical = re.sub(
+                r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+                "",
+                name,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip() or name
+            result[EntityResolver.normalize(canonical)] = {
+                "identity_type": "named_character",
+                "relationship_to": None,
+                "relationship": None,
+                "semantic_aliases": list(dict.fromkeys(aliases)),
+            }
+
+        for hint in relational_hints or []:
+            if not hint.get("strong"):
                 continue
-            if not any(cls._story_has_character_name(story,v) for v in [name,*aliases] if v):
+            canonical = str(hint.get("name", "") or "").strip()
+            if not canonical:
                 continue
-            canonical=re.sub(r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\\.?\\s+","",name,count=1,flags=re.IGNORECASE).strip() or name
-            result[canonical.lower()]={"semantic_aliases":list(dict.fromkeys(aliases))[:8],"identity_type":"named_character","relationship_to":None,"relationship":None}
+            key = EntityResolver.normalize(canonical)
+            result.setdefault(
+                key,
+                {
+                    "identity_type": "relational_character",
+                    "relationship_to": str(hint.get("relationship_to", "") or "").strip() or None,
+                    "relationship": str(hint.get("relationship", "") or "").strip() or None,
+                    "semantic_aliases": list(dict.fromkeys(hint.get("aliases", []) or [])),
+                },
+            )
+            if result[key].get("identity_type") == "relational_character":
+                result[key]["semantic_aliases"] = list(dict.fromkeys(
+                    (result[key].get("semantic_aliases", []) or []) + list(hint.get("aliases", []) or [])
+                ))
         return result
 
     @classmethod
@@ -2572,14 +2723,7 @@ class ProductionPlanner:
         deterministic: list[str],
         semantic_result,
     ) -> list[str]:
-        """Canonicalize the Qwen semantic roster without re-running semantic discovery.
-
-        When a Qwen extraction result is present and well-formed, Qwen owns the
-        semantic decision. The planner only applies production-safety checks:
-        supported entity type, story anchoring, aliases, title stripping, and
-        duplicate/full-name normalization. Deterministic candidates are used
-        only when the semantic result is unusable or absent.
-        """
+        """Canonicalize the semantic roster with deterministic safety guards."""
         if not isinstance(semantic_result, dict):
             return cls._canonicalize_character_descriptors(deterministic or [])
 
@@ -2588,6 +2732,8 @@ class ProductionPlanner:
             semantic_candidates = list(semantic_result.get("characters", []) or [])
 
         normalized: list[str] = []
+        known_names = cls._canonicalize_character_descriptors(deterministic or [])
+
         for raw in semantic_candidates:
             if isinstance(raw, str):
                 raw = {
@@ -2595,16 +2741,31 @@ class ProductionPlanner:
                     "entity_type": "CHARACTER",
                     "is_character": True,
                     "aliases": [],
+                    "identity_type": "named_character",
                 }
             if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                 continue
 
-            entity_type = str(raw.get("entity_type", "")).strip().upper()
+            identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
+            entity_type = str(raw.get("entity_type", "") or "").strip().upper()
             if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}:
+                continue
+
+            if identity_type == "relational_character":
+                valid, canonical, _metadata = cls._relational_candidate_is_grounded(
+                    story,
+                    raw,
+                    known_names,
+                )
+                if valid and canonical:
+                    normalized.append(canonical)
                 continue
 
             name = str(raw.get("name", "") or "").strip()
             if not name:
+                continue
+            lowered = name.lower()
+            if lowered in cls.GENERIC_PERSON_LABELS or lowered in cls.RELATIONSHIP_TERMS:
                 continue
 
             aliases = [
@@ -2612,15 +2773,10 @@ class ProductionPlanner:
                 for alias in (raw.get("aliases", []) or [])
                 if str(alias or "").strip()
             ]
-            surfaces = [name, *aliases]
-
-            # Alias/normalization tolerant story anchor. Qwen may canonicalize
-            # a short form to a fuller name, or retain a short surface alias.
-            anchored = any(
+            if not any(
                 cls._story_has_character_name(story, surface)
-                for surface in surfaces
-            )
-            if not anchored:
+                for surface in [name, *aliases]
+            ):
                 continue
 
             canonical = re.sub(
@@ -2641,58 +2797,53 @@ class ProductionPlanner:
         qwen_character_extractor=None,
         qwen_character_adjudicator=None,
     ) -> list[Character]:
+        # Per-invocation semantic metadata is carried out-of-band through the
+        # existing Character.identity_profile path by QwenDirector. No schema
+        # expansion is required.
+        self._semantic_character_metadata_cache = {}
 
-        deterministic = self._canonicalize_character_descriptors(
+        descriptors = self._canonicalize_character_descriptors(
             self.detect_character_descriptors(story)
         )
-        relation_candidates = self._detect_relational_character_candidates(
+        relational_hints = self._extract_relational_character_hints(
             story,
-            self._known_named_character_targets(deterministic),
+            descriptors,
         )
-        semantic_hints = list(dict.fromkeys(
-            [item["name"] for item in relation_candidates] + deterministic
-        ))
-
-        descriptors = list(deterministic)
-        semantic_result_final = None
         semantic_roster_authoritative = False
+        semantic_result_final = None
 
         if qwen_character_extractor is not None:
             try:
+                semantic_hints = list(dict.fromkeys(
+                    [*descriptors]
+                    + [item["name"] for item in relational_hints if item.get("name")]
+                ))[:32]
                 semantic_result = qwen_character_extractor(
                     story,
                     semantic_hints,
                 )
                 semantic_result_final = semantic_result
 
-                candidates = []
+                semantic_candidates = []
                 if isinstance(semantic_result, dict):
-                    candidates = list(semantic_result.get("candidates", []) or [])
-                    if not candidates:
-                        candidates = list(semantic_result.get("characters", []) or [])
+                    semantic_candidates = list(semantic_result.get("candidates", []) or [])
+                    if not semantic_candidates:
+                        semantic_candidates = list(semantic_result.get("characters", []) or [])
 
-                usable = (
+                semantic_payload_usable = (
                     isinstance(semantic_result, dict)
                     and (
                         isinstance(semantic_result.get("candidates"), list)
                         or isinstance(semantic_result.get("characters"), list)
                     )
                 )
-                semantic_roster_authoritative = usable
+                semantic_roster_authoritative = semantic_payload_usable
 
-                semantic_names = {
-                    str(raw.get("name", "") or "").strip().lower()
-                    for raw in candidates
-                    if isinstance(raw, dict)
-                }
-                strong_relation_missing = any(
-                    bool(item.get("strong"))
-                    and item["name"].strip().lower() not in semantic_names
-                    for item in relation_candidates
-                )
-
+                true_semantic_count = 0
                 invalid_positive = False
-                for raw in candidates:
+                semantic_names = set()
+
+                for raw in semantic_candidates:
                     if isinstance(raw, str):
                         raw = {
                             "name": raw,
@@ -2703,50 +2854,64 @@ class ProductionPlanner:
                         }
                     if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                         continue
-
-                    identity_type = str(
-                        raw.get("identity_type", "named_character")
-                    ).strip().lower()
-                    name = str(raw.get("name", "") or "").strip()
-                    aliases = [
-                        str(alias or "").strip()
-                        for alias in (raw.get("aliases", []) or [])
-                        if str(alias or "").strip()
-                    ]
-                    entity_type = str(
-                        raw.get("entity_type", "")
-                    ).strip().upper()
-
+                    true_semantic_count += 1
+                    identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
+                    entity_type = str(raw.get("entity_type", "") or "").strip().upper()
                     if identity_type == "relational_character":
-                        valid = self._relational_candidate_is_grounded(
+                        valid, canonical, _ = self._relational_candidate_is_grounded(
                             story,
                             raw,
-                            deterministic,
+                            descriptors,
                         )
+                        if valid and canonical:
+                            semantic_names.add(EntityResolver.normalize(canonical))
+                        else:
+                            invalid_positive = True
+                        continue
+
+                    name = str(raw.get("name", "") or "").strip()
+                    aliases = [
+                        str(a or "").strip()
+                        for a in (raw.get("aliases", []) or [])
+                        if str(a or "").strip()
+                    ]
+                    valid_named = (
+                        entity_type in {"PERSON", "CHARACTER", "SENTIENT"}
+                        and bool(name)
+                        and name.lower() not in self.GENERIC_PERSON_LABELS
+                        and name.lower() not in self.RELATIONSHIP_TERMS
+                        and any(
+                            self._story_has_character_name(story, surface)
+                            for surface in [name, *aliases]
+                            if surface
+                        )
+                    )
+                    if valid_named:
+                        semantic_names.add(EntityResolver.normalize(name))
                     else:
-                        valid = (
-                            entity_type in {"PERSON", "CHARACTER", "SENTIENT"}
-                            and bool(name)
-                            and name.lower() not in self.GENERIC_PERSON_LABELS
-                            and name.lower() not in self.STABLE_RELATIONSHIPS
-                            and any(
-                                self._story_has_character_name(story, surface)
-                                for surface in [name, *aliases]
-                                if surface
-                            )
-                        )
-                    if not valid:
                         invalid_positive = True
 
+                strong_relation_missing = any(
+                    bool(item.get("strong"))
+                    and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_names
+                    for item in relational_hints
+                )
+
+                deterministic_high_confidence = [
+                    name for name in descriptors
+                    if self._high_confidence_deterministic_character(story, name)
+                ]
                 needs_adjudication = (
-                    not usable
-                    or strong_relation_missing
+                    not semantic_payload_usable
                     or invalid_positive
+                    or (true_semantic_count == 0 and bool(deterministic_high_confidence))
+                    or strong_relation_missing
                 )
 
                 if needs_adjudication and qwen_character_adjudicator is not None:
                     adjudication_hints = list(dict.fromkeys(
-                        [item["name"] for item in relation_candidates] + deterministic
+                        [*descriptors]
+                        + [item["name"] for item in relational_hints if item.get("name")]
                     ))[:24]
                     adjudicated = qwen_character_adjudicator(
                         story,
@@ -2766,13 +2931,11 @@ class ProductionPlanner:
                 if semantic_roster_authoritative:
                     descriptors = self._reconcile_semantic_characters(
                         story,
-                        deterministic,
+                        descriptors,
                         semantic_result_final,
                     )
                 else:
-                    descriptors = self._canonicalize_character_descriptors(
-                        deterministic
-                    )
+                    descriptors = self._canonicalize_character_descriptors(descriptors)
 
             except Exception as exc:
                 LOGGER.warning(
@@ -2781,7 +2944,7 @@ class ProductionPlanner:
                 )
                 semantic_result_final = None
                 semantic_roster_authoritative = False
-                descriptors = list(deterministic)
+                descriptors = self._canonicalize_character_descriptors(descriptors)
 
         if not descriptors and not semantic_roster_authoritative:
             fallback = []
@@ -2801,43 +2964,49 @@ class ProductionPlanner:
                     fallback.append(name)
             descriptors = self._canonicalize_character_descriptors(fallback)
 
+        # Add only strongly grounded relational identities that have passed the
+        # same deterministic evidence gate. This is a bounded semantic-recall
+        # rescue, not generic role promotion.
+        relation_by_norm = {
+            EntityResolver.normalize(str(item.get("name", "") or "")): item
+            for item in relational_hints
+            if item.get("strong") and item.get("name")
+        }
+        for key, item in relation_by_norm.items():
+            canonical = str(item.get("name", "") or "").strip()
+            if canonical and key not in {
+                EntityResolver.normalize(value) for value in descriptors
+            }:
+                descriptors.append(canonical)
+
+        descriptors = self._canonicalize_character_descriptors(descriptors)
         if not descriptors:
             return []
 
         metadata = self._semantic_character_metadata(
             story,
-            deterministic,
+            descriptors,
             semantic_result_final,
+            relational_hints,
         )
+        self._semantic_character_metadata_cache = metadata
 
-        characters: list[Character] = []
+        characters = []
         for index, descriptor in enumerate(descriptors, start=1):
             character = self._make_character(
                 descriptor,
                 index,
                 story,
             )
-            info = metadata.get(
-                str(descriptor).strip().lower()
-            )
+            info = metadata.get(EntityResolver.normalize(descriptor))
             if info:
-                character.semantic_aliases = list(
-                    info.get("semantic_aliases", []) or []
-                )
-                character.identity_type = str(
-                    info.get("identity_type", "named_character")
-                )
-                character.relationship_to = info.get("relationship_to")
-                character.relationship = info.get("relationship")
+                # Keep existing Character schema unchanged. QwenDirector carries
+                # this validated metadata through the existing identity_profile.
+                character._semantic_identity_metadata = dict(info)
             characters.append(character)
 
-        self.references.resolve_characters(
-            characters
-        )
-        self.references.validate(
-            characters,
-            require_images=False,
-        )
+        self.references.resolve_characters(characters)
+        self.references.validate(characters, require_images=False)
         return characters
 
     # ============================================================
@@ -2949,22 +3118,6 @@ class ProductionPlanner:
         aliases = EntityResolver.build_alias_map(
             canonical_names
         )
-        semantic_alias_owners = {}
-        for character in characters:
-            canonical = str(character.name or "").strip().lower()
-            for alias in list(getattr(character, "semantic_aliases", []) or []):
-                normalized = EntityResolver.normalize(alias)
-                if normalized:
-                    semantic_alias_owners.setdefault(normalized, set()).add(canonical)
-                    generic_match = re.fullmatch(
-                        r"(?:the\s+)?(?:(?:older|elder|younger)\s+)?(man|woman|boy|girl)",
-                        normalized,
-                    )
-                    if generic_match:
-                        semantic_alias_owners.setdefault(generic_match.group(1), set()).add(canonical)
-        for alias, owners in semantic_alias_owners.items():
-            if len(owners) == 1:
-                aliases.setdefault(alias, next(iter(owners)))
 
         lower = text.lower()
         resolved: list[str] = []
