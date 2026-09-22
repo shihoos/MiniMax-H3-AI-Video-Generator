@@ -216,6 +216,38 @@ class ProductionOrchestrator:
                     )
                     or []
                 ),
+                semantic_aliases=list(
+                    value.get(
+                        "semantic_aliases",
+                        (value.get("identity_profile", {}) or {}).get("semantic_aliases", []),
+                    )
+                    or []
+                ),
+                identity_type=str(
+                    value.get(
+                        "identity_type",
+                        (value.get("identity_profile", {}) or {}).get("identity_type", "named_character"),
+                    )
+                    or "named_character"
+                ),
+                relationship_to=(
+                    str(
+                        value.get(
+                            "relationship_to",
+                            (value.get("identity_profile", {}) or {}).get("relationship_to", ""),
+                        )
+                        or ""
+                    ).strip() or None
+                ),
+                relationship=(
+                    str(
+                        value.get(
+                            "relationship",
+                            (value.get("identity_profile", {}) or {}).get("relationship", ""),
+                        )
+                        or ""
+                    ).strip() or None
+                ),
             )
 
             source = (
