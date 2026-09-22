@@ -1025,6 +1025,26 @@ class ProductionRunner:
                     f"{result}"
                 )
 
+            official = dict(shot.get("h3_context_ir", {}).get("official_context_ir", {}) or {})
+            capture_path = str(official.get("capture_path", "") or "").strip()
+            if capture_path:
+                capture = executor.client.read_context_ir_capture(
+                    capture_path,
+                    expected_base_prompt_sha256=str(official.get("base_prompt_sha256", "")),
+                )
+                official.update({
+                    "status": "succeeded",
+                    "task_id": str(capture.get("task_id", "")),
+                    "enhanced_prompt": str(capture.get("enhanced_prompt", "")),
+                    "prompt": str(capture.get("enhanced_prompt", "")),
+                    "effective_prompt_sha256": str(capture.get("effective_prompt_sha256", "")),
+                    "captured_at": str(capture.get("captured_at", "")),
+                })
+                shot["h3_context_ir"]["official_context_ir"] = official
+                shot["h3_effective_prompt"] = official["enhanced_prompt"]
+            else:
+                raise RuntimeError(f"Shot {shot_id} has no official Context-IR capture path.")
+
             try:
                 av_result = FFProbeMediaDurationProvider().validate_video_audio_sync(
                     result,
@@ -1073,22 +1093,37 @@ class ProductionRunner:
                     "identity_anchors": shot.get("identity_anchors", []) or [],
                     "continuity_start_state": shot.get("continuity_start_state", {}) or {},
                     "continuity_end_state": shot.get("continuity_end_state", {}) or {},
-                    "h3_prompt": shot.get("h3_prompt", shot.get("prompt", "")),
+                    "h3_prompt": shot.get("h3_effective_prompt") or shot.get("h3_prompt", shot.get("prompt", "")),
                 }
-                shot["visual_feedback"] = self.visual_feedback.analyze(
-                    result,
-                    anchor_frame,
-                    expected_state,
-                    review_frames=review_frames,
-                )
-                shot["quality_gate"] = self.quality_gate.evaluate(
-                    shot["visual_feedback"],
-                    technical_ok=True,
-                )
-                shot["retake_recommended"] = shot["quality_gate"].get("recommended_action") == "retake"
-                shot["observed_visual_state"] = dict(
-                    shot["visual_feedback"].get("observed_state", {})
-                )
+                policy = executor.execution_policy
+                if policy.visual_qa_enabled():
+                    shot["visual_feedback"] = self.visual_feedback.analyze(
+                        result,
+                        anchor_frame,
+                        expected_state,
+                        review_frames=review_frames,
+                    )
+                    shot["quality_gate"] = self.quality_gate.evaluate(
+                        shot["visual_feedback"],
+                        technical_ok=True,
+                    )
+                    shot["retake_recommended"] = shot["quality_gate"].get("recommended_action") == "retake"
+                    shot["observed_visual_state"] = dict(
+                        shot["visual_feedback"].get("observed_state", {})
+                    )
+                else:
+                    shot["visual_feedback"] = {
+                        "enabled": False,
+                        "policy_mode": policy.mode,
+                        "warning": "Visual QA disabled by authoritative ExecutionPolicy.",
+                    }
+                    shot["quality_gate"] = {
+                        "status": "not_run",
+                        "recommended_action": "accept",
+                        "reason": "Visual QA disabled by ExecutionPolicy.",
+                    }
+                    shot["retake_recommended"] = False
+                    shot["observed_visual_state"] = {}
             except Exception as feedback_error:
                 shot["visual_feedback"] = {
                     "deterministic_observation": False,
@@ -1100,7 +1135,8 @@ class ProductionRunner:
             shot["retake_attempts"] = 0
             shot["max_auto_retries"] = max_auto_retries
             if (
-                executor.execution_policy.auto_retake
+                executor.execution_policy.visual_qa_enabled()
+                and executor.execution_policy.auto_retake
                 and max_auto_retries > 0
                 and shot.get("quality_gate", {}).get("recommended_action") == "retake"
             ):
@@ -1154,39 +1190,60 @@ class ProductionRunner:
                         shot["retake_execution"]["attempt"] = attempt_number
                         shot["retake_execution"]["max_attempts"] = max_auto_retries
 
+                        shot["retake_execution"]["official_context_ir"] = dict(
+                            retake_result.get("official_context_ir", {}) or {}
+                        )
+                        if retake_result.get("h3_effective_prompt"):
+                            shot["retake_execution"]["h3_effective_prompt"] = str(
+                                retake_result["h3_effective_prompt"]
+                            )
+                            shot["h3_effective_prompt"] = str(retake_result["h3_effective_prompt"])
+
                         retake_anchor = self.continuity.prepare_next_shot(
                             result,
                             scene_id,
                             shot_id,
                         )
                         review_frames = []
-                        if getattr(self.visual_feedback.vision_analyzer, "available", False):
-                            review_dir = (
-                                self.project_root
-                                / "data"
-                                / "production"
-                                / production_id
-                                / "qa"
-                                / self._safe_name(shot_id)
-                                / f"retake_{attempt_number}"
-                            )
-                            review_frames = self.visual_observer.extract_review_frames(
-                                result,
-                                review_dir,
-                                count=3,
-                            )
+                        if executor.execution_policy.visual_qa_enabled():
+                            if getattr(self.visual_feedback.vision_analyzer, "available", False):
+                                review_dir = (
+                                    self.project_root
+                                    / "data"
+                                    / "production"
+                                    / production_id
+                                    / "qa"
+                                    / self._safe_name(shot_id)
+                                    / f"retake_{attempt_number}"
+                                )
+                                review_frames = self.visual_observer.extract_review_frames(
+                                    result,
+                                    review_dir,
+                                    count=3,
+                                )
 
-                        shot["visual_feedback_after_retake"] = self.visual_feedback.analyze(
-                            result,
-                            retake_anchor,
-                            expected_state,
-                            review_frames=review_frames,
-                        )
-                        shot["quality_gate_after_retake"] = self.quality_gate.evaluate(
-                            shot["visual_feedback_after_retake"],
-                            technical_ok=True,
-                        )
-                        shot["quality_gate"] = shot["quality_gate_after_retake"]
+                            shot["visual_feedback_after_retake"] = self.visual_feedback.analyze(
+                                result,
+                                retake_anchor,
+                                expected_state,
+                                review_frames=review_frames,
+                            )
+                            shot["quality_gate_after_retake"] = self.quality_gate.evaluate(
+                                shot["visual_feedback_after_retake"],
+                                technical_ok=True,
+                            )
+                            shot["quality_gate"] = shot["quality_gate_after_retake"]
+                        else:
+                            shot["visual_feedback_after_retake"] = {
+                                "enabled": False,
+                                "policy_mode": executor.execution_policy.mode,
+                            }
+                            shot["quality_gate_after_retake"] = {
+                                "status": "not_run",
+                                "recommended_action": "accept",
+                                "reason": "Visual QA disabled by authoritative ExecutionPolicy.",
+                            }
+                            shot["quality_gate"] = shot["quality_gate_after_retake"]
                         shot["retake_recommended"] = (
                             shot["quality_gate"].get("recommended_action") == "retake"
                         )
@@ -1321,16 +1378,17 @@ class ProductionRunner:
         self._active_story = str(production_plan.get("story", "") or "")
         self._active_plan = production_plan
         self._active_profile = str(production_plan.get("profile", PROFILE_BASE) or PROFILE_BASE).strip().lower()
-        try:
-            self.production_manifest.write(
-                production_plan,
-                self.project_root / "data" / "production" / production_id / "production_manifest.json",
-            )
-        except Exception as manifest_error:
-            print("[H3 MANIFEST] warning:", manifest_error, flush=True)
-
-        
-        self._prepare_production_paths(production_id)
+        manifest_path = self.project_root / "data" / "production" / production_id / "production_manifest.json"
+        # Pre-render manifest records the immutable source/model/workflow fingerprint,
+        # but official Context-IR results do not exist until each shot executes.
+        self.production_manifest.write(
+            production_plan,
+            manifest_path,
+            require_context_ir_results=False,
+        )
+        production_plan["production_manifest_path"] = str(manifest_path)
+        production_plan["context_ir_capture_root"] = str((self.project_root / "data" / "production" / production_id / "context_ir").resolve())
+        Path(production_plan["context_ir_capture_root"]).mkdir(parents=True, exist_ok=True)
 
         checkpoint = self._load_render_checkpoint(production_id)
         self._active_plan_sha256 = self._validate_checkpoint_plan(
@@ -1668,15 +1726,14 @@ class ProductionRunner:
                         if key in record:
                             planned[key] = record[key]
 
-            try:
-                diagnostics_path = self.project_root / "data" / "production" / production_id / "runtime_diagnostics.json"
-                production_plan["runtime_diagnostics"] = self.runtime_diagnostics.write(diagnostics_path)
-                self.production_manifest.write(
-                    production_plan,
-                    self.project_root / "data" / "production" / production_id / "production_manifest.json",
-                )
-            except Exception as diagnostics_error:
-                production_plan["runtime_diagnostics_warning"] = str(diagnostics_error)
+            diagnostics_path = self.project_root / "data" / "production" / production_id / "runtime_diagnostics.json"
+            production_plan["runtime_diagnostics"] = self.runtime_diagnostics.write(diagnostics_path)
+            final_manifest = self.production_manifest.write(
+                production_plan,
+                self.project_root / "data" / "production" / production_id / "production_manifest.json",
+                require_context_ir_results=True,
+            )
+            production_plan["production_manifest"] = final_manifest
 
             assembly_dir = (
                 self.project_root
