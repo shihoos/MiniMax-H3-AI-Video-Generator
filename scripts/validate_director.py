@@ -2753,6 +2753,148 @@ def test_expand_failure_is_source_fallback_without_retry() -> None:
         "Expand mode still attempted an expensive Qwen retry.",
     )
 
+
+def test_relational_character_identity_pipeline() -> None:
+    """Regression for stable unnamed relational characters versus bare generic roles."""
+    planner = ProductionPlanner(ROOT)
+    story = (
+        "Eli stepped cautiously into the abandoned subway station. His father had disappeared under similar circumstances, "
+        "leaving behind a single note. The older man stepped forward, revealing a face that sent a jolt through Eli's body—"
+        "his father's face, but younger, alive. \"I was trying to protect you,\" the man said, his voice heavy with regret."
+    )
+
+    relation = {
+        "name": "Eli's father",
+        "entity_type": "PERSON",
+        "is_character": True,
+        "aliases": ["his father", "the older man", "the man"],
+        "identity_type": "relational_character",
+        "relationship_to": "Eli",
+        "relationship": "father",
+    }
+    named = {
+        "name": "Eli",
+        "entity_type": "PERSON",
+        "is_character": True,
+        "aliases": ["Eli"],
+        "identity_type": "named_character",
+        "relationship_to": "",
+        "relationship": "",
+    }
+
+    def extractor(_story, _hints):
+        # Simulate the observed failure: extractor misses the relational identity.
+        return {"candidates": [named]}
+
+    def adjudicator(_story, hints, _semantic):
+        check(
+            "Eli's father" in hints,
+            "Relational identity was not supplied to the bounded adjudication pass.",
+        )
+        return {"candidates": [named, relation]}
+
+    characters = planner.create_characters(
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=adjudicator,
+    )
+    by_name = {c.name: c for c in characters}
+
+    check(
+        set(by_name) == {"Eli", "Eli's father"},
+        f"Relational canonical roster was not preserved: {sorted(by_name)}",
+    )
+    father = by_name["Eli's father"]
+    check(
+        father.identity_type == "relational_character",
+        "Relational character lost identity_type.",
+    )
+    check(
+        father.relationship_to == "Eli" and father.relationship == "father",
+        "Relational character lost relationship metadata.",
+    )
+    check(
+        "man" in {EntityResolver.normalize(x) for x in father.semantic_aliases},
+        "Generic surface alias 'man' was not retained as a non-canonical alias.",
+    )
+
+    serialized = father.to_dict()
+    check(
+        serialized["identity_type"] == "relational_character"
+        and serialized["relationship_to"] == "Eli"
+        and serialized["relationship"] == "father",
+        "Relational metadata did not survive Character serialization.",
+    )
+
+    director = QwenDirector(ROOT)
+    shots = [{
+        "shot_id": "scene_004_shot_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{
+            "speaker": "man",
+            "text": "I was trying to protect you,",
+        }],
+    }]
+    director._normalize_dialogue_speakers(
+        story,
+        shots,
+        [character.to_dict() for character in characters],
+    )
+    event = shots[0]["dialogue_events"][0]
+    check(
+        event["speaker"] == "Eli's father",
+        "Generic dialogue speaker 'man' did not resolve to the grounded relational identity.",
+    )
+    check(
+        "Eli's father" in shots[0]["characters"],
+        "Resolved relational speaker was not repaired into the shot character binding.",
+    )
+
+    # The generic label itself remains non-canonical.
+    check(
+        director._valid_character_name("man") is False,
+        "Bare generic role 'man' was incorrectly accepted as a canonical identity.",
+    )
+
+    # Ambiguous generic aliases must not guess.
+    ambiguous = [
+        character.to_dict() for character in characters
+    ] + [{
+        **serialized,
+        "character_id": "char_other_father",
+        "name": "Mira's father",
+        "relationship_to": "Mira",
+    }]
+    ambiguous_shots = [{
+        "shot_id": "ambiguous",
+        "characters": ["Eli's father", "Mira's father"],
+        "dialogue_events": [{
+            "speaker": "man",
+            "text": "I was trying to protect you,",
+        }],
+    }]
+    director._normalize_dialogue_speakers(
+        story,
+        ambiguous_shots,
+        ambiguous,
+    )
+    check(
+        ambiguous_shots[0]["dialogue_events"] == [],
+        "Ambiguous generic speaker 'man' was incorrectly guessed to one relational identity.",
+    )
+
+    # A semantic result that explicitly rejects the relational identity must not
+    # be overridden by deterministic hints.
+    rejected = planner.create_characters(
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=lambda *_args: {"candidates": [named]},
+    )
+    check(
+        {c.name for c in rejected} == {"Eli"},
+        "Deterministic relation hints overrode an explicit semantic rejection.",
+    )
+
 def main() -> None:
     test_deterministic_foundation_when_director_enabled()
     test_abbreviation_safe_story_split()
@@ -2807,6 +2949,7 @@ def main() -> None:
         test_recorded_semantic_payloads_are_terminal,
         test_character_semantic_call_budget_is_bounded,
         test_qwen_semantic_character_reconciliation,
+        test_relational_character_identity_pipeline,
         test_verified_semantic_character_roster_reaches_final_plan,
         test_qwen_semantic_character_extractor_contract,
         test_mult_word_character_extraction_regression,
