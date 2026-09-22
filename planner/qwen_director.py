@@ -1523,16 +1523,50 @@ class QwenDirector(
                     continue
 
                 if bound and normalized_speaker not in bound:
-                    # The line is real speech and the identity is canonical, but
-                    # Qwen bound it to a character that is not present in this
-                    # shot. Do not invent a new binding or abort the production;
-                    # discard only the inconsistent dialogue event and preserve
-                    # the strict post-normalization validator as a safety net.
-                    self._record_recovery(
-                        "dialogue_speaker_unbound",
-                        f"shot={shot_id} speaker={speaker!r}",
+                    generic_surface = EntityResolver.generic_role_surface(speaker)
+                    canonical_payload = next(
+                        (item for item in characters
+                         if isinstance(item, dict)
+                         and EntityResolver.normalize(str(item.get("name", "") or "")) == normalized_speaker),
+                        None,
                     )
-                    continue
+                    canonical_profile = (canonical_payload or {}).get("identity_profile", {})
+                    canonical_identity_type = str(
+                        (canonical_payload or {}).get(
+                            "identity_type",
+                            canonical_profile.get("identity_type", ""),
+                        )
+                        or ""
+                    ).strip().lower()
+
+                    # A grounded generic speaker can be repaired into the shot
+                    # binding when it resolves uniquely to an already-approved
+                    # relational character. This does not create a new character:
+                    # it restores the canonical identity Qwen omitted from the
+                    # shot-level character binding.
+                    if generic_surface and canonical_identity_type == "relational_character":
+                        shot_characters = shot.get("characters")
+                        if not isinstance(shot_characters, list):
+                            shot_characters = list(shot_characters or [])
+                            shot["characters"] = shot_characters
+                        existing_norm = {
+                            EntityResolver.normalize(str(value or ""))
+                            for value in shot_characters
+                            if str(value or "").strip()
+                        }
+                        if normalized_speaker not in existing_norm:
+                            shot_characters.append(canonical)
+                        bound.add(normalized_speaker)
+                    else:
+                        # The line is real speech and the identity is canonical, but
+                        # Qwen bound it to a character that is not present in this
+                        # shot. Do not invent a new binding or abort the whole
+                        # production; discard only the inconsistent dialogue event.
+                        self._record_recovery(
+                            "dialogue_speaker_unbound",
+                            f"shot={shot_id} speaker={speaker!r}",
+                        )
+                        continue
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
