@@ -114,26 +114,7 @@ class QwenDirector(
         "visual_prompt",
     }
 
-    VALID_GENERIC_ROLES = {
-        "man",
-        "woman",
-        "girl",
-        "boy",
-        "child",
-        "person",
-        "hero",
-        "heroine",
-        "explorer",
-        "detective",
-        "scientist",
-        "soldier",
-        "warrior",
-        "king",
-        "queen",
-        "robot",
-        "android",
-        "pilot",
-    }
+    VALID_GENERIC_ROLES = set(EntityResolver.GENERIC_ROLE_ALIASES)
 
     _MODE_LABELS = {
         AI_STORY_MODE: "AI STORY MODE",
@@ -575,16 +556,7 @@ class QwenDirector(
             from schemas.character import Character
             canonical_characters = []
             for item in resume_roster:
-                allowed = {
-                    "character_id", "name", "role", "description", "personality",
-                    "appearance", "clothing", "distinctive_features", "character_state",
-                    "continuity_rules", "reference_mode", "reference_paths",
-                    "reference_video_paths", "reference_audio_paths", "reference_path",
-                    "reference_video_path", "reference_audio_path", "reference_mask_path",
-                    "identity_profile", "story_state_profile",
-                }
-                payload = {key: deepcopy(value) for key, value in item.items() if key in allowed}
-                canonical_characters.append(Character(**payload))
+                canonical_characters.append(Character.from_dict(deepcopy(item)))
         else:
             canonical_characters = planner.create_characters(
                 canonical_source_story,
@@ -1446,6 +1418,14 @@ class QwenDirector(
             resolved = aliases.get(stripped)
             if resolved and resolved in canonical_by_norm:
                 return canonical_by_norm[resolved]
+            contextual = EntityResolver.contextual_generic_alias(
+                value,
+                characters,
+                bound_names=None,
+                story=story,
+            )
+            if contextual and contextual.lower() in canonical_by_norm:
+                return canonical_by_norm[contextual.lower()]
             return None
 
         for shot in shots:
@@ -1496,6 +1476,15 @@ class QwenDirector(
                     continue
 
                 canonical = _resolve(speaker)
+                if canonical is None:
+                    contextual = EntityResolver.contextual_generic_alias(
+                        speaker,
+                        characters,
+                        bound_names=bound,
+                        story=story,
+                    )
+                    if contextual and contextual.lower() in canonical_by_norm:
+                        canonical = canonical_by_norm[contextual.lower()]
                 if canonical is None:
                     # Qwen may attribute grounded speech to a role label that
                     # never became a canonical character. Do not invent an
