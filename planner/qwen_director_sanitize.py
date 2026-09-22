@@ -7,6 +7,8 @@ from pathlib import Path
 
 from pipeline.production_checkpoint import ProductionCheckpoint
 
+from planner.entity_resolver import EntityResolver
+
 from planner.config import (
     AI_STORY_MODE,
     EXPAND_USER_STORY_MODE,
@@ -34,7 +36,7 @@ class QwenDirectorSanitizeMixin:
         ):
             return False
 
-        if lowered in self.VALID_GENERIC_ROLES:
+        if EntityResolver.generic_role_surface(lowered) or lowered in EntityResolver.RELATIONSHIP_LABELS:
             return False
 
         if len(
@@ -179,6 +181,42 @@ class QwenDirectorSanitizeMixin:
                     f"char_{self._slug(name)}"
                 )
 
+            profile = self._coerce_mapping(value.get("identity_profile", {}))
+            identity_type = str(
+                value.get("identity_type", profile.get("identity_type", "named_character"))
+                or "named_character"
+            ).strip().lower()
+            relationship_to = str(
+                value.get("relationship_to", profile.get("relationship_to", "")) or ""
+            ).strip() or None
+            relationship = str(
+                value.get("relationship", profile.get("relationship", "")) or ""
+            ).strip() or None
+            aliases_raw = value.get("semantic_aliases", profile.get("semantic_aliases", []))
+            aliases = []
+            for alias in self._coerce_list(aliases_raw):
+                text = str(alias).strip()
+                if not text or not EntityResolver.is_safe_semantic_reference(text):
+                    if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type == "relational_character":
+                        aliases.append(text)
+                    continue
+                if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type != "relational_character":
+                    continue
+                aliases.append(text)
+            aliases = list(dict.fromkeys(aliases))
+            if identity_type == "relational_character" and (not relationship_to or not relationship):
+                identity_type = "named_character"
+                relationship_to = None
+                relationship = None
+                aliases = []
+            profile.update({
+                "name": name,
+                "semantic_aliases": aliases,
+                "identity_type": identity_type,
+                "relationship_to": relationship_to,
+                "relationship": relationship,
+            })
+
             result.append(
                 {
                     "character_id":
@@ -275,15 +313,8 @@ class QwenDirectorSanitizeMixin:
                             or ""
                         ).strip() or None
                     ),
-                    "relationship": (
-                        str(
-                            value.get(
-                                "relationship",
-                                (value.get("identity_profile", {}) or {}).get("relationship", ""),
-                            )
-                            or ""
-                        ).strip() or None
-                    ),
+                    "relationship": relationship,
+                    "identity_profile": profile,
                 }
             )
 
