@@ -219,6 +219,77 @@ class EntityResolver:
         return aliases
 
     @classmethod
+    def build_character_alias_map(
+        cls,
+        characters,
+    ) -> dict[str, str]:
+        """Build a deterministic alias map from character payloads.
+
+        Relational identities do not inherit ordinary first-name aliases; only
+        their exact canonical name and validated semantic aliases are eligible.
+        Ambiguous semantic aliases are dropped instead of guessed.
+        """
+        payloads = []
+        for item in characters or []:
+            if isinstance(item, dict):
+                payloads.append(item)
+            elif hasattr(item, "to_dict"):
+                try:
+                    value = item.to_dict()
+                except Exception:
+                    continue
+                if isinstance(value, dict):
+                    payloads.append(value)
+
+        named_names = []
+        relational_names = []
+        semantic_alias_owners: dict[str, set[str]] = {}
+
+        for item in payloads:
+            name = str(item.get("name", "") or "").strip()
+            if not name:
+                continue
+            profile = item.get("identity_profile")
+            profile = profile if isinstance(profile, dict) else {}
+            identity_type = str(
+                item.get("identity_type", profile.get("identity_type", "named_character"))
+                or "named_character"
+            ).strip().lower()
+            if identity_type == "relational_character":
+                relational_names.append(name)
+            else:
+                named_names.append(name)
+
+            raw_aliases = item.get("semantic_aliases")
+            if raw_aliases is None:
+                raw_aliases = profile.get("semantic_aliases", [])
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            for raw_alias in raw_aliases or []:
+                alias = cls.normalize(str(raw_alias or ""))
+                if not alias or alias == cls.normalize(name):
+                    continue
+                if not cls.is_safe_semantic_reference(alias):
+                    continue
+                semantic_alias_owners.setdefault(alias, set()).add(cls.normalize(name))
+
+        aliases = cls.build_alias_map(named_names)
+        for name in relational_names:
+            normalized = cls.normalize(name)
+            if normalized:
+                aliases[normalized] = normalized
+
+        for alias, owners in semantic_alias_owners.items():
+            if len(owners) != 1:
+                continue
+            owner = next(iter(owners))
+            existing = aliases.get(alias)
+            if existing is None or existing == owner:
+                aliases[alias] = owner
+
+        return aliases
+
+    @classmethod
     def is_safe_semantic_reference(
         cls,
         value: str,
