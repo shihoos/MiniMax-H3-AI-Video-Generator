@@ -2073,12 +2073,14 @@ class H3WorkflowBuilder:
                 )
             widgets[2] = True
 
+        official_context_ir_prompt = None
         if context_ir is not None:
             from pipeline.context_ir import H3ContextIRCompiler
             H3ContextIRCompiler.validate(context_ir)
             if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
                 raise ValueError("Production H3 builder accepts Ref2VA Context-IR only.")
             prompt = H3ContextIRCompiler.input_prompt(context_ir)
+            official_context_ir_prompt = H3ContextIRCompiler.workflow_prompt(context_ir)
 
         if mode not in {"ref2va", "turbo_ref2va", "upscale"}:
             raise ValueError(f"Unsupported production workflow mode: {mode}")
@@ -2172,7 +2174,7 @@ class H3WorkflowBuilder:
 
         self._ensure_official_context_ir(
             workflow,
-            prompt=prompt,
+            prompt=official_context_ir_prompt or prompt,
             reference_images=reference_images,
             reference_videos=reference_videos,
             reference_audio=reference_audio,
