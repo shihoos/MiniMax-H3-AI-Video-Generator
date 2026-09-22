@@ -582,6 +582,7 @@ class QwenDirector(
                     "reference_video_paths", "reference_audio_paths", "reference_path",
                     "reference_video_path", "reference_audio_path", "reference_mask_path",
                     "identity_profile", "story_state_profile",
+                    "semantic_aliases", "identity_type", "relationship_to", "relationship",
                 }
                 payload = {key: deepcopy(value) for key, value in item.items() if key in allowed}
                 canonical_characters.append(Character(**payload))
@@ -1407,151 +1408,75 @@ class QwenDirector(
 
         return anchors
 
-    def _normalize_dialogue_speakers(
-        self,
-        story: str,
-        shots: list[dict],
-        characters: list[dict],
-    ) -> None:
-        """Canonicalize speakers and remove dialogue not anchored in explicit speech."""
-        allowed_names = [
-            str(value.get("name", "")).strip()
-            for value in characters
-            if isinstance(value, dict)
-            and str(value.get("name", "")).strip()
-        ]
-        if not allowed_names:
-            return
-
-        canonical_by_norm = {name.lower(): name for name in allowed_names}
-        aliases = EntityResolver.build_alias_map(allowed_names)
-        spoken_anchors = self._extract_story_spoken_texts(story)
-
-        def _resolve(value: str) -> str | None:
-            normalized = EntityResolver.normalize(value)
-            if normalized in canonical_by_norm:
-                return canonical_by_norm[normalized]
-            resolved = aliases.get(normalized)
-            if resolved and resolved in canonical_by_norm:
-                return canonical_by_norm[resolved]
-            stripped = EntityResolver.strip_honorific(normalized)
-            resolved = aliases.get(stripped)
-            if resolved and resolved in canonical_by_norm:
-                return canonical_by_norm[resolved]
-            return None
-
-        for shot in shots:
-            if not isinstance(shot, dict):
-                continue
-
-            shot_id = str(shot.get("shot_id", "")).strip()
-            bound = {
-                canonical.lower()
-                for canonical in (
-                    _resolve(str(name))
-                    for name in (shot.get("characters", []) or [])
-                )
-                if canonical
-            }
-
-            raw_events = shot.get("dialogue_events", [])
-            events = raw_events if isinstance(raw_events, list) else []
-            repaired_events = []
-
-            for event in events:
-                if not isinstance(event, dict):
-                    continue
-                speaker = str(event.get("speaker", "") or "").strip()
-                text = str(event.get("text", "") or "").strip()
-                if not speaker or not text:
-                    continue
-
-                # When the source story contains explicit speech anchors, only
-                # anchored speech can become audio. Substring matching supports
-                # a quoted line split into multiple valid events while still
-                # rejecting whole narrative/action sentences.
-                normalized_text = self._normalize_dialogue_text(text)
-                if not spoken_anchors:
-                    continue
-
-                matched_source_speakers: set[str] = set()
-                matched_any = False
-                for anchor, source_speakers in spoken_anchors.items():
-                    if (
-                        normalized_text == anchor
-                        or normalized_text in anchor
-                        or anchor in normalized_text
-                    ):
-                        matched_any = True
-                        matched_source_speakers.update(source_speakers)
-                if not matched_any:
-                    continue
-
-                canonical = _resolve(speaker)
-                if canonical is None:
-                    # Qwen may attribute grounded speech to a role label that
-                    # never became a canonical character. Do not invent an
-                    # identity or abort the whole production; discard only the
-                    # unresolved dialogue event and record the recovery.
-                    self._record_recovery(
-                        "dialogue_speaker_unresolved",
-                        f"shot={shot_id} speaker={speaker!r}",
-                    )
-                    continue
-
-                explicit_source_canonicals = {
-                    resolved.lower()
-                    for source_speaker in matched_source_speakers
-                    if (resolved := _resolve(source_speaker)) is not None
-                }
-                if matched_source_speakers and not explicit_source_canonicals:
-                    # The source explicitly labels this line, but that label does
-                    # not resolve to a canonical character. Never guess which
-                    # canonical character Qwen intended.
-                    self._record_recovery(
-                        "dialogue_source_speaker_unresolved",
-                        f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}",
-                    )
-                    continue
-
-                normalized_speaker = canonical.lower()
-                if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
-                    # The source gives explicit speaker provenance that conflicts
-                    # with Qwen's attribution. Preserve the source contract rather
-                    # than silently remapping the line to another character.
-                    self._record_recovery(
-                        "dialogue_speaker_source_mismatch",
-                        f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}",
-                    )
-                    continue
-
-                if bound and normalized_speaker not in bound:
-                    # The line is real speech and the identity is canonical, but
-                    # Qwen bound it to a character that is not present in this
-                    # shot. Do not invent a new binding or abort the production;
-                    # discard only the inconsistent dialogue event and preserve
-                    # the strict post-normalization validator as a safety net.
-                    self._record_recovery(
-                        "dialogue_speaker_unbound",
-                        f"shot={shot_id} speaker={speaker!r}",
-                    )
-                    continue
-
-                repaired = dict(event)
-                repaired["speaker"] = canonical
-                repaired_events.append(repaired)
-
-            shot["dialogue_events"] = repaired_events
-            shot["speaking_characters"] = list(dict.fromkeys(
-                str(event["speaker"]).strip()
-                for event in repaired_events
-                if str(event.get("speaker", "")).strip()
-            ))
-            shot["speech_text"] = " ".join(
-                str(event.get("text", "")).strip()
-                for event in repaired_events
-                if str(event.get("text", "")).strip()
+    @staticmethod
+    def _build_semantic_character_alias_map(characters: list[dict]) -> dict[str, set[str]]:
+        owners={}
+        for value in characters or []:
+            if not isinstance(value,dict): continue
+            canonical=str(value.get("name","") or "").strip()
+            if not canonical: continue
+            canonical_norm=EntityResolver.normalize(canonical); profile=value.get("identity_profile",{}) or {}
+            aliases=[*list(value.get("semantic_aliases",[]) or []),*list(profile.get("semantic_aliases",[]) or [])]
+            aliases.extend(
+                EntityResolver.build_alias_map({canonical}).keys()
             )
+            if str(value.get("identity_type","") or "").strip().lower()=="relational_character":
+                relation=str(value.get("relationship","") or "").strip()
+                if relation: aliases.append(relation)
+            aliases.append(canonical)
+            for alias in aliases:
+                normalized=EntityResolver.normalize(alias)
+                if normalized:
+                    owners.setdefault(normalized,set()).add(canonical_norm)
+                    stripped=EntityResolver.strip_honorific(normalized)
+                    if stripped: owners.setdefault(stripped,set()).add(canonical_norm)
+                    generic_match = re.fullmatch(
+                        r"(?:the\s+)?(?:(?:older|elder|younger)\s+)?(man|woman|boy|girl)",
+                        normalized,
+                    )
+                    if generic_match:
+                        owners.setdefault(generic_match.group(1),set()).add(canonical_norm)
+        return owners
+
+    def _normalize_dialogue_speakers(self, story: str, shots: list[dict], characters: list[dict]) -> None:
+        allowed=[str(v.get("name","")).strip() for v in characters if isinstance(v,dict) and str(v.get("name","")).strip()]
+        if not allowed: return
+        canonical_by_norm={EntityResolver.normalize(name):name for name in allowed}; aliases=self._build_semantic_character_alias_map(characters); anchors=self._extract_story_spoken_texts(story)
+        def resolve(value):
+            n=EntityResolver.normalize(value)
+            if n in canonical_by_norm: return canonical_by_norm[n]
+            owners=aliases.get(n,set())
+            if len(owners)==1: return canonical_by_norm.get(next(iter(owners)))
+            stripped=EntityResolver.strip_honorific(n); owners=aliases.get(stripped,set())
+            return canonical_by_norm.get(next(iter(owners))) if len(owners)==1 else None
+        for shot in shots:
+            if not isinstance(shot,dict): continue
+            shot_id=str(shot.get("shot_id","")).strip(); names=[str(v).strip() for v in (shot.get("characters",[]) or []) if str(v).strip()]; bound={c.lower() for c in (resolve(v) for v in names) if c}
+            events=shot.get("dialogue_events",[]); events=events if isinstance(events,list) else []; repaired=[]
+            for event in events:
+                if not isinstance(event,dict): continue
+                speaker=str(event.get("speaker","") or "").strip(); text=str(event.get("text","") or "").strip()
+                if not speaker or not text or not anchors: continue
+                norm=self._normalize_dialogue_text(text); matched=False; sources=set()
+                for anchor, source_speakers in anchors.items():
+                    if norm==anchor or norm in anchor or anchor in norm:
+                        matched=True; sources.update(source_speakers)
+                if not matched: continue
+                canonical=resolve(speaker)
+                if canonical is None:
+                    self._record_recovery("dialogue_speaker_unresolved",f"shot={shot_id} speaker={speaker!r}"); continue
+                source_canonicals={r.lower() for r in (resolve(v) for v in sources) if r}
+                if sources and not source_canonicals:
+                    self._record_recovery("dialogue_source_speaker_unresolved",f"shot={shot_id} speaker={speaker!r} source={sorted(sources)!r}"); continue
+                if source_canonicals and canonical.lower() not in source_canonicals:
+                    self._record_recovery("dialogue_speaker_source_mismatch",f"shot={shot_id} speaker={speaker!r} source={sorted(source_canonicals)!r}"); continue
+                if canonical.lower() not in bound:
+                    names.append(canonical); bound.add(canonical.lower())
+                    self._record_recovery("dialogue_speaker_binding_repaired",f"shot={shot_id} speaker={speaker!r} canonical={canonical!r}")
+                fixed=dict(event); fixed["speaker"]=canonical; repaired.append(fixed)
+            shot["characters"]=list(dict.fromkeys(names)); shot["dialogue_events"]=repaired
+            shot["speaking_characters"]=list(dict.fromkeys(str(e.get("speaker","")).strip() for e in repaired if str(e.get("speaker","")).strip()))
+            shot["speech_text"]=" ".join(str(e.get("text","")).strip() for e in repaired if str(e.get("text","")).strip())
 
     def _validate_dialogue_speaker_contract(
         self,
