@@ -826,14 +826,14 @@ class QwenDirectorPromptMixin:
             profile = item.get("identity_profile")
             profile = profile if isinstance(profile, dict) else {}
             for key in ("identity_type", "relationship_to", "relationship"):
-                value = str(profile.get(key, "") or "").strip()
+                value = str(item.get(key, profile.get(key, "")) or "").strip()
                 if value:
                     entry[key] = value
             semantic_aliases = [
                 str(value).strip()
-                for value in (profile.get("semantic_aliases", []) or [])
+                for value in (item.get("semantic_aliases", profile.get("semantic_aliases", [])) or [])
                 if str(value).strip()
-            ][:6]
+            ][:8]
             if semantic_aliases:
                 entry["semantic_aliases"] = semantic_aliases
             compact_characters.append(entry)
