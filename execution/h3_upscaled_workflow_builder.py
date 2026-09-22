@@ -445,7 +445,7 @@ class H3UpscaledWorkflowBuilder(
                 )
             if str(context_ir.get("mode", "")).strip().lower() != "ref2va":
                 raise ValueError("This production inventory is Ref2VA-only; Context-IR mode must be ref2va.")
-            prompt = H3ContextIRCompiler.prompt(context_ir)
+            prompt = H3ContextIRCompiler.input_prompt(context_ir)
 
         if (
             generation_mode
