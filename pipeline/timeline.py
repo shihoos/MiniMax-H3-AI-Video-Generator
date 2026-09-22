@@ -200,6 +200,20 @@ class ProductionTimeline:
         segments = timeline.get("segments")
         if not isinstance(segments, list):
             raise RuntimeError("Production timeline segments are missing.")
+        shots = [shot for shot in (plan.get("shots", []) or []) if isinstance(shot, dict)]
+        scene_order = {
+            str(scene.get("scene_id", "")).strip(): index
+            for index, scene in enumerate(plan.get("scenes", []) or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "")).strip()
+        }
+        ordered_shots = sorted(
+            shots,
+            key=lambda item: (scene_order.get(str(item.get("scene_id", "")).strip(), 10**9), int(item.get("order", 0) or 0)),
+        )
+        canonical_ids = [str(shot.get("shot_id", "")).strip() for shot in ordered_shots]
+        timeline_ids = [str(item.get("shot_id", "")).strip() for item in segments if isinstance(item, dict)]
+        if canonical_ids != timeline_ids:
+            raise RuntimeError(f"Timeline shot coverage/order mismatch: canonical={canonical_ids} timeline={timeline_ids}")
         previous_end = 0.0
         ids = set()
         for item in segments:
@@ -223,4 +237,19 @@ class ProductionTimeline:
             mode = str(item.get("continuity_mode", ""))
             if mode not in VALID_CONTINUITY_MODES:
                 raise RuntimeError(f"Invalid timeline continuity mode for {shot_id}: {mode!r}")
+            matching_shot = next((shot for shot in ordered_shots if str(shot.get("shot_id", "")).strip() == shot_id), None)
+            if matching_shot is None:
+                raise RuntimeError(f"Timeline references an unknown shot: {shot_id}")
+            for event in matching_shot.get("dialogue_events", []) or []:
+                if not isinstance(event, dict):
+                    raise RuntimeError(f"Dialogue event for {shot_id} must be an object.")
+                start_event = float(event.get("start_seconds", 0.0) or 0.0)
+                end_event = float(event.get("end_seconds", 0.0) or 0.0)
+                if start_event < -1e-6 or end_event < start_event - 1e-6 or end_event > duration + 1e-6:
+                    raise RuntimeError(f"Dialogue timing exceeds shot timeline bounds for {shot_id}.")
             previous_end = end
+        total = float(timeline.get("total_duration_seconds", 0.0) or 0.0)
+        if segments and abs(total - previous_end) > 0.02:
+            raise RuntimeError("Timeline total_duration_seconds does not match its final segment end.")
+        if not segments and abs(total) > 0.02:
+            raise RuntimeError("Empty timeline must have zero total duration.")
