@@ -343,8 +343,7 @@ class ProductionOrchestrator:
             EntityResolver.normalize(character.name): character
             for character in characters
         }
-        canonical_names = set(by_name)
-        aliases = EntityResolver.build_alias_map(canonical_names)
+        aliases = EntityResolver.build_character_alias_map(characters)
 
         scenes_by_id = {
             str(
@@ -430,6 +429,21 @@ class ProductionOrchestrator:
                     aliases.get(normalized)
                     or aliases.get(EntityResolver.strip_honorific(normalized))
                 )
+                if not resolved:
+                    scene = scenes_by_id.get(scene_id, {})
+                    scene_bound_names = {
+                        str(value).strip()
+                        for value in (scene.get("characters", []) or [])
+                        if str(value).strip()
+                    }
+                    contextual = EntityResolver.contextual_generic_alias(
+                        name,
+                        [character.to_dict() for character in characters],
+                        bound_names=scene_bound_names,
+                        story=str(plan.get("story", "") or ""),
+                    )
+                    if contextual:
+                        resolved = EntityResolver.normalize(contextual)
 
                 if (
                     resolved
@@ -1007,16 +1021,19 @@ class ProductionOrchestrator:
     def _director_fingerprint(project_root: Path, checkpoint: ProductionCheckpoint) -> str:
         """Return a stable fingerprint covering the complete split Director."""
         director_root = Path(project_root).resolve() / "planner"
-        module_names = (
-            "qwen_director.py",
-            "qwen_director_runtime.py",
-            "qwen_director_prompts.py",
-            "qwen_director_scene.py",
-            "qwen_director_sanitize.py",
+        tracked = (
+            (Path("planner") / "qwen_director.py"),
+            (Path("planner") / "qwen_director_runtime.py"),
+            (Path("planner") / "qwen_director_prompts.py"),
+            (Path("planner") / "qwen_director_scene.py"),
+            (Path("planner") / "qwen_director_sanitize.py"),
+            (Path("planner") / "production_planner.py"),
+            (Path("planner") / "entity_resolver.py"),
+            (Path("schemas") / "character.py"),
         )
         material = "".join(
-            f"{name}:{checkpoint.digest_file(director_root / name)}\n"
-            for name in module_names
+            f"{path.as_posix()}:{checkpoint.digest_file(Path(project_root).resolve() / path)}\n"
+            for path in tracked
         )
         return checkpoint.digest_text(material)
 
