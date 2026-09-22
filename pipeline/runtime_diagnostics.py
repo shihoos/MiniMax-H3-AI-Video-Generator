@@ -16,6 +16,30 @@ from planner.config import RUNTIME
 class RuntimeDiagnostics:
     """Collect a machine-readable runtime health/fingerprint without mutating the environment."""
 
+    SAFE_H3_ENV_KEYS = {
+        "H3_VLLM_HOST", "H3_VLLM_PORT", "H3_VLLM_MODEL",
+        "H3_VLLM_SPECULATIVE_MODEL", "H3_VLLM_NUM_SPECULATIVE_TOKENS",
+        "H3_VLM_ENDPOINT", "H3_VLM_MODEL", "H3_VLM_TIMEOUT_SECONDS",
+        "H3_INPUT_ROOT", "H3_PROFILE",
+    }
+
+    SECRET_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD", "_CREDENTIAL")
+
+    @classmethod
+    def _safe_environment(cls) -> dict[str, str]:
+        result = {}
+        for key in cls.SAFE_H3_ENV_KEYS:
+            value = os.environ.get(key)
+            if value is not None:
+                result[key] = value
+        for key in os.environ:
+            upper = key.upper()
+            if not upper.startswith("H3_"):
+                continue
+            if any(upper.endswith(suffix) for suffix in cls.SECRET_SUFFIXES):
+                continue
+        return dict(sorted(result.items()))
+
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root).resolve()
 
@@ -115,7 +139,7 @@ class RuntimeDiagnostics:
             "director_speculative_model_path": str((RUNTIME.get("director", {}) or {}).get("speculative_model_path", "")),
             "director_speculative_tokens": int((RUNTIME.get("director", {}) or {}).get("speculative_tokens", 0) or 0),
             "vllm": self._isolated_vllm_version(),
-            "environment": {key: value for key, value in os.environ.items() if key.startswith("H3_")},
+            "environment": self._safe_environment(),
             "nvidia_smi": self._command(["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version", "--format=csv,noheader"]),
         }
         try:
