@@ -121,6 +121,7 @@ class Shot:
         default_factory=list
     )
     speech_text: str = ""
+    language: str = "English"
     dialogue_events: list[dict] = field(default_factory=list)
     audio_duration_seconds: Optional[float] = None
     audio_duration_source: str = "unvalidated"
@@ -619,9 +620,10 @@ class Shot:
                 if continuation
                 else ""
             )
+            language = str(event.get("language") or self.language or "English").strip() or "English"
             dialogue_lines.append(
                 f"At {start_seconds:.2f} seconds, {display_name} says: "
-                f"<d>[English] {text}</d> and completes by "
+                f"<d>[{language}] {text}</d> and completes by "
                 f"{end_seconds:.2f} seconds.{continuation_text}"
             )
 
@@ -704,6 +706,7 @@ class Shot:
             "reference_video_by_character": self.reference_video_by_character,
             "speaking_characters": self.speaking_characters,
             "speech_text": self.speech_text,
+            "language": self.language,
             "dialogue_events": self.dialogue_events,
             "audio_duration_seconds": self.audio_duration_seconds,
             "audio_duration_source": self.audio_duration_source,
