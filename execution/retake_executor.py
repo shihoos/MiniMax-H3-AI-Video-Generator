@@ -59,6 +59,7 @@ class RetakeExecutor:
         shot_executor,
         workflow_mode: str,
         upscale: bool,
+        production_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base_video = Path(base_video).resolve()
         if not base_video.is_file():
@@ -144,8 +145,11 @@ class RetakeExecutor:
         replacement["retake_start_seconds"] = start
         replacement["retake_end_seconds"] = end
         replacement["retake_request_path"] = str(request_path)
+        context_plan = dict(production_plan or {})
+        context_plan["production_id"] = production_id
+        context_plan["story"] = str(context_plan.get("story") or shot.get("story", "") or "")
         replacement_context_ir = H3ContextIRCompiler().compile(
-            {"production_id": production_id, "story": str(shot.get("story", "") or "")},
+            context_plan,
             replacement,
         )
         replacement["h3_context_ir"] = replacement_context_ir
