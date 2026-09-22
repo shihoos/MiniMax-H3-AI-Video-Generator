@@ -109,3 +109,47 @@ class ProductionJobQueue:
         with self._connect() as conn:
             cur = conn.execute("UPDATE jobs SET status='queued', updated_at=?, worker_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL WHERE status='running' AND ((lease_expires_at IS NULL AND updated_at < ?) OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))", (now, cutoff, now))
             return int(cur.rowcount)
+    def reconcile_plan_states(self, plan_store) -> int:
+        """Reconcile materialized plan job state from the authoritative queue rows.
+
+        SQLite remains the durable job-state authority; plan JSON is a materialized
+        UI/render view. Reconciliation is idempotent and safe after a crash between
+        queue and plan persistence.
+        """
+        from contextlib import nullcontext
+        changed = 0
+        with self._connect() as conn:
+            rows = [dict(row) for row in conn.execute("SELECT * FROM jobs ORDER BY created_at").fetchall()]
+        for row in rows:
+            plan_path = Path(row["plan_path"]).resolve()
+            if not plan_path.is_file():
+                continue
+            try:
+                with plan_store.lock(plan_path):
+                    plan = plan_store.load_unlocked(plan_path)
+                    expected = {
+                        "job_id": str(row["job_id"]),
+                        "job_status": str(row["status"]),
+                    }
+                    if row.get("error"):
+                        expected["job_error"] = str(row["error"])
+                    elif "job_error" in plan:
+                        expected["job_error"] = ""
+                    if row.get("result_json"):
+                        try:
+                            result = json.loads(row["result_json"])
+                        except Exception:
+                            result = {}
+                        if isinstance(result, dict):
+                            if result.get("final_video"):
+                                expected["final_video"] = result["final_video"]
+                            expected["job_result"] = result
+                    changed_here = any(plan.get(k) != v for k, v in expected.items())
+                    if changed_here:
+                        plan.update(expected)
+                        plan_store.atomic_save_unlocked(plan_path, plan)
+                        changed += 1
+            except Exception:
+                continue
+        return changed
+
