@@ -721,13 +721,21 @@ class H3ContextIRCompiler:
             for ref in refs:
                 owner=f" for {ref['character_name']}" if cls._clean(ref.get("character_name")) else ""
                 lines.append(f"{ref['label']} ({ref['media_type']}){owner}: role={ref['role']}; relationship={ref['relationship']}; purpose={ref['description']}.")
+        subject_definitions=cls._subject_definitions(plan,shot,refs)
+        summary=cls._summary(plan,shot,refs)
+        retention=cls._retention_analysis(shot,refs)
+        detailed=cls._detailed_description(plan,shot,refs)
+        soundscape=cls._soundscape(shot,refs)
+        music=cls._music(shot,refs)
+        lines.append(f"Subject definitions: {subject_definitions}")
+        lines.append(f"Shot summary: {summary}")
+        lines.append(f"Retention requirements: {retention}")
+        lines.append(f"Detailed description: {detailed}")
         dialogue=cls._dialogue_lines(plan,shot)
         if dialogue:
             lines.append("Dialogue and speech timing:")
             lines.extend(dialogue)
-        soundscape=cls._soundscape(shot,refs)
-        lines.append(f"Diegetic sound: {soundscape}")
-        music=cls._music(shot,refs)
+        lines.append(f"Overall soundscape: {soundscape}")
         lines.append(f"Non-diegetic music: {music}")
         duration=float(shot.get("duration_seconds",0.0) or 0.0)
         if duration>0: lines.append(f"Target duration: {duration:.3f} seconds.")
@@ -746,6 +754,9 @@ class H3ContextIRCompiler:
         prompt=cls._clean(context_ir.get("context_ir_input"))
         if not prompt:
             raise ValueError("H3 Context-IR contains an empty context_ir_input.")
+        for section in cls.REQUIRED_SECTIONS:
+            if not cls._clean(context_ir.get(section)):
+                raise ValueError(f"H3 Context-IR is missing required section: {section}")
         refs=context_ir.get("references",[]) or []
         if not isinstance(refs,list):
             raise ValueError("H3 Context-IR references must be a list.")
@@ -789,6 +800,12 @@ class H3ContextIRCompiler:
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
         refs=self._canonical_references(shot)
+        subject_definitions=self._subject_definitions(plan,shot,refs)
+        summary=self._summary(plan,shot,refs)
+        retention_analysis=self._retention_analysis(shot,refs)
+        detailed_description=self._detailed_description(plan,shot,refs)
+        overall_soundscape=self._soundscape(shot,refs)
+        non_diegetic_music=self._music(shot,refs)
         speaker_map=self._speaker_map(shot)
         reference_rows=[]
         for ref in refs:
@@ -801,6 +818,12 @@ class H3ContextIRCompiler:
             dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0)})
         result={
             "version":self.VERSION,"mode":"ref2va","story":str(plan.get("story","") or ""),
+            "subject_definitions":subject_definitions,
+            "summary":summary,
+            "retention_analysis":retention_analysis,
+            "detailed_description":detailed_description,
+            "overall_soundscape":overall_soundscape,
+            "non_diegetic_music":non_diegetic_music,
             "scene":{"scene_id":self._clean(shot.get("scene_id")),"location":self._clean(shot.get("location")),"time_of_day":self._clean(shot.get("time_of_day")),"mood":self._clean(shot.get("mood"))},
             "context_ir_input":self._canonical_input_prompt(plan,shot,refs),
             "shot":{"shot_id":self._clean(shot.get("shot_id")),"duration_seconds":float(shot.get("duration_seconds",0.0) or 0.0),"camera":{"shot":self._clean(shot.get("camera_shot")),"movement":self._clean(shot.get("camera_movement")),"lens":self._clean(shot.get("lens_and_depth_of_field"))},"composition":self._clean(shot.get("composition_notes")),"lighting":self._clean(shot.get("lighting")),"action":self._clean(shot.get("action"))},
