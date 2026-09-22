@@ -642,6 +642,27 @@ class ComfyClient:
         except TimeoutError:
             raise
 
+
+    @staticmethod
+    def read_context_ir_capture(path: str | Path, *, expected_base_prompt_sha256: str | None = None) -> dict:
+        target = Path(path).resolve()
+        if not target.is_file():
+            raise RuntimeError(f"Official Context-IR capture file is missing: {target}")
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise RuntimeError(f"Official Context-IR capture is invalid JSON: {target}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("Official Context-IR capture must be a JSON object.")
+        if str(payload.get("status", "")).strip().lower() != "succeeded":
+            raise RuntimeError(f"Official Context-IR capture did not succeed: {payload.get('status')!r}")
+        enhanced = str(payload.get("enhanced_prompt", "") or "").strip()
+        if not enhanced:
+            raise RuntimeError("Official Context-IR capture contains no enhanced_prompt.")
+        if expected_base_prompt_sha256 and str(payload.get("base_prompt_sha256", "")) != str(expected_base_prompt_sha256):
+            raise RuntimeError("Official Context-IR capture base prompt fingerprint does not match the production Context-IR input.")
+        return payload
+
     def download_file(
         self,
         filename,
