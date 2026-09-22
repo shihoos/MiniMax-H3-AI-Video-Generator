@@ -153,7 +153,20 @@ class DialogueTimeline:
         if isinstance(supplied, list) and supplied:
             if any(not isinstance(value, dict) for value in supplied):
                 raise ValueError(f"{shot.get('shot_id', '')}: dialogue_events contains a non-object entry.")
-            return [dict(value) for value in supplied]
+            normalized: list[dict] = []
+            for value in supplied:
+                event = dict(value)
+                # Canonical DialogueEvent payloads use speaker_id/speaker_name,
+                # while Qwen/legacy inputs use speaker. Preserve both contracts
+                # so deterministic rescheduling is idempotent.
+                speaker = str(event.get("speaker", "") or "").strip()
+                if not speaker:
+                    speaker = str(event.get("speaker_name", "") or "").strip()
+                if not speaker:
+                    speaker = str(event.get("speaker_id", "") or "").strip()
+                event["speaker"] = speaker
+                normalized.append(event)
+            return normalized
         return DialogueTimeline._legacy_events(shot)
 
     def _resolve_speaker(self, name_or_id: str, shot_characters: list[str]) -> dict:
@@ -465,8 +478,16 @@ class DialogueTimeline:
             )
             shot["dialogue_events"] = events
             shot["speaking_characters"] = [event["speaker_name"] for event in events]
+            default_language = str(
+                shot.get("dialogue_language")
+                or shot.get("language")
+                or plan.get("dialogue_language")
+                or plan.get("language")
+                or "English"
+            ).strip() or "English"
+            shot["language"] = default_language
             shot["speech_text"] = "\n".join(
-                f"({event['speaker_id']}) says: <d>[English] {event['text']}</d>"
+                f"({event['speaker_id']}) says: <d>[{event.get('language', default_language)}] {event['text']}</d>"
                 for event in events
             )
 
