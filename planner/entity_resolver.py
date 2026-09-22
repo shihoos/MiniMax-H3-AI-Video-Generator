@@ -82,6 +82,20 @@ class EntityResolver:
         "nobody",
     }
 
+    GENERIC_ROLE_ALIASES = {
+        "man", "woman", "boy", "girl", "child", "person",
+        "doctor", "scientist", "guard", "officer", "soldier",
+        "captain", "commander", "detective", "stranger", "pilot",
+        "nurse", "teacher", "engineer", "driver", "officer",
+    }
+
+    RELATIONSHIP_LABELS = {
+        "father", "mother", "dad", "mom", "parent", "son", "daughter",
+        "child", "brother", "sister", "husband", "wife", "partner",
+        "fiance", "fiancee", "uncle", "aunt", "cousin", "grandfather",
+        "grandmother", "grandson", "granddaughter", "nephew", "niece",
+    }
+
     HONORIFICS = {
         "dr",
         "doctor",
@@ -219,15 +233,12 @@ class EntityResolver:
         return aliases
 
     @classmethod
-    def build_character_alias_map(
-        cls,
-        characters,
-    ) -> dict[str, str]:
-        """Build a deterministic alias map from character payloads.
+    def build_character_alias_map(cls, characters) -> dict[str, str]:
+        """Build a deterministic semantic alias map from approved character payloads.
 
-        Relational identities do not inherit ordinary first-name aliases; only
-        their exact canonical name and validated semantic aliases are eligible.
-        Ambiguous semantic aliases are dropped instead of guessed.
+        Generic labels are never canonical identities. They may be aliases only for
+        an already-grounded relational character, and only when exactly one owner
+        claims the alias.
         """
         payloads = []
         for item in characters or []:
@@ -249,16 +260,19 @@ class EntityResolver:
             name = str(item.get("name", "") or "").strip()
             if not name:
                 continue
-            profile = item.get("identity_profile")
-            profile = profile if isinstance(profile, dict) else {}
+            profile = item.get("identity_profile") if isinstance(item.get("identity_profile"), dict) else {}
             identity_type = str(
                 item.get("identity_type", profile.get("identity_type", "named_character"))
                 or "named_character"
             ).strip().lower()
-            if identity_type == "relational_character":
+            normalized_name = cls.normalize(name)
+            is_relational = identity_type == "relational_character"
+            if is_relational:
                 relational_names.append(name)
-            else:
+            elif normalized_name not in cls.GENERIC_ROLE_ALIASES and normalized_name not in cls.GENERIC_REFERENCES:
                 named_names.append(name)
+            else:
+                continue
 
             raw_aliases = item.get("semantic_aliases")
             if raw_aliases is None:
@@ -267,11 +281,16 @@ class EntityResolver:
                 raw_aliases = [raw_aliases]
             for raw_alias in raw_aliases or []:
                 alias = cls.normalize(str(raw_alias or ""))
-                if not alias or alias == cls.normalize(name):
+                if not alias or alias == normalized_name:
                     continue
-                if not cls.is_safe_semantic_reference(alias):
+                if alias in cls.PRONOUNS:
                     continue
-                semantic_alias_owners.setdefault(alias, set()).add(cls.normalize(name))
+                generic_surface = cls.generic_role_surface(alias)
+                if not cls.is_safe_semantic_reference(alias) and not (is_relational and generic_surface):
+                    continue
+                if generic_surface and not is_relational:
+                    continue
+                semantic_alias_owners.setdefault(alias, set()).add(normalized_name)
 
         aliases = cls.build_alias_map(named_names)
         for name in relational_names:
@@ -286,8 +305,87 @@ class EntityResolver:
             existing = aliases.get(alias)
             if existing is None or existing == owner:
                 aliases[alias] = owner
-
         return aliases
+
+    @classmethod
+    def contextual_generic_alias(
+        cls,
+        value: str,
+        characters,
+        *,
+        bound_names: set[str] | None = None,
+        story: str = "",
+    ) -> str | None:
+        """Resolve a generic surface only when one grounded relational owner is explicit.
+
+        The method never creates an entity. It only maps an already-approved relational
+        character when the current shot binding or story evidence makes ownership unique.
+        """
+        alias = cls.normalize(value)
+        generic_surface = cls.generic_role_surface(alias)
+        if not generic_surface:
+            return None
+        alias = generic_surface
+        candidates: list[str] = []
+        bound = {cls.normalize(x) for x in (bound_names or set()) if cls.normalize(x)}
+        story_lower = cls.normalize(story)
+        payloads = []
+        for item in characters or []:
+            if isinstance(item, dict):
+                payloads.append(item)
+            elif hasattr(item, "to_dict"):
+                try:
+                    item = item.to_dict()
+                except Exception:
+                    continue
+                if isinstance(item, dict):
+                    payloads.append(item)
+        for item in payloads:
+            name = str(item.get("name", "") or "").strip()
+            profile = item.get("identity_profile") if isinstance(item.get("identity_profile"), dict) else {}
+            identity_type = str(item.get("identity_type", profile.get("identity_type", "")) or "").strip().lower()
+            if identity_type != "relational_character":
+                continue
+            norm_name = cls.normalize(name)
+            if bound and norm_name not in bound:
+                continue
+            aliases = item.get("semantic_aliases")
+            if aliases is None:
+                aliases = profile.get("semantic_aliases", [])
+            aliases_norm = {cls.normalize(str(x or "")) for x in (aliases or [])}
+            if alias in aliases_norm:
+                candidates.append(name)
+                continue
+            owner = cls.normalize(str(item.get("relationship_to", profile.get("relationship_to", "")) or ""))
+            relation = cls.normalize(str(item.get("relationship", profile.get("relationship", "")) or ""))
+            generic_pattern = r"\b(?:a|an|the|older|younger|young|old|hooded|masked|another)?\s*" + re.escape(alias) + r"\b"
+            if owner and relation and story_lower:
+                for owner_match in re.finditer(re.escape(owner), story_lower):
+                    start = max(0, owner_match.start() - 250)
+                    end = min(len(story_lower), owner_match.end() + 800)
+                    window = story_lower[start:end]
+                    relation_hit = bool(re.search(r"\b" + re.escape(relation) + r"\b", window))
+                    generic_hit = bool(re.search(generic_pattern, window))
+                    if relation_hit and generic_hit:
+                        candidates.append(name)
+                        break
+
+        unique = list(dict.fromkeys(candidates))
+        return unique[0] if len(unique) == 1 else None
+
+    @classmethod
+    def generic_role_surface(cls, value: str) -> str | None:
+        """Return a bare generic role for common contextual surfaces."""
+        normalized = cls.normalize(value)
+        if normalized in cls.GENERIC_ROLE_ALIASES:
+            return normalized
+        tokens = normalized.split()
+        if not tokens or tokens[-1] not in cls.GENERIC_ROLE_ALIASES:
+            return None
+        allowed_prefixes = {"the", "a", "an", "older", "younger", "young", "old", "hooded", "masked", "another"}
+        if all(token in allowed_prefixes for token in tokens[:-1]):
+            return tokens[-1]
+        return None
 
     @classmethod
     def is_safe_semantic_reference(
