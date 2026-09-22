@@ -111,6 +111,7 @@ class ProductionManifest:
             "execution/shot_executor.py",
             "execution/execution_policy.py",
             "pipeline/timeline.py",
+            "pipeline/dialogue_timeline.py",
             "pipeline/context_ir.py",
             "pipeline/production_orchestrator.py",
             "pipeline/vlm_analyzer.py",
