@@ -470,16 +470,14 @@ def install_director_runtime(
     def resolve_checkpoint(configured: str, required: tuple[str, ...], label: str, *, require_weights: bool = False) -> Path:
         configured_path = Path(configured).expanduser()
         candidates = [configured_path]
-        if Path("/kaggle/input").is_dir():
-            candidates.append(Path("/kaggle/input") / configured_path.name)
-        for root in (Path("/kaggle/input"),):
-            if root.is_dir():
-                try:
-                    candidates.extend(
-                        p for p in root.rglob(configured_path.name) if p.is_dir()
-                    )
-                except OSError:
-                    pass
+        if KAGGLE_INPUT.is_dir():
+            candidates.append(KAGGLE_INPUT / configured_path.name)
+            try:
+                candidates.extend(
+                    p for p in KAGGLE_INPUT.rglob(configured_path.name) if p.is_dir()
+                )
+            except OSError:
+                pass
 
         def has_weights(path: Path) -> bool:
             # Prefer an explicit index when present so every referenced shard is verified.
