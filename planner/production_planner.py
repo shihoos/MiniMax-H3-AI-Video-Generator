@@ -2687,11 +2687,17 @@ class ProductionPlanner:
                 count=1,
                 flags=re.IGNORECASE,
             ).strip() or name
+            filtered_aliases = []
+            for alias in aliases:
+                if EntityResolver.generic_role_surface(alias):
+                    continue
+                if EntityResolver.is_safe_semantic_reference(alias):
+                    filtered_aliases.append(alias)
             result[EntityResolver.normalize(canonical)] = {
                 "identity_type": "named_character",
                 "relationship_to": None,
                 "relationship": None,
-                "semantic_aliases": list(dict.fromkeys(aliases)),
+                "semantic_aliases": list(dict.fromkeys(filtered_aliases)),
             }
 
         for hint in relational_hints or []:
@@ -2701,16 +2707,15 @@ class ProductionPlanner:
             if not canonical:
                 continue
             key = EntityResolver.normalize(canonical)
-            result.setdefault(
-                key,
-                {
+            existing = result.get(key)
+            if not existing or existing.get("identity_type") != "relational_character":
+                result[key] = {
                     "identity_type": "relational_character",
                     "relationship_to": str(hint.get("relationship_to", "") or "").strip() or None,
                     "relationship": str(hint.get("relationship", "") or "").strip() or None,
                     "semantic_aliases": list(dict.fromkeys(hint.get("aliases", []) or [])),
-                },
-            )
-            if result[key].get("identity_type") == "relational_character":
+                }
+            else:
                 result[key]["semantic_aliases"] = list(dict.fromkeys(
                     (result[key].get("semantic_aliases", []) or []) + list(hint.get("aliases", []) or [])
                 ))
@@ -3000,9 +3005,23 @@ class ProductionPlanner:
             )
             info = metadata.get(EntityResolver.normalize(descriptor))
             if info:
-                # Keep existing Character schema unchanged. QwenDirector carries
-                # this validated metadata through the existing identity_profile.
-                character._semantic_identity_metadata = dict(info)
+                identity_type = str(info.get("identity_type", "named_character") or "named_character").strip().lower()
+                aliases = [
+                    str(value).strip()
+                    for value in (info.get("semantic_aliases", []) or [])
+                    if str(value).strip()
+                ]
+                character.identity_type = identity_type if identity_type in {"named_character", "relational_character"} else "named_character"
+                character.relationship_to = str(info.get("relationship_to", "") or "").strip() or None
+                character.relationship = str(info.get("relationship", "") or "").strip() or None
+                character.semantic_aliases = list(dict.fromkeys(aliases))
+                if character.identity_type == "relational_character" and (not character.relationship_to or not character.relationship):
+                    # A malformed semantic candidate never becomes a relational identity.
+                    character.identity_type = "named_character"
+                    character.relationship_to = None
+                    character.relationship = None
+                    character.semantic_aliases = []
+                character.build_identity_profile()
             characters.append(character)
 
         self.references.resolve_characters(characters)
