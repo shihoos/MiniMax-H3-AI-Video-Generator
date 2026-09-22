@@ -21,7 +21,7 @@ from planner.config import (
 )
 
 
-SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE only; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- Every dialogue_events[].speaker MUST resolve to one supplied canonical character identity. A canonical relational identity is valid when it exists in the supplied roster. Never invent a new identity and never use a bare generic role that is not in the supplied roster.\n- Preserve spoken text exactly; never paraphrase, summarize, or invent dialogue.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
+SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE only; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.\n- Relational canonical identities are valid when supplied (for example, "Eli\'s father"). Use the exact canonical identity, not a bare role.\n- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.\n- Preserve spoken text exactly; never paraphrase, summarize, or invent dialogue.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
 
 class QwenDirectorPromptMixin:
     def _mode_instruction(
@@ -413,10 +413,17 @@ class QwenDirectorPromptMixin:
                             },
                             "identity_type": {
                                 "type": "string",
-                                "enum": ["named_character", "relational_character"],
+                                "enum": [
+                                    "named_character",
+                                    "relational_character",
+                                ],
                             },
-                            "relationship_to": {"type": "string"},
-                            "relationship": {"type": "string"},
+                            "relationship_to": {
+                                "type": "string",
+                            },
+                            "relationship": {
+                                "type": "string",
+                            },
                         },
                         "required": [
                             "name",
@@ -462,21 +469,28 @@ class QwenDirectorPromptMixin:
 
         system_prompt = textwrap.dedent("""
     You are a strict character/entity extraction component for a cinematic production planner.
-    Return JSON only. Analyze the supplied story and classify named entities relevant to character identity.
-    A character is a stable human or sentient identity that can receive a stable identity lock. Proper names
-    are the normal case. A stable relational identity is also valid when the story clearly establishes one
-    persistent person through a grounded relationship, for example "Eli's father" or "her mother".
-    Do NOT invent identities. Bare generic labels such as "man", "woman", "boy", "girl", "doctor",
-    "guard", or "scientist" are not canonical identities by themselves. For a relational character, set
-    identity_type=relational_character, set relationship_to to the grounded target's canonical name, set
-    relationship to the stable relationship noun, and include the actual narrative/speech forms in aliases.
-    Titles such as Dr., Captain, Commander, etc. are not part of the canonical name. Preserve full names when
-    present and use the most complete proper name actually present in the story. For relational identities,
-    the canonical name is the grounded form <target>'s <relationship> even when that exact possessive form
-    does not appear verbatim. When a character's full proper name and a shorter form both appear as candidates, return
-    only the single most complete canonical form; do not return the short form as a separate candidate. Review
-    the deterministic candidate hints and explicitly mark any that are not characters, while also recovering
-    named characters that the deterministic scan missed.
+    Return JSON only. Analyze the supplied story and classify stable human/sentient identities that can receive
+    an identity lock. There are TWO valid character identity types:
+
+    1) named_character: a proper/named character such as "Eli" or "Lin Mei".
+    2) relational_character: a persistent unnamed character whose identity is grounded by a named story
+       character and a relationship, such as "Eli's father", "Sara's sister", or "Mira's commander".
+
+    Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
+    "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a named_character.
+    They may appear only as aliases/surface descriptions of a grounded relational_character when the story clearly
+    establishes which persistent character they refer to.
+
+    Do NOT invent a relationship or identity. For a relational_character, relationship_to MUST name a canonical
+    character actually grounded in the story, relationship MUST be one concrete family/role relation, and the
+    supplied story must contain enough evidence to support that link. Prefer a canonical name in the form
+    "<Canonical Character>'s <relationship>" and include grounded surface forms (for example "his father",
+    "the older man") in aliases.
+
+    Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
+    weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
+    Preserve the most complete canonical identity. Review the deterministic candidate hints and recover stable
+    relational identities that the deterministic scan may not have named yet.
     """).strip()
 
         user_payload = json.dumps(
@@ -526,12 +540,13 @@ class QwenDirectorPromptMixin:
         supplied = semantic_result if isinstance(semantic_result, dict) else {}
         system_prompt = textwrap.dedent("""
     You are the final character-identity adjudicator. Return JSON only.
-    Review only the supplied candidate identities and the supplied semantic extraction.
-    A candidate may be a proper named character or a grounded stable relational identity.
-    Bare generic labels are NOT_CHARACTER unless a separate relational identity has been explicitly established.
-    Never invent or rename a candidate. For relational identities, preserve relationship_to and relationship
-    and use <target>'s <relationship> as the canonical identity. UNCERTAIN is
-    terminal and must not trigger another call.
+    Review only the supplied candidate names and the supplied semantic extraction.
+    For each candidate decide whether it is a stable character identity: named_character,
+    relational_character, NOT_CHARACTER, or UNCERTAIN. Never invent an unrelated person.
+    A relational identity is valid only when relationship_to is a grounded canonical character and the
+    relationship is explicitly or unambiguously established by the story. Bare generic role labels remain
+    NOT_CHARACTER. Preserve grounded aliases without turning the alias itself into another canonical person.
+    UNCERTAIN is terminal and must not trigger another call.
     """).strip()
         payload = json.dumps(
             {
@@ -802,14 +817,26 @@ class QwenDirectorPromptMixin:
             if not name:
                 continue
 
-            compact_characters.append(
-                {
-                    "name": name,
-                    "role": str(
-                        item.get("role", "") or ""
-                    ).strip(),
-                }
-            )
+            entry = {
+                "name": name,
+                "role": str(
+                    item.get("role", "") or ""
+                ).strip(),
+            }
+            profile = item.get("identity_profile")
+            profile = profile if isinstance(profile, dict) else {}
+            for key in ("identity_type", "relationship_to", "relationship"):
+                value = str(profile.get(key, "") or "").strip()
+                if value:
+                    entry[key] = value
+            semantic_aliases = [
+                str(value).strip()
+                for value in (profile.get("semantic_aliases", []) or [])
+                if str(value).strip()
+            ][:6]
+            if semantic_aliases:
+                entry["semantic_aliases"] = semantic_aliases
+            compact_characters.append(entry)
 
         language = {}
 
