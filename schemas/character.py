@@ -71,6 +71,11 @@ class Character:
         default_factory=list
     )
 
+    semantic_aliases: list[str] = field(default_factory=list)
+    identity_type: str = "named_character"
+    relationship_to: Optional[str] = None
+    relationship: Optional[str] = None
+
     reference_mode: str = "missing"
 
     reference_paths: list[str] = field(
@@ -132,6 +137,22 @@ class Character:
             self.continuity_rules,
             "continuity_rules",
         )
+
+        self.semantic_aliases = list(dict.fromkeys(
+            value.strip()
+            for value in _as_string_list(self.semantic_aliases, "semantic_aliases")
+            if value.strip()
+        ))
+        self.identity_type = str(self.identity_type or "named_character").strip().lower() or "named_character"
+        if self.identity_type not in {"named_character", "relational_character"}:
+            raise ValueError("identity_type must be 'named_character' or 'relational_character'.")
+        for field_name in ("relationship_to", "relationship"):
+            value = getattr(self, field_name)
+            if value is not None:
+                value = str(value).strip()
+                setattr(self, field_name, value or None)
+        if self.identity_type == "relational_character" and (not self.relationship_to or not self.relationship):
+            raise ValueError("relational_character requires relationship_to and relationship.")
 
         self.reference_mode = str(
             self.reference_mode or "missing"
@@ -268,6 +289,10 @@ class Character:
                 "stable_identity_marks",
                 [],
             ),
+            "semantic_aliases": list(self.semantic_aliases),
+            "identity_type": self.identity_type,
+            "relationship_to": self.relationship_to,
+            "relationship": self.relationship,
         }
 
         return self.identity_profile
@@ -379,6 +404,10 @@ class Character:
             "distinctive_features": self.distinctive_features,
             "character_state": self.character_state,
             "continuity_rules": self.continuity_rules,
+            "semantic_aliases": list(self.semantic_aliases),
+            "identity_type": self.identity_type,
+            "relationship_to": self.relationship_to,
+            "relationship": self.relationship,
             "reference_mode": self.reference_mode,
             "reference_paths": images,
             "reference_video_paths": videos,
