@@ -100,6 +100,15 @@ class ProductionCheckpoint:
             "job_id",
             "job_status",
             "job_error",
+            "production_manifest_path",
+            "context_ir_capture_root",
+            "h3_effective_prompt",
+            "h3_context_ir",
+            "visual_feedback",
+            "visual_feedback_after_retake",
+            "quality_gate",
+            "retake_recommended",
+            "observed_visual_state",
         ):
             normalized.pop(key, None)
         return cls.digest_object(normalized)
