@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 from pipeline.job_queue import ProductionJobQueue
 from pipeline.production_plan_store import ProductionPlanStore
 from pipeline.timeline import ProductionTimeline
+from pipeline.dialogue_timeline import DialogueTimeline
 from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.production_checkpoint import ProductionCheckpoint
 from pipeline.retake_manager import RetakeManager
@@ -58,6 +59,7 @@ class ProductionController:
         )
         self._plan_store = ProductionPlanStore()
         self._job_queue.recover_stale(max_age_seconds=21600.0)
+        self._job_queue.reconcile_plan_states(self._plan_store)
         self._queue_stop = threading.Event()
         self._queue_thread = threading.Thread(
             target=self._queue_worker_loop,
@@ -935,6 +937,8 @@ class ProductionController:
                     return [], f"### BUSY\nTimeline edits are disabled while the render job is `{job_status}`.", str(plan_path)
 
                 ProductionTimeline(plan).apply_table(rows)
+                DialogueTimeline(plan.get("characters", []) or []).apply_to_plan(plan)
+                ProductionTimeline(plan).build()
                 ProductionTimeline.validate(plan)
                 ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
 
@@ -1186,6 +1190,7 @@ class ProductionController:
         job_id = str(plan.get("job_id", "") or "").strip()
         if not job_id:
             return "No persistent render job is attached to this storyboard.", plan.get("final_video"), str(plan_path)
+        self._job_queue.reconcile_plan_states(self._plan_store)
         row = self._job_queue.get(job_id)
         if not row:
             return "### ERROR\nPersistent render job was not found.", None, str(plan_path)
@@ -1214,6 +1219,7 @@ class ProductionController:
             job_completed = False
 
             try:
+                self._job_queue.reconcile_plan_states(self._plan_store)
                 def _heartbeat():
                     while not heartbeat_stop.wait(30.0):
                         if not self._job_queue.heartbeat(job_id, worker_token):
@@ -1248,6 +1254,7 @@ class ProductionController:
                         job_completed = True
                         plan["job_status"] = "completed"
                         ProductionPlanStore.atomic_save_unlocked(plan_path, plan)
+                        self._job_queue.reconcile_plan_states(self._plan_store)
             except Exception as exc:
                 if not job_completed:
                     try:
