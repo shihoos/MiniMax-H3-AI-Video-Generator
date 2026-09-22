@@ -14,18 +14,17 @@ class GPUScheduler:
             raise ValueError("At least one GPU is required.")
 
     def run_independent(self, jobs, worker_function):
-        indexed_jobs = deque(enumerate(jobs))
-        queue_lock = threading.Lock()
+        indexed_jobs = list(enumerate(jobs))
+        assignments = {gpu_id: [] for gpu_id in self.gpu_ids}
+        for index, job in indexed_jobs:
+            gpu_id = self.gpu_ids[index % len(self.gpu_ids)]
+            assignments[gpu_id].append((index, job))
         result_lock = threading.Lock()
         results = []
         failures = []
 
         def worker(gpu_id):
-            while True:
-                with queue_lock:
-                    if not indexed_jobs:
-                        return
-                    index, job = indexed_jobs.popleft()
+            for index, job in assignments[gpu_id]:
                 started = time.monotonic()
                 try:
                     result = worker_function(gpu_id, job)
@@ -59,3 +58,4 @@ class GPUScheduler:
 
         results.sort(key=lambda item: item[0])
         return [result for _index, result, _gpu_id, _duration in results]
+
