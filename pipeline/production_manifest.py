@@ -15,7 +15,7 @@ from pipeline.production_checkpoint import ProductionCheckpoint
 class ProductionManifest:
     """Immutable-ish audit artifact describing exactly what produced a film."""
 
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root).resolve()
@@ -90,54 +90,68 @@ class ProductionManifest:
             "inventory_policy": dict(inventory.get("policy", {}) or {}),
         }
 
-    def build(self, plan: dict[str, Any]) -> dict[str, Any]:
-        files = {}
-        for rel in (
-            "configs/runtime_versions.yaml",
-            "configs/model_inventory.yaml",
-            "configs/custom_nodes.yaml",
-            "planner/qwen_director.py",
-            "planner/qwen_director_runtime.py",
-            "planner/qwen_director_prompts.py",
-            "planner/qwen_director_scene.py",
-            "planner/qwen_director_sanitize.py",
-            "planner/cinematic_compiler.py",
-            "planner/production_planner.py",
-            "planner/entity_resolver.py",
-            "schemas/character.py",
-            "execution/h3_workflow_builder.py",
-            "execution/h3_upscaled_workflow_builder.py",
-            "execution/production_runner.py",
-            "execution/shot_executor.py",
-            "execution/execution_policy.py",
-            "pipeline/timeline.py",
-            "pipeline/dialogue_timeline.py",
-            "pipeline/context_ir.py",
-            "pipeline/production_orchestrator.py",
-            "pipeline/vlm_analyzer.py",
-            "pipeline/quality_gate.py",
-            "pipeline/retake_manager.py",
-            "execution/retake_executor.py",
-            "pipeline/runtime_diagnostics.py",
-            "pipeline/comfy_preview.py",
-            "pipeline/visual_feedback.py",
-            "pipeline/visual_state_observer.py",
-            "pipeline/production_checkpoint.py",
-            "ui/storyboard_gradio.py",
-            "ui/shot_view_model.py",
-        ):
-            files[rel] = self._file_hash(self.project_root / rel)
-        model_manifest = plan.get("model_manifest") or plan.get("models") or self.default_model_manifest()
-        if not isinstance(model_manifest, dict):
-            raise RuntimeError("Production model provenance must be a mapping.")
+    def build(self, plan: dict[str, Any], *, require_context_ir_results: bool = False) -> dict[str, Any]:
+        files: dict[str, str] = {}
+        roots = ("planner", "pipeline", "execution", "schemas", "scheduler", "ui", "kaggle")
+        for root_name in roots:
+            root = self.project_root / root_name
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.py")):
+                if "__pycache__" in path.parts:
+                    continue
+                rel = path.relative_to(self.project_root).as_posix()
+                files[rel] = self._file_hash(path)
+        for pattern in ("configs/*.yaml", "configs/*.yml", "workflows/**/*.json", "requirements*.txt", ".github/workflows/*.yml"):
+            for path in sorted(self.project_root.glob(pattern)):
+                if path.is_file():
+                    files[path.relative_to(self.project_root).as_posix()] = self._file_hash(path)
+
+        authoritative_models = self.default_model_manifest()
+        supplied_models = plan.get("model_manifest") or plan.get("models")
+        if supplied_models is not None:
+            if not isinstance(supplied_models, dict):
+                raise RuntimeError("Production model provenance must be a mapping.")
+            if ProductionCheckpoint.digest_object(supplied_models) != ProductionCheckpoint.digest_object(authoritative_models):
+                raise RuntimeError("Plan-supplied model provenance differs from the authoritative repository inventory.")
+        model_manifest = authoritative_models
         production_models = model_manifest.get("production")
         director_model = model_manifest.get("director")
         if not isinstance(production_models, dict) or not production_models:
             raise RuntimeError("Production model provenance is missing the production model inventory.")
-        if not isinstance(director_model, dict):
-            raise RuntimeError("Production model provenance is missing the Director model.")
-        if not director_model.get("path") and not director_model.get("filename"):
+        if not isinstance(director_model, dict) or not (director_model.get("path") or director_model.get("filename")):
             raise RuntimeError("Production model provenance is missing the Director model path.")
+
+        effective_prompts: dict[str, str] = {}
+        context_ir_artifacts: dict[str, dict[str, Any]] = {}
+        for shot in plan.get("shots", []) or []:
+            if not isinstance(shot, dict):
+                continue
+            sid = str(shot.get("shot_id", "")).strip()
+            ctx = shot.get("h3_context_ir") or {}
+            if require_context_ir_results and not isinstance(ctx, dict):
+                raise RuntimeError(f"Shot {sid} has no production Context-IR record.")
+            official = ctx.get("official_context_ir") if isinstance(ctx, dict) else None
+            if isinstance(official, dict):
+                artifact = {
+                    "status": official.get("status", ""),
+                    "task_id": official.get("task_id", ""),
+                    "base_prompt_sha256": official.get("base_prompt_sha256", ""),
+                    "effective_prompt_sha256": official.get("effective_prompt_sha256", ""),
+                    "capture_path": official.get("capture_path", ""),
+                }
+                capture_path = Path(str(official.get("capture_path", "")).strip()) if official.get("capture_path") else None
+                if capture_path and capture_path.is_file():
+                    artifact["capture_sha256"] = self._file_hash(capture_path)
+                context_ir_artifacts[sid] = artifact
+                if require_context_ir_results and (official.get("status") not in {"succeeded", "captured"} or not capture_path or not capture_path.is_file()):
+                    raise RuntimeError(f"Shot {sid} is missing a successful official Context-IR result.")
+                if shot.get("h3_effective_prompt"):
+                    effective_prompts[sid] = str(shot["h3_effective_prompt"])
+                elif require_context_ir_results:
+                    raise RuntimeError(f"Shot {sid} is missing its effective H3 prompt from the official Context-IR result.")
+            elif require_context_ir_results:
+                raise RuntimeError(f"Shot {sid} is missing its official Context-IR provenance record.")
 
         manifest = {
             "version": self.VERSION,
@@ -149,18 +163,17 @@ class ProductionManifest:
             "models": model_manifest,
             "runtime": plan.get("runtime_diagnostics", {}) or {},
             "timeline_version": (plan.get("timeline", {}) or {}).get("version", 1),
-            "execution": {
-                "mode": str(plan.get("execution_mode", "production") or "production"),
-                "context_ir_version": (plan.get("features", {}) or {}).get("context_ir_version", 2),
-                "profile": str(plan.get("profile", "base") or "base"),
-            },
+            "effective_h3_prompts": effective_prompts,
+            "official_context_ir": context_ir_artifacts,
+            "execution": dict(plan.get("execution", {}) or {}),
+            "workflow_files": {k: v for k, v in files.items() if k.startswith("workflows/")},
         }
         manifest["manifest_sha256"] = hashlib.sha256(
             json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         return manifest
 
-    def write(self, plan: dict[str, Any], path: Path) -> dict[str, Any]:
-        manifest = self.build(plan)
+    def write(self, plan: dict[str, Any], path: Path, *, require_context_ir_results: bool = True) -> dict[str, Any]:
+        manifest = self.build(plan, require_context_ir_results=require_context_ir_results)
         self._atomic_write_json(Path(path), manifest)
         return manifest
