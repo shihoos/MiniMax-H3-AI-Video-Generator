@@ -286,6 +286,27 @@ def _prepare_cuda_environment() -> tuple[
 # DIRECTOR
 # ============================================================
 
+def _resolve_kaggle_asset(configured: str) -> Path:
+    """Resolve a logical Kaggle input path, including nested dataset mounts."""
+    configured_path = Path(str(configured or "").strip()).expanduser()
+    candidates = [configured_path, KAGGLE_INPUT / configured_path.name]
+    if KAGGLE_INPUT.is_dir():
+        try:
+            candidates.extend(p for p in KAGGLE_INPUT.rglob(configured_path.name) if p.is_dir())
+        except OSError:
+            pass
+    seen = set()
+    for candidate in candidates:
+        try:
+            candidate = candidate.resolve()
+        except OSError:
+            continue
+        if str(candidate) in seen or not candidate.is_dir():
+            continue
+        seen.add(str(candidate))
+        return candidate
+    raise FileNotFoundError(f"Kaggle asset directory was not found: {configured}")
+
 def find_director_model() -> Path:
     runtime = load_yaml(RUNTIME_MANIFEST)
     director = dict(runtime.get("director", {}) or {})
@@ -294,12 +315,13 @@ def find_director_model() -> Path:
     configured = str(director.get("model_path", "") or "").strip()
     if not configured:
         raise RuntimeError("runtime_versions.yaml director.model_path is empty.")
-    candidates = [Path(configured).expanduser(), KAGGLE_INPUT / Path(configured).name]
+    try:
+        candidate = _resolve_kaggle_asset(configured)
+    except FileNotFoundError:
+        candidate = None
     required = ("config.json", "model.safetensors.index.json", "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors", "tokenizer.json")
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if candidate.is_dir() and all((candidate / name).is_file() for name in required):
-            return candidate
+    if candidate is not None and all((candidate / name).is_file() for name in required):
+        return candidate
     raise RuntimeError("Complete Qwen3-14B-AWQ checkpoint was not found at " + configured)
 
 
@@ -312,12 +334,11 @@ def find_director_speculator() -> Path:
             "runtime_versions.yaml director.speculative_model_path must be /kaggle/input/eagle-3 for the locked Eagle-3 Kaggle dataset."
         )
 
-    candidates = [
-        Path(configured).expanduser(),
-        KAGGLE_INPUT / Path(configured).name,
-    ]
-    for candidate in candidates:
-        candidate = candidate.resolve()
+    try:
+        resolved_candidate = _resolve_kaggle_asset(configured)
+    except FileNotFoundError:
+        resolved_candidate = None
+    for candidate in ([resolved_candidate] if resolved_candidate is not None else []):
         config_path = candidate / "config.json"
         if not (candidate.is_dir() and config_path.is_file()):
             continue
