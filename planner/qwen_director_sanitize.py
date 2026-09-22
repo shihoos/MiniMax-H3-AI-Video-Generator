@@ -30,13 +30,11 @@ class QwenDirectorSanitizeMixin:
         lowered = value.lower()
 
         if lowered in (
-            self.VALID_GENERIC_ROLES
-        ):
-            return True
-
-        if lowered in (
             self.FORBIDDEN_CHARACTER_NAMES
         ):
+            return False
+
+        if lowered in self.VALID_GENERIC_ROLES:
             return False
 
         if len(
@@ -255,6 +253,37 @@ class QwenDirectorSanitizeMixin:
                                 [],
                             )
                         ),
+                    "semantic_aliases": self._coerce_list(
+                        value.get(
+                            "semantic_aliases",
+                            (value.get("identity_profile", {}) or {}).get("semantic_aliases", []),
+                        )
+                    ),
+                    "identity_type": str(
+                        value.get(
+                            "identity_type",
+                            (value.get("identity_profile", {}) or {}).get("identity_type", "named_character"),
+                        )
+                        or "named_character"
+                    ).strip(),
+                    "relationship_to": (
+                        str(
+                            value.get(
+                                "relationship_to",
+                                (value.get("identity_profile", {}) or {}).get("relationship_to", ""),
+                            )
+                            or ""
+                        ).strip() or None
+                    ),
+                    "relationship": (
+                        str(
+                            value.get(
+                                "relationship",
+                                (value.get("identity_profile", {}) or {}).get("relationship", ""),
+                            )
+                            or ""
+                        ).strip() or None
+                    ),
                 }
             )
 
