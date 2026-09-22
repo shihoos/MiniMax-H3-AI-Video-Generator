@@ -2617,10 +2617,22 @@ class ProductionPlanner:
 
         semantic_aliases = []
         for surface in raw_aliases:
-            if EntityResolver.normalize(surface) != EntityResolver.normalize(canonical):
-                semantic_aliases.append(surface)
+            if EntityResolver.normalize(surface) == EntityResolver.normalize(canonical):
+                continue
+            text = str(surface or "").strip()
+            generic_surface = EntityResolver.generic_role_surface(text)
+            # Preserve the grounded relational role as a non-canonical semantic
+            # alias in its stable bare form. This lets a later dialogue speaker
+            # such as ``man`` resolve to the already-approved relational identity
+            # without ever promoting ``man`` into the canonical character roster.
+            if generic_surface:
+                semantic_aliases.append(generic_surface)
+            else:
+                semantic_aliases.append(text)
         if supplied_name and EntityResolver.normalize(supplied_name) != EntityResolver.normalize(canonical):
-            semantic_aliases.append(supplied_name)
+            text = str(supplied_name).strip()
+            generic_surface = EntityResolver.generic_role_surface(text)
+            semantic_aliases.append(generic_surface or text)
 
         return True, canonical, {
             "identity_type": "relational_character",
@@ -2969,20 +2981,22 @@ class ProductionPlanner:
                     fallback.append(name)
             descriptors = self._canonicalize_character_descriptors(fallback)
 
-        # Add only strongly grounded relational identities that have passed the
-        # same deterministic evidence gate. This is a bounded semantic-recall
-        # rescue, not generic role promotion.
-        relation_by_norm = {
-            EntityResolver.normalize(str(item.get("name", "") or "")): item
-            for item in relational_hints
-            if item.get("strong") and item.get("name")
-        }
-        for key, item in relation_by_norm.items():
-            canonical = str(item.get("name", "") or "").strip()
-            if canonical and key not in {
-                EntityResolver.normalize(value) for value in descriptors
-            }:
-                descriptors.append(canonical)
+        # Add strongly grounded relational identities only when the semantic
+        # roster is not authoritative. Once an explicit semantic/adjudication
+        # result has been accepted, its exclusions are terminal: deterministic
+        # relation hints must not silently re-add a character that Qwen rejected.
+        if not semantic_roster_authoritative:
+            relation_by_norm = {
+                EntityResolver.normalize(str(item.get("name", "") or "")): item
+                for item in relational_hints
+                if item.get("strong") and item.get("name")
+            }
+            for key, item in relation_by_norm.items():
+                canonical = str(item.get("name", "") or "").strip()
+                if canonical and key not in {
+                    EntityResolver.normalize(value) for value in descriptors
+                }:
+                    descriptors.append(canonical)
 
         descriptors = self._canonicalize_character_descriptors(descriptors)
         if not descriptors:
