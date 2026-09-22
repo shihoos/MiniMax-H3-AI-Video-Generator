@@ -34,6 +34,7 @@ from planner.entity_resolver import (
 )
 from pipeline.dialogue_timeline import DialogueTimeline
 from pipeline.production_orchestrator import ProductionOrchestrator
+from schemas.character import Character
 
 
 def check(
@@ -2667,7 +2668,13 @@ def test_scene_boundary_dialogue_continuation_is_closed() -> None:
 
 
 def test_final_plan_metadata_and_scene_character_sync() -> None:
-    character = make_character()
+    character = Character(
+        character_id="char_alex",
+        name="Alex",
+        role="protagonist",
+        description="Test character",
+        personality="Focused",
+    )
     plan = {
         "characters": [],
         "scenes": [
