@@ -292,7 +292,20 @@ class QwenDirectorRuntimeMixin:
         system_prompt: str,
         user_prompt: str,
         response_schema: dict | None,
+        *,
+        temperature: float,
+        top_p: float,
+        max_tokens: int,
+        json_mode: bool,
+        disable_thinking: bool,
     ) -> str:
+        # Cache identity must include every model/runtime parameter that can
+        # change the generated answer.  Otherwise a model/config change can
+        # incorrectly reuse an older semantic decision.
+        try:
+            model_name = self._vllm_model_name()
+        except Exception:
+            model_name = "unknown"
         material = json.dumps(
             {
                 "namespace": self._cache_namespace,
@@ -300,6 +313,19 @@ class QwenDirectorRuntimeMixin:
                 "system": system_prompt,
                 "user": user_prompt,
                 "schema": response_schema,
+                "model": model_name,
+                "model_path": str(self._model_path) if getattr(self, "_model_path", None) else "",
+                "temperature": float(temperature),
+                "top_p": float(top_p),
+                "max_tokens": int(max_tokens),
+                "json_mode": bool(json_mode),
+                "disable_thinking": bool(disable_thinking),
+                "generation_config": str(DIRECTOR_VLLM_GENERATION_CONFIG),
+                "tensor_parallel": int(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
+                "max_model_len": int(DIRECTOR_VLLM_MAX_MODEL_LEN),
+                "speculative_method": str(DIRECTOR_VLLM_SPECULATIVE_METHOD),
+                "speculative_model_path": str(DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH),
+                "speculative_tokens": int(DIRECTOR_VLLM_SPECULATIVE_TOKENS),
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1052,6 +1078,11 @@ class QwenDirectorRuntimeMixin:
                 system_prompt,
                 user_prompt,
                 response_schema,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                disable_thinking=disable_thinking,
             )
             cached = self._cache_read(cache_key)
             if cached is not None:
