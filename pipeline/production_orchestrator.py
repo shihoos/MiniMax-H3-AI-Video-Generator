@@ -1347,9 +1347,15 @@ class ProductionOrchestrator:
             characters,
         )
 
-        DialogueTimeline(
+        dialogue_timeline = DialogueTimeline(
             character_dicts
-        ).apply_to_plan(plan)
+        )
+        source_dialogue = dialogue_timeline.snapshot_source_dialogue(plan)
+        dialogue_timeline.apply_to_plan(plan)
+        dialogue_timeline.assert_source_dialogue_preserved(
+            plan,
+            source_dialogue,
+        )
 
         ledger = ContinuityLedger(
             self.project_root,
@@ -1366,15 +1372,24 @@ class ProductionOrchestrator:
                 plan,
                 character_dicts,
             )
+            dialogue_timeline.assert_source_dialogue_preserved(
+                plan,
+                source_dialogue,
+            )
             return plan
         except ContinuityViolation:
             # Deterministic field-level fallback only. The creative shot is
             # never regenerated here, and the unloaded Qwen director is never
             # called from this post-director phase.
-            return ledger.apply_field_level_fallback(
+            repaired = ledger.apply_field_level_fallback(
                 plan,
                 character_dicts,
             )
+            dialogue_timeline.assert_source_dialogue_preserved(
+                repaired,
+                source_dialogue,
+            )
+            return repaired
 
     def create_production_plan(
         self,
