@@ -320,7 +320,7 @@ class ProductionPlanner:
         "He", "She", "It", "They", "We", "You", "I",
         "His", "Her", "Its", "Their", "Our", "Your",
         "This", "That", "These", "Those",
-        "There", "Here", "Who", "What", "Which",
+        "There", "Here", "All", "Who", "What", "Which",
         "Monday", "Tuesday", "Wednesday", "Thursday",
         "Friday", "Saturday", "Sunday",
         "January", "February", "March", "April", "May", "June",
@@ -1728,6 +1728,16 @@ class ProductionPlanner:
             score = item["score"]
             occurrences = item["occurrences"]
 
+            # Bare generic person labels are never canonical identities. They
+            # remain semantic surface evidence for later entity resolution.
+            # This prevents strings such as ``man``/``woman`` from becoming
+            # fake Character records and poisoning relational hints.
+            if (
+                name.lower() in self.GENERIC_PERSON_LABELS
+                and "explicit" not in sources
+            ):
+                continue
+
             # Explicit identity is authoritative.
             if "explicit" in sources:
                 accepted.append(
@@ -2015,8 +2025,9 @@ class ProductionPlanner:
 
         return character
 
-    @staticmethod
+    @classmethod
     def _canonicalize_character_descriptors(
+        cls,
         descriptors: list[str],
     ) -> list[str]:
         """
@@ -2056,6 +2067,9 @@ class ProductionPlanner:
             key = value.lower()
 
             if key in seen:
+                continue
+
+            if key in cls.GENERIC_PERSON_LABELS:
                 continue
 
             seen.add(key)
@@ -3017,22 +3031,25 @@ class ProductionPlanner:
                     fallback.append(name)
             descriptors = self._canonicalize_character_descriptors(fallback)
 
-        # Add strongly grounded relational identities only when the semantic
-        # roster is not authoritative. Once an explicit semantic/adjudication
-        # result has been accepted, its exclusions are terminal: deterministic
-        # relation hints must not silently re-add a character that Qwen rejected.
-        if not semantic_roster_authoritative:
-            relation_by_norm = {
-                EntityResolver.normalize(str(item.get("name", "") or "")): item
-                for item in relational_hints
-                if item.get("strong") and item.get("name")
-            }
-            for key, item in relation_by_norm.items():
-                canonical = str(item.get("name", "") or "").strip()
-                if canonical and key not in {
-                    EntityResolver.normalize(value) for value in descriptors
-                }:
-                    descriptors.append(canonical)
+        # Strongly grounded relational identities are additive safety facts, not
+        # optional Qwen decorations. A complete named-character adjudication may
+        # legitimately exclude a weak/non-person candidate, but it must not erase
+        # a story-grounded relational person that is explicitly established by
+        # the source story (for example, ``Eli's father``) and may later speak as
+        # ``the man``, ``his father``, or ``father``. Named-character semantic
+        # negatives remain authoritative through the normal reconciliation path;
+        # relational hints are preserved here as a separate deterministic floor.
+        relation_by_norm = {
+            EntityResolver.normalize(str(item.get("name", "") or "")): item
+            for item in relational_hints
+            if item.get("strong") and item.get("name")
+        }
+        existing_norms = {EntityResolver.normalize(value) for value in descriptors}
+        for key, item in relation_by_norm.items():
+            canonical = str(item.get("name", "") or "").strip()
+            if canonical and key not in existing_norms:
+                descriptors.append(canonical)
+                existing_norms.add(key)
 
         descriptors = self._canonicalize_character_descriptors(descriptors)
         if not descriptors:
