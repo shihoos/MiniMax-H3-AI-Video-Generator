@@ -245,6 +245,102 @@ def test_generic_relationship_speakers_resolve_for_uncle_and_father():
             "bare relationship speaker 'father' did not resolve")
 
 
+
+def test_relational_pronoun_antecedent_does_not_attach_to_relative_clause_object():
+    from planner.production_planner import ProductionPlanner
+    planner = _planner()
+    story = (
+        "Eli opened the vault. Inside he discovered a sentient AI his father had created to protect the city."
+    )
+    descriptors = planner.detect_character_descriptors(story)
+    hints = planner._extract_relational_character_hints(story, descriptors)
+    names = {item["name"] for item in hints}
+    _assert("Eli's father" in names, f"expected Eli's father relational hint: {hints}")
+    _assert("AI's father" not in names, f"relative-clause object incorrectly became relationship owner: {hints}")
+
+
+def test_explicit_nameplate_survives_semantic_negative():
+    planner = _planner()
+    story = "The vault console flickered. The nameplate on the console: Dr. Lila Voss. She spoke to Elias Kade."
+
+    def extractor(*_args):
+        return {"candidates": [{
+            "name": "Elias Kade", "entity_type": "PERSON", "is_character": True,
+            "aliases": [], "identity_type": "named_character",
+        }, {
+            "name": "Lila Voss", "entity_type": "PERSON", "is_character": False,
+            "aliases": [], "identity_type": "named_character",
+        }]}
+
+    def adjudicator(*_args):
+        return {"candidates": [{
+            "name": "Elias Kade", "entity_type": "PERSON", "is_character": True,
+            "aliases": [], "identity_type": "named_character",
+        }, {
+            "name": "Lila Voss", "entity_type": "PERSON", "is_character": False,
+            "aliases": [], "identity_type": "named_character",
+        }]}
+
+    names = [c.name for c in planner.create_characters(
+        story, qwen_character_extractor=extractor, qwen_character_adjudicator=adjudicator
+    )]
+    _assert("Lila Voss" in names, f"explicit nameplate identity was lost: {names}")
+
+
+def test_descriptive_character_identity_and_generic_alias():
+    planner = _planner()
+    story = "Eli entered the vault. A woman with piercing eyes stepped into the light and spoke to Eli."
+    characters = planner.create_characters(story)
+    payload = [c.to_dict() for c in characters]
+    names = [c.name for c in characters]
+    _assert("woman with piercing eyes" in {n.lower() for n in names}, f"descriptive character was not retained: {names}")
+    descriptive = next(c for c in payload if c["name"].lower() == "woman with piercing eyes")
+    _assert(descriptive["identity_type"] == "descriptive_character", f"wrong descriptive identity type: {descriptive}")
+    from planner.entity_resolver import EntityResolver
+    _assert(
+        EntityResolver.contextual_generic_alias("woman", payload, story=story) == "woman with piercing eyes",
+        f"generic descriptive alias did not resolve: {payload}",
+    )
+
+
+def test_descriptive_or_relational_speaker_repairs_scene_and_shot_binding():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    characters = [{
+        "name": "Eli's father",
+        "identity_type": "relational_character",
+        "relationship_to": "Eli",
+        "relationship": "father",
+        "semantic_aliases": ["man", "father"],
+        "identity_profile": {
+            "identity_type": "relational_character",
+            "relationship_to": "Eli",
+            "relationship": "father",
+            "semantic_aliases": ["man", "father"],
+        },
+    }, {
+        "name": "woman with piercing eyes",
+        "identity_type": "descriptive_character",
+        "semantic_aliases": ["woman"],
+        "identity_profile": {
+            "identity_type": "descriptive_character",
+            "semantic_aliases": ["woman"],
+        },
+    }]
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{"speaker": "man", "text": "Come here."}],
+    }]
+    story = 'Eli turned. The man spoke: "Come here."'
+    director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    _assert(shots[0]["dialogue_events"][0]["speaker"] == "Eli's father", f"relational speaker not repaired: {shots[0]}")
+    _assert("Eli's father" in shots[0]["characters"], f"relational speaker missing from shot: {shots[0]}")
+    _assert("Eli's father" in scenes[0]["characters"], f"relational speaker missing from scene: {scenes[0]}")
+
 def test_sanitizer_identity_contract():
     from planner.qwen_director import QwenDirector
 
@@ -426,6 +522,10 @@ def main():
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
         test_relational_character_survives_generic_negative_and_resolves_dialogue,
         test_generic_relationship_speakers_resolve_for_uncle_and_father,
+        test_relational_pronoun_antecedent_does_not_attach_to_relative_clause_object,
+        test_explicit_nameplate_survives_semantic_negative,
+        test_descriptive_character_identity_and_generic_alias,
+        test_descriptive_or_relational_speaker_repairs_scene_and_shot_binding,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
