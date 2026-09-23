@@ -375,14 +375,30 @@ class EntityResolver:
 
     @classmethod
     def generic_role_surface(cls, value: str) -> str | None:
-        """Return a bare generic role for common contextual surfaces."""
+        """Return a stable bare role/relation surface for contextual identity binding.
+
+        The returned value is never itself a canonical character. It is only an
+        alias candidate that can bind to an already-approved named/relational
+        character when ownership is unique.
+        """
         normalized = cls.normalize(value)
-        if normalized in cls.GENERIC_ROLE_ALIASES:
+        surfaces = set(cls.GENERIC_ROLE_ALIASES) | set(cls.RELATIONSHIP_LABELS)
+        if normalized in surfaces:
             return normalized
         tokens = normalized.split()
-        if not tokens or tokens[-1] not in cls.GENERIC_ROLE_ALIASES:
+        if not tokens or tokens[-1] not in surfaces:
             return None
-        allowed_prefixes = {"the", "a", "an", "older", "younger", "young", "old", "hooded", "masked", "another"}
+        if tokens[-1] in cls.RELATIONSHIP_LABELS:
+            allowed_prefixes = {
+                "the", "a", "an", "older", "younger", "young", "old",
+                "hooded", "masked", "another", "his", "her", "their",
+                "my", "our", "your",
+            }
+        else:
+            allowed_prefixes = {
+                "the", "a", "an", "older", "younger", "young", "old",
+                "hooded", "masked", "another",
+            }
         if all(token in allowed_prefixes for token in tokens[:-1]):
             return tokens[-1]
         return None
