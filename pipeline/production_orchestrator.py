@@ -1326,6 +1326,82 @@ class ProductionOrchestrator:
         plan["director_pending"] = False
         plan["preview_ready"] = True
 
+    @staticmethod
+    def _snapshot_dialogue_contract(plan: dict) -> dict[tuple[str, str], int]:
+        """Snapshot normalized dialogue before deterministic production passes.
+
+        The Director has already performed semantic speaker normalization at this
+        point. Downstream timing/continuity code is allowed to change timing fields
+        but must not silently add, remove, or rewrite explicit dialogue text.
+        """
+        from collections import Counter
+
+        snapshot: Counter[tuple[str, str]] = Counter()
+        for shot in plan.get("shots", []) or []:
+            if not isinstance(shot, dict):
+                continue
+            shot_id = str(shot.get("shot_id", "") or "").strip()
+            events = shot.get("dialogue_events", [])
+            if not isinstance(events, list):
+                raise RuntimeError(
+                    f"Shot {shot_id} dialogue_events must be a list before production enforcement."
+                )
+            for event in events:
+                if not isinstance(event, dict):
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains a non-object dialogue event before production enforcement."
+                    )
+                text = str(event.get("text", "") or "").strip()
+                speaker = str(
+                    event.get("speaker", "")
+                    or event.get("speaker_name", "")
+                    or event.get("speaker_id", "")
+                    or ""
+                ).strip()
+                if text:
+                    snapshot[(shot_id, text)] += 1
+                elif speaker:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains dialogue speaker {speaker!r} with empty text."
+                    )
+        return dict(snapshot)
+
+    @staticmethod
+    def _assert_dialogue_contract_preserved(
+        before: dict[tuple[str, str], int],
+        plan: dict,
+    ) -> None:
+        """Ensure deterministic downstream passes never lose or rewrite dialogue."""
+        from collections import Counter
+
+        after: Counter[tuple[str, str]] = Counter()
+        for shot in plan.get("shots", []) or []:
+            if not isinstance(shot, dict):
+                continue
+            shot_id = str(shot.get("shot_id", "") or "").strip()
+            events = shot.get("dialogue_events", [])
+            if not isinstance(events, list):
+                raise RuntimeError(
+                    f"Shot {shot_id} dialogue_events is not a list after production enforcement."
+                )
+            for event in events:
+                if not isinstance(event, dict):
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains a non-object dialogue event after production enforcement."
+                    )
+                text = str(event.get("text", "") or "").strip()
+                if text:
+                    after[(shot_id, text)] += 1
+
+        before_counter = Counter(before)
+        if before_counter != after:
+            missing = before_counter - after
+            extra = after - before_counter
+            raise RuntimeError(
+                "Deterministic production passes changed explicit dialogue content: "
+                f"missing={dict(missing)!r} extra={dict(extra)!r}"
+            )
+
     def _enforce_production_contracts(
         self,
         plan: dict,
@@ -1347,15 +1423,9 @@ class ProductionOrchestrator:
             characters,
         )
 
-        dialogue_timeline = DialogueTimeline(
+        DialogueTimeline(
             character_dicts
-        )
-        source_dialogue = dialogue_timeline.snapshot_source_dialogue(plan)
-        dialogue_timeline.apply_to_plan(plan)
-        dialogue_timeline.assert_source_dialogue_preserved(
-            plan,
-            source_dialogue,
-        )
+        ).apply_to_plan(plan)
 
         ledger = ContinuityLedger(
             self.project_root,
@@ -1372,24 +1442,15 @@ class ProductionOrchestrator:
                 plan,
                 character_dicts,
             )
-            dialogue_timeline.assert_source_dialogue_preserved(
-                plan,
-                source_dialogue,
-            )
             return plan
         except ContinuityViolation:
             # Deterministic field-level fallback only. The creative shot is
             # never regenerated here, and the unloaded Qwen director is never
             # called from this post-director phase.
-            repaired = ledger.apply_field_level_fallback(
+            return ledger.apply_field_level_fallback(
                 plan,
                 character_dicts,
             )
-            dialogue_timeline.assert_source_dialogue_preserved(
-                repaired,
-                source_dialogue,
-            )
-            return repaired
 
     def create_production_plan(
         self,
@@ -1602,10 +1663,16 @@ class ProductionOrchestrator:
             characters,
         )
 
+        # Snapshot the already-verified Director dialogue before any deterministic
+        # timing/continuity pass. Those downstream passes may change timestamps but
+        # must never silently remove or rewrite explicit spoken text.
+        dialogue_contract = self._snapshot_dialogue_contract(plan)
+
         # Deterministic production-enforcement passes. Qwen remains the
         # creative source, while timing and continuity are finalized here.
         plan["production_id"] = production_id
         plan = self._enforce_production_contracts(plan, characters)
+        self._assert_dialogue_contract_preserved(dialogue_contract, plan)
         ensure_plan_lineage(plan, production_id)
         character_dicts = [character.to_dict() for character in characters]
 
