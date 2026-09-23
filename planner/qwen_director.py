@@ -1510,15 +1510,19 @@ class QwenDirector(
                     if contextual and contextual.lower() in canonical_by_norm:
                         canonical = canonical_by_norm[contextual.lower()]
                 if canonical is None:
-                    # Qwen may attribute grounded speech to a role label that
-                    # never became a canonical character. Do not invent an
-                    # identity or abort the whole production; discard only the
-                    # unresolved dialogue event and record the recovery.
+                    # Explicit source dialogue is a protected semantic contract.
+                    # Never silently delete a real spoken line because Qwen used
+                    # an unresolved speaker surface. A later stage cannot recover
+                    # an event that is discarded here, so fail closed with the
+                    # exact shot/speaker context instead.
                     self._record_recovery(
                         "dialogue_speaker_unresolved",
                         f"shot={shot_id} speaker={speaker!r}",
                     )
-                    continue
+                    raise RuntimeError(
+                        "Explicit dialogue speaker could not be canonically resolved: "
+                        f"shot={shot_id} speaker={speaker!r}"
+                    )
 
                 explicit_source_canonicals = {
                     resolved.lower()
@@ -1526,27 +1530,34 @@ class QwenDirector(
                     if (resolved := _resolve(source_speaker)) is not None
                 }
                 if matched_source_speakers and not explicit_source_canonicals:
-                    # The source explicitly labels this line, but that label does
-                    # not resolve to a canonical character. Never guess which
-                    # canonical character Qwen intended.
+                    # Explicit source attribution is authoritative enough to reject
+                    # an unsafe remap, but not to justify deleting the spoken line.
+                    # Stop production so the caller can surface the exact semantic
+                    # conflict instead of silently losing dialogue.
                     self._record_recovery(
                         "dialogue_source_speaker_unresolved",
                         f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}",
                     )
-                    continue
+                    raise RuntimeError(
+                        "Explicit dialogue source speaker could not be resolved: "
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}"
+                    )
 
                 normalized_speaker = canonical.lower()
                 if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
                     # The source gives explicit speaker provenance that conflicts
-                    # with Qwen's attribution. Preserve the source contract rather
-                    # than silently remapping the line to another character.
+                    # with Qwen's attribution. Never silently delete or remap the
+                    # line; fail closed so the semantic conflict is visible.
                     self._record_recovery(
                         "dialogue_speaker_source_mismatch",
                         f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}",
                     )
-                    continue
+                    raise RuntimeError(
+                        "Explicit dialogue speaker conflicts with source attribution: "
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}"
+                    )
 
-                if normalized_speaker not in bound:
+                if bound and normalized_speaker not in bound:
                     generic_surface = EntityResolver.generic_role_surface(speaker)
                     canonical_payload = next(
                         (item for item in characters
@@ -1568,7 +1579,7 @@ class QwenDirector(
                     # relational character. This does not create a new character:
                     # it restores the canonical identity Qwen omitted from the
                     # shot-level character binding.
-                    if canonical_identity_type in {"relational_character", "descriptive_character"}:
+                    if generic_surface and canonical_identity_type == "relational_character":
                         shot_characters = shot.get("characters")
                         if not isinstance(shot_characters, list):
                             shot_characters = list(shot_characters or [])
@@ -1597,15 +1608,38 @@ class QwenDirector(
                             if normalized_speaker not in scene_norms:
                                 scene_characters.append(canonical)
                     else:
-                        # The line is real speech and the identity is canonical, but
-                        # Qwen bound it to a character that is not present in this
-                        # shot. Do not invent a new binding or abort the whole
-                        # production; discard only the inconsistent dialogue event.
-                        self._record_recovery(
-                            "dialogue_speaker_unbound",
-                            f"shot={shot_id} speaker={speaker!r}",
-                        )
-                        continue
+                        # The identity is already canonical. If Qwen omitted it from
+                        # the shot binding, repair the binding deterministically rather
+                        # than deleting the explicit dialogue. This is safe because
+                        # no new entity is created; only an existing canonical entity
+                        # is restored to the shot/scene.
+                        shot_characters = shot.get("characters")
+                        if not isinstance(shot_characters, list):
+                            shot_characters = list(shot_characters or [])
+                            shot["characters"] = shot_characters
+                        existing_norm = {
+                            EntityResolver.normalize(str(value or ""))
+                            for value in shot_characters
+                            if str(value or "").strip()
+                        }
+                        if normalized_speaker not in existing_norm:
+                            shot_characters.append(canonical)
+                        bound.add(normalized_speaker)
+
+                        scene_id = str(shot.get("scene_id", "") or "").strip()
+                        scene = scene_by_id.get(scene_id)
+                        if scene is not None:
+                            scene_characters = scene.get("characters", [])
+                            if not isinstance(scene_characters, list):
+                                scene_characters = list(scene_characters or [])
+                                scene["characters"] = scene_characters
+                            scene_norms = {
+                                EntityResolver.normalize(str(value or ""))
+                                for value in scene_characters
+                                if str(value or "").strip()
+                            }
+                            if normalized_speaker not in scene_norms:
+                                scene_characters.append(canonical)
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
