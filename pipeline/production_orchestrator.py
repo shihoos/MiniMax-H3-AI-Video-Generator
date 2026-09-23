@@ -1223,20 +1223,23 @@ class ProductionOrchestrator:
         )
 
         try:
-            temporary.write_text(
-                json.dumps(
-                    plan,
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(plan, handle, indent=2, ensure_ascii=False)
+                handle.flush()
+                import os
+                os.fsync(handle.fileno())
             temporary.replace(path)
+            try:
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
         finally:
             if temporary.exists():
-                temporary.unlink(
-                    missing_ok=True
-                )
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _refresh_shot_prompt(shot: dict) -> None:
@@ -1431,11 +1434,7 @@ class ProductionOrchestrator:
             # The planner owns the canonical character roster. Keep an
             # immutable boundary copy so a director/enrichment pass can never
             # replace or erase deterministic character identities downstream.
-            canonical_characters = (
-                deepcopy(base_plan.get("characters", []) or [])
-                if mode == PRESERVE_USER_STORY_MODE
-                else []
-            )
+            canonical_characters = deepcopy(base_plan.get("characters", []) or [])
 
             director_resume_state = None
 
@@ -1767,7 +1766,11 @@ class ProductionOrchestrator:
             plan_path,
             plan,
         )
-        self.manifest.write(plan, session_dir / "production_manifest.json")
+        self.manifest.write(
+            plan,
+            session_dir / "production_manifest.json",
+            require_context_ir_results=False,
+        )
 
         # Mark the planning stage READY. Rendering is a separate persisted
         # stage owned by ProductionRunner; do not claim production completed
