@@ -2333,6 +2333,102 @@ def test_verified_semantic_character_roster_reaches_final_plan() -> None:
     check(names == {"eli", "sara"}, "Verified semantic roster did not reach the final production plan.")
 
 
+def test_empty_semantic_roster_falls_back_without_overriding_grounded_characters() -> None:
+    planner = ProductionPlanner(ROOT)
+    calls = []
+
+    def extractor(_story, _hints):
+        calls.append("extractor")
+        return {"candidates": []}
+
+    def adjudicator(_story, _hints, _semantic):
+        calls.append("adjudicator")
+        return {"candidates": []}
+
+    characters = planner.create_characters(
+        "Elias Kade entered the station.",
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=adjudicator,
+    )
+    names = {character.name.lower() for character in characters}
+    check(calls == ["extractor", "adjudicator"], "Empty semantic payload did not take the bounded adjudication path.")
+    check(names == {"elias kade"}, f"Empty semantic payload erased a grounded deterministic character: {names}")
+
+
+def test_explicit_semantic_negative_remains_authoritative() -> None:
+    planner = ProductionPlanner(ROOT)
+    characters = planner.create_characters(
+        "Elena Kovalenko entered the station.",
+        qwen_character_extractor=lambda _story, _hints: {
+            "candidates": [
+                {
+                    "name": "Elena Kovalenko",
+                    "entity_type": "PERSON",
+                    "is_character": False,
+                    "aliases": [],
+                }
+            ]
+        },
+        qwen_character_adjudicator=lambda _story, _hints, _semantic: (_ for _ in ()).throw(
+            AssertionError("Explicit semantic negative must not trigger a second semantic decision")
+        ),
+    )
+    check(not characters, "An explicit semantic negative was not treated as authoritative.")
+
+
+def test_sanitized_identity_fields_are_self_consistent() -> None:
+    from planner.qwen_director import QwenDirector
+
+    director = object.__new__(QwenDirector)
+    result = director._sanitize_characters([
+        {
+            "name": "Eli",
+            "identity_type": "relational_character",
+            "relationship_to": "",
+            "relationship": "",
+            "semantic_aliases": ["man"],
+            "identity_profile": {
+                "identity_type": "relational_character",
+                "relationship_to": "",
+                "relationship": "",
+                "semantic_aliases": ["man"],
+            },
+        }
+    ])
+    check(len(result) == 1, "Sanitizer unexpectedly dropped the recoverable character record.")
+    value = result[0]
+    check(value["identity_type"] == value["identity_profile"]["identity_type"], "Identity type fields diverged.")
+    check(value["semantic_aliases"] == value["identity_profile"]["semantic_aliases"], "Semantic alias fields diverged.")
+    check(value["identity_type"] == "named_character", "Malformed relational identity was not downgraded.")
+    check(value["semantic_aliases"] == [], "Unsafe generic alias survived relational downgrade.")
+
+
+def test_qwen_cache_key_changes_with_generation_contract() -> None:
+    from pathlib import Path
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+
+    runtime = object.__new__(QwenDirectorRuntimeMixin)
+    runtime._cache_namespace = "test"
+    runtime._model_path = Path("/model/A")
+    runtime._vllm_model_name = lambda: "model-a"
+    kwargs = {
+        "call_name": "character_entity_extraction",
+        "system_prompt": "system",
+        "user_prompt": "user",
+        "response_schema": {"type": "object"},
+        "temperature": 0.05,
+        "top_p": 0.70,
+        "max_tokens": 256,
+        "json_mode": True,
+        "disable_thinking": True,
+    }
+    baseline = runtime._cache_key(**kwargs)
+    changed_temperature = runtime._cache_key(**{**kwargs, "temperature": 0.20})
+    changed_budget = runtime._cache_key(**{**kwargs, "max_tokens": 512})
+    check(baseline != changed_temperature, "Qwen cache key ignores temperature changes.")
+    check(baseline != changed_budget, "Qwen cache key ignores completion-budget changes.")
+
+
 def test_qwen_semantic_character_extractor_contract() -> None:
     planner = ProductionPlanner(ROOT)
 
@@ -2951,6 +3047,10 @@ def main() -> None:
         test_qwen_semantic_character_reconciliation,
         test_relational_character_identity_pipeline,
         test_verified_semantic_character_roster_reaches_final_plan,
+        test_empty_semantic_roster_falls_back_without_overriding_grounded_characters,
+        test_explicit_semantic_negative_remains_authoritative,
+        test_sanitized_identity_fields_are_self_consistent,
+        test_qwen_cache_key_changes_with_generation_contract,
         test_qwen_semantic_character_extractor_contract,
         test_mult_word_character_extraction_regression,
         test_visual_language_partial_merge_preserves_base_fields,
