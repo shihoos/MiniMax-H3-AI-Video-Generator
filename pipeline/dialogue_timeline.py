@@ -388,6 +388,84 @@ class DialogueTimeline:
 
         return [event.to_dict() for event in events]
 
+    @classmethod
+    def snapshot_source_dialogue(cls, plan: dict) -> dict[str, list[dict[str, str]]]:
+        """Capture explicit dialogue before deterministic scheduling.
+
+        The snapshot is intentionally limited to source identity/text, not timing,
+        because timing is allowed to change during H3-legal normalization.  This
+        provides a hard invariant against silently dropping or rewriting spoken
+        content while the speaker identity is canonicalized upstream.
+        """
+        snapshot: dict[str, list[dict[str, str]]] = {}
+        for shot in plan.get("shots", []) or []:
+            if not isinstance(shot, dict):
+                continue
+            shot_id = str(shot.get("shot_id", "") or "").strip()
+            if not shot_id:
+                continue
+            events = cls._raw_events(shot)
+            if not events:
+                continue
+            snapshot[shot_id] = [
+                {
+                    "speaker": str(event.get("speaker", "") or "").strip(),
+                    "text": str(event.get("text", "")),
+                }
+                for event in events
+            ]
+        return snapshot
+
+    @classmethod
+    def assert_source_dialogue_preserved(
+        cls,
+        plan: dict,
+        source_snapshot: dict[str, list[dict[str, str]]],
+    ) -> None:
+        """Fail closed if deterministic normalization drops explicit dialogue.
+
+        Speaker names are allowed to become canonical names during upstream
+        entity resolution, so this invariant checks source identity presence and
+        exact spoken text, while the final speaker_id/name fields are validated
+        separately for canonical binding.
+        """
+        final_by_shot = {
+            str(shot.get("shot_id", "") or "").strip(): shot
+            for shot in (plan.get("shots", []) or [])
+            if isinstance(shot, dict) and str(shot.get("shot_id", "") or "").strip()
+        }
+
+        for shot_id, expected_events in source_snapshot.items():
+            shot = final_by_shot.get(shot_id)
+            if shot is None:
+                raise ValueError(
+                    f"Dialogue contract violation: source dialogue shot {shot_id!r} disappeared."
+                )
+
+            final_events = shot.get("dialogue_events", []) or []
+            if not isinstance(final_events, list):
+                raise ValueError(
+                    f"Dialogue contract violation: {shot_id!r} dialogue_events is not a list."
+                )
+            if len(final_events) != len(expected_events):
+                raise ValueError(
+                    f"Dialogue contract violation: {shot_id!r} changed dialogue event count "
+                    f"from {len(expected_events)} to {len(final_events)}."
+                )
+
+            for index, (expected, actual) in enumerate(zip(expected_events, final_events), start=1):
+                actual_text = str(actual.get("text", ""))
+                if actual_text != expected["text"]:
+                    raise ValueError(
+                        f"Dialogue contract violation: {shot_id!r} event {index} text was altered."
+                    )
+                speaker_name = str(actual.get("speaker_name", "") or "").strip()
+                speaker_id = str(actual.get("speaker_id", "") or "").strip()
+                if not speaker_name or not speaker_id:
+                    raise ValueError(
+                        f"Dialogue contract violation: {shot_id!r} event {index} has no canonical speaker binding."
+                    )
+
     def apply_to_plan(self, plan: dict) -> None:
         previous_by_scene: dict[str, DialogueEvent | None] = {}
         continuation_by_scene: dict[str, bool] = {}
