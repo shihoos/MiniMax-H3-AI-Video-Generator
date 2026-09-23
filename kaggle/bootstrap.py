@@ -2,10 +2,8 @@ from __future__ import annotations
 
 import os
 import shutil
-import site
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 
 import yaml
@@ -191,79 +189,29 @@ def link_model(
 
 
 def _site_packages() -> list[Path]:
-    """Return every plausible active Python package root."""
-    roots: list[Path] = []
 
-    def add(value) -> None:
-        if not value:
-            return
-        try:
-            path = Path(value).expanduser().resolve()
-        except OSError:
-            return
-        if path.is_dir() and path not in roots:
-            roots.append(path)
-
-    for value in sys.path:
-        add(value)
-    try:
-        for value in site.getsitepackages():
-            add(value)
-    except Exception:
-        pass
-    try:
-        add(site.getusersitepackages())
-    except Exception:
-        pass
-    try:
-        paths = sysconfig.get_paths()
-        add(paths.get("purelib"))
-        add(paths.get("platlib"))
-    except Exception:
-        pass
-
-    return [root for root in roots if root.name in {"site-packages", "dist-packages"}]
-
-
-def _discover_pillow_roots() -> list[Path]:
-    """Find every active package root that can provide PIL."""
-    roots = list(_site_packages())
-
-    probe_code = (
-        "import importlib.util; "
-        "s=importlib.util.find_spec(\"PIL\"); "
-        "print(\"\\n\".join(str(x) for x in (s.submodule_search_locations or []) if x) if s else \"\")"
-    )
-    probe = subprocess.run(
-        [sys.executable, "-c", probe_code],
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import site; "
+                "print('\\n'.join(site.getsitepackages()))"
+            ),
+        ],
         capture_output=True,
         text=True,
-        check=False,
+        check=True,
     )
-    for line in probe.stdout.splitlines():
-        try:
-            path = Path(line.strip()).expanduser().resolve()
-        except OSError:
-            continue
-        parent = path.parent
-        if path.name == "PIL" and parent.name in {"site-packages", "dist-packages"} and parent not in roots:
-            roots.append(parent)
 
-    show = subprocess.run(
-        [sys.executable, "-m", "pip", "show", "Pillow"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    for line in show.stdout.splitlines():
-        if line.startswith("Location:"):
-            try:
-                path = Path(line.split(":", 1)[1].strip()).expanduser().resolve()
-            except OSError:
-                continue
-            if path.is_dir() and path.name in {"site-packages", "dist-packages"} and path not in roots:
-                roots.append(path)
-    return roots
+    return [
+        Path(
+            line.strip()
+        )
+        for line in result.stdout.splitlines()
+        if line.strip()
+    ]
+
 
 def _cuda_library_dirs() -> list[Path]:
 
@@ -357,7 +305,13 @@ def install_base_requirements() -> None:
 
 
 def install_pytorch_runtime(runtime: dict) -> None:
-    """Install and verify the project-locked PyTorch CUDA build at the final shared-runtime boundary."""
+    """Install and verify the project-locked PyTorch CUDA build last.
+
+    ComfyUI and custom-node requirements are allowed to install their own
+    compatible dependencies first. PyTorch is re-asserted only after all of
+    those dependency installs so a transitive requirement cannot silently
+    leave the worker on a different CUDA build.
+    """
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
     cuda = str(config.get("cuda", "") or "").strip().lower()
@@ -729,184 +683,75 @@ def install_storyboard_runtime(
         )
 
 
-def _purge_pillow_filesystem() -> int:
-    """Remove stale Pillow trees from every active package root."""
-    roots = _discover_pillow_roots()
+def install_and_verify_pillow_runtime(runtime: dict) -> None:
+    """Install the locked Pillow build cleanly and verify it in a fresh process."""
+    pillow_version = str(
+        runtime.get("storyboard", {}).get("pillow_version", "")
+    ).strip()
+    if not pillow_version:
+        raise RuntimeError(
+            "runtime_versions.yaml storyboard.pillow_version is missing."
+        )
+
+    roots = list(_site_packages())
+    try:
+        user_root = Path(site.getusersitepackages())
+        if user_root not in roots:
+            roots.append(user_root)
+    except Exception:
+        pass
+
     removed = 0
     for root in roots:
-        candidates = [root / "PIL", root / "Pillow.libs", *root.glob("Pillow-*.dist-info"), *root.glob("Pillow-*.egg-info")]
+        if not root.is_dir():
+            continue
+        candidates = [
+            root / "PIL",
+            root / "Pillow.libs",
+            *root.glob("Pillow-*.dist-info"),
+            *root.glob("Pillow-*.egg-info"),
+        ]
         for path in candidates:
             if not path.exists() and not path.is_symlink():
                 continue
-            try:
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path)
-                else:
-                    path.unlink(missing_ok=True)
-                removed += 1
-                print(f"[PILLOW CLEAN] removed {path}")
-            except OSError as exc:
-                raise RuntimeError(f"Unable to remove stale Pillow component {path}: {exc}") from exc
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
+            removed += 1
+            print("[PILLOW CLEAN] removed", path)
+
     print(f"[PILLOW CLEAN] roots={len(roots)} removed_components={removed}")
-    return removed
 
-def _pillow_install_root() -> Path:
-    """Resolve the package root that a fresh worker interpreter uses first."""
-    probe = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import sys; "
-                "print('\\n'.join(str(p) for p in sys.path if p))"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    candidates: list[Path] = []
-    for value in probe.stdout.splitlines():
-        try:
-            path = Path(value).expanduser().resolve()
-        except OSError:
-            continue
-        if path.is_dir() and path.name in {"site-packages", "dist-packages"}:
-            if path not in candidates:
-                candidates.append(path)
-
-    if not candidates:
-        raise RuntimeError("Could not resolve the active Python package root for Pillow.")
-
-    # Prefer the root that currently exposes the PIL package, matching the
-    # worker's normal import resolution order.
-    active = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import importlib.util; "
-                "s=importlib.util.find_spec('PIL'); "
-                "print(s.submodule_search_locations.__iter__().__next__() if s and s.submodule_search_locations else '')"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    active_line = (active.stdout or "").strip()
-    if active_line:
-        try:
-            active_root = Path(active_line).expanduser().resolve().parent
-            if active_root.name in {"site-packages", "dist-packages"}:
-                return active_root
-        except OSError:
-            pass
-
-    return candidates[0]
-
-
-def install_and_verify_pillow_runtime(runtime: dict) -> None:
-    """Materialize the exact Pillow wheel into a staging tree, replace the active PIL tree, and verify the worker-visible import."""
-    pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
-    if not pillow_version:
-        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-
-    install_root = _pillow_install_root()
-    staging_root = ROOT / ".runtime_kaggle" / f"pillow-staging-{pillow_version}"
-    if staging_root.exists():
-        shutil.rmtree(staging_root)
-    staging_root.mkdir(parents=True, exist_ok=True)
-
-    print("[PILLOW] active install root:", install_root)
-    print("[PILLOW] staging root:", staging_root)
-
-    # First build a complete wheel installation in isolation. We verify the
-    # staged source before touching the active Python environment.
     run(
         sys.executable,
         "-m",
         "pip",
         "install",
         "--no-cache-dir",
-        "--disable-pip-version-check",
         "--ignore-installed",
         "--no-deps",
-        "--target",
-        str(staging_root),
+        "-q",
+        "--disable-pip-version-check",
         f"Pillow=={pillow_version}",
     )
 
-    staged_typing = staging_root / "PIL" / "_typing.py"
-    staged_init = staging_root / "PIL" / "__init__.py"
-    if not staged_typing.is_file() or not staged_init.is_file():
-        raise RuntimeError("Pillow staging tree is incomplete: PIL/_typing.py or PIL/__init__.py is missing.")
-
-    staged_typing_text = staged_typing.read_text(encoding="utf-8")
-    if "_Ink = float | tuple[int, ...] | str" not in staged_typing_text:
-        raise RuntimeError(
-            "The Pillow 12.3.0 wheel staged by pip does not contain the expected _Ink definition. "
-            f"Staged file: {staged_typing}"
-        )
-
-    # Remove every active copy/metadata first. This avoids mixed trees when
-    # pip's recorded-file state is already inconsistent.
-    removed = _purge_pillow_filesystem()
-
-    install_root.mkdir(parents=True, exist_ok=True)
-    active_pil = install_root / "PIL"
-    active_libs = install_root / "Pillow.libs"
-    if active_pil.exists() or active_pil.is_symlink():
-        if active_pil.is_dir() and not active_pil.is_symlink():
-            shutil.rmtree(active_pil)
-        else:
-            active_pil.unlink(missing_ok=True)
-    if active_libs.exists() or active_libs.is_symlink():
-        if active_libs.is_dir() and not active_libs.is_symlink():
-            shutil.rmtree(active_libs)
-        else:
-            active_libs.unlink(missing_ok=True)
-
-    shutil.copytree(staging_root / "PIL", active_pil)
-    if (staging_root / "Pillow.libs").exists():
-        shutil.copytree(staging_root / "Pillow.libs", active_libs)
-
-    for metadata in staging_root.glob("Pillow-*.dist-info"):
-        destination = install_root / metadata.name
-        if destination.exists():
-            shutil.rmtree(destination)
-        shutil.copytree(metadata, destination)
-
-    # Fresh-process verification is the authoritative check because ComfyUI
-    # workers are also fresh Python processes. Confirm the exact origin path,
-    # version and _Ink symbol they will import.
-    verify_script = f"""
-from pathlib import Path
-import importlib.util
-import sys
-import PIL
-from PIL import Image, ImageText, _typing
-from PIL._typing import _Ink
-expected = {pillow_version!r}
-pil_root = Path(PIL.__path__[0]).resolve()
-typing_path = Path(_typing.__file__).resolve()
-image_path = Path(Image.__file__).resolve()
-image_text_path = Path(ImageText.__file__).resolve()
-assert PIL.__version__ == expected, (PIL.__version__, expected)
-assert pil_root == Path({str(active_pil)!r}).resolve(), (pil_root, {str(active_pil)!r})
-assert typing_path.parent == pil_root, (typing_path, pil_root)
-assert image_path.parent == pil_root, (image_path, pil_root)
-assert image_text_path.parent == pil_root, (image_text_path, pil_root)
-assert getattr(_typing, '_Ink', None) is _Ink
-assert '_Ink = float | tuple[int, ...] | str' in typing_path.read_text(encoding='utf-8')
-print('Pillow', PIL.__version__, 'OK')
-print('PIL', PIL.__file__)
-print('_typing', _typing.__file__)
-print('_Ink', _Ink)
-print('sys.path[0:6]')
-for value in sys.path[:6]:
-    print(value)
-"""
+    verify_script = (
+        "import PIL; "
+        "from PIL import Image, ImageText; "
+        "from PIL import _typing; "
+        "from PIL._typing import _Ink; "
+        f"assert PIL.__version__ == {pillow_version!r}, "
+        "f'expected Pillow {pillow_version}, got {PIL.__version__}'; "
+        "assert Image.__version__ == PIL.__version__; "
+        "assert Image.__file__.startswith(PIL.__path__[0]); "
+        "assert ImageText.__file__.startswith(PIL.__path__[0]); "
+        "assert _typing.__file__.startswith(PIL.__path__[0]); "
+        "assert _typing._Ink is _Ink; "
+        "print('Pillow', PIL.__version__, 'OK'); "
+        "print('PIL', PIL.__file__); "
+        "print('ImageText', ImageText.__file__)"
+    )
     verification = subprocess.run(
         [sys.executable, "-c", verify_script],
         capture_output=True,
@@ -915,147 +760,15 @@ for value in sys.path[:6]:
     )
     if verification.returncode != 0:
         raise RuntimeError(
-            "Final Pillow worker-runtime verification failed.\n"
-            f"active_root={install_root}\n"
-            f"purged_components={removed}\n"
-            f"stdout={verification.stdout!r}\n"
-            f"stderr={verification.stderr!r}"
-        )
-
-    print("[PILLOW]", (verification.stdout or "").strip())
-    shutil.rmtree(staging_root, ignore_errors=True)
-
-def verify_final_shared_runtime(runtime: dict) -> None:
-    """Verify the final shared Python/GPU runtime after every package installer finishes."""
-    storyboard = runtime.get("storyboard", {}) or {}
-    pytorch = runtime.get("pytorch", {}) or {}
-
-    version = str(pytorch.get("version", "")).strip()
-    cuda_tag = str(pytorch.get("cuda", "")).strip().lower()
-    expected_torch = f"{version}+{cuda_tag}"
-    if not cuda_tag.startswith("cu") or len(cuda_tag) < 4 or not cuda_tag[2:].isdigit():
-        raise RuntimeError(f"Unsupported locked CUDA tag: {cuda_tag!r}")
-    cuda_digits = cuda_tag[2:]
-    expected_cuda = cuda_digits[:-1] + "." + cuda_digits[-1]
-    expected_pillow = str(storyboard.get("pillow_version", "")).strip()
-    expected_gradio = str(storyboard.get("gradio_version", "")).strip()
-    expected_torchvision = str(pytorch.get("torchvision_version", "")).strip()
-    expected_torchaudio = str(pytorch.get("torchaudio_version", "")).strip()
-
-    if not all(
-        (
-            version,
-            cuda_tag,
-            expected_pillow,
-            expected_gradio,
-            expected_torchvision,
-            expected_torchaudio,
-        )
-    ):
-        raise RuntimeError("runtime_versions.yaml shared-runtime lock is incomplete.")
-
-    # Kaggle's base image contains unrelated optional packages with known conflicts.
-    # Keep pip check diagnostic; the authoritative gate is the fresh-process
-    # exact-version/import contract below.
-    pip_check = subprocess.run(
-        [sys.executable, "-m", "pip", "check"],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if pip_check.returncode != 0:
-        print("[PIP CHECK] non-fatal Kaggle base-environment conflicts detected:")
-        print((pip_check.stdout or pip_check.stderr or "").strip())
-    else:
-        print("[PIP CHECK] PASS")
-
-    verify_script = r'''
-import os
-
-import PIL
-from PIL import Image, ImageText
-from PIL._typing import _Ink
-import gradio
-import torch
-import torchaudio
-import torchvision
-import transformers
-import yaml
-import requests
-import jsonschema
-import websocket
-import psutil
-
-expected_torch = os.environ["H3_EXPECTED_TORCH"]
-expected_cuda = os.environ["H3_EXPECTED_CUDA"]
-expected_pillow = os.environ["H3_EXPECTED_PILLOW"]
-expected_gradio = os.environ["H3_EXPECTED_GRADIO"]
-expected_torchvision = os.environ["H3_EXPECTED_TORCHVISION"]
-expected_torchaudio = os.environ["H3_EXPECTED_TORCHAUDIO"]
-
-assert str(torch.__version__) == expected_torch, (torch.__version__, expected_torch)
-assert str(torch.version.cuda) == expected_cuda, (torch.version.cuda, expected_cuda)
-assert torch.cuda.is_available(), "CUDA unavailable in fresh shared-runtime process"
-assert tuple(torch.cuda.get_device_capability(0)) == (7, 5), torch.cuda.get_device_capability(0)
-assert str(torchvision.__version__).split("+", 1)[0] == expected_torchvision
-assert str(torchaudio.__version__).split("+", 1)[0] == expected_torchaudio
-assert str(PIL.__version__) == expected_pillow, (PIL.__version__, expected_pillow)
-assert str(Image.__version__) == expected_pillow
-assert Image.__file__.startswith(PIL.__path__[0])
-assert ImageText.__file__.startswith(PIL.__path__[0])
-assert getattr(PIL._typing, "_Ink", None) is _Ink
-assert getattr(ImageText, "_Ink", None) is _Ink
-assert str(gradio.__version__) == expected_gradio
-major = int(str(transformers.__version__).split(".", 1)[0])
-assert 5 <= major < 6, transformers.__version__
-
-print("[FRESH SHARED RUNTIME] PASS")
-print("torch=" + str(torch.__version__))
-print("torch_cuda=" + str(torch.version.cuda))
-print("torchvision=" + str(torchvision.__version__))
-print("torchaudio=" + str(torchaudio.__version__))
-print("pillow=" + str(PIL.__version__))
-print("gradio=" + str(gradio.__version__))
-print("transformers=" + str(transformers.__version__))
-print("gpu_capability=" + str(torch.cuda.get_device_capability(0)))
-print("PIL.ImageText/_Ink=PASS")
-print("control-plane imports=PASS")
-'''
-
-    environment = dict(os.environ)
-    environment.update(
-        {
-            "H3_EXPECTED_TORCH": expected_torch,
-            "H3_EXPECTED_CUDA": expected_cuda,
-            "H3_EXPECTED_PILLOW": expected_pillow,
-            "H3_EXPECTED_GRADIO": expected_gradio,
-            "H3_EXPECTED_TORCHVISION": expected_torchvision,
-            "H3_EXPECTED_TORCHAUDIO": expected_torchaudio,
-        }
-    )
-
-    verification = subprocess.run(
-        [sys.executable, "-c", verify_script],
-        env=environment,
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if verification.stdout:
-        print(verification.stdout, end="")
-    if verification.stderr:
-        print(verification.stderr, end="")
-    if verification.returncode != 0:
-        raise RuntimeError(
-            "Final shared-runtime verification failed.\n"
+            "Final Pillow runtime verification failed after clean reinstall.\n"
+            f"PILLOW PURGED COMPONENTS: {removed}\n"
             + (verification.stdout or "")
             + (verification.stderr or "")
         )
+    print("[PILLOW]", (verification.stdout or "").strip().replace("\n", " | "))
 
-    print("[SHARED RUNTIME] final dependency and GPU contract passed.")
 
-EMBEDDED_CONTEXT_IR_NODE = 'from __future__ import annotations\n\nimport hashlib\nimport json\nimport mimetypes\nimport os\nimport time\nfrom datetime import datetime, timezone\nfrom pathlib import Path\nfrom typing import Dict, Tuple\n\nimport requests\n\nDEFAULT_BASE = "https://api.minimax.io"\nCREATE_PATH = "/v2/h3_context_ir"\nQUERY_PATH = "/v2/query/video_generation/{task_id}"\nUPLOAD_PATH = "/v1/files/upload"\nRETRIEVE_PATH = "/v1/files/retrieve"\nFINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}\nTRANSIENT_HTTP = {429, 500, 502, 503, 504}\n_URL_CACHE: Dict[Tuple[str, str, int, int], str] = {}\n\n\ndef _split_paths(value: str) -> list[str]:\n    return [x.strip() for x in str(value or "").splitlines() if x.strip()]\n\n\ndef _config_int(name: str, default: int) -> int:\n    try:\n        return int(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _config_float(name: str, default: float) -> float:\n    try:\n        return float(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _headers(token: str) -> dict[str, str]:\n    return {"Authorization": f"Bearer {token}"}\n\n\ndef _request_with_retry(method: str, url: str, *, token: str, retry: bool = True, **kwargs):\n    retries = max(0, _config_int("H3_CONTEXT_IR_API_RETRIES", 3)) if retry else 0 if retry else 0\n    backoff = max(0.5, _config_float("H3_CONTEXT_IR_RETRY_BACKOFF_SECONDS", 2.0))\n    last = None\n    for attempt in range(retries + 1):\n        try:\n            response = requests.request(\n                method,\n                url,\n                headers={**_headers(token), **kwargs.pop("headers", {})},\n                **kwargs,\n            )\n        except requests.RequestException as exc:\n            last = exc\n            if attempt >= retries:\n                raise\n            time.sleep(backoff * (2 ** attempt))\n            continue\n        if response.status_code in TRANSIENT_HTTP and attempt < retries:\n            retry_after = response.headers.get("Retry-After")\n            try:\n                delay = max(0.5, float(retry_after)) if retry_after else backoff * (2 ** attempt)\n            except ValueError:\n                delay = backoff * (2 ** attempt)\n            time.sleep(delay)\n            continue\n        return response\n    if last:\n        raise last\n    raise RuntimeError("Context-IR request retry loop failed unexpectedly.")\n\n\ndef _resolve_local_file(value: str) -> Path:\n    path = Path(value).expanduser().resolve()\n    if not path.is_file():\n        raise FileNotFoundError(f"Context-IR reference file does not exist: {path}")\n    return path\n\n\ndef _max_upload_bytes(kind: str) -> int:\n    env_name = {\n        "image": "H3_CONTEXT_IR_MAX_IMAGE_MB",\n        "video": "H3_CONTEXT_IR_MAX_VIDEO_MB",\n        "audio": "H3_CONTEXT_IR_MAX_AUDIO_MB",\n    }[kind]\n    limit_mb = max(0.0, _config_float(env_name, {"image": 30.0, "video": 50.0, "audio": 15.0}[kind]))\n    return int(limit_mb * 1024 * 1024)\n\n\ndef _upload_local_file(path: Path, kind: str, token: str, base: str) -> str:\n    stat = path.stat()\n    limit_bytes = _max_upload_bytes(kind)\n    if limit_bytes and stat.st_size > limit_bytes:\n        limit_mb = limit_bytes / (1024 * 1024)\n        actual_mb = stat.st_size / (1024 * 1024)\n        raise ValueError(\n            f"Context-IR {kind} reference exceeds configured upload limit: "\n            f"{path.name} is {actual_mb:.2f} MiB; limit is {limit_mb:.2f} MiB."\n        )\n    key = (str(path), kind, int(stat.st_size), int(stat.st_mtime_ns))\n    cached = _URL_CACHE.get(key)\n    if cached:\n        return cached\n    purpose = "video_generation"\n    mime = mimetypes.guess_type(path.name)[0] or {\n        "image": "image/png", "video": "video/mp4", "audio": "audio/mpeg",\n    }[kind]\n    with path.open("rb") as handle:\n        response = _request_with_retry(\n            "POST",\n            base + UPLOAD_PATH,\n            token=token,\n            files={"file": (path.name, handle, mime)},\n            data={"purpose": purpose},\n            timeout=120,\n        )\n    response.raise_for_status()\n    payload = response.json()\n    file_obj = payload.get("file") or {}\n    file_id = str(file_obj.get("file_id") or file_obj.get("id") or "").strip()\n    url = str(file_obj.get("download_url") or file_obj.get("url") or "").strip()\n    if not url and file_id:\n        retrieve = _request_with_retry(\n            "GET",\n            base + RETRIEVE_PATH,\n            token=token,\n            params={"file_id": file_id},\n            timeout=60,\n        )\n        retrieve.raise_for_status()\n        robj = (retrieve.json().get("file") or {})\n        url = str(robj.get("download_url") or robj.get("url") or "").strip()\n    if not url.startswith(("https://", "http://")):\n        raise RuntimeError(f"MiniMax file upload returned no usable download URL for {path.name}.")\n    _URL_CACHE[key] = url\n    return url\n\n\ndef _media_url(value: str, kind: str, token: str, base: str) -> str:\n    value = str(value).strip()\n    if value.startswith(("https://", "http://")):\n        return value\n    if value.startswith("data:"):\n        return value\n    return _upload_local_file(_resolve_local_file(value), kind, token, base)\n\n\ndef _required_config_int(name: str) -> int:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return int(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _required_config_float(name: str) -> float:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return float(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _poll(base: str, token: str, task_id: str) -> str:\n    timeout_s = max(1, _required_config_int("H3_CONTEXT_IR_TIMEOUT_SECONDS"))\n    interval_s = max(0.1, _required_config_float("H3_CONTEXT_IR_POLL_INTERVAL_SECONDS"))\n    max_polls = max(1, _required_config_int("H3_CONTEXT_IR_MAX_POLLS"))\n    url = base + QUERY_PATH.format(task_id=task_id)\n    started = time.monotonic()\n    for _ in range(max_polls):\n        response = _request_with_retry("GET", url, token=token, timeout=60)\n        response.raise_for_status()\n        payload = response.json()\n        task = payload.get("task") or {}\n        status = str(task.get("status") or payload.get("status") or "").strip().lower()\n        if status in FINAL_STATUSES:\n            if status != "succeeded":\n                raise RuntimeError(f"MiniMax H3 Context-IR task {task_id} ended with status={status}.")\n            prompt = str((task.get("content") or {}).get("prompt") or "").strip()\n            if not prompt:\n                raise RuntimeError("MiniMax H3 Context-IR returned an empty enhanced prompt.")\n            return prompt\n        if time.monotonic() - started >= timeout_s:\n            break\n        time.sleep(interval_s)\n    raise TimeoutError(f"MiniMax H3 Context-IR task {task_id} timed out after {timeout_s}s.")\n\n\nCAPTURE_MARKER = "[[H3_CONTEXT_IR_CAPTURE_PATH:"\n\ndef _capture_marker(prompt: str) -> tuple[str, str]:\n    raw = str(prompt or "").strip()\n    start = raw.find(CAPTURE_MARKER)\n    if start < 0:\n        return "", raw\n    end = raw.find("]]", start)\n    if end < 0:\n        raise RuntimeError("Malformed H3 Context-IR capture marker.")\n    path = raw[start + len(CAPTURE_MARKER):end].strip()\n    clean = (raw[:start] + raw[end + 2:]).strip()\n    if not path:\n        raise RuntimeError("Empty H3 Context-IR capture path.")\n    return path, clean\n\n\ndef _write_capture(path: str, payload: dict) -> None:\n    target = Path(path).resolve()\n    target.parent.mkdir(parents=True, exist_ok=True)\n    temporary = target.with_suffix(target.suffix + f".{os.getpid()}.tmp")\n    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")\n    os.replace(temporary, target)\n\nclass MiniMaxH3ContextIR:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {"required": {\n            "prompt": ("STRING", {"multiline": True, "default": ""}),\n            "duration": ("INT", {"default": 5, "min": 4, "max": 15, "step": 1}),\n            "ratio": (["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "adaptive"}),\n            "reference_images": ("STRING", {"multiline": True, "default": ""}),\n            "reference_videos": ("STRING", {"multiline": True, "default": ""}),\n            "reference_audios": ("STRING", {"multiline": True, "default": ""}),\n        }}\n\n    RETURN_TYPES = ("STRING",)\n    RETURN_NAMES = ("enhanced_prompt",)\n    FUNCTION = "enhance"\n    CATEGORY = "MiniMax H3/Prompting"\n    DESCRIPTION = "Official MiniMax H3 Context-IR multimodal prompt enhancer."\n\n    def enhance(self, prompt, duration, ratio, reference_images, reference_videos, reference_audios):\n        # Official MiniMax H3 Context-IR is mandatory. There is deliberately no\n        # no local fallback or disable switch on the production bridge.\n        token = os.getenv("MINIMAX_API_TOKEN", "").strip() or os.getenv("TOKEN", "").strip()\n        if not token:\n            raise RuntimeError("Official MiniMax H3 Context-IR requires MINIMAX_API_TOKEN (or TOKEN).")\n        capture_path, prompt = _capture_marker(str(prompt or "").strip())\n        if not prompt:\n            raise ValueError("Context-IR prompt cannot be empty.")\n        base_prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()\n        base = (os.getenv("MINIMAX_API_BASE", DEFAULT_BASE).strip() or DEFAULT_BASE).rstrip("/")\n        content = [{"type": "text", "text": prompt}]\n        for value in _split_paths(reference_images):\n            content.append({"type": "image_url", "image_url": {"url": _media_url(value, "image", token, base)}, "role": "reference_image"})\n        for value in _split_paths(reference_videos):\n            content.append({"type": "video_url", "video_url": {"url": _media_url(value, "video", token, base)}, "role": "reference_video"})\n        for value in _split_paths(reference_audios):\n            content.append({"type": "audio_url", "audio_url": {"url": _media_url(value, "audio", token, base)}, "role": "reference_audio"})\n        ratio_value = str(ratio or "adaptive").strip()\n        payload = {\n            "model": "MiniMax-H3",\n            "content": content,\n            "duration": int(max(4, min(15, int(duration)))),\n            "ratio": None if ratio_value.lower() == "adaptive" else ratio_value,\n        }\n        response = _request_with_retry(\n            "POST", base + CREATE_PATH, token=token, retry=False,\n            headers={"Content-Type": "application/json"}, json=payload, timeout=60,\n        )\n        response.raise_for_status()\n        result = response.json()\n        task_id = str(result.get("task_id") or ((result.get("task") or {}).get("id")) or "").strip()\n        if not task_id:\n            raise RuntimeError(f"MiniMax H3 Context-IR did not return task_id: {response.text[:1000]}")\n        enhanced = _poll(base, token, task_id)\n        effective_prompt_sha256 = hashlib.sha256(enhanced.encode("utf-8")).hexdigest()\n        if capture_path:\n            _write_capture(capture_path, {\n                "status": "succeeded",\n                "task_id": task_id,\n                "base_prompt_sha256": base_prompt_sha256,\n                "effective_prompt_sha256": effective_prompt_sha256,\n                "enhanced_prompt": enhanced,\n                "captured_at": datetime.now(timezone.utc).isoformat(),\n            })\n        print(f"[H3 Context-IR] official task={task_id} enhanced_prompt_chars={len(enhanced)}", flush=True)\n        return (enhanced,)\n\n\nNODE_CLASS_MAPPINGS = {"MiniMaxH3ContextIR": MiniMaxH3ContextIR}\nNODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ContextIR": "MiniMax H3 Context IR (Official Prompt Enhancer)"}\n'
+EMBEDDED_CONTEXT_IR_NODE = 'from __future__ import annotations\n\nimport hashlib\nimport mimetypes\nimport os\nimport time\nfrom pathlib import Path\nfrom typing import Dict, Tuple\n\nimport requests\n\nDEFAULT_BASE = "https://api.minimax.io"\nCREATE_PATH = "/v2/h3_context_ir"\nQUERY_PATH = "/v2/query/video_generation/{task_id}"\nUPLOAD_PATH = "/v1/files/upload"\nRETRIEVE_PATH = "/v1/files/retrieve"\nFINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}\nTRANSIENT_HTTP = {429, 500, 502, 503, 504}\n_URL_CACHE: Dict[Tuple[str, str, int, int], str] = {}\n\n\ndef _split_paths(value: str) -> list[str]:\n    return [x.strip() for x in str(value or "").splitlines() if x.strip()]\n\n\ndef _config_int(name: str, default: int) -> int:\n    try:\n        return int(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _config_float(name: str, default: float) -> float:\n    try:\n        return float(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _headers(token: str) -> dict[str, str]:\n    return {"Authorization": f"Bearer {token}"}\n\n\ndef _request_with_retry(method: str, url: str, *, token: str, retry: bool = True, **kwargs):\n    retries = max(0, _config_int("H3_CONTEXT_IR_API_RETRIES", 3)) if retry else 0 if retry else 0\n    backoff = max(0.5, _config_float("H3_CONTEXT_IR_RETRY_BACKOFF_SECONDS", 2.0))\n    last = None\n    for attempt in range(retries + 1):\n        try:\n            response = requests.request(\n                method,\n                url,\n                headers={**_headers(token), **kwargs.pop("headers", {})},\n                **kwargs,\n            )\n        except requests.RequestException as exc:\n            last = exc\n            if attempt >= retries:\n                raise\n            time.sleep(backoff * (2 ** attempt))\n            continue\n        if response.status_code in TRANSIENT_HTTP and attempt < retries:\n            retry_after = response.headers.get("Retry-After")\n            try:\n                delay = max(0.5, float(retry_after)) if retry_after else backoff * (2 ** attempt)\n            except ValueError:\n                delay = backoff * (2 ** attempt)\n            time.sleep(delay)\n            continue\n        return response\n    if last:\n        raise last\n    raise RuntimeError("Context-IR request retry loop failed unexpectedly.")\n\n\ndef _resolve_local_file(value: str) -> Path:\n    path = Path(value).expanduser().resolve()\n    if not path.is_file():\n        raise FileNotFoundError(f"Context-IR reference file does not exist: {path}")\n    return path\n\n\ndef _max_upload_bytes(kind: str) -> int:\n    env_name = {\n        "image": "H3_CONTEXT_IR_MAX_IMAGE_MB",\n        "video": "H3_CONTEXT_IR_MAX_VIDEO_MB",\n        "audio": "H3_CONTEXT_IR_MAX_AUDIO_MB",\n    }[kind]\n    limit_mb = max(0.0, _config_float(env_name, {"image": 30.0, "video": 50.0, "audio": 15.0}[kind]))\n    return int(limit_mb * 1024 * 1024)\n\n\ndef _upload_local_file(path: Path, kind: str, token: str, base: str) -> str:\n    stat = path.stat()\n    limit_bytes = _max_upload_bytes(kind)\n    if limit_bytes and stat.st_size > limit_bytes:\n        limit_mb = limit_bytes / (1024 * 1024)\n        actual_mb = stat.st_size / (1024 * 1024)\n        raise ValueError(\n            f"Context-IR {kind} reference exceeds configured upload limit: "\n            f"{path.name} is {actual_mb:.2f} MiB; limit is {limit_mb:.2f} MiB."\n        )\n    key = (str(path), kind, int(stat.st_size), int(stat.st_mtime_ns))\n    cached = _URL_CACHE.get(key)\n    if cached:\n        return cached\n    purpose = "video_generation"\n    mime = mimetypes.guess_type(path.name)[0] or {\n        "image": "image/png", "video": "video/mp4", "audio": "audio/mpeg",\n    }[kind]\n    with path.open("rb") as handle:\n        response = _request_with_retry(\n            "POST",\n            base + UPLOAD_PATH,\n            token=token,\n            files={"file": (path.name, handle, mime)},\n            data={"purpose": purpose},\n            timeout=120,\n        )\n    response.raise_for_status()\n    payload = response.json()\n    file_obj = payload.get("file") or {}\n    file_id = str(file_obj.get("file_id") or file_obj.get("id") or "").strip()\n    url = str(file_obj.get("download_url") or file_obj.get("url") or "").strip()\n    if not url and file_id:\n        retrieve = _request_with_retry(\n            "GET",\n            base + RETRIEVE_PATH,\n            token=token,\n            params={"file_id": file_id},\n            timeout=60,\n        )\n        retrieve.raise_for_status()\n        robj = (retrieve.json().get("file") or {})\n        url = str(robj.get("download_url") or robj.get("url") or "").strip()\n    if not url.startswith(("https://", "http://")):\n        raise RuntimeError(f"MiniMax file upload returned no usable download URL for {path.name}.")\n    _URL_CACHE[key] = url\n    return url\n\n\ndef _media_url(value: str, kind: str, token: str, base: str) -> str:\n    value = str(value).strip()\n    if value.startswith(("https://", "http://")):\n        return value\n    if value.startswith("data:"):\n        return value\n    return _upload_local_file(_resolve_local_file(value), kind, token, base)\n\n\ndef _required_config_int(name: str) -> int:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return int(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _required_config_float(name: str) -> float:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return float(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _poll(base: str, token: str, task_id: str) -> str:\n    timeout_s = max(1, _required_config_int("H3_CONTEXT_IR_TIMEOUT_SECONDS"))\n    interval_s = max(0.1, _required_config_float("H3_CONTEXT_IR_POLL_INTERVAL_SECONDS"))\n    max_polls = max(1, _required_config_int("H3_CONTEXT_IR_MAX_POLLS"))\n    url = base + QUERY_PATH.format(task_id=task_id)\n    started = time.monotonic()\n    for _ in range(max_polls):\n        response = _request_with_retry("GET", url, token=token, timeout=60)\n        response.raise_for_status()\n        payload = response.json()\n        task = payload.get("task") or {}\n        status = str(task.get("status") or payload.get("status") or "").strip().lower()\n        if status in FINAL_STATUSES:\n            if status != "succeeded":\n                raise RuntimeError(f"MiniMax H3 Context-IR task {task_id} ended with status={status}.")\n            prompt = str((task.get("content") or {}).get("prompt") or "").strip()\n            if not prompt:\n                raise RuntimeError("MiniMax H3 Context-IR returned an empty enhanced prompt.")\n            return prompt\n        if time.monotonic() - started >= timeout_s:\n            break\n        time.sleep(interval_s)\n    raise TimeoutError(f"MiniMax H3 Context-IR task {task_id} timed out after {timeout_s}s.")\n\n\nclass MiniMaxH3ContextIR:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {"required": {\n            "prompt": ("STRING", {"multiline": True, "default": ""}),\n            "duration": ("INT", {"default": 5, "min": 4, "max": 15, "step": 1}),\n            "ratio": (["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "adaptive"}),\n            "reference_images": ("STRING", {"multiline": True, "default": ""}),\n            "reference_videos": ("STRING", {"multiline": True, "default": ""}),\n            "reference_audios": ("STRING", {"multiline": True, "default": ""}),\n        }}\n\n    RETURN_TYPES = ("STRING",)\n    RETURN_NAMES = ("enhanced_prompt",)\n    FUNCTION = "enhance"\n    CATEGORY = "MiniMax H3/Prompting"\n    DESCRIPTION = "Official MiniMax H3 Context-IR multimodal prompt enhancer."\n\n    def enhance(self, prompt, duration, ratio, reference_images, reference_videos, reference_audios):\n        # Official MiniMax H3 Context-IR is mandatory. There is deliberately no\n        # no local fallback or disable switch on the production bridge.\n        token = os.getenv("MINIMAX_API_TOKEN", "").strip() or os.getenv("TOKEN", "").strip()\n        if not token:\n            raise RuntimeError("Official MiniMax H3 Context-IR requires MINIMAX_API_TOKEN (or TOKEN).")\n        prompt = str(prompt or "").strip()\n        if not prompt:\n            raise ValueError("Context-IR prompt cannot be empty.")\n        base = (os.getenv("MINIMAX_API_BASE", DEFAULT_BASE).strip() or DEFAULT_BASE).rstrip("/")\n        content = [{"type": "text", "text": prompt}]\n        for value in _split_paths(reference_images):\n            content.append({"type": "image_url", "image_url": {"url": _media_url(value, "image", token, base)}, "role": "reference_image"})\n        for value in _split_paths(reference_videos):\n            content.append({"type": "video_url", "video_url": {"url": _media_url(value, "video", token, base)}, "role": "reference_video"})\n        for value in _split_paths(reference_audios):\n            content.append({"type": "audio_url", "audio_url": {"url": _media_url(value, "audio", token, base)}, "role": "reference_audio"})\n        ratio_value = str(ratio or "adaptive").strip()\n        payload = {\n            "model": "MiniMax-H3",\n            "content": content,\n            "duration": int(max(4, min(15, int(duration)))),\n            "ratio": None if ratio_value.lower() == "adaptive" else ratio_value,\n        }\n        response = _request_with_retry(\n            "POST", base + CREATE_PATH, token=token, retry=False,\n            headers={"Content-Type": "application/json"}, json=payload, timeout=60,\n        )\n        response.raise_for_status()\n        result = response.json()\n        task_id = str(result.get("task_id") or ((result.get("task") or {}).get("id")) or "").strip()\n        if not task_id:\n            raise RuntimeError(f"MiniMax H3 Context-IR did not return task_id: {response.text[:1000]}")\n        enhanced = _poll(base, token, task_id)\n        print(f"[H3 Context-IR] official task={task_id} enhanced_prompt_chars={len(enhanced)}", flush=True)\n        return (enhanced,)\n\n\nNODE_CLASS_MAPPINGS = {"MiniMaxH3ContextIR": MiniMaxH3ContextIR}\nNODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ContextIR": "MiniMax H3 Context IR (Official Prompt Enhancer)"}\n'
 
 def install_embedded_context_ir_node(runtime: dict) -> None:
     """Install the official Context-IR bridge into runtime-only ComfyUI custom_nodes.
@@ -1601,28 +1314,23 @@ def verify_runtime_files(runtime: dict) -> None:
         )
 
 
-def _warn_if_native_runtime_already_imported() -> None:
-    """Warn when bootstrap will replace native modules already loaded in the notebook."""
-    imported = []
-    if "torch" in sys.modules:
-        imported.append("torch")
-    if "PIL" in sys.modules or any(name.startswith("PIL.") for name in sys.modules):
-        imported.append("PIL")
-    if not imported:
+def _warn_if_torch_already_imported() -> None:
+    """Warn when bootstrap is running in a process that already imported Torch."""
+    if "torch" not in sys.modules:
         return
 
     print("=" * 80)
-    print("[BOOTSTRAP WARNING] already-imported native packages:", ", ".join(imported))
-    print("Bootstrap will update files on disk, but cannot unload modules already resident")
-    print("in this notebook interpreter. All GPU/PIL validation and production workers use")
-    print("fresh Python subprocesses, so a Kaggle kernel restart is NOT required.")
-    print("Do not rely on already-imported Torch/PIL objects in this same notebook process.")
+    print("[BOOTSTRAP WARNING] torch is already imported in this process.")
+    print("Reinstalling PyTorch changes files on disk, not the native Torch runtime")
+    print("already loaded into this Python process.")
+    print("GPU-dependent validation/work must run in a FRESH subprocess after bootstrap.")
+    print("Do NOT import or reload torch directly in this same kernel after reinstall.")
     print("=" * 80)
 
 
 def main():
 
-    _warn_if_native_runtime_already_imported()
+    _warn_if_torch_already_imported()
 
     runtime = load_yaml(
         RUNTIME_MANIFEST
@@ -1640,30 +1348,45 @@ def main():
         director_model,
     )
 
-    # Install ordinary/control-plane dependencies first. External installers are
-    # allowed to resolve transitive dependencies because the shared GPU/runtime
-    # stack is re-asserted below at one final authoritative boundary.
     install_base_requirements()
+
     install_comfyui(runtime)
-    install_storyboard_runtime(runtime)
+
+    # vLLM must be installed after the pinned PyTorch/CUDA runtime so its
+    # compiled extensions bind against the intended torch/CUDA stack.
+    install_pytorch_runtime(runtime)
+
+    install_director_runtime(
+        runtime
+    )
+
+    install_storyboard_runtime(
+        runtime
+    )
+
     install_nodes()
     install_embedded_context_ir_node(runtime)
 
-    # The Director uses its own isolated vLLM environment. It is installed before
-    # the final shared-runtime lock is re-applied and cannot mutate system Torch.
-    install_director_runtime(runtime)
-
-    # FINAL SHARED-RUNTIME BOUNDARY. Nothing installed after this point may run
-    # a pip dependency resolver that can replace Torch/Pillow.
-    install_pytorch_runtime(runtime)
+    # Pillow is enforced at the final dependency boundary because downstream
+    # package installers can otherwise replace it after an earlier verification.
     install_and_verify_pillow_runtime(runtime)
-    verify_final_shared_runtime(runtime)
 
+    # Verify H3 only after the final locked PyTorch runtime is active. The
+    # optimizer imports ComfyUI and Torch internals, so checking it earlier
+    # would validate against Kaggle's pre-existing runtime instead of the
+    # project's locked CUDA environment.
     verify_h3_optimization_runtime(runtime)
 
-    # Apply project-owned ComfyUI overrides only after the external checkout and
-    # final dependency versions are locked and verified.
+    # ComfyUI is a runtime dependency, not repository content.
+    # Apply the project-owned H3 overrides only after the locked upstream
+    # ComfyUI checkout and custom nodes are installed.
     apply_embedded_h3_runtime_overlay()
+
+    # Keep the historical T4/H3 guards active. They are idempotent: after the
+    # embedded overlay they confirm the exact fixes are present, and they can
+    # still apply the patch if a future overlay omits one of them.
+    patch_t4_h3_value_clone(runtime)
+    patch_h3_vae_decoder_dtype(runtime)
 
     install_models()
 
