@@ -2847,30 +2847,48 @@ class ProductionPlanner:
                     if not semantic_candidates:
                         semantic_candidates = list(semantic_result.get("characters", []) or [])
 
-                # A correctly shaped but EMPTY semantic payload means that the
-                # semantic pass made no roster decision. It must not become an
-                # authoritative empty roster, otherwise a transient/weak Qwen
-                # response can erase a valid deterministic character roster.
-                # Explicit positive/negative decisions remain authoritative only
-                # when they identify a concrete candidate by name.
-                def _has_semantic_decision(payload) -> bool:
+                # Semantic authority is staged. The extractor is a proposal layer;
+                # an explicit negative from extraction cannot override a strong
+                # deterministic character signal without adjudication. Empty or
+                # malformed output is also non-authoritative. Only an adjudicator
+                # decision (or a clean extractor result with no conflict) may become
+                # final semantic authority.
+                def _semantic_decision_state(payload) -> tuple[bool, bool]:
+                    """Return (has_explicit_decision, has_positive_decision).
+
+                    Structured candidates are decisions only when ``is_character``
+                    is explicitly boolean. Bare string candidates are legacy
+                    shorthand for positive character decisions.
+                    """
                     if not isinstance(payload, dict):
-                        return False
+                        return False, False
                     values = payload.get("candidates")
                     if not isinstance(values, list):
                         values = payload.get("characters")
                     if not isinstance(values, list):
-                        return False
+                        return False, False
+                    has_decision = False
+                    has_positive = False
                     for value in values:
-                        if isinstance(value, str) and value.strip():
-                            return True
-                        if isinstance(value, dict):
-                            name = str(value.get("name", "") or "").strip()
-                            if name:
-                                return True
-                    return False
+                        if isinstance(value, str):
+                            if value.strip():
+                                has_decision = True
+                                has_positive = True
+                            continue
+                        if not isinstance(value, dict):
+                            continue
+                        name = str(value.get("name", "") or "").strip()
+                        if not name or not isinstance(value.get("is_character"), bool):
+                            continue
+                        has_decision = True
+                        if value.get("is_character") is True:
+                            has_positive = True
+                    return has_decision, has_positive
 
-                semantic_roster_authoritative = _has_semantic_decision(semantic_result)
+                semantic_has_decision, semantic_has_positive = _semantic_decision_state(
+                    semantic_result
+                )
+                semantic_roster_authoritative = semantic_has_decision
 
                 invalid_positive = False
                 semantic_names = set()
@@ -2932,11 +2950,28 @@ class ProductionPlanner:
                     and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_decision_names
                     for item in relational_hints
                 )
+
+                deterministic_high_confidence = [
+                    name for name in descriptors
+                    if self._high_confidence_deterministic_character(story, name)
+                ]
+
                 needs_adjudication = (
-                    not semantic_roster_authoritative
+                    not semantic_has_decision
                     or invalid_positive
                     or strong_relation_missing
+                    or (
+                        not semantic_has_positive
+                        and bool(deterministic_high_confidence)
+                    )
                 )
+
+                # Do not let a provisional extractor decision erase a
+                # high-confidence deterministic identity while adjudication is
+                # pending. The deterministic roster remains available as the
+                # safe fallback whenever adjudication is unavailable or unusable.
+                if needs_adjudication:
+                    semantic_roster_authoritative = False
 
                 if needs_adjudication and qwen_character_adjudicator is not None:
                     adjudication_hints = list(dict.fromkeys(
@@ -2949,19 +2984,9 @@ class ProductionPlanner:
                         semantic_result,
                     )
                     if isinstance(adjudicated, dict):
-                        values = adjudicated.get("candidates")
-                        if not isinstance(values, list):
-                            values = adjudicated.get("characters")
-                        adjudicated_has_decision = False
-                        if isinstance(values, list):
-                            for value in values:
-                                if isinstance(value, str) and value.strip():
-                                    adjudicated_has_decision = True
-                                    break
-                                if isinstance(value, dict):
-                                    if str(value.get("name", "") or "").strip() or "is_character" in value:
-                                        adjudicated_has_decision = True
-                                        break
+                        adjudicated_has_decision, _adjudicated_has_positive = _semantic_decision_state(
+                            adjudicated
+                        )
                         if adjudicated_has_decision:
                             semantic_result_final = adjudicated
                             semantic_roster_authoritative = True
