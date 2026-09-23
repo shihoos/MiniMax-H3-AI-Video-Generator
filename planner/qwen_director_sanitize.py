@@ -197,10 +197,10 @@ class QwenDirectorSanitizeMixin:
             for alias in self._coerce_list(aliases_raw):
                 text = str(alias).strip()
                 if not text or not EntityResolver.is_safe_semantic_reference(text):
-                    if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type == "relational_character":
+                    if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type in {"relational_character", "descriptive_character"}:
                         aliases.append(text)
                     continue
-                if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type != "relational_character":
+                if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type not in {"relational_character", "descriptive_character"}:
                     continue
                 aliases.append(text)
             aliases = list(dict.fromkeys(aliases))
@@ -209,6 +209,27 @@ class QwenDirectorSanitizeMixin:
                 relationship_to = None
                 relationship = None
                 aliases = []
+
+            if identity_type == "descriptive_character":
+                normalized_name = EntityResolver.normalize(name)
+                descriptive_roles = {
+                    "man", "woman", "boy", "girl", "person", "child",
+                    "detective", "scientist", "soldier", "warrior", "king", "queen",
+                    "robot", "android", "pilot", "doctor", "guard", "officer",
+                    "stranger", "captain", "commander", "engineer", "teacher",
+                    "nurse", "driver", "explorer", "hero", "heroine",
+                }
+                core = normalized_name
+                for article in ("the ", "a ", "an "):
+                    if core.startswith(article):
+                        core = core[len(article):]
+                if (
+                    len(core.split()) < 2
+                    or not any(token in descriptive_roles for token in core.split())
+                    or core in descriptive_roles
+                ):
+                    identity_type = "named_character"
+                    aliases = []
             profile.update({
                 "name": name,
                 "semantic_aliases": aliases,
