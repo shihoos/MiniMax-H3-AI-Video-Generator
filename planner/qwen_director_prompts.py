@@ -539,14 +539,14 @@ class QwenDirectorPromptMixin:
         ][:12]
         supplied = semantic_result if isinstance(semantic_result, dict) else {}
         system_prompt = textwrap.dedent("""
-    You are the final character-identity adjudicator. Return JSON only.
-    Review only the supplied candidate names and the supplied semantic extraction.
-    For each candidate decide whether it is a stable character identity: named_character,
-    relational_character, NOT_CHARACTER, or UNCERTAIN. Never invent an unrelated person.
-    A relational identity is valid only when relationship_to is a grounded canonical character and the
-    relationship is explicitly or unambiguously established by the story. Bare generic role labels remain
-    NOT_CHARACTER. Preserve grounded aliases without turning the alias itself into another canonical person.
-    UNCERTAIN is terminal and must not trigger another call.
+    You are the final character-identity adjudicator. Return JSON only and obey the supplied JSON schema exactly.
+    Review only the supplied candidate names and the supplied semantic extraction. Never invent an unrelated person.
+    For every supplied candidate, emit an explicit boolean `is_character` decision.
+    Use `is_character=false` for NOT_CHARACTER or UNCERTAIN; there is no separate `decision` field.
+    Use `entity_type=PERSON` and `identity_type=named_character` for named characters.
+    Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
+    relationship is explicitly or unambiguously established by the story. Bare generic role labels remain non-characters.
+    Preserve grounded aliases without turning the alias itself into another canonical person.
     """).strip()
         payload = json.dumps(
             {
