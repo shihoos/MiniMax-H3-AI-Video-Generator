@@ -1,3158 +1,2043 @@
 from __future__ import annotations
 
-import os
-import sys
+import json
+import re
+from copy import deepcopy
 from pathlib import Path
 
-# Keep the logic validator model-free when run directly.
-# QwenDirector otherwise performs model discovery during construction.
-os.environ.setdefault(
-    "H3_DIRECTOR_ENABLED",
-    "0",
+from pipeline.production_checkpoint import ProductionCheckpoint
+
+from planner.entity_resolver import EntityResolver
+
+from planner.config import (
+    AI_STORY_MODE,
+    EXPAND_USER_STORY_MODE,
+    PRESERVE_USER_STORY_MODE,
 )
 
-ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[1]
-)
 
-if str(ROOT) not in sys.path:
-    sys.path.insert(
-        0,
-        str(ROOT),
-    )
+class QwenDirectorSanitizeMixin:
+    def _valid_character_name(
+        self,
+        name: str,
+    ) -> bool:
 
-from planner.production_planner import (
-    ProductionPlanner,
-)
-from planner.qwen_director import (
-    QwenDirector,
-)
-from planner.entity_resolver import (
-    EntityResolver,
-)
-from pipeline.dialogue_timeline import DialogueTimeline
-from pipeline.production_orchestrator import ProductionOrchestrator
-from schemas.character import Character
+        value = str(
+            name or ""
+        ).strip()
 
+        if not value:
+            return False
 
-def check(
-    condition: bool,
-    message: str,
-) -> None:
+        lowered = value.lower()
 
-    if not condition:
-        raise RuntimeError(
-            message
+        if lowered in (
+            self.FORBIDDEN_CHARACTER_NAMES
+        ):
+            return False
+
+        if EntityResolver.generic_role_surface(lowered) or lowered in EntityResolver.RELATIONSHIP_LABELS:
+            return False
+
+        if len(
+            value.split()
+        ) > 5:
+            return False
+
+        if any(
+            token in value
+            for token in (
+                ":",
+                ";",
+                "|",
+                "{",
+                "}",
+                "[",
+                "]",
+            )
+        ):
+            return False
+
+        return True
+
+    @staticmethod
+    def _slug(
+        value: str,
+    ) -> str:
+
+        cleaned = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            str(
+                value or ""
+            ).lower(),
+        ).strip("_")
+
+        return (
+            cleaned
+            or "character"
         )
 
-
-def test_story_modes() -> None:
-
-    director = QwenDirector(
-        ROOT
-    )
-
-    source = (
-        "A lone man walks through an endless abyss "
-        "at the edge of a collapsing world."
-    )
-
-    # AI STORY
-    ai_result = (
-        "A lone man walks through an endless abyss "
-        "at the edge of a collapsing world. "
-        "He discovers a hidden signal beneath the ruins "
-        "and realizes that the collapse is leading him "
-        "toward a final choice."
-    )
-
-    director._validate_mode_output(
-        "ai_story",
-        source,
-        ai_result,
-    )
-
-    try:
-
-        director._validate_mode_output(
-            "ai_story",
-            source,
-            source,
-        )
-
-    except RuntimeError:
-        pass
-
-    else:
-
-        raise RuntimeError(
-            "AI Story accepted an unchanged premise."
-        )
-
-    # EXPAND
-    expanded = (
-        "A lone man walks through an endless abyss "
-        "at the edge of a collapsing world. "
-        "He carries the memories of the life he lost "
-        "before the collapse and slowly realizes that "
-        "the destruction is not random. Each step brings "
-        "him closer to the source of the catastrophe, "
-        "forcing him to decide whether survival is still "
-        "possible."
-    )
-
-    director._validate_mode_output(
-        "expand_user_story",
-        source,
-        expanded,
-    )
-
-    try:
-
-        director._validate_mode_output(
-            "expand_user_story",
-            source,
-            source,
-        )
-
-    except RuntimeError:
-        pass
-
-    else:
-
-        raise RuntimeError(
-            "Expand Story accepted unchanged input."
-        )
-
-    # PRESERVE
-    director._validate_mode_output(
-        "preserve_user_story",
-        source,
-        source,
-    )
-
-    try:
-
-        director._validate_mode_output(
-            "preserve_user_story",
-            source,
-            source + " Extra event.",
-        )
-
-    except RuntimeError:
-        pass
-
-    else:
-
-        raise RuntimeError(
-            "Preserve Story accepted modified text."
-        )
-
-
-def test_expand_preservation_gates() -> None:
-    director = QwenDirector(
-        ROOT
-    )
-
-    source = (
-        "A man named Eli enters the abandoned station. "
-        "A woman named Sara gives Eli a map to the underground vault. "
-        "The vault contains 7 sealed chambers."
-    )
-
-    valid = (
-        "Eli enters the abandoned station and searches the ruined platform. "
-        "Sara gives Eli a map to the underground vault, explaining why she "
-        "believes it matters. Eli follows the map and discovers 7 sealed "
-        "chambers, realizing the station hides a much larger secret."
-    )
-
-    director._validate_mode_output(
-        "expand_user_story",
-        source,
-        valid,
-    )
-
-    missing_name = valid.replace("Sara", "Mara")
-    try:
-        director._validate_mode_output(
-            "expand_user_story",
-            source,
-            missing_name,
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "Expand Story accepted output that dropped a named source anchor."
-        )
-
-    unrelated = (
-        "A pilot crosses a desert, discovers a hidden temple, and escapes "
-        "before sunset. The journey ends with a mysterious transmission."
-    )
-    try:
-        director._validate_mode_output(
-            "expand_user_story",
-            source,
-            unrelated,
-        )
-    except RuntimeError:
-        pass
-    else:
-        raise RuntimeError(
-            "Expand Story accepted output with insufficient source overlap."
-        )
-
-
-def test_dialogue_speaker_contract() -> None:
-    director = QwenDirector(ROOT)
-
-    director._normalize_dialogue_speakers(
-        'Eli Voss said, "We have to go."',
-        [
-            {
-                "shot_id": "scene_001_shot_001",
-                "characters": ["Eli Voss"],
-                "dialogue_events": [
-                    {"speaker": "Eli", "text": "We have to go."},
-                ],
-            }
-        ],
-        [{"name": "Eli Voss"}],
-    )
-
-    shots = [
-        {
-            "shot_id": "scene_005_shot_001",
-            "characters": ["Eli"],
-            "dialogue_events": [
-                {"speaker": "uncle", "text": "Do not open it."},
-            ],
-        }
-    ]
-    director._normalize_dialogue_speakers(
-        'Eli heard his uncle say, "Do not open it."',
-        shots,
-        [{"name": "Eli"}],
-    )
-    check(
-        not shots[0]["dialogue_events"],
-        "Unresolved grounded role speaker was not dropped safely.",
-    )
-
-
-def test_explicit_source_speaker_provenance() -> None:
-    director = QwenDirector(ROOT)
-
-    anchors = director._extract_story_spoken_texts(
-        'Eli Voss: "We have to go."'
-    )
-    check(
-        anchors.get("we have to go.") == {"eli voss"},
-        f"Explicit source speaker provenance was lost: {anchors}",
-    )
-
-    shots = [{
-        "shot_id": "scene_008_shot_001",
-        "characters": ["Lena Kovalenko"],
-        "dialogue_events": [
-            {"speaker": "Lena Kovalenko", "text": "We have to go."},
-        ],
-    }]
-    director._normalize_dialogue_speakers(
-        'Eli Voss: "We have to go."',
-        shots,
-        [{"name": "Eli Voss"}, {"name": "Lena Kovalenko"}],
-    )
-    check(
-        not shots[0]["dialogue_events"],
-        "Qwen speaker contradicted an explicit source speaker label.",
-    )
-
-    shots = [{
-        "shot_id": "scene_009_shot_001",
-        "characters": ["Eli Voss"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "We have to go."},
-        ],
-    }]
-    director._normalize_dialogue_speakers(
-        'Eli Voss: "We have to go."',
-        shots,
-        [{"name": "Eli Voss"}],
-    )
-    check(
-        shots[0]["dialogue_events"][0]["speaker"] == "Eli Voss",
-        "Canonical speaker matching failed for an explicit source label.",
-    )
-
-    shots = [{
-        "shot_id": "scene_010_shot_001",
-        "characters": ["Eli Voss"],
-        "dialogue_events": [
-            {"speaker": "Eli Voss", "text": "Take the chip and run."},
-        ],
-    }]
-    director._normalize_dialogue_speakers(
-        'Father: "Take the chip and run."',
-        shots,
-        [{"name": "Eli Voss"}],
-    )
-    check(
-        not shots[0]["dialogue_events"],
-        "Unresolved explicit role speaker was incorrectly attributed to a canonical character.",
-    )
-
-
-def test_grounding_precedes_binding_failure() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_007_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Lena Kovalenko", "text": "This line is not in the story."},
-        ],
-    }]
-
-    director._normalize_dialogue_speakers(
-        'Eli stood beside the vault in silence.',
-        shots,
-        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
-    )
-    check(
-        not shots[0]["dialogue_events"],
-        "Ungrounded dialogue reached speaker-binding validation.",
-    )
-
-
-def test_grounded_but_unbound_dialogue_is_recovered() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Lena Kovalenko", "text": "We need to leave."},
-        ],
-    }]
-
-    director._normalize_dialogue_speakers(
-        'Lena Kovalenko said, "We need to leave."',
-        shots,
-        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
-    )
-
-    check(
-        not shots[0]["dialogue_events"],
-        "Grounded but unbound dialogue was not recovered.",
-    )
-    director._validate_dialogue_speaker_contract(
-        shots,
-        [{"name": "Eli"}, {"name": "Lena Kovalenko"}],
-    )
-
-
-def test_narrative_prose_is_not_promoted_to_dialogue() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_006_shot_002",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {
-                "speaker": "Eli",
-                "text": "Eli left the station, carrying the choice with him.",
-            },
-            {
-                "speaker": "Eli",
-                "text": "I know what I have to do.",
-            },
-        ],
-    }]
-
-    director._normalize_dialogue_speakers(
-        'Eli left the station. "I know what I have to do."',
-        shots,
-        [{"name": "Eli"}],
-    )
-
-    events = shots[0]["dialogue_events"]
-    check(len(events) == 1, "Narrative prose was incorrectly retained as dialogue.")
-    check(
-        events[0]["text"] == "I know what I have to do.",
-        "Quoted dialogue was incorrectly modified.",
-    )
-
-    director._validate_dialogue_speaker_contract(
-        shots,
-        [{"name": "Eli"}],
-    )
-
-
-def test_unquoted_narrative_is_not_promoted() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "Eli walked toward the vault."},
-        ],
-    }]
-    director._normalize_dialogue_speakers(
-        "Eli walked toward the vault.",
-        shots,
-        [{"name": "Eli"}],
-    )
-    check(not shots[0]["dialogue_events"], "Unquoted narrative was promoted to dialogue.")
-
-
-def test_screen_text_is_not_treated_as_speech() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "Project Echo—Initiated."},
-            {"speaker": "Eli", "text": "We need to leave."},
-        ],
-    }]
-    story = 'A message appeared on the screen: "Project Echo—Initiated." Then Eli said, "We need to leave."'
-    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
-    check(
-        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
-        "Screen text was incorrectly treated as spoken dialogue.",
-    )
-
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "Project Echo—Initiated."},
-            {"speaker": "Eli", "text": "We need to leave."},
-        ],
-    }]
-    story = 'The terminal displayed "Project Echo—Initiated." Then Eli said, "We need to leave."'
-    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
-    check(
-        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
-        "Terminal display text was incorrectly treated as spoken dialogue.",
-    )
-
-
-def test_no_explicit_speech_anchor_means_no_dialogue() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "I will open the vault."},
-        ],
-    }]
-    director._normalize_dialogue_speakers(
-        "Eli approached the sealed vault in silence.",
-        shots,
-        [{"name": "Eli"}],
-    )
-    check(not shots[0]["dialogue_events"], "Dialogue was invented without a source speech anchor.")
-
-
-def test_dialogue_screen_context_is_sentence_local() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [
-            {"speaker": "Eli", "text": "Project Echo—Initiated."},
-            {"speaker": "Eli", "text": "We need to leave."},
-        ],
-    }]
-    story = 'A message appeared on the screen: “Project Echo—Initiated.” Then Eli said, “We need to leave.”'
-    director._normalize_dialogue_speakers(story, shots, [{"name": "Eli"}])
-    check(
-        [e["text"] for e in shots[0]["dialogue_events"]] == ["We need to leave."],
-        "Screen context from an earlier sentence leaked into spoken dialogue classification.",
-    )
-
-
-def test_story_context_budget_preserves_head_and_tail() -> None:
-    director = QwenDirector(ROOT)
-    long_story = "Opening character and goal. " + ("middle detail. " * 1200) + "Final outcome and resolution."
-    compact = director._compact_story_context(long_story, 900)
-    check(
-        "Opening character and goal." in compact and "Final outcome and resolution." in compact,
-        "Bounded story context lost either the narrative head or resolution tail.",
-    )
-
-
-def test_legacy_speech_text_does_not_promote_long_narrative() -> None:
-    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
-
-    candidate = {
-        "shot_id": "scene_001_shot_001",
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "speaking_characters": ["Eli"],
-        "speech_text": "Eli walked toward the vault and felt the cold air tighten around him as the storm grew louder.",
-        "visual_prompt": "Eli approaches the sealed vault in the cold abandoned station.",
-    }
-    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
-        [candidate],
-        {"scene_id": "scene_001", "description": "Eli approaches the sealed vault."},
-        {"eli"},
-    )
-    check(
-        not sanitized[0].get("dialogue_events"),
-        "Legacy narrative speech_text was promoted to dialogue.",
-    )
-
-
-def test_dialogue_normalization_happens_before_compiler() -> None:
-    import inspect
-    source = inspect.getsource(QwenDirector.generate)
-    normalize_pos = source.find("self._normalize_dialogue_speakers(")
-    compile_pos = source.find("CinematicCompiler(")
-    check(
-        normalize_pos >= 0 and compile_pos > normalize_pos,
-        "Dialogue normalization occurs after compilation.",
-    )
-
-
-def test_dialogue_contract_sync() -> None:
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [{"speaker": "Eli", "text": "Go."}],
-        "speaking_characters": ["Eli"],
-        "speech_text": "Go.",
-    }]
-    director._validate_dialogue_speaker_contract(shots, [{"name": "Eli"}])
-
-
-def test_prompt_uses_topology_constant() -> None:
-    director = QwenDirector(ROOT)
-    schema = director._shot_batch_json_schema()
-    nested = schema["properties"]["scene_shots"]["items"]["properties"]["shots"]
-    check(
-        nested["minItems"] == QwenDirector.SHOTS_PER_SCENE
-        and nested["maxItems"] == QwenDirector.SHOTS_PER_SCENE,
-        "Shot-batch JSON schema is not tied to SHOTS_PER_SCENE.",
-    )
-
-
-def test_shot_batch_completion_budget_not_bound_to_topology() -> None:
-    director = QwenDirector(ROOT)
-    check(
-        director._shot_batch_completion_budget(1) == 1400,
-        "Single-scene shot batch completion budget is incorrect.",
-    )
-    check(
-        director._shot_batch_completion_budget(2) == 2800,
-        "Two-scene shot batch completion budget is incorrectly capped by SHOTS_PER_SCENE.",
-    )
-    check(
-        director._shot_batch_completion_budget(2) > QwenDirector.SHOTS_PER_SCENE,
-        "Shot topology constant was reused as a token budget.",
-    )
-
-
-def test_sanitize_synchronizes_legacy_dialogue_fields() -> None:
-    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
-
-    candidate = {
-        "shot_id": "scene_001_shot_001",
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "speaking_characters": ["Eli"],
-        "speech_text": "stale text that must not survive",
-        "dialogue_events": [
-            {
-                "speaker": "Eli",
-                "text": "Go.",
-                "continues_from_previous_shot": False,
-                "continues_to_next_shot": False,
-            }
-        ],
-        "visual_prompt": "Eli stands at the sealed vault.",
-    }
-    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
-        [candidate],
-        {"scene_id": "scene_001", "description": "Eli stands at the sealed vault."},
-        {"eli"},
-    )[0]
-    check(
-        sanitized["speaking_characters"] == ["Eli"],
-        "Sanitizer failed to synchronize speaking_characters from dialogue_events.",
-    )
-    check(
-        sanitized["speech_text"] == "Go.",
-        "Sanitizer left stale speech_text instead of synchronizing dialogue metadata.",
-    )
-
-
-def test_legacy_speech_text_direct_speech_bridge_is_bounded() -> None:
-    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
-    base = {
-        "scene_id": "scene_001",
-        "description": "Eli waits at the vault.",
-    }
-    candidate = {
-        "shot_id": "scene_001_shot_001",
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "speaking_characters": ["Eli"],
-        "speech_text": "I will open the vault.",
-        "visual_prompt": "Eli studies the sealed vault.",
-    }
-    sanitized = QwenDirectorSanitizeMixin()._sanitize_shots(
-        [candidate], base, {"eli"}
-    )[0]
-    check(
-        sanitized["dialogue_events"],
-        "Bounded direct-speech legacy bridge rejected valid direct speech.",
-    )
-    check(
-        sanitized["speaking_characters"] == ["Eli"]
-        and sanitized["speech_text"] == "I will open the vault.",
-        "Legacy direct-speech bridge did not synchronize metadata.",
-    )
-
-
-def test_dialogue_validator_is_pure() -> None:
-    import copy
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [{"speaker": "Eli", "text": "Go."}],
-        "speaking_characters": ["Eli"],
-        "speech_text": "Go.",
-    }]
-    before = copy.deepcopy(shots)
-    director._validate_dialogue_speaker_contract(shots, [{"name": "Eli"}])
-    check(shots == before, "Dialogue validator unexpectedly mutated the plan.")
-
-
-def test_manifest_has_model_provenance() -> None:
-    from pipeline.production_manifest import ProductionManifest
-    manifest = ProductionManifest(ROOT).build({"production_id": "test"})
-    models = manifest.get("models", {})
-    check(bool(models.get("production")), "Production model provenance is missing from manifest.")
-    director = models.get("director") or {}
-    check(bool(director), "Director model provenance is missing from manifest.")
-    speculative = director.get("speculative") or {}
-    check(
-        str(speculative.get("method", "")).strip().lower() == "eagle3",
-        "Director provenance must record Eagle3 speculative decoding.",
-    )
-    check(
-        str(speculative.get("path", "")).strip() == "/kaggle/input/eagle-3",
-        "Director provenance must record the locked Eagle3 dataset path.",
-    )
-    check(
-        int(speculative.get("tokens", 0) or 0) > 0,
-        "Director provenance must record positive Eagle3 speculative tokens.",
-    )
-
-def test_shot_batch_contract() -> None:
-    director = QwenDirector(
-        ROOT
-    )
-
-    prompt = director._shot_director_batch_system()
-
-    check(
-        f"Create exactly {QwenDirector.SHOTS_PER_SCENE} production-ready shots for EACH supplied scene." in prompt,
-        "Batch shot prompt does not enforce two shots per scene.",
-    )
-
-    check(
-        "Do not add characters" in prompt or "Do not create new characters" in prompt,
-        "Batch prompt lost the explicit character restriction.",
-    )
-
-    normalized = director._normalize_batch_shot_response(
-        {
-            "scene_shots": [
+    @staticmethod
+    def _coerce_mapping(
+        value,
+    ) -> dict:
+        """Safely normalize a model field that should be a JSON object."""
+        if isinstance(value, dict):
+            return dict(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("{") and text.endswith("}"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return {}
+                if isinstance(parsed, dict):
+                    return parsed
+
+        return {}
+
+    @staticmethod
+    def _coerce_list(
+        value,
+    ) -> list:
+        """Safely normalize a model field that should be a JSON array."""
+        if value is None:
+            return []
+
+        if isinstance(value, list):
+            return list(value)
+
+        if isinstance(value, tuple):
+            return list(value)
+
+        if isinstance(value, set):
+            return list(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith("[") and text.endswith("]"):
+                try:
+                    parsed = json.loads(text)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    return []
+                return list(parsed) if isinstance(parsed, list) else []
+            return [text] if text else []
+
+        return []
+
+    def _sanitize_characters(
+        self,
+        characters,
+    ) -> list[dict]:
+
+        result: list[dict] = []
+        seen: set[str] = set()
+
+        for value in (
+            characters or []
+        ):
+
+            if not isinstance(
+                value,
+                dict,
+            ):
+                continue
+
+            name = str(
+                value.get(
+                    "name",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not self._valid_character_name(
+                name
+            ):
+                continue
+
+            key = name.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(
+                key
+            )
+
+            character_id = str(
+                value.get(
+                    "character_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not character_id:
+
+                character_id = (
+                    f"char_{self._slug(name)}"
+                )
+
+            profile = self._coerce_mapping(value.get("identity_profile", {}))
+            identity_type = str(
+                value.get("identity_type", profile.get("identity_type", "named_character"))
+                or "named_character"
+            ).strip().lower()
+            relationship_to = str(
+                value.get("relationship_to", profile.get("relationship_to", "")) or ""
+            ).strip() or None
+            relationship = str(
+                value.get("relationship", profile.get("relationship", "")) or ""
+            ).strip() or None
+            aliases_raw = value.get("semantic_aliases", profile.get("semantic_aliases", []))
+            aliases = []
+            for alias in self._coerce_list(aliases_raw):
+                text = str(alias).strip()
+                if not text or not EntityResolver.is_safe_semantic_reference(text):
+                    if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type == "relational_character":
+                        aliases.append(text)
+                    continue
+                if EntityResolver.normalize(text) in EntityResolver.GENERIC_ROLE_ALIASES and identity_type != "relational_character":
+                    continue
+                aliases.append(text)
+            aliases = list(dict.fromkeys(aliases))
+            if identity_type == "relational_character" and (not relationship_to or not relationship):
+                identity_type = "named_character"
+                relationship_to = None
+                relationship = None
+                aliases = []
+            profile.update({
+                "name": name,
+                "semantic_aliases": aliases,
+                "identity_type": identity_type,
+                "relationship_to": relationship_to,
+                "relationship": relationship,
+            })
+
+            result.append(
                 {
-                    "scene_id": "scene_001",
-                    "shots": [
-                        {"shot_id": "a"},
-                        {"shot_id": "b"},
-                    ],
-                },
-                {
-                    "scene_id": "scene_002",
-                    "shots": [
-                        {"shot_id": "c"},
-                        {"shot_id": "d"},
-                    ],
-                },
+                    "character_id":
+                        character_id,
+
+                    "name":
+                        name,
+
+                    "role":
+                        str(
+                            value.get(
+                                "role",
+                                "story character",
+                            )
+                            or "story character"
+                        ),
+
+                    "description":
+                        str(
+                            value.get(
+                                "description",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "personality":
+                        str(
+                            value.get(
+                                "personality",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "appearance":
+                        self._coerce_mapping(
+                            value.get(
+                                "appearance",
+                                {},
+                            )
+                        ),
+
+                    "clothing":
+                        self._coerce_mapping(
+                            value.get(
+                                "clothing",
+                                {},
+                            )
+                        ),
+
+                    "distinctive_features":
+                        self._coerce_list(
+                            value.get(
+                                "distinctive_features",
+                                [],
+                            )
+                        ),
+
+                    "character_state":
+                        self._coerce_mapping(
+                            value.get(
+                                "character_state",
+                                {},
+                            )
+                        ),
+
+                    "continuity_rules":
+                        self._coerce_list(
+                            value.get(
+                                "continuity_rules",
+                                [],
+                            )
+                        ),
+                    # Return the already-sanitized identity contract, not the
+                    # raw model fields.  This keeps top-level character metadata
+                    # exactly aligned with identity_profile after malformed
+                    # relational candidates are downgraded.
+                    "semantic_aliases": list(aliases),
+                    "identity_type": identity_type,
+                    "relationship_to": relationship_to,
+                    "relationship": relationship,
+                    "identity_profile": profile,
+                }
+            )
+
+        return result
+
+    @staticmethod
+    def _clean_list(
+        value,
+        limit: int | None = None,
+    ) -> list[str]:
+        if value is None:
+            return []
+
+        if isinstance(
+            value,
+            str,
+        ):
+            items = [
+                item.strip()
+                for item in re.split(
+                    r"[\n,;]+",
+                    value,
+                )
+                if item.strip()
             ]
-        }
-    )
-
-    check(
-        set(normalized) == {"scene_001", "scene_002"},
-        "Batch response normalization lost a scene.",
-    )
-
-    check(
-        all(len(values) == 2 for values in normalized.values()),
-        "Batch response normalization did not preserve both shots.",
-    )
-
-
-def test_text_generation_disables_thinking_by_default() -> None:
-    director = QwenDirector(
-        ROOT
-    )
-
-    import inspect
-
-    parameter = inspect.signature(
-        director._chat_text
-    ).parameters["disable_thinking"]
-
-    check(
-        parameter.default is True,
-        "Narrative text generation still enables Qwen reasoning by default.",
-    )
-
-
-def test_character_sanitization() -> None:
-
-    director = QwenDirector(
-        ROOT
-    )
-
-    values = (
-        director._sanitize_characters(
-            [
-                {
-                    "name": "Elias",
-                    "role": "protagonist",
-                },
-                {
-                    "name": "The Vortex",
-                    "role": "entity",
-                },
-                {
-                    "name": "Visual",
-                    "role": "metadata",
-                },
-                {
-                    "name": "Camera",
-                    "role": "metadata",
-                },
-                {
-                    "name": "Elias",
-                    "role": "duplicate",
-                },
+        elif isinstance(
+            value,
+            (list, tuple, set),
+        ):
+            items = [
+                str(item).strip()
+                for item in value
+                if str(item).strip()
             ]
+        else:
+            items = [
+                str(value).strip()
+            ] if str(value).strip() else []
+
+        result: list[str] = []
+        seen: set[str] = set()
+
+        for item in items:
+            key = item.lower()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            result.append(item)
+
+            if (
+                limit is not None
+                and len(result) >= limit
+            ):
+                break
+
+        return result
+
+    @staticmethod
+    def _character_alias_map(
+        character_names: set[str],
+    ) -> dict[str, str]:
+        """Resolve safe, unambiguous aliases to canonical roster names."""
+        canonical_names = sorted(
+            {
+                str(name or "").strip().lower()
+                for name in character_names
+                if str(name or "").strip()
+            }
         )
-    )
 
-    names = [
-        value["name"].lower()
-        for value
-        in values
-    ]
+        aliases: dict[str, str] = {}
 
-    check(
-        names.count("elias") == 1,
-        "Character sanitizer failed to remove duplicate Elias.",
-    )
+        for canonical in canonical_names:
+            aliases[canonical] = canonical
 
-    check(
-        "visual" not in names,
-        "Character sanitizer accepted metadata word Visual.",
-    )
+        first_candidates: dict[str, set[str]] = {}
+        pair_candidates: dict[str, set[str]] = {}
 
-    check(
-        "camera" not in names,
-        "Character sanitizer accepted metadata word Camera.",
-    )
+        for canonical in canonical_names:
 
+            tokens = re.findall(
+                r"[a-z0-9']+",
+                canonical,
+            )
 
-def test_scene_id_sanitization_before_batching() -> None:
-    director = QwenDirector(ROOT)
-    scenes = director._sanitize_scenes(
-        [
-            {"scene_id": "scene_001", "description": "First event."},
-            {"scene_id": "scene_001", "description": "Second event."},
-        ],
-        set(),
-    )
-    ids = [str(scene.get("scene_id", "")) for scene in scenes]
-    check(ids == ["scene_001", "scene_001_2"], "Duplicate scene IDs must be repaired before batching/resume.")
+            if not tokens:
+                continue
 
+            first_candidates.setdefault(
+                tokens[0],
+                set(),
+            ).add(canonical)
 
-def test_shot_id_normalization() -> None:
+            if len(tokens) >= 2:
 
-    director = QwenDirector(
-        ROOT
-    )
+                pair = " ".join(
+                    tokens[-2:]
+                )
 
-    scenes = [
-        {
-            "scene_id": "scene_001",
-            "title": "Beginning",
-        },
-        {
-            "scene_id": "scene_002",
-            "title": "Escalation",
-        },
-    ]
+                pair_candidates.setdefault(
+                    pair,
+                    set(),
+                ).add(canonical)
 
-    shots = [
-        {
-            "shot_id": "shot_001",
-            "scene_id": "scene_001",
-        },
-        {
-            "shot_id": "shot_001",
-            "scene_id": "scene_001",
-        },
-        {
-            "shot_id": "shot_001",
-            "scene_id": "scene_002",
-        },
-    ]
+        for alias, matches in first_candidates.items():
 
-    director._normalize_ids(
+            if len(matches) == 1:
+                aliases[alias] = next(
+                    iter(matches)
+                )
+
+        for alias, matches in pair_candidates.items():
+
+            if len(matches) == 1:
+                aliases[alias] = next(
+                    iter(matches)
+                )
+
+        return aliases
+
+    def _sanitize_scenes(
+        self,
         scenes,
-        shots,
-    )
+        character_names: set[str],
+    ) -> list[dict]:
 
-    ids = [
-        shot["shot_id"]
-        for shot
-        in shots
-    ]
+        result: list[dict] = []
 
-    check(
-        len(ids) == len(set(ids)),
-        "Shot IDs are not globally unique.",
-    )
+        for index, value in enumerate(
+            scenes or [],
+            start=1,
+        ):
 
-    for value in ids:
+            if not isinstance(
+                value,
+                dict,
+            ):
+                continue
 
-        check(
-            value.strip(),
-            "Shot ID is empty.",
+            description = str(
+                value.get(
+                    "description",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not description:
+
+                description = str(
+                    value.get(
+                        "scene_objective",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+            if not description:
+                continue
+
+            lower = description.lower()
+
+            if lower.startswith(
+                (
+                    "tone:",
+                    "visual priority:",
+                    "visual priorities:",
+                    "camera:",
+                    "lighting:",
+                    "mood:",
+                    "sound:",
+                )
+            ):
+                continue
+
+            selected: list[str] = []
+
+            alias_map = self._character_alias_map(
+                character_names
+            )
+
+            for name in (
+                value.get(
+                    "characters",
+                    [],
+                )
+                or []
+            ):
+
+                supplied = str(
+                    name
+                ).strip().lower()
+
+                resolved = alias_map.get(
+                    supplied
+                )
+
+                if resolved:
+                    selected.append(
+                        resolved
+                    )
+
+            if not selected and character_names:
+
+                searchable = " ".join(
+                    [
+                        description,
+                        str(value.get("title", "") or ""),
+                        str(value.get("scene_objective", "") or ""),
+                        str(value.get("continuity_notes", "") or ""),
+                    ]
+                ).lower()
+
+                for alias, canonical in sorted(
+                    alias_map.items(),
+                    key=lambda item: (
+                        -len(item[0]),
+                        item[0],
+                    ),
+                ):
+
+                    if re.search(
+                        r"(?<![a-z0-9'])"
+                        + re.escape(alias)
+                        + r"(?![a-z0-9'])",
+                        searchable,
+                    ):
+
+                        if canonical not in selected:
+                            selected.append(
+                                canonical
+                            )
+
+            selected = self._clean_list(
+                selected,
+                limit=6,
+            )
+
+            scene_id = str(
+                value.get(
+                    "scene_id",
+                    f"scene_{index:03d}",
+                )
+                or f"scene_{index:03d}"
+            ).strip()
+
+            title = str(
+                value.get(
+                    "title",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not title:
+
+                title = (
+                    str(
+                        value.get(
+                            "location",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+                    or f"Scene {index}"
+                )
+
+            result.append(
+                {
+                    "scene_id":
+                        scene_id,
+
+                    "title":
+                        title,
+
+                    "order":
+                        len(result) + 1,
+
+                    "location":
+                        str(
+                            value.get(
+                                "location",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "time_of_day":
+                        str(
+                            value.get(
+                                "time_of_day",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "weather":
+                        str(
+                            value.get(
+                                "weather",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "atmosphere":
+                        str(
+                            value.get(
+                                "atmosphere",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "description":
+                        description,
+
+                    "mood":
+                        str(
+                            value.get(
+                                "mood",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "lighting":
+                        str(
+                            value.get(
+                                "lighting",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "color_temperature":
+                        str(
+                            value.get(
+                                "color_temperature",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "environment_details":
+                        self._clean_list(
+                            value.get(
+                                "environment_details",
+                                [],
+                            ),
+                            limit=12,
+                        ),
+
+                    "key_props":
+                        self._clean_list(
+                            value.get(
+                                "key_props",
+                                [],
+                            ),
+                            limit=8,
+                        ),
+
+                    "scene_objective":
+                        str(
+                            value.get(
+                                "scene_objective",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "characters":
+                        self._clean_list(
+                        selected,
+                    ),
+
+                    "story_summary":
+                        str(
+                            value.get(
+                                "story_summary",
+                                description,
+                            )
+                            or description
+                        ),
+
+                    "continuity_notes":
+                        str(
+                            value.get(
+                                "continuity_notes",
+                                "",
+                            )
+                            or ""
+                        ),
+
+                    "shot_ids":
+                        [],
+                }
+            )
+
+        # Normalize duplicate scene IDs deterministically. Never silently allow
+        # two scenes to share a checkpoint address. Fresh plans may be repaired;
+        # resume plans are returned before this path so their stored IDs remain stable.
+        used_ids: set[str] = set()
+        for scene in result:
+            base_id = str(scene.get("scene_id", "") or "").strip() or "scene"
+            candidate = base_id
+            suffix = 2
+            while candidate.lower() in used_ids:
+                candidate = f"{base_id}_{suffix}"
+                suffix += 1
+            scene["scene_id"] = candidate
+            used_ids.add(candidate.lower())
+
+        # Budget enforcement intentionally happens after sanitization.
+        # Keeping the raw sanitized scene list here lets _compress_scenes_to_budget()
+        # see every narrative beat instead of silently discarding over-segmented
+        # scenes before the semantic compression pass can run.
+        return result
+
+    @staticmethod
+    def _normalize_shot_response(
+        response: dict,
+    ) -> list[dict]:
+
+        if not isinstance(
+            response,
+            dict,
+        ):
+            return []
+
+        shots = response.get(
+            "shots"
         )
 
+        if isinstance(
+            shots,
+            list,
+        ):
+            return [
+                item
+                for item
+                in shots
+                if isinstance(
+                    item,
+                    dict,
+                )
+            ]
 
-def test_character_descriptor_deduplication() -> None:
+        # Qwen3 sometimes returns a single shot object even when the
+        # prompt requests {"shots": [...]}. That response is still useful.
+        shot_fields = {
+            "shot_id",
+            "camera_shot",
+            "camera_movement",
+            "lens_and_depth_of_field",
+            "composition_notes",
+            "lighting",
+            "color_temperature",
+            "mood",
+            "visual_prompt",
+        }
 
-    planner = ProductionPlanner(
-        ROOT
-    )
+        if (
+            shot_fields
+            & set(
+                response.keys()
+            )
+        ):
+            return [
+                response
+            ]
 
-    story = (
-        "A young man named Eli explores an "
-        "abandoned city after a war. "
-        "He meets a woman named Sara near "
-        "the ruined railway station."
-    )
+        return []
 
-    values = (
-        planner.detect_character_descriptors(
+    @staticmethod
+    def _normalize_batch_shot_response(
+        response: dict,
+    ) -> dict[str, list[dict]]:
+        if not isinstance(response, dict):
+            return {}
+
+        if (
+            str(response.get("scene_id", "") or "").strip()
+            and isinstance(response.get("shots"), list)
+        ):
+            entries = [response]
+        else:
+            entries = (
+                response.get("scene_shots")
+                or response.get("shots")
+                or response.get("items")
+                or response.get("scene_shot")
+            )
+
+        if entries is None:
+            return {}
+
+        if isinstance(entries, dict):
+            entries = [
+                {"scene_id": str(key), "shots": value}
+                for key, value in entries.items()
+                if isinstance(value, list)
+            ]
+
+        if not isinstance(entries, list):
+            return {}
+
+        result: dict[str, list[dict]] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            scene_id = str(entry.get("scene_id", "") or "").strip()
+            shots = entry.get("shots")
+            if scene_id and isinstance(shots, list):
+                result[scene_id] = [
+                    item for item in shots if isinstance(item, dict)
+                ]
+                continue
+            if isinstance(shots, list):
+                for item in shots:
+                    if not isinstance(item, dict):
+                        continue
+                    sid = str(item.get("scene_id", "") or "").strip()
+                    if sid:
+                        result.setdefault(sid, []).append(item)
+        return result
+
+    def _sanitize_shots(
+        self,
+        shots,
+        scene: dict,
+        character_names: set[str],
+    ) -> list[dict]:
+
+        scene_id = str(
+            scene.get(
+                "scene_id",
+                "",
+            )
+            or ""
+        ).strip()
+
+        result: list[dict] = []
+
+        for value in (
+            shots
+            or []
+        ):
+
+            if not isinstance(
+                value,
+                dict,
+            ):
+                continue
+
+            candidate = dict(
+                value
+            )
+
+            candidate_scene_id = str(
+                candidate.get(
+                    "scene_id",
+                    scene_id,
+                )
+                or scene_id
+            ).strip()
+
+            if candidate_scene_id != scene_id:
+                continue
+
+            candidate[
+                "scene_id"
+            ] = scene_id
+
+            # Repair non-critical omissions deterministically instead of
+            # discarding a useful shot. Use scene-owned values where available.
+            scene_description = str(scene.get("description", "") or "").strip()
+            scene_lighting = str(scene.get("lighting", "") or "").strip() or "soft natural light"
+            scene_color = str(scene.get("color_temperature", "") or "").strip() or "neutral"
+            scene_mood = str(scene.get("mood", "") or "").strip() or "cinematic"
+
+            defaults = {
+                "camera_shot": "medium wide",
+                "camera_movement": "static",
+                "lens_and_depth_of_field": "normal lens, moderate depth of field",
+                "composition_notes": "Clear subject separation with readable spatial depth.",
+                "lighting": scene_lighting,
+                "color_temperature": scene_color,
+                "mood": scene_mood,
+                "visual_prompt": scene_description or str(candidate.get("action", "") or "").strip(),
+            }
+
+            for field, fallback in defaults.items():
+                if not str(candidate.get(field, "") or "").strip():
+                    candidate[field] = fallback
+
+            shot_location = str(
+                candidate.get("location", "") or ""
+            ).strip()
+            scene_location = str(
+                scene.get("location", "") or ""
+            ).strip()
+
+            if shot_location and scene_location:
+                location_words = shot_location.split()
+                if len(location_words) > 4:
+                    candidate["location"] = scene_location
+                elif any(
+                    word.lower() in {
+                        "the", "a", "an", "of", "she", "he",
+                        "they", "his", "her", "their", "doing",
+                        "response", "hushed", "sharp", "this",
+                        "that", "didn't", "somewhere", "few",
+                        "who", "still", "remembered",
+                    }
+                    for word in location_words
+                ):
+                    candidate["location"] = scene_location
+
+            for state_key in (
+                "continuity_start_state",
+                "continuity_end_state",
+            ):
+                state = candidate.get(state_key)
+                if isinstance(state, dict) and state.get("location"):
+                    state_words = str(state["location"]).split()
+                    if len(state_words) > 4:
+                        state["location"] = candidate.get(
+                            "location", scene_location
+                        )
+
+            if not str(candidate.get("visual_prompt", "") or "").strip():
+                continue
+
+            # Character binding is production-critical. Qwen may omit the
+            # field or return an empty list even though the scene already
+            # has approved characters. In that case deterministically inherit
+            # the scene's character set. When Qwen does provide names, keep
+            # only names already present in the approved character roster.
+            scene_characters = self._clean_list(
+                scene.get(
+                    "characters",
+                    [],
+                ),
+                limit=6,
+            )
+
+            supplied_characters = self._clean_list(
+                candidate.get(
+                    "characters",
+                    [],
+                ),
+                limit=6,
+            )
+
+            selected_characters: list[str] = []
+
+            for name in supplied_characters:
+
+                lowered = name.lower()
+
+                if lowered in character_names:
+                    selected_characters.append(name)
+
+            if not selected_characters:
+
+                selected_characters = [
+                    name
+                    for name in scene_characters
+                    if name.lower() in character_names
+                ]
+
+            candidate["characters"] = self._clean_list(
+                selected_characters,
+                limit=6,
+            )
+
+            dialogue = candidate.get("dialogue_events", [])
+            if not isinstance(dialogue, list):
+                dialogue = []
+            normalized_dialogue = []
+            for event in dialogue:
+                if not isinstance(event, dict):
+                    continue
+                speaker = str(event.get("speaker", "") or "").strip()
+                text = str(event.get("text", "") or "")
+                if not speaker or not text.strip():
+                    continue
+                normalized_dialogue.append({
+                    "speaker": speaker,
+                    "text": text,
+                    "continues_from_previous_shot": bool(event.get("continues_from_previous_shot", False)),
+                    "continues_to_next_shot": bool(event.get("continues_to_next_shot", False)),
+                })
+            if not normalized_dialogue:
+                legacy_speakers = candidate.get("speaking_characters", []) or []
+                legacy_text = str(candidate.get("speech_text", "") or "").strip()
+                if legacy_text and legacy_speakers:
+                    # Keep the compatibility bridge, but never manufacture a
+                    # dialogue event from obviously long narrative prose. The
+                    # Director's semantic normalizer remains the final gate.
+                    word_count = len(legacy_text.split())
+                    quoted = re.findall(r'“([^”\n]+)”|"([^"\n]+)"|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)', legacy_text)
+                    quoted_texts = [next((part for part in group if part), "").strip() for group in quoted]
+                    quoted_texts = [value for value in quoted_texts if value]
+                    direct_speech_like = bool(
+                        re.match(
+                            r"^(?:i|we|you|your|why|what|how|when|where|please|do not|don't|let's|can|could|would|will|is|are|did|have|has)\b",
+                            legacy_text,
+                            re.IGNORECASE,
+                        )
+                    )
+                    if quoted_texts:
+                        legacy_text = " ".join(quoted_texts)
+                        normalized_dialogue = [{
+                            "speaker": str(legacy_speakers[0]).strip(),
+                            "text": legacy_text,
+                            "continues_from_previous_shot": False,
+                            "continues_to_next_shot": False,
+                        }]
+                    elif 0 < word_count <= 32 and direct_speech_like:
+                        normalized_dialogue = [{
+                            "speaker": str(legacy_speakers[0]).strip(),
+                            "text": legacy_text,
+                            "continues_from_previous_shot": False,
+                            "continues_to_next_shot": False,
+                        }]
+            # Keep all legacy dialogue fields synchronized with the canonical
+            # event list. This prevents stale speaking_characters/speech_text
+            # metadata from surviving when Qwen returns invalid JSON and the
+            # deterministic fallback path is used.
+            candidate["dialogue_events"] = normalized_dialogue
+            candidate["speaking_characters"] = list(dict.fromkeys(
+                str(event.get("speaker", "") or "").strip()
+                for event in normalized_dialogue
+                if str(event.get("speaker", "") or "").strip()
+            ))
+            candidate["speech_text"] = " ".join(
+                str(event.get("text", "") or "").strip()
+                for event in normalized_dialogue
+                if str(event.get("text", "") or "").strip()
+            )
+
+            def _normalize_continuity(value) -> dict:
+                if isinstance(value, dict):
+                    return dict(value)
+                text = str(value or "").strip()
+                if not text:
+                    return {}
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    return {"state_description": text}
+                return parsed if isinstance(parsed, dict) else {"state_description": str(parsed)}
+
+            candidate["continuity_start_state"] = _normalize_continuity(
+                candidate.get("continuity_start_state", candidate.get("continuity_state_start"))
+            )
+            candidate["continuity_end_state"] = _normalize_continuity(
+                candidate.get("continuity_end_state", candidate.get("continuity_state_end"))
+            )
+            candidate.pop("continuity_state_start", None)
+            candidate.pop("continuity_state_end", None)
+            candidate["is_scene_boundary"] = bool(candidate.get("is_scene_boundary", False))
+            raw_bboxes = candidate.get("character_spatial_bboxes", {}) or {}
+            normalized_bboxes = {}
+            if isinstance(raw_bboxes, dict):
+                for name, bbox in raw_bboxes.items():
+                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                        values = [float(v) for v in bbox]
+                        if all(0.0 <= v <= 1.0 for v in values) and values[2] >= values[0] and values[3] >= values[1]:
+                            normalized_bboxes[str(name).strip()] = values
+            candidate["character_spatial_bboxes"] = normalized_bboxes
+            raw_regions = candidate.get("character_spatial_regions", {}) or {}
+            candidate["character_spatial_regions"] = (
+                {str(k).strip(): str(v).strip() for k, v in raw_regions.items() if str(k).strip() and str(v).strip()}
+                if isinstance(raw_regions, dict) else {}
+            )
+            for spatial_key in ("character_spatial_bboxes_start", "character_spatial_bboxes_end"):
+                raw = candidate.get(spatial_key, {}) or {}
+                normalized = {}
+                if isinstance(raw, dict):
+                    for name, bbox in raw.items():
+                        if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                            values = [float(v) for v in bbox]
+                            if all(0.0 <= v <= 1.0 for v in values) and values[2] >= values[0] and values[3] >= values[1]:
+                                normalized[str(name).strip()] = values
+                candidate[spatial_key] = normalized
+            for spatial_key in ("character_spatial_regions_start", "character_spatial_regions_end"):
+                raw = candidate.get(spatial_key, {}) or {}
+                candidate[spatial_key] = (
+                    {str(k).strip(): str(v).strip() for k, v in raw.items() if str(k).strip() and str(v).strip()}
+                    if isinstance(raw, dict) else {}
+                )
+
+            result.append(
+                candidate
+            )
+
+        # Canonicalize dialogue continuation across adjacent shots in the same
+        # scene. Qwen may independently set the two boundary flags; the plan
+        # must expose one consistent boundary state to DialogueTimeline.
+        for index, candidate in enumerate(result):
+            events = candidate.get("dialogue_events", [])
+            if not isinstance(events, list) or not events:
+                if index > 0:
+                    previous_events = result[index - 1].get("dialogue_events", [])
+                    if isinstance(previous_events, list) and previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                continue
+
+            if index == 0 or bool(candidate.get("is_scene_boundary", False)):
+                events[0]["continues_from_previous_shot"] = False
+                if index > 0:
+                    previous_events = result[index - 1].get("dialogue_events", [])
+                    if isinstance(previous_events, list) and previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                continue
+
+            previous_events = result[index - 1].get("dialogue_events", [])
+            if not isinstance(previous_events, list) or not previous_events:
+                events[0]["continues_from_previous_shot"] = False
+                continue
+
+            previous_flag = bool(previous_events[-1].get("continues_to_next_shot", False))
+            current_flag = bool(events[0].get("continues_from_previous_shot", False))
+            continuation = previous_flag or current_flag
+            previous_events[-1]["continues_to_next_shot"] = continuation
+            events[0]["continues_from_previous_shot"] = continuation
+
+        return result
+
+    @staticmethod
+    def _normalize_ids(
+        scenes: list[dict],
+        shots: list[dict],
+    ) -> None:
+
+        old_to_new: dict[str, str] = {}
+
+        for index, scene in enumerate(
+            scenes,
+            start=1,
+        ):
+            old_id = str(
+                scene.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+            canonical = f"scene_{index:03d}"
+            if old_id:
+                old_to_new.setdefault(
+                    old_id.lower(),
+                    canonical,
+                )
+            scene["scene_id"] = canonical
+            scene["order"] = index
+
+        scene_shot_counts: dict[str, int] = {}
+        for shot in shots:
+            old_scene_id = str(
+                shot.get(
+                    "scene_id",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            scene_id = old_to_new.get(
+                old_scene_id.lower(),
+                old_scene_id,
+            )
+
+            shot["scene_id"] = scene_id
+            scene_shot_counts[scene_id] = (
+                scene_shot_counts.get(
+                    scene_id,
+                    0,
+                )
+                + 1
+            )
+            shot_number = scene_shot_counts[scene_id]
+            shot["shot_id"] = (
+                f"{scene_id}_shot_{shot_number:03d}"
+            )
+
+    @staticmethod
+    def _normalize_story(
+        text: str,
+    ) -> str:
+
+        return re.sub(
+            r"\s+",
+            " ",
+            str(
+                text or ""
+            ).strip(),
+        )
+
+    @staticmethod
+    def _meaningful_tokens(
+        text: str,
+    ) -> set[str]:
+
+        words = re.findall(
+            r"[A-Za-z][A-Za-z'-]{3,}",
+            str(
+                text or ""
+            ).lower(),
+        )
+
+        stop = {
+            "this",
+            "that",
+            "with",
+            "from",
+            "into",
+            "about",
+            "have",
+            "will",
+            "they",
+            "their",
+            "there",
+            "which",
+            "while",
+            "where",
+            "would",
+            "could",
+            "should",
+            "story",
+            "then",
+            "than",
+            "when",
+        }
+
+        return {
+            word
+            for word in words
+            if word not in stop
+        }
+
+    @staticmethod
+    def _preservation_anchors(text: str) -> set[str]:
+        value = str(text or "")
+        anchors: set[str] = set()
+
+        # Explicitly named/called characters are high-confidence anchors.
+        for match in re.finditer(
+            r"\b(?:named|called)\s+([A-Z][A-Za-z'-]{1,}(?:\s+[A-Z][A-Za-z'-]{1,})*)",
+            value,
+        ):
+            anchors.add(match.group(1).strip().lower())
+
+        # Preserve dates/counts/measurements that can materially change plot facts.
+        anchors.update(re.findall(r"\b\d+(?:[.,]\d+)?(?:%|[A-Za-z]+)?\b", value.lower()))
+        return anchors
+
+    def _preservation_coverage(
+        self,
+        source: str,
+        result: str,
+        minimum_sentence_overlap: float = 0.28,
+    ) -> tuple[float, list[str]]:
+        """Measure conservative sentence-level lexical preservation.
+
+        This is deliberately lexical/structural rather than an LLM judge so
+        acceptance remains deterministic, cheap, and available in CI.
+        """
+        source_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[.!?]+", source)
+            if sentence.strip()
+        ]
+        result_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[.!?]+", result)
+            if sentence.strip()
+        ]
+        if not source_sentences:
+            return 1.0, []
+        result_tokens = [
+            self._meaningful_tokens(sentence)
+            for sentence in result_sentences
+        ]
+        covered = 0
+        missing: list[str] = []
+        for sentence in source_sentences:
+            tokens = self._meaningful_tokens(sentence)
+            if not tokens:
+                continue
+            best = 0.0
+            for candidate in result_tokens:
+                if not candidate:
+                    continue
+                overlap = len(tokens & candidate) / max(1, len(tokens))
+                best = max(best, overlap)
+            if best >= minimum_sentence_overlap:
+                covered += 1
+            else:
+                missing.append(sentence[:140])
+        coverage = covered / max(1, len(source_sentences))
+        return coverage, missing
+
+    @staticmethod
+    def _ends_cleanly(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return False
+        return bool(re.search(r"[.!?][\"')\]]*$", value))
+
+    @staticmethod
+    def _named_character_identity_candidates(text: str) -> list[str]:
+        """Extract conservative name-like identity anchors from completed story prose.
+
+        This is a production-safety gate, not a semantic character detector.
+        It only looks for explicit naming/direct-address/predicate structures that
+        can distinguish a named supporting identity from generic roles or places.
+        """
+        value = str(text or "")
+        candidates: list[str] = []
+
+        def add(raw: str) -> None:
+            name = re.sub(r"\s+", " ", str(raw or "").strip(" \t\r\n,.;:!?\"'“”‘’()[]{}"))
+            if not name:
+                return
+            # Strip honorifics from the identity key; keep the most complete name.
+            name = re.sub(
+                r"^(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+",
+                "",
+                name,
+                count=1,
+                flags=re.IGNORECASE,
+            ).strip()
+            if not name:
+                return
+            if name.lower() in {
+                "the", "a", "an", "arctic", "station", "vault", "father",
+                "mother", "man", "woman", "boy", "girl", "child", "person",
+                "doctor", "detective", "scientist", "pilot", "stranger",
+            }:
+                return
+            if not re.fullmatch(r"[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}", name):
+                return
+            candidates.append(name)
+
+        # Explicit naming constructions.
+        for match in re.finditer(
+            r"\b(?:named|called)\s+((?:[A-Z][A-Za-z'-]*)(?:\s+[A-Z][A-Za-z'-]*){0,3})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Honorific + proper name.
+        for match in re.finditer(
+            r"\b(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
+            r"((?:[A-Z][A-Za-z'-]*)(?:\s+[A-Z][A-Za-z'-]*){0,3})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Proper multi-token names, excluding obvious location/setting phrases.
+        for match in re.finditer(
+            r"\b([A-Z][A-Za-z'-]+\s+[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Single-token names grounded by a narrative/dialogue predicate.
+        verbs = (
+            "said", "asked", "replied", "answered", "whispered", "shouted", "called",
+            "told", "warned", "entered", "arrived", "left", "ran", "walked", "looked",
+            "turned", "stepped", "followed", "waited", "stood", "sat", "moved", "opened",
+            "closed", "found", "took", "held", "carried", "grabbed", "saw", "heard",
+            "knew", "felt", "remembered", "returned", "stared", "smiled", "nodded",
+        )
+        verb_alt = "|".join(re.escape(v) for v in verbs)
+        for match in re.finditer(
+            rf"(?<![A-Za-z0-9'_-])([A-Z][A-Za-z'-]{{2,}})\s+(?:{verb_alt})\b",
+            value,
+        ):
+            add(match.group(1))
+
+        # Direct-address names in dialogue.
+        for match in re.finditer(
+            r"(?:^|[\"'“”])\s*([A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,2})\s*,",
+            value,
+            flags=re.MULTILINE,
+        ):
+            add(match.group(1))
+
+        # Deduplicate short forms against a more complete full name.
+        normalized: list[str] = []
+        for candidate in sorted(set(candidates), key=lambda item: (-len(item.split()), -len(item), item.lower())):
+            lower = candidate.lower()
+            if any(
+                lower == existing.lower()
+                or lower in {part.lower() for part in existing.split()}
+                for existing in normalized
+            ):
+                continue
+            if not any(candidate.lower() == existing.lower() for existing in normalized):
+                normalized.append(candidate)
+        return normalized
+
+    def _validate_mode_output(
+        self,
+        mode: str,
+        user_input: str,
+        story: str,
+    ) -> None:
+
+        source = self._normalize_story(
+            user_input
+        )
+
+        result = self._normalize_story(
             story
         )
-    )
 
-    names = {
-        str(value).lower()
-        for value
-        in values
-    }
+        if not result:
 
-    check(
-        "eli" in names,
-        "Named character Eli was not detected.",
-    )
+            raise RuntimeError(
+                "Qwen director returned an empty story."
+            )
 
-    check(
-        "sara" in names,
-        "Named character Sara was not detected.",
-    )
+        if mode == PRESERVE_USER_STORY_MODE:
 
-    check(
-        not (
-            "man" in names
-            and "eli" in names
-        ),
-        "Generic 'man' was duplicated alongside named Eli.",
-    )
+            if source != result:
 
-    check(
-        not (
-            "woman" in names
-            and "sara" in names
-        ),
-        "Generic 'woman' was duplicated alongside named Sara.",
-    )
+                raise RuntimeError(
+                    "Preserve Story mode changed "
+                    "the supplied story."
+                )
 
+            return
 
-def test_single_paragraph_segmentation() -> None:
+        if mode == AI_STORY_MODE:
 
-    planner = ProductionPlanner(
-        ROOT
-    )
+            if source == result:
 
-    story = (
-        "Eli enters the abandoned city. "
-        "He finds the ruined station and discovers "
-        "a strange signal. "
-        "The signal leads him underground, where "
-        "the city begins to collapse around him."
-    )
+                raise RuntimeError(
+                    "AI Story mode returned "
+                    "the premise unchanged."
+                )
 
-    units = planner._split_story(
-        story
-    )
+            # Do not reject a valid one-sentence story using an arbitrary
+            # sentence-count rule. Require deterministic source preservation
+            # and some genuinely new meaningful content instead.
+            source_anchors = self._preservation_anchors(source)
+            result_lower = result.lower()
+            missing_anchors = [
+                anchor
+                for anchor in source_anchors
+                if anchor not in result_lower
+            ]
+            if missing_anchors:
+                raise RuntimeError(
+                    "AI Story mode dropped required source anchors: "
+                    + ", ".join(missing_anchors[:8])
+                )
 
-    check(
-        len(units) > 1,
-        "A multi-event single paragraph remained a single scene.",
-    )
+            coverage, missing_sentences = self._preservation_coverage(
+                source,
+                result,
+                minimum_sentence_overlap=0.20,
+            )
+            if source and coverage < 0.5:
+                detail = "; ".join(missing_sentences[:3])
+                raise RuntimeError(
+                    "AI Story mode did not preserve enough of the supplied "
+                    f"premise (coverage={coverage:.2f}). {detail}".strip()
+                )
 
+            source_tokens = self._meaningful_tokens(source)
+            result_tokens = self._meaningful_tokens(result)
+            if source_tokens and not (result_tokens - source_tokens):
+                raise RuntimeError(
+                    "AI Story mode did not add meaningful narrative content."
+                )
 
-def test_director_prompt_contract() -> None:
-    director = QwenDirector(ROOT)
+            if not self._ends_cleanly(result):
+                raise RuntimeError(
+                    "Story text does not end in a complete sentence "
+                    "(the model stopped generating before finishing)."
+                )
 
-    ai = director._story_text_system("ai_story")
-    expand = director._story_text_system("expand_user_story")
-    shots = director._shot_director_batch_system()
+            named_identities = self._named_character_identity_candidates(result)
+            # A fully anonymous premise/story may legitimately contain no named
+            # supporting identity, so do not invent a failure for one-character
+            # test fixtures. Once the generated story establishes at least one
+            # explicit named identity, however, require a second stable named
+            # identity so the production roster can represent a real supporting
+            # character rather than generic roles such as "man" or "boy".
+            if named_identities and len(named_identities) < 2:
+                raise RuntimeError(
+                    "AI Story mode established only one stable named character identity "
+                    f"({named_identities[0]!r}) but the narrative contract requires at least "
+                    "one additional meaningful named supporting character. Add a distinct named "
+                    "supporting identity and connect that character to the story conflict or objective."
+                )
 
-    # AI Story: validate behavior, not a fragile literal heading.
-    check(
-        "complete cinematic short-film story" in ai.lower(),
-        "AI Story text prompt does not require a complete cinematic story.",
-    )
+            return
 
-    check(
-        "Output ONLY the story prose" in ai,
-        "AI Story text prompt does not enforce prose-only output.",
-    )
+        if mode == EXPAND_USER_STORY_MODE:
 
-    check(
-        "Do not output JSON" in ai,
-        "AI Story text prompt still permits JSON output.",
-    )
+            if source == result:
 
-    # Expand Story: validate the actual expansion contract.
-    check(
-        "Expand the supplied story substantially" in expand,
-        "Expand Story text prompt does not require substantial expansion.",
-    )
+                raise RuntimeError(
+                    "Expand Story mode returned "
+                    "the supplied story unchanged."
+                )
 
-    check(
-        "Output ONLY the expanded story prose" in expand,
-        "Expand Story text prompt does not enforce prose-only output.",
-    )
+            source_words = (
+                self._meaningful_tokens(
+                    source
+                )
+            )
 
-    check(
-        "Do not replace the original plot" in expand,
-        "Expand Story text prompt does not protect the original plot.",
-    )
+            if source_words:
 
-    # Preserve Story intentionally has no story-text generation pass.
-    try:
-        director._story_text_system("preserve_user_story")
-    except ValueError:
-        pass
-    else:
-        raise RuntimeError(
-            "Preserve Story should not use the story-text generation pass."
+                result_words = (
+                    self._meaningful_tokens(
+                        result
+                    )
+                )
+
+                overlap = (
+                    len(
+                        source_words
+                        & result_words
+                    )
+                    / max(
+                        1,
+                        len(source_words),
+                    )
+                )
+
+                if overlap < 0.35:
+
+                    raise RuntimeError(
+                        "Expand Story mode changed too much of the supplied story "
+                        f"(meaningful-token overlap={overlap:.3f}; minimum=0.350)."
+                    )
+
+            anchors = self._preservation_anchors(source)
+            result_lower = result.lower()
+            missing_anchors = [
+                anchor
+                for anchor in sorted(anchors)
+                if anchor not in result_lower
+            ]
+            if missing_anchors:
+                raise RuntimeError(
+                    "Expand Story mode dropped source anchors: "
+                    + ", ".join(missing_anchors)
+                )
+
+            coverage, missing_sentences = self._preservation_coverage(
+                source,
+                result,
+                minimum_sentence_overlap=0.28,
+            )
+            if coverage < 0.60:
+                details = "; ".join(missing_sentences[:3])
+                raise RuntimeError(
+                    "Expand Story mode did not preserve enough source-event coverage "
+                    f"(coverage={coverage:.3f}; minimum=0.600). "
+                    f"Unmatched source events: {details}"
+                )
+
+            sentences = [
+                value
+                for value
+                in re.split(
+                    r"[.!?]+",
+                    result,
+                )
+                if value.strip()
+            ]
+
+            if len(sentences) < 3:
+
+                raise RuntimeError(
+                    "Expand Story mode did not "
+                    "provide enough narrative development."
+                )
+
+            if not self._ends_cleanly(result):
+                raise RuntimeError(
+                    "Story text does not end in a complete sentence "
+                    "(the model stopped generating before finishing)."
+                )
+
+            return
+
+        raise ValueError(
+            f"Unsupported story mode: {mode}"
         )
 
-    # Active cinematography/shot-generation contract.
-    check(
-        "visual-language consistency" in shots,
-        "Shot prompt lost visual-language continuity requirements.",
-    )
+    def _validate_shot_character_contract(
+        self,
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        if not characters:
+            return
 
-    check(
-        "lens_and_depth_of_field" in shots,
-        "Shot prompt does not request lens/depth-of-field direction.",
-    )
+        allowed = {
+            str(value.get("name", "")).strip().lower()
+            for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
+        }
 
-    check(
-        "composition_notes" in shots,
-        "Shot prompt does not request composition direction.",
-    )
+        for shot in shots:
+            shot_characters = [
+                str(name).strip()
+                for name in (
+                    shot.get("characters", [])
+                    or []
+                )
+                if str(name).strip()
+            ]
 
-    check(
-        "SHOT / FRAMING VOCABULARY" in shots,
-        "Shot prompt is missing framing vocabulary.",
-    )
+            if not shot_characters:
+                raise RuntimeError(
+                    f"Shot {shot.get('shot_id', '')} has no character binding."
+                )
 
-    check(
-        "CAMERA MOVEMENT VOCABULARY" in shots,
-        "Shot prompt is missing camera-movement vocabulary.",
-    )
+            for field in (
+                "characters",
+                "speaking_characters",
+            ):
+                for name in (
+                    shot.get(field, [])
+                    or []
+                ):
+                    if (
+                        str(name).strip().lower()
+                        not in allowed
+                    ):
+                        raise RuntimeError(
+                            f"Shot {shot.get('shot_id', '')} contains unknown character '{name}'."
+                        )
 
-    check(
-        "LIGHTING VOCABULARY" in shots,
-        "Shot prompt is missing lighting vocabulary.",
-    )
-
-    check(
-        "Do not create new characters" in shots,
-        "Shot director does not protect character identity.",
-    )
-
-    check(
-        "SCENE-FUNCTION DIRECTING" in shots
-        and "obligatory_moment" in shots,
-        "Shot prompt is missing scene-function / obligatory-moment directing constraints.",
-    )
-
-    check(
-        "Do NOT output compiler-owned fields." in shots,
-        "Shot prompt is missing compiler-ownership boundaries.",
-    )
-    
-
-def test_shot_sampling_contract() -> None:
-
-    director = QwenDirector(
-        ROOT
-    )
-
-    temperature, top_p = (
-        director._shot_sampling()
-    )
-
-    check(
-        temperature == 0.68,
-        "Shot temperature is not 0.68.",
-    )
-
-    check(
-        top_p == 0.92,
-        "Shot top_p is not 0.92.",
-    )
-
-
-def test_visual_schema_sanitization() -> None:
-
-    director = QwenDirector(
-        ROOT
-    )
-
-    visual_language = (
-        director._sanitize_visual_language(
-            {
-                "genre_tone": "dark cinematic sci-fi",
-                "color_palette": "charcoal, amber, cold blue",
-                "lighting_philosophy": "low-key motivated practical light",
-                "camera_philosophy": "deliberate movement with deep spatial compositions",
-                "pacing": "slow build with sharp escalation",
-                "unexpected": "ignored",
+            speakers = {
+                str(name).strip().lower()
+                for name in (
+                    shot.get("speaking_characters", [])
+                    or []
+                )
+                if str(name).strip()
             }
-        )
-    )
+            if not speakers.issubset(
+                {
+                    name.lower()
+                    for name in shot_characters
+                }
+            ):
+                raise RuntimeError(
+                    f"Shot {shot.get('shot_id', '')} has a speaker not present in its character bindings."
+                )
 
-    check(
-        set(visual_language) == {
+    @staticmethod
+    def _baseline_visual_language() -> dict:
+        return {
+            "genre_tone": "cinematic, story-led, naturalistic with controlled contrast",
+            "color_palette": "coherent palette derived from scene mood and environment",
+            "lighting_philosophy": "motivated cinematic lighting consistent within each scene",
+            "camera_philosophy": "deliberate composition with motivated movement and continuity-first coverage",
+            "pacing": "clear escalation with varied cinematic rhythm",
+        }
+
+    @staticmethod
+    def _sanitize_visual_language(
+        value,
+    ) -> dict:
+
+        if not isinstance(value, dict):
+            return {}
+
+        fields = (
             "genre_tone",
             "color_palette",
             "lighting_philosophy",
             "camera_philosophy",
             "pacing",
-        },
-        "Visual-language sanitizer returned unexpected fields.",
-    )
-
-
-def test_shot_schema_cardinality_is_grammar_constrained() -> None:
-    # Grammar-constrained (JSON Schema) decoding is the project's
-    # chosen speed/correctness strategy for JSON calls. This locks in
-    # that the valid shot-count contracts are enforced at the schema
-    # level; missing shots are repaired deterministically later rather
-    # than by another Qwen recovery call.
-    normal = QwenDirector._shot_json_schema()
-    check(
-        normal["properties"]["shots"]["minItems"] == QwenDirector.SHOTS_PER_SCENE
-        and normal["properties"]["shots"]["maxItems"] == QwenDirector.SHOTS_PER_SCENE,
-        "Normal/retry shot schema must constrain to exactly "
-        "SHOTS_PER_SCENE shots.",
-    )
-
-    batch = QwenDirector._shot_batch_json_schema(
-        scene_count=2,
-    )
-    check(
-        batch["properties"]["scene_shots"]["minItems"] == 2
-        and batch["properties"]["scene_shots"]["maxItems"] == 2,
-        "Batch schema must constrain scene_shots to the actual "
-        "batch size.",
-    )
-    check(
-        batch["properties"]["scene_shots"]["items"]["properties"][
-            "shots"
-        ]["minItems"]
-        == QwenDirector.SHOTS_PER_SCENE
-        and batch["properties"]["scene_shots"]["items"]["properties"][
-            "shots"
-        ]["maxItems"]
-        == QwenDirector.SHOTS_PER_SCENE,
-        "Batch schema must constrain each scene's shots to "
-        "SHOTS_PER_SCENE.",
-    )
-
-
-def test_shot_sanitization_cinematography_fields() -> None:
-
-    director = QwenDirector(
-        ROOT
-    )
-
-    values = director._sanitize_shots(
-        [
-            {
-                "shot_id": "shot_001",
-                "scene_id": "scene_001",
-                "characters": [],
-                "camera_shot": "close-up",
-                "camera_movement": "slow push-in",
-                "lens_and_depth_of_field": "telephoto compression with shallow depth of field",
-                "composition_notes": "rule of thirds with foreground framing",
-                "lighting": "cool moonlight",
-                "color_temperature": "cool 4300K",
-                "mood": "tense and isolated",
-                "visual_prompt": "A lone figure stands among ruined stone structures under cool moonlight.",
-            }
-        ],
-        {
-            "scene_id": "scene_001",
-            "location": "ruins",
-        },
-        set(),
-    )
-
-    check(
-        len(values) == 1,
-        "Shot sanitizer rejected a valid shot.",
-    )
-
-    shot = values[0]
-
-    check(
-        shot["lens_and_depth_of_field"].startswith("telephoto"),
-        "Shot lens/DOF field was not preserved.",
-    )
-
-    check(
-        "rule of thirds" in shot["composition_notes"],
-        "Shot composition field was not preserved.",
-    )
-
-    check(
-        shot["color_temperature"] == "cool 4300K",
-        "Shot color temperature was not preserved.",
-    )
-
-
-
-
-
-def test_entity_resolution_adversarial_regressions() -> None:
-    planner = ProductionPlanner(ROOT)
-
-    cases = {
-        "Eli enters the station. Sara gives Eli a map.": {"Eli", "Sara"},
-        "Eli enters the station. Sara helps Eli escape.": {"Eli", "Sara"},
-        "Eli enters the station. Sara says the signal is dangerous.": {"Eli", "Sara"},
-        "Eli, a scientist, enters the station.": {"Eli"},
-        "Mira, the detective, follows Arun.": {"Mira", "Arun"},
-        "Sara, an engineer, and Eli, a pilot, arrive.": {"Sara", "Eli"},
-        "Mira and Arun arrive at the station.": {"Mira", "Arun"},
-        "Dr. Elara Voss entered the station. Marcus Chen followed her.": {"Elara Voss", "Marcus Chen"},
-        "Sara said, \"Eli, run!\"": {"Sara", "Eli"},
-    }
-
-    for story, expected in cases.items():
-        actual = set(planner.detect_character_descriptors(story))
-        check(
-            expected.issubset(actual),
-            f"Entity detector missed canonical names for: {story}; actual={sorted(actual)}",
         )
 
-    roles = {
-        value.lower()
-        for value in planner.detect_character_descriptors(
-            "Sara, an engineer, and Eli, a pilot, arrive."
-        )
-    }
-    check(
-        not ({"engineer", "pilot"} & roles),
-        "Appositive role descriptors leaked into the canonical roster.",
-    )
+        return {
+            field: str(
+                value.get(
+                    field,
+                    "",
+                )
+                or ""
+            ).strip()
+            for field in fields
+        }
 
-    false_positive = {
-        value.lower()
-        for value in planner.detect_character_descriptors(
-            "The Station opened at dawn."
-        )
-    }
-    check(
-        "station" not in false_positive,
-        "A location noun was classified as a character.",
-    )
-
-
-def test_character_appearance_is_locally_scoped() -> None:
-    planner = ProductionPlanner(ROOT)
-    appearance = planner._appearance_from_story(
-        "Eli",
-        "Eli has long hair. Sara wears a red coat and has short hair.",
-    )
-    check(
-        appearance["hair"] == "long hair",
-        "Eli inherited Sara's unrelated hair description.",
-    )
-    check(
-        "red" not in appearance["clothing"],
-        "Eli inherited Sara's unrelated clothing description.",
-    )
-
-
-def test_cinematic_compiler_cannot_promote_scene_identity() -> None:
-    from planner.cinematic_compiler import CinematicCompiler
-
-    compiler = CinematicCompiler({"Eli", "Sara"})
-    scene = _sample_scene("scene_001", ["Eli"], 1)
-    shot = _sample_shot("scene_001", 1)
-    shot["characters"] = ["Eli", "Invented Character"]
-    compiled = compiler.compile_shot(scene, shot, 1)
-    check(
-        compiled["characters"] == ["Eli"],
-        "Compiler promoted an unrecognized Qwen character into the output roster.",
-    )
-    check(
-        "invented character" not in compiler.character_names,
-        "Compiler mutated the canonical identity set.",
-    )
-
-
-def test_h3_optimizer_ownership_guard() -> None:
-    from execution.h3_workflow_builder import H3WorkflowBuilder
-
-    workflow = {
-        "nodes": [
-            {"id": 1, "type": "UNETLoader", "outputs": [{"name": "MODEL", "links": [1, 2]}]},
-            {"id": 2, "type": "H3MemoryOptimization", "inputs": [{"name": "model", "type": "MODEL", "link": 1}], "outputs": [{"name": "MODEL", "links": [3, 4]}]},
-            {"id": 3, "type": "BasicScheduler", "inputs": [{"name": "model", "type": "MODEL", "link": 3}]},
-            {"id": 4, "type": "BasicGuider", "inputs": [{"name": "model", "type": "MODEL", "link": 4}]},
-        ],
-        "links": [
-            [1, 1, 0, 2, 0, "MODEL"],
-            [2, 1, 0, 3, 0, "MODEL"],
-            [3, 2, 0, 3, 0, "MODEL"],
-            [4, 2, 0, 4, 0, "MODEL"],
-        ],
-    }
-    try:
-        H3WorkflowBuilder._assert_optimizer_ownership(
-            workflow,
-            "UNETLoader",
-        )
-    except RuntimeError:
-        return
-    raise RuntimeError(
-        "H3 optimizer ownership guard accepted a bypassing MODEL edge."
-    )
-
-def _sample_scene(scene_id: str, characters=None, order: int = 1) -> dict:
-    return {
-        "scene_id": scene_id,
-        "title": f"Beat {scene_id}",
-        "order": order,
-        "location": "ruined city",
-        "time_of_day": "night",
-        "weather": "rain",
-        "atmosphere": "wet neon streets",
-        "description": f"A real narrative event unfolds in {scene_id}.",
-        "mood": "tense",
-        "lighting": "cool neon",
-        "color_temperature": "cool 4300K",
-        "environment_details": ["ruined buildings"],
-        "key_props": ["signal device"],
-        "characters": list(characters or []),
-        "scene_objective": "Advance the story.",
-        "continuity_notes": "",
-        "story_summary": f"Summary {scene_id}",
-        "shot_ids": [],
-    }
-
-
-def _sample_shot(scene_id: str, ordinal: int, characters=None) -> dict:
-    return {
-        "shot_id": f"{scene_id}_shot_{ordinal}",
-        "scene_id": scene_id,
-        "duration_seconds": 5.2,
-        "characters": list(characters or []),
-        "location": "ruined city",
-        "action": f"Action beat {ordinal}.",
-        "camera_shot": "wide" if ordinal == 1 else "close-up",
-        "camera_movement": "slow pan" if ordinal == 1 else "push-in",
-        "lens_and_depth_of_field": (
-            "normal perspective with deep focus"
-            if ordinal == 1
-            else "telephoto compression with shallow depth of field"
-        ),
-        "composition_notes": (
-            "leading lines and layered depth"
-            if ordinal == 1
-            else "subject isolation with foreground framing"
-        ),
-        "lighting": "cool neon",
-        "color_temperature": "cool 4300K",
-        "mood": "tense",
-        "visual_prompt": "A filmable cinematic shot.",
-        "speaking_characters": [],
-        "speech_text": "",
-    }
-
-
-
-def test_h3_workflow_duration_updates_float_source() -> None:
-    from execution.h3_workflow_builder import H3WorkflowBuilder
-
-    builder = H3WorkflowBuilder(ROOT, None)
-    workflow = builder.load("ref2va")
-
-    expression = next(
-        node
-        for node in workflow["nodes"]
-        if node.get("type") == "ComfyMathExpression"
-    )
-    primitive = next(
-        node
-        for node in workflow["nodes"]
-        if node.get("type") == "PrimitiveFloat"
-        and node.get("title") == "Float (Duration)"
-    )
-
-    original_expression = expression["widgets_values"][0]
-    builder._set_duration(workflow, 5.0)
-
-    check(
-        expression["widgets_values"][0] == original_expression,
-        "H3 duration update modified the ComfyMathExpression formula.",
-    )
-    check(
-        primitive["widgets_values"][0] == 5.0,
-        "H3 duration update did not modify the PrimitiveFloat source.",
-    )
-    check(
-        primitive.get("widgets_values_named", {}).get("value") == 5.0,
-        "H3 duration named widget value was not updated.",
-    )
-
-    ref_node = builder._one(
-        workflow,
-        "MiniMaxH3ReferenceToVideo",
-    )
-    check(
-        ref_node["widgets_values"][3] == 124,
-        "5.0 seconds did not resolve to the H3-legal 124-frame length.",
-    )
-
-
-def test_h3_workflow_resolution_selector_mapping() -> None:
-    from execution.h3_workflow_builder import H3WorkflowBuilder
-
-    builder = H3WorkflowBuilder(ROOT, None)
-    expected = {
-        (1344, 768): 0.98,
-        (1216, 672): 0.80,
-        (1056, 608): 0.60,
-        (1920, 1088): 2.00,
-    }
-
-    for (width, height), megapixels in expected.items():
-        workflow = builder.load("ref2va")
-        builder._set_resolution(
-            workflow,
-            width,
-            height,
-        )
-        selector = builder._one(
-            workflow,
-            "ResolutionSelector",
-        )
-        widgets = selector["widgets_values"]
-
-        check(
-            widgets[0] == "16:9 (Widescreen)"
-            and float(widgets[1]) == megapixels
-            and int(widgets[2]) == 32,
-            f"Resolution selector mapping failed for {width}x{height}.",
-        )
-
-    try:
-        workflow = builder.load("ref2va")
-        builder._set_resolution(
-            workflow,
-            1400,
-            800,
-        )
-    except ValueError:
-        pass
-    else:
-        raise RuntimeError(
-            "Unsupported H3 resolution was accepted instead of failing loudly."
-        )
-
-
-def test_short_story_rebalances_to_four_units_without_losing_source_text() -> None:
-    planner = ProductionPlanner(ROOT)
-
-    source = "Eli enters the station."
-    units = planner._rebalance_story_units(
-        planner._split_story(source)
-    )
-
-    check(
-        len(units) == 4,
-        "Short story did not rebalance to four structural planning units.",
-    )
-
-    joined = " ".join(
-        unit.text
-        for unit in units
-    )
-    check(
-        "Eli" in joined and "enters" in joined and "station" in joined,
-        "Short-story rebalance lost source narrative content.",
-    )
-
-    tiny = planner._rebalance_story_units(
-        planner._split_story("Run.")
-    )
-    check(
-        len(tiny) == 4,
-        "Extremely short story did not produce four structural units.",
-    )
-    check(
-        all(unit.text == "Run." for unit in tiny),
-        "Tiny-source fallback changed the source text.",
-    )
-
-
-def test_canonical_roster_not_overwritten_by_qwen() -> None:
-    # P0 regression guard: enrich_plan() must never let Qwen's creative
-    # output replace the deterministic canonical character roster or
-    # scene topology (scene_id / order / characters / shot_ids). This
-    # locks in the fix described in the V2.1 architecture review.
-    director = QwenDirector(ROOT)
-
-    base_plan = {
-        "story": "Elias walked into the ruined city looking for Mara.",
-        "story_mode": "preserve_user_story",
-        "characters": [
-            {
-                "character_id": "char_elias",
-                "name": "Elias",
-                "role": "protagonist",
-                "description": "",
-                "personality": "",
-            },
-            {
-                "character_id": "char_mara",
-                "name": "Mara",
-                "role": "supporting",
-                "description": "",
-                "personality": "",
-            },
-        ],
-        "scenes": [
-            _sample_scene("scene_001", ["Elias", "Mara"], 1),
-        ],
-        "shots": [],
-        "visual_language": {},
-    }
-
-    # Simulate a Qwen response that tries to invent an entirely
-    # different roster and scene topology -- this must be rejected,
-    # not merged in, regardless of what the model returns.
-    def fake_generate(
+    def _validate_production_quality(
         self,
         *,
-        mode,
-        user_input,
-        base_plan,
-        checkpoint_session_id=None,
-        resume_state=None,
-    ):
-        return {
-            "enabled": True,
-            "plan": {
-                "story": base_plan["story"],
-                "director_notes": "creative notes",
-                "visual_language": {
-                    "genre_tone": "noir",
-                    "color_palette": "desaturated blues",
-                    "lighting_philosophy": "hard chiaroscuro",
-                    "camera_philosophy": "handheld",
-                    "pacing": "slow",
-                },
-                "characters": [
-                    {
-                        "character_id": "char_invented",
-                        "name": "Invented Stranger",
-                        "role": "protagonist",
-                        "description": "",
-                        "personality": "",
-                    }
-                ],
-                "scenes": [
-                    {
-                        "scene_id": "scene_001",
-                        "order": 99,
-                        "characters": ["Invented Stranger"],
-                        "shot_ids": ["fake_shot"],
-                        "mood": "eerie",
-                        "lighting": "moonlight",
-                    }
-                ],
-                "shots": [
-                    _sample_shot("scene_001", 1, ["Invented Stranger"]),
-                    _sample_shot("scene_001", 2, ["Invented Stranger"]),
-                ],
-            },
-        }
-
-    original_generate = QwenDirector.generate
-    QwenDirector.generate = fake_generate
-    try:
-        merged = director.enrich_plan(
-            mode="preserve_user_story",
-            user_input=base_plan["story"],
-            base_plan=base_plan,
-        )
-    finally:
-        QwenDirector.generate = original_generate
-
-    check(
-        merged["characters"] == base_plan["characters"],
-        "enrich_plan() let Qwen overwrite the canonical character roster.",
-    )
-
-    merged_scene = merged["scenes"][0]
-
-    check(
-        merged_scene["scene_id"] == "scene_001"
-        and merged_scene["order"] == 1
-        and merged_scene["characters"] == ["Elias", "Mara"],
-        "enrich_plan() let Qwen overwrite protected scene topology "
-        "(scene_id/order/characters).",
-    )
-
-    check(
-        merged_scene.get("mood") == "eerie"
-        and merged_scene.get("lighting") == "moonlight",
-        "enrich_plan() failed to apply Qwen's non-structural creative "
-        "enrichment (mood/lighting) onto the canonical scene.",
-    )
-
-    check(
-        merged["visual_language"].get("genre_tone") == "noir",
-        "enrich_plan() failed to merge the visual_language bible.",
-    )
-
-
-def test_verified_roster_flag_propagates_to_orchestrator() -> None:
-    # Regression guard for a real production failure reproduced from a
-    # live Kaggle benchmark: AI Story mode produced "characters=0" and
-    # a hard AssertionError on a story that clearly named two
-    # characters ("Elena Kovalenko", "Anton"). Root cause: enrich_plan()
-    # correctly computed merged["characters"] from generate()'s
-    # verified, story-derived roster, but never copied the
-    # "_canonical_character_roster_verified" flag itself into the
-    # returned dict. The orchestrator's boundary check
-    # (production_orchestrator.py) reads exactly this key to decide
-    # whether it may trust the roster enrich_plan() just computed; with
-    # the flag missing, it always fell back to its own premise-derived
-    # roster -- which is empty for AI Story mode, since the user's
-    # premise rarely names the characters Qwen goes on to invent in the
-    # final story. This test simulates that exact orchestrator check.
-    director = QwenDirector(ROOT)
-
-    premise = (
-        "Write a sci-fi thriller about a researcher who discovers "
-        "something dangerous in an abandoned Arctic station."
-    )
-
-    base_plan = {
-        "story": premise,
-        # What a premise-only deterministic pass would find: nobody,
-        # since the premise itself never names a character.
-        "characters": [],
-        "scenes": [
-            {
-                "scene_id": f"scene_{i:03d}",
-                "order": i,
-                "characters": [],
-                "shot_ids": [],
-            }
-            for i in range(1, 5)
-        ],
-        "shots": [],
-        "visual_language": {},
-    }
-
-    def fake_generate(
-        self,
-        *,
-        mode,
-        user_input,
-        base_plan,
-        checkpoint_session_id=None,
-        resume_state=None,
-    ):
-        return {
-            "enabled": True,
-            "plan": {
-                "story": (
-                    "Elena Kovalenko stumbled through the blinding "
-                    "snow. Anton had left notes behind."
-                ),
-                "director_notes": "",
-                "visual_language": {},
-                "characters": [
-                    {
-                        "character_id": "char_elena",
-                        "name": "Elena Kovalenko",
-                        "role": "protagonist",
-                        "description": "",
-                        "personality": "",
-                    },
-                    {
-                        "character_id": "char_anton",
-                        "name": "Anton",
-                        "role": "supporting",
-                        "description": "",
-                        "personality": "",
-                    },
-                ],
-                "_canonical_character_roster_verified": True,
-                "scenes": base_plan["scenes"],
-                "shots": [],
-            },
-        }
-
-    original_generate = QwenDirector.generate
-    QwenDirector.generate = fake_generate
-    try:
-        merged = director.enrich_plan(
-            mode="ai_story",
-            user_input=premise,
-            base_plan=base_plan,
-        )
-    finally:
-        QwenDirector.generate = original_generate
-
-    check(
-        merged.get("_canonical_character_roster_verified") is True,
-        "enrich_plan() did not propagate the "
-        "_canonical_character_roster_verified flag into its returned "
-        "dict, even though generate() marked the roster verified.",
-    )
-
-    # Simulate the orchestrator's own boundary check verbatim.
-    plan = merged
-    premise_derived_characters: list = []
-    if (
-        not isinstance(plan, dict)
-        or plan.get("_canonical_character_roster_verified") is not True
-    ):
-        plan["characters"] = premise_derived_characters
-
-    check(
-        {c["name"] for c in plan["characters"]}
-        == {"Elena Kovalenko", "Anton"},
-        "A verified, story-derived character roster was lost when "
-        "passed through the orchestrator's boundary check -- this is "
-        "the exact 'characters=0' production failure.",
-    )
-
-
-def test_verified_scene_topology_not_orphaned() -> None:
-    # Regression guard for a real production failure reproduced from a
-    # live Kaggle benchmark: AI Story mode produced "scenes=4, shots=8"
-    # when generate() had actually produced a verified 6-scene,
-    # 12-shot topology derived from the final story. Root cause:
-    # enrich_plan() always anchored canonical_scenes to the premise-
-    # derived base_plan (computed by planner.build() before the
-    # director ever ran), discarding any story-derived scene beyond
-    # what the short premise alone produced -- along with the shots
-    # generated for it, silently throwing away real Qwen shot-batch
-    # compute. This mirrors the character-roster fix: a verified
-    # director pass's own scene topology must take priority over the
-    # premise-derived skeleton.
-    director = QwenDirector(ROOT)
-
-    premise = (
-        "A polar systems engineer reaches an abandoned Arctic "
-        "station during a violent storm and discovers a sealed "
-        "underground vault."
-    )
-
-    # What planner.build(premise) actually produces: a short,
-    # premise-derived 4-scene skeleton (the real observed behavior --
-    # a short premise naturally splits into fewer scenes than a full
-    # generated story).
-    base_plan = {
-        "story": premise,
-        "characters": [],
-        "scenes": [
-            {
-                "scene_id": f"scene_{i:03d}",
-                "order": i,
-                "characters": [],
-                "shot_ids": [],
-                "title": f"premise scene {i}",
-            }
-            for i in range(1, 5)
-        ],
-        "shots": [],
-        "visual_language": {},
-    }
-
-    def fake_generate(
-        self,
-        *,
-        mode,
-        user_input,
-        base_plan,
-        checkpoint_session_id=None,
-        resume_state=None,
-    ):
-        scenes = [
-            {
-                "scene_id": f"scene_{i:03d}",
-                "order": i,
-                "characters": ["Elena Kovalenko"],
-                "shot_ids": [],
-                "title": f"story scene {i}",
-                "mood": "tense",
-            }
-            for i in range(1, 7)
-        ]
-        shots = [
-            {
-                "shot_id": f"scene_{i:03d}_shot_{j:03d}",
-                "scene_id": f"scene_{i:03d}",
-                "characters": ["Elena Kovalenko"],
-            }
-            for i in range(1, 7)
-            for j in range(1, 3)
-        ]
-        return {
-            "enabled": True,
-            "plan": {
-                "story": (
-                    "Elena Kovalenko stumbled through the blinding "
-                    "snow toward the Arctic station..."
-                ),
-                "director_notes": "",
-                "visual_language": {},
-                "characters": [
-                    {
-                        "character_id": "char_elena",
-                        "name": "Elena Kovalenko",
-                        "role": "protagonist",
-                        "description": "",
-                        "personality": "",
-                    },
-                ],
-                "_canonical_character_roster_verified": True,
-                "scenes": scenes,
-                "shots": shots,
-            },
-        }
-
-    original_generate = QwenDirector.generate
-    QwenDirector.generate = fake_generate
-    try:
-        merged = director.enrich_plan(
-            mode="ai_story",
-            user_input=premise,
-            base_plan=base_plan,
-        )
-    finally:
-        QwenDirector.generate = original_generate
-
-    check(
-        len(merged["scenes"]) == 6,
-        "Verified story-derived scene topology was truncated to the "
-        f"premise-derived scene count: got {len(merged['scenes'])} "
-        "scenes, expected 6. This silently discards real Qwen "
-        "shot-batch work for the dropped scenes.",
-    )
-
-    check(
-        len(merged["shots"]) == 12,
-        "Shots for story-derived scenes beyond the premise-derived "
-        f"count were dropped: got {len(merged['shots'])} shots, "
-        "expected 12.",
-    )
-
-
-def test_qwen_excluded_candidate_not_silently_readded() -> None:
-    # Regression guard for the live "Arctic" leak: Qwen's character
-    # extraction correctly returned only ["Elena Kovalenko", "Anton"],
-    # but the final roster contained a third, wrong entry ("Arctic")
-    # that neither the deterministic detector nor Qwen's own raw
-    # result actually named. Root cause was the reconciliation layer
-    # silently re-adding deterministically-flagged candidates Qwen had
-    # excluded. Once Qwen produces a usable roster, it is the semantic
-    # authority; deterministic candidates are a fallback only, never a
-    # silent addition on top of a valid Qwen answer.
-    planner = ProductionPlanner(ROOT)
-
-    story = (
-        "The wind screamed like a wounded beast as Elena Kovalenko "
-        "stumbled through the blinding snow. The Arctic station had "
-        "been abandoned for years. Inside, the walls were covered in "
-        "scrawled equations and desperate notes, the handwriting of "
-        "the previous engineer, a man named Anton."
-    )
-
-    def fake_extractor(story_text, descriptors):
-        # Exact recorded Qwen response from the live benchmark run.
-        return {"characters": ["Elena Kovalenko", "Anton"]}
-
-    characters = planner.create_characters(
-        story,
-        qwen_character_extractor=fake_extractor,
-    )
-
-    names = {c.name for c in characters}
-
-    check(
-        names == {"Elena Kovalenko", "Anton"},
-        "A valid Qwen character roster was contaminated by a "
-        f"silently re-added deterministic candidate: got {sorted(names)}, "
-        "expected exactly {'Elena Kovalenko', 'Anton'}.",
-    )
-
-
-def test_entity_resolver_shot_rebinding() -> None:
-    # P0 regression guard: shot/scene character references must resolve
-    # through EntityResolver (aliases, honorifics) rather than exact-name
-    # matching only, and an explicit-but-unresolved character reference
-    # must never silently fall back to "all scene characters" (that
-    # would invent presence the model didn't actually establish).
-    from pipeline.production_orchestrator import ProductionOrchestrator
-    from schemas.character import Character
-
-    characters = [
-        Character(
-            character_id="char_elias",
-            name="Elias",
-            role="protagonist",
-            description="",
-            personality="",
-        ),
-        Character(
-            character_id="char_mara",
-            name="Mara",
-            role="supporting",
-            description="",
-            personality="",
-        ),
-    ]
-
-    plan = {
-        "scenes": [
-            _sample_scene("scene_001", ["Elias", "Mara"], 1),
-        ],
-        "shots": [
-            # Honorific + case variation should resolve to Elias.
-            {
-                **_sample_shot("scene_001", 1, ["Dr. elias"]),
-            },
-            # No character field at all -- must inherit scene characters.
-            {
-                k: v
-                for k, v in _sample_shot("scene_001", 2, []).items()
-                if k != "characters"
-            },
-            # Explicit reference to someone not in the roster -- must
-            # resolve to nobody, NOT fall back to the full scene cast.
-            {
-                **_sample_shot("scene_001", 3, ["Totally Unknown Person"]),
-            },
-        ],
-    }
-
-    orchestrator = ProductionOrchestrator.__new__(
-        ProductionOrchestrator
-    )
-    ProductionOrchestrator._rebind_shots(
-        orchestrator,
-        plan,
-        characters,
-    )
-
-    shots = plan["shots"]
-
-    check(
-        shots[0]["characters"] == ["Elias"],
-        "EntityResolver honorific/case normalization did not resolve "
-        "'Dr. elias' to the canonical character 'Elias'.",
-    )
-
-    check(
-        set(shots[1]["characters"]) == {"Elias", "Mara"},
-        "A shot with no character field at all should inherit the "
-        "scene's full character list.",
-    )
-
-    check(
-        shots[2]["characters"] == [],
-        "An explicit but unresolved character reference must resolve "
-        "to no characters, not silently fall back to the full scene "
-        "cast (that would invent presence the model never established).",
-    )
-
-
-def test_scene_budget_contract_and_fallback() -> None:
-    director = QwenDirector(ROOT)
-    scenes = [
-        _sample_scene(f"scene_{index:03d}", ["Elias"], index)
-        for index in range(1, 9)
-    ]
-
-    original_chat = director._chat_json
-    try:
-        def fail_compression(*args, **kwargs):
-            raise RuntimeError("forced validation fallback")
-
-        director._chat_json = fail_compression
-        reduced = director._compress_scenes_to_budget(
-            "ai_story",
-            "A story about Elias discovering a signal before the city collapses.",
-            [{"name": "Elias", "role": "protagonist"}],
-            scenes,
-            {"elias"},
-        )
-    finally:
-        director._chat_json = original_chat
-
-    check(len(reduced) == director.MAX_SCENES, "Scene budget fallback did not enforce MAX_SCENES.")
-    check(reduced[0]["scene_id"] == "scene_001", "Scene budget fallback lost the opening scene.")
-    check(reduced[-1]["scene_id"] == "scene_008", "Scene budget fallback lost the closing scene.")
-    check(
-        [scene["order"] for scene in reduced] == list(range(1, director.MAX_SCENES + 1)),
-        "Scene budget fallback did not normalize scene order.",
-    )
-
-
-def test_scene_budget_semantic_repair_contract() -> None:
-    director = QwenDirector(ROOT)
-    scenes = [
-        _sample_scene(f"scene_{index:03d}", ["Elias"], index)
-        for index in range(1, 8)
-    ]
-
-    def fake_chat(*args, **kwargs):
-        return {
-            "scenes": [
-                _sample_scene("scene_001", ["Elias"], 1),
-                _sample_scene("scene_002", ["Elias"], 2),
-                _sample_scene("scene_003", ["Elias"], 3),
-                _sample_scene("scene_004", ["Elias"], 4),
-                _sample_scene("scene_005", ["Elias"], 5),
-            ]
-        }
-
-    original_chat = director._chat_json
-    try:
-        director._chat_json = fake_chat
-        repaired = director._compress_scenes_to_budget(
-            "ai_story",
-            "Elias discovers the signal and reaches the final beacon.",
-            [{"name": "Elias", "role": "protagonist"}],
-            scenes,
-            {"elias"},
-        )
-    finally:
-        director._chat_json = original_chat
-
-    check(len(repaired) == 5, "Semantic scene compression did not accept a valid 5-scene repair.")
-    check(all(scene.get("description") for scene in repaired), "Compressed scenes contain an empty description.")
-    check([scene["order"] for scene in repaired] == [1, 2, 3, 4, 5], "Semantic repair returned non-contiguous orders.")
-
-
-def test_batch_planning_runtime_contract() -> None:
-    director = QwenDirector(ROOT)
-    import inspect
-
-    source = inspect.getsource(director.generate)
-
-    check(
-        director.MAX_SHOT_BATCH_SCENES == 2,
-        "Shot batch max scenes must be 2.",
-    )
-
-    check(
-        "_shot_director_batch_system" in source
-        and "_shot_director_batch_user" in source
-        and "_normalize_batch_shot_response" in source,
-        "Generate path is missing the batched shot-planning path.",
-    )
-
-   
-    normalized = director._normalize_batch_shot_response(
-        {
-            "scene_shots": [
-                {
-                    "scene_id": "scene_001",
-                    "shots": [
-                        _sample_shot("scene_001", 1),
-                        _sample_shot("scene_001", 2),
-                    ],
-                },
-                {
-                    "scene_id": "scene_002",
-                    "shots": [
-                        _sample_shot("scene_002", 1),
-                        _sample_shot("scene_002", 2),
-                    ],
-                },
-            ]
-        }
-    )
-
-    check(
-        set(normalized) == {"scene_001", "scene_002"},
-        "Batch normalization lost a scene.",
-    )
-
-    check(
-        all(len(value) == 2 for value in normalized.values()),
-        "Batch normalization lost required shots.",
-    )
-
-    single = director._shot_batch_json_schema(scene_count=1)
-    check(
-        single["properties"]["scene_shots"]["minItems"] == 1
-        and single["properties"]["scene_shots"]["maxItems"] == 1,
-        "Single-scene batch schema is missing.",
-    )
-
-    five = director._shot_batch_json_schema(scene_count=5)
-    check(
-        five["properties"]["scene_shots"]["minItems"] == 5
-        and five["properties"]["scene_shots"]["maxItems"] == 5,
-        "Five-scene batch schema is missing.",
-    )
-
-def test_critic_payload_is_compact() -> None:
-    director = QwenDirector(ROOT)
-    captured = {}
-
-    def fake_chat_json(system_prompt, user_prompt, **kwargs):
-        captured["prompt"] = user_prompt
-        return {
-            "overall_score": 1.0,
-            "status": "pass",
-            "findings": [],
-            "shot_findings": [],
-            "recommended_focus": [],
-            "shot_patches": [],
-        }
-
-    original = director._chat_json
-    director._chat_json = fake_chat_json
-    try:
-        plan = {
-            "story": "A complete cinematic story with a beginning, climax, and resolution.",
-            "visual_language": {"genre_tone": "cinematic"},
-            "characters": [{"name": "Eli", "identity_locks": ["heavy"]}],
-            "scenes": [{
-                "scene_id": "scene_001",
-                "title": "Arrival",
-                "description": "Eli reaches the station.",
-                "scene_objective": "Establish the threat.",
-                "location": "station entrance",
-                "characters": ["Eli"],
-                "heavy_prompt": "x" * 5000,
-            }],
-            "shots": [{
-                "shot_id": "scene_001_shot_001",
-                "scene_id": "scene_001",
-                "camera_shot": "wide",
-                "camera_movement": "push-in",
-                "lens_and_depth_of_field": "wide-angle, deep focus",
-                "lighting": "blue-hour",
-                "mood": "tense",
-                "visual_prompt": "Eli enters the station.",
-                "action": "Eli reaches the door.",
-                "dialogue_events": [{"speaker": "Eli", "text": "We are here.", "extra": "ignored"}],
-                "h3_prompt": "x" * 10000,
-                "identity_locks": ["x"] * 10,
-                "reference_bindings": ["x"] * 10,
-            }],
-        }
-        result = director.critique_plan(
-            mode="ai_story",
-            user_input="premise",
-            plan=plan,
-        )
-    finally:
-        director._chat_json = original
-
-    prompt = captured.get("prompt", "")
-    check(result.get("status") == "pass", "Critic stub did not return the expected result.")
-    check("h3_prompt" not in prompt, "Critic payload still includes compiler/runtime prompt data.")
-    check("identity_locks" not in prompt, "Critic payload still includes identity locks.")
-    check("reference_bindings" not in prompt, "Critic payload still includes heavy reference bindings.")
-    check(len(prompt) < 20000, "Critic payload remains too large for the fixed context budget.")
-
-
-def test_batch_prompt_is_compact() -> None:
-    director = QwenDirector(ROOT)
-    scenes = [
-        _sample_scene("scene_001", ["Elias"]),
-        _sample_scene("scene_002", ["Sara"]),
-    ]
-    huge_story = " ".join(["A detailed narrative event about Elias and Sara and the ruined city."] * 500)
-    payload = director._shot_director_batch_user(
-        huge_story,
-        [{"name": "Elias", "role": "protagonist"}, {"name": "Sara", "role": "supporting"}],
-        scenes,
-        {"genre_tone": "cinematic", "color_palette": "cold blue"},
-    )
-    check(len(payload) < 10000, "Batch shot prompt grew beyond the intended compact payload budget.")
-    check("visual_language" in payload and "scenes" in payload, "Compact batch prompt lost required context.")
-    check("personality" not in payload and "distinctive_features" not in payload, "Batch prompt included heavyweight character descriptors.")
-
-
-# Removed test_shot_prompt_is_compact since _shot_director_user is gone.
-
-
-def test_qwen_semantic_negative_is_authoritative() -> None:
-    planner = ProductionPlanner(ROOT)
-    story = (
-        "Elena Kovalenko stumbled through the blinding snow. "
-        "The Arctic station had been abandoned for years."
-    )
-    deterministic = planner.detect_character_descriptors(story)
-    check(
-        "Elena Kovalenko" in deterministic,
-        f"Deterministic extraction lost Elena Kovalenko: {deterministic}",
-    )
-
-    semantic = {
-        "candidates": [
-            {
-                "name": "Elena Kovalenko",
-                "entity_type": "PERSON",
-                "is_character": False,
-                "aliases": [],
-            },
-        ]
-    }
-
-    names = {
-        value.lower()
-        for value in planner._reconcile_semantic_characters(
-            story,
-            deterministic,
-            semantic,
-        )
-    }
-    check(
-        "elena kovalenko" not in names,
-        "Planner incorrectly overrode a Qwen semantic negative.",
-    )
-
-
-def test_qwen_semantic_character_reconciliation() -> None:
-    planner = ProductionPlanner(ROOT)
-
-    story = (
-        "The Research Station was silent. Dr. Elara Voss checked Sara's notebook. "
-        "Marcus Chen waited outside. The United Nations issued a warning. "
-        "Captain Rho, exhausted after the journey, entered the chamber."
-    )
-
-    deterministic = planner.detect_character_descriptors(story)
-
-    semantic = {
-        "candidates": [
-            {"name": "Elara Voss", "entity_type": "PERSON", "is_character": True, "aliases": ["Dr. Voss"]},
-            {"name": "Sara", "entity_type": "CHARACTER", "is_character": True, "aliases": []},
-            {"name": "Marcus Chen", "entity_type": "PERSON", "is_character": True, "aliases": ["Marcus"]},
-            {"name": "Captain Rho", "entity_type": "CHARACTER", "is_character": True, "aliases": ["Rho"]},
-            {"name": "Research Station", "entity_type": "FACILITY", "is_character": False, "aliases": []},
-            {"name": "United Nations", "entity_type": "ORGANIZATION", "is_character": False, "aliases": ["UN"]},
-            {"name": "Invented Person", "entity_type": "PERSON", "is_character": True, "aliases": []},
-        ]
-    }
-
-    names = {
-        value.lower()
-        for value in planner._reconcile_semantic_characters(
-            story,
-            deterministic,
-            semantic,
-        )
-    }
-
-    check("elara voss" in names, "Qwen recovery lost Elara Voss.")
-    check("sara" in names, "Qwen recovery lost possessive character Sara.")
-    check("marcus chen" in names, "Qwen recovery lost Marcus Chen.")
-    check("rho" in names, "Qwen recovery missed the named title-form character.")
-    check("research station" not in names, "Qwen reconciliation kept a facility as a character.")
-    check("united nations" not in names, "Qwen reconciliation kept an organization as a character.")
-    check("invented person" not in names, "Qwen reconciliation accepted a hallucinated name.")
-    check("voss" not in names, "Qwen reconciliation retained a shorter surname beside Elara Voss.")
-    check("scientist" not in names, "Qwen reconciliation promoted an anonymous role to a canonical character.")
-
-
-
-def test_character_pipeline_has_no_external_ner_dependency() -> None:
-    import inspect
-    source = inspect.getsource(ProductionPlanner).lower()
-    forbidden_package = "spa" + "cy"
-    forbidden_model = "en_core" + "_web_sm"
-    check(forbidden_package not in source, "ProductionPlanner contains a forbidden external NER package.")
-    check(forbidden_model not in source, "ProductionPlanner references a forbidden external NER model.")
-
-
-def test_semantic_character_reconciliation_adversarial_matrix() -> None:
-    planner = ProductionPlanner(ROOT)
-
-    cases = (
-        ("Dr. Elara Voss entered the station.", {"elara voss"}),
-        ("Sara's notebook was open beside Marcus Chen.", {"sara", "marcus chen"}),
-        ("Eli whispered, \"Sara, run!\"", {"eli", "sara"}),
-        ("Captain Rho, exhausted after the journey, entered.", {"rho"}),
-        ("The United Nations issued a warning while Marcus watched.", {"marcus"}),
-        ("The Research Station was silent. Naomi Reyes checked the console.", {"naomi reyes"}),
-        ("Paris was quiet before Elena arrived.", {"elena"}),
-        ("Washington was evacuated after Marcus left.", {"marcus"}),
-        ("Amazon delivered the package while Sara waited.", {"sara"}),
-        ("The Apollo Mission launched as Eli watched.", {"eli"}),
-        ("A scientist named Mira entered. Arun followed.", {"mira", "arun"}),
-        ("The pilot and Sara arrived together.", {"sara"}),
-        ("Sara was a scientist at the station.", {"sara"}),
-        ("Mira, a systems engineer, arrived.", {"mira"}),
-        ("The old commander, Marcus, raised his weapon.", {"marcus"}),
-        ("Zara-Lin activated the console and Nex'to watched.", {"zara-lin", "nex'to"}),
-        ("John Doe arrived while Ava Morgan waited.", {"john doe", "ava morgan"}),
-        ("Prof. Amina al-Rashid arrived before Daniel Stone.", {"amina al-rashid", "daniel stone"}),
-        ("The woman everyone called Elara stepped forward.", {"elara"}),
-        ("Later, Elias understood what Sara meant.", {"elias", "sara"}),
-        ("Behind her, Marcus opened the door.", {"marcus"}),
-        ("Across the room stood Dr. Lina Park.", {"lina park"}),
-        ("Eli followed Marcus into Central Command.", {"eli", "marcus"}),
-        ("The Frozen Lake was empty; Talia waited nearby.", {"talia"}),
-        ("Monday arrived cold, and Elena smiled.", {"elena"}),
-        ("Renn led Kass through the tunnels while Odile followed.", {"renn", "kass", "odile"}),
-        ("Sara said that the Warden was coming.", {"sara", "the warden"}),
-        ("The Warden watched from the tower while Eli waited.", {"the warden", "eli"}),
-        ("Nex'to's signal reached Zara-Lin first.", {"nex'to", "zara-lin"}),
-        ("The commander known as Marcus spoke to Eli.", {"marcus", "eli"}),
-    )
-
-    for story, expected in cases:
-        deterministic = planner.detect_character_descriptors(story)
-        deterministic_names = {str(value).strip() for value in deterministic if str(value).strip()}
-        semantic_candidates = []
-        for name in sorted(expected | deterministic_names):
-            semantic_candidates.append(
-                {
-                    "name": name,
-                    "entity_type": "PERSON" if name.lower() not in {"the warden"} else "CHARACTER",
-                    "is_character": name.lower() in {value.lower() for value in expected},
-                    "aliases": [],
-                }
+        mode: str,
+        story: str,
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Deterministically reject structurally valid but production-poor plans."""
+        if not story.strip():
+            raise RuntimeError("Production plan has no story.")
+
+        if not characters and mode != PRESERVE_USER_STORY_MODE:
+            raise RuntimeError(
+                "Production plan has no usable character roster for this story mode."
             )
-        semantic_candidates.extend([
-            {"name": "United Nations", "entity_type": "ORGANIZATION", "is_character": False, "aliases": []},
-            {"name": "Research Station", "entity_type": "FACILITY", "is_character": False, "aliases": []},
-            {"name": "Invented Person", "entity_type": "PERSON", "is_character": True, "aliases": []},
-            {"name": "scientist", "entity_type": "ROLE", "is_character": True, "aliases": []},
-        ])
-        semantic = {"candidates": semantic_candidates}
-        got = {
-            value.lower()
-            for value in planner._reconcile_semantic_characters(story, deterministic, semantic)
+
+        if not 4 <= len(scenes) <= self.MAX_SCENES:
+            raise RuntimeError(
+                f"Production plan must contain 4–{self.MAX_SCENES} scenes; got {len(scenes)}."
+            )
+
+        scene_ids = [str(scene.get("scene_id", "")).strip() for scene in scenes]
+        if any(not scene_id for scene_id in scene_ids):
+            raise RuntimeError("Production plan contains an empty scene ID.")
+        if len(scene_ids) != len(set(scene_ids)):
+            raise RuntimeError("Production plan contains duplicate scene IDs.")
+
+        allowed = {
+            str(item.get("name", "")).strip().lower()
+            for item in characters
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
         }
-        check(
-            got == {value.lower() for value in expected},
-            f"Semantic reconciliation mismatch for {story!r}: expected {sorted(expected)}, got {sorted(got)}",
+
+        expected_shot_count = len(scenes) * self.SHOTS_PER_SCENE
+        if len(shots) != expected_shot_count:
+            raise RuntimeError(
+                f"Production plan must contain exactly {expected_shot_count} shots; got {len(shots)}."
+            )
+
+        seen_shot_ids: set[str] = set()
+        scene_counts = {scene_id: 0 for scene_id in scene_ids}
+        for shot in shots:
+            shot_id = str(shot.get("shot_id", "")).strip()
+            scene_id = str(shot.get("scene_id", "")).strip()
+            if not shot_id or shot_id in seen_shot_ids:
+                raise RuntimeError("Production plan contains duplicate or empty shot IDs.")
+            seen_shot_ids.add(shot_id)
+            if scene_id not in scene_counts:
+                raise RuntimeError(f"Shot {shot_id} references unknown scene {scene_id}.")
+            scene_counts[scene_id] += 1
+            if not str(shot.get("visual_prompt", "") or "").strip():
+                raise RuntimeError(f"Shot {shot_id} has no visual prompt.")
+            for field in ("camera_shot", "camera_movement", "lens_and_depth_of_field", "composition_notes"):
+                if not str(shot.get(field, "") or "").strip():
+                    raise RuntimeError(f"Shot {shot_id} is missing {field}.")
+            shot_characters = shot.get("characters", []) or []
+            speakers = shot.get("speaking_characters", []) or []
+            if allowed and not shot_characters:
+                raise RuntimeError(
+                    f"Shot {shot_id} has no character binding."
+                )
+            for name in [*shot_characters, *speakers]:
+                if allowed and str(name).strip().lower() not in allowed:
+                    raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
+
+        if any(count != self.SHOTS_PER_SCENE for count in scene_counts.values()):
+            raise RuntimeError("Every scene must contain exactly two production shots.")
+
+    def _checkpoint_state(
+        self,
+        session_id: str,
+        mode: str,
+        user_input: str,
+        base_plan: dict,
+        director_plan: dict,
+        status: str,
+        stage: str,
+        completed_scene_ids: list[str],
+        current_scene_id: str = "",
+        error: str = "",
+    ) -> dict:
+
+        checkpoint = ProductionCheckpoint(
+            self.project_root
         )
 
-
-def test_verified_semantic_character_roster_reaches_final_plan() -> None:
-    director = QwenDirector(ROOT)
-    base_plan = {
-        "story": "Eli entered the station.",
-        "characters": [{"name": "Eli"}],
-        "scenes": [],
-        "shots": [],
-        "visual_language": {},
-    }
-
-    original_generate = director.generate
-    try:
-        director.generate = lambda **kwargs: {
-            "enabled": True,
-            "plan": {
-                "story": "Eli entered the station.",
-                "characters": [{"name": "Eli"}, {"name": "Sara"}],
-                "scenes": [],
-                "shots": [],
-                "visual_language": {},
-                "_canonical_character_roster_verified": True,
-            },
-        }
-        merged = director.enrich_plan(
-            mode="PRESERVE_USER_STORY_MODE",
-            user_input=base_plan["story"],
-            base_plan=base_plan,
+        # Checkpoint validity depends on every split Director module, not
+        # just this mixin. Hash the canonical entry point plus its split
+        # implementation modules in a stable order.
+        director_module_files = [
+            Path(__file__).resolve().parent / name
+            for name in (
+                "qwen_director.py",
+                "qwen_director_runtime.py",
+                "qwen_director_prompts.py",
+                "qwen_director_scene.py",
+                "qwen_director_sanitize.py",
+            )
+        ]
+        director_hash_material = "".join(
+            f"{path.name}:{checkpoint.digest_file(path)}\n"
+            for path in director_module_files
+            if path.exists()
         )
-    finally:
-        director.generate = original_generate
 
-    names = {str(item.get("name", "")).lower() for item in merged["characters"] if isinstance(item, dict)}
-    check(names == {"eli", "sara"}, "Verified semantic roster did not reach the final production plan.")
-
-
-def test_empty_semantic_roster_falls_back_without_overriding_grounded_characters() -> None:
-    planner = ProductionPlanner(ROOT)
-    calls = []
-
-    def extractor(_story, _hints):
-        calls.append("extractor")
-        return {"candidates": []}
-
-    def adjudicator(_story, _hints, _semantic):
-        calls.append("adjudicator")
-        return {"candidates": []}
-
-    characters = planner.create_characters(
-        "Elias Kade entered the station.",
-        qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
-    )
-    names = {character.name.lower() for character in characters}
-    check(calls == ["extractor", "adjudicator"], "Empty semantic payload did not take the bounded adjudication path.")
-    check(names == {"elias kade"}, f"Empty semantic payload erased a grounded deterministic character: {names}")
-
-
-def test_explicit_semantic_negative_remains_authoritative() -> None:
-    planner = ProductionPlanner(ROOT)
-    characters = planner.create_characters(
-        "Elena Kovalenko entered the station.",
-        qwen_character_extractor=lambda _story, _hints: {
-            "candidates": [
-                {
-                    "name": "Elena Kovalenko",
-                    "entity_type": "PERSON",
-                    "is_character": False,
-                    "aliases": [],
-                }
-            ]
-        },
-        qwen_character_adjudicator=lambda _story, _hints, _semantic: (_ for _ in ()).throw(
-            AssertionError("Explicit semantic negative must not trigger a second semantic decision")
-        ),
-    )
-    check(not characters, "An explicit semantic negative was not treated as authoritative.")
-
-
-def test_sanitized_identity_fields_are_self_consistent() -> None:
-    from planner.qwen_director import QwenDirector
-
-    director = object.__new__(QwenDirector)
-    result = director._sanitize_characters([
-        {
-            "name": "Eli",
-            "identity_type": "relational_character",
-            "relationship_to": "",
-            "relationship": "",
-            "semantic_aliases": ["man"],
-            "identity_profile": {
-                "identity_type": "relational_character",
-                "relationship_to": "",
-                "relationship": "",
-                "semantic_aliases": ["man"],
-            },
-        }
-    ])
-    check(len(result) == 1, "Sanitizer unexpectedly dropped the recoverable character record.")
-    value = result[0]
-    check(value["identity_type"] == value["identity_profile"]["identity_type"], "Identity type fields diverged.")
-    check(value["semantic_aliases"] == value["identity_profile"]["semantic_aliases"], "Semantic alias fields diverged.")
-    check(value["identity_type"] == "named_character", "Malformed relational identity was not downgraded.")
-    check(value["semantic_aliases"] == [], "Unsafe generic alias survived relational downgrade.")
-
-
-def test_qwen_cache_key_changes_with_generation_contract() -> None:
-    from pathlib import Path
-    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
-
-    runtime = object.__new__(QwenDirectorRuntimeMixin)
-    runtime._cache_namespace = "test"
-    runtime._model_path = Path("/model/A")
-    runtime._vllm_model_name = lambda: "model-a"
-    kwargs = {
-        "call_name": "character_entity_extraction",
-        "system_prompt": "system",
-        "user_prompt": "user",
-        "response_schema": {"type": "object"},
-        "temperature": 0.05,
-        "top_p": 0.70,
-        "max_tokens": 256,
-        "json_mode": True,
-        "disable_thinking": True,
-    }
-    baseline = runtime._cache_key(**kwargs)
-    changed_temperature = runtime._cache_key(**{**kwargs, "temperature": 0.20})
-    changed_budget = runtime._cache_key(**{**kwargs, "max_tokens": 512})
-    check(baseline != changed_temperature, "Qwen cache key ignores temperature changes.")
-    check(baseline != changed_budget, "Qwen cache key ignores completion-budget changes.")
-
-
-def test_qwen_semantic_character_extractor_contract() -> None:
-    planner = ProductionPlanner(ROOT)
-
-    calls = []
-
-    def fake_extractor(story, candidates):
-        calls.append((story, list(candidates)))
         return {
-            "candidates": [
-                {
-                    "name": "Eli",
-                    "entity_type": "PERSON",
-                    "is_character": True,
-                    "aliases": [],
-                },
-                {
-                    "name": "Station",
-                    "entity_type": "FACILITY",
-                    "is_character": False,
-                    "aliases": [],
-                },
-            ]
-        }
-
-    characters = planner.create_characters(
-        "Eli entered the station.",
-        qwen_character_extractor=fake_extractor,
-    )
-    names = {character.name.lower() for character in characters}
-
-    check(calls, "Qwen character extractor callback was not invoked.")
-    check("eli" in names, "Semantic extraction failed to preserve Eli.")
-    check("station" not in names, "Semantic extraction allowed a facility into the canonical roster.")
-
-
-def test_mult_word_character_extraction_regression() -> None:
-    # P0 regression guard for the ProductionPlanner character extractor.
-    # Multi-word names must remain intact and extraction cannot depend on a
-    # closed hand-maintained verb list.
-    planner = ProductionPlanner(ROOT)
-
-    story = (
-        "Marcus Chen arrived at the station just as "
-        "Dr. Elara Voss finished her readings."
-    )
-    names = planner.detect_character_descriptors(story)
-    normalized = {name.lower() for name in names}
-
-    check(
-        "marcus chen" in normalized,
-        "ProductionPlanner truncated or missed multi-word name Marcus Chen.",
-    )
-    check(
-        "elara voss" in normalized,
-        "ProductionPlanner truncated or missed honorific multi-word name Dr. Elara Voss.",
-    )
-    check(
-        "chen" not in normalized and "voss" not in normalized,
-        "ProductionPlanner reduced a multi-word character to a surname.",
-    )
-
-    suffix_story = "Ava Morgan sprinted across the bridge while Daniel Stone watched."
-    suffix_names = {
-        name.lower()
-        for name in planner.detect_character_descriptors(suffix_story)
-    }
-    check(
-        {"ava morgan", "daniel stone"}.issubset(suffix_names),
-        "ProductionPlanner morphological verb fallback missed multi-word narrative subjects.",
-    )
-
-
-def test_visual_language_partial_merge_preserves_base_fields() -> None:
-    director = QwenDirector(ROOT)
-    base_plan = {
-        "story": "Elias walks home.",
-        "characters": [],
-        "scenes": [],
-        "shots": [],
-        "visual_language": {
-            "genre_tone": "base tone",
-            "color_palette": "base palette",
-            "lighting_philosophy": "base lighting",
-            "camera_philosophy": "base camera",
-            "pacing": "base pacing",
-        },
-    }
-
-    def fake_generate(self, **kwargs):
-        return {
-            "enabled": True,
-            "plan": {
-                "story": base_plan["story"],
-                "visual_language": {
-                    "genre_tone": "qwen tone",
-                    "pacing": "",
-                },
-                "characters": [],
-                "scenes": [],
-                "shots": [],
-            },
-        }
-
-    original = QwenDirector.generate
-    QwenDirector.generate = fake_generate
-    try:
-        merged = director.enrich_plan(
-            mode="preserve_user_story",
-            user_input=base_plan["story"],
-            base_plan=base_plan,
-        )
-    finally:
-        QwenDirector.generate = original
-
-    check(
-        merged["visual_language"]["genre_tone"] == "qwen tone",
-        "Creative visual-language field was not applied.",
-    )
-    check(
-        merged["visual_language"]["camera_philosophy"] == "base camera",
-        "Partial Qwen visual-language output erased a base field.",
-    )
-    check(
-        merged["visual_language"]["pacing"] == "base pacing",
-        "Empty Qwen visual-language value erased a base field.",
-    )
-
-
-def test_final_generation_uses_dialogue_normalization_before_compiler() -> None:
-    director = QwenDirector(ROOT)
-    import inspect
-    source = inspect.getsource(director.generate)
-    normalize_pos = source.find("self._normalize_dialogue_speakers(")
-    compile_pos = source.find("all_shots = CinematicCompiler(", normalize_pos)
-    quality_pos = source.find("self._validate_production_quality(", compile_pos)
-    check(
-        normalize_pos >= 0 and compile_pos > normalize_pos and quality_pos > compile_pos,
-        "Final generation order is not dialogue-normalize -> compile -> quality validation.",
-    )
-
-
-def test_cinematic_compiler_deterministic_fallback() -> None:
-    from planner.cinematic_compiler import CinematicCompiler
-
-    scene = _sample_scene("scene_001", ["Elias", "Mara"], 1)
-    compiler = CinematicCompiler(
-        character_names={"Elias", "Mara"},
-    )
-
-    compiled = compiler.compile_all(
-        [scene],
-        [],
-    )
-
-    check(
-        len(compiled) == 2,
-        "CinematicCompiler fallback did not produce exactly two shots.",
-    )
-    check(
-        all(shot.get("scene_id") == "scene_001" for shot in compiled),
-        "Compiler fallback changed the canonical scene ID.",
-    )
-    check(
-        len({shot.get("shot_id") for shot in compiled}) == 2
-        and all(str(shot.get("shot_id", "")).strip() for shot in compiled),
-        "Compiler fallback did not produce unique non-empty shot IDs.",
-    )
-    check(
-        all(
-            str(shot.get("camera_shot", "")).strip()
-            and str(shot.get("camera_movement", "")).strip()
-            and str(shot.get("lens_and_depth_of_field", "")).strip()
-            and str(shot.get("composition_notes", "")).strip()
-            and str(shot.get("lighting", "")).strip()
-            and str(shot.get("color_temperature", "")).strip()
-            and str(shot.get("mood", "")).strip()
-            and str(shot.get("visual_prompt", "")).strip()
-            for shot in compiled
-        ),
-        "Compiler fallback did not satisfy required creative shot fields.",
-    )
-    check(
-        all(set(shot.get("characters", [])) <= {"Elias", "Mara"} for shot in compiled),
-        "Compiler fallback introduced a character outside the canonical roster.",
-    )
-
-
-def test_resume_does_not_rewrite_scene_ids() -> None:
-    director = QwenDirector(ROOT)
-    import inspect
-    source = inspect.getsource(director.generate)
-    check(
-        'prior_director_plan.get(' in source and 'scene_id' in source,
-        "Resume path does not retain prior director scene addressing.",
-    )
-    check(
-        'if len(existing_scene_shots) >= self.SHOTS_PER_SCENE' in source,
-        "Resume path does not preserve completed scene shots.",
-    )
-
-
-
-def test_deterministic_foundation_when_director_enabled() -> None:
-    original = os.environ.get("H3_DIRECTOR_ENABLED")
-    try:
-        os.environ["H3_DIRECTOR_ENABLED"] = "1"
-        planner = ProductionPlanner(ROOT)
-        result = planner.build(
-            mode="preserve_user_story",
-            user_input=(
-                "Dr. Elara Voss enters the station. "
-                "Marcus Chen follows her. "
-                "They discover a hidden signal."
+            "mode": mode,
+            "user_input": str(user_input or ""),
+            "user_input_sha256": checkpoint.digest_text(
+                user_input
             ),
+            "director_sha256": checkpoint.digest_text(
+                director_hash_material
+            ),
+            "status": status,
+            "stage": stage,
+            "completed_scene_ids": list(
+                completed_scene_ids
+            ),
+            "current_scene_id": current_scene_id,
+            "error": error,
+            "base_plan": deepcopy(
+                base_plan
+            ),
+            "director_plan": deepcopy(
+                director_plan
+            ),
+        }
+
+    def _save_checkpoint(
+        self,
+        checkpoint_store: ProductionCheckpoint | None,
+        session_id: str | None,
+        state: dict,
+    ) -> None:
+
+        if checkpoint_store is None or not session_id:
+            return
+
+        checkpoint_store.save(
+            session_id,
+            state,
         )
-        check(
-            result["characters"],
-            "Director-enabled build returned no deterministic characters.",
-        )
-        check(
-            result["scenes"],
-            "Director-enabled build returned no deterministic scenes.",
-        )
-    finally:
-        if original is None:
-            os.environ.pop("H3_DIRECTOR_ENABLED", None)
-        else:
-            os.environ["H3_DIRECTOR_ENABLED"] = original
 
+    def _compress_scenes_to_budget(
+        self,
+        mode: str,
+        story: str,
+        characters: list[dict],
+        scenes: list[dict],
+        character_names: set[str],
+    ) -> list[dict]:
+        """Reduce an over-segmented scene plan while preserving narrative beats.
 
-def test_abbreviation_safe_story_split() -> None:
-    planner = ProductionPlanner(ROOT)
-    units = planner._split_story(
-        "Dr. Elara Voss entered the station. Marcus Chen followed her. "
-        "They found the signal."
-    )
-    text = " ".join(unit.text for unit in units)
-    check(
-        "dr. elara voss" in text.lower(),
-        "Abbreviation-safe splitter broke 'Dr. Elara Voss'.",
-    )
+        This is only called when metadata violates the 4-6 scene contract.
+        Prefer one controlled Qwen restructuring pass over silently discarding
+        most of the story. If that repair fails, fall back to deterministic
+        first/middle/last sampling so production can still continue.
+        """
+        if len(scenes) <= self.MAX_SCENES:
+            return scenes
 
-
-def test_scene_boundary_dialogue_continuation_is_closed() -> None:
-    director = QwenDirector(ROOT)
-    scenes = [
-        {"scene_id": "scene_001"},
-        {"scene_id": "scene_002"},
-    ]
-    shots = [
-        {
-            "shot_id": "scene_001_shot_001",
-            "scene_id": "scene_001",
-            "order": 1,
-            "dialogue_events": [
+        scene_payload = []
+        for scene in scenes:
+            scene_payload.append(
                 {
-                    "speaker": "Eli",
-                    "text": "Stay here.",
-                    "continues_from_previous_shot": False,
-                    "continues_to_next_shot": False,
+                    "scene_id": str(
+                        scene.get("scene_id", "") or ""
+                    ).strip(),
+                    "order": int(
+                        scene.get("order", len(scene_payload) + 1) or (
+                            len(scene_payload) + 1
+                        )
+                    ),
+                    "title": str(
+                        scene.get("title", "") or ""
+                    ).strip(),
+                    "description": self._limit_text(
+                        scene.get("description", ""),
+                        600,
+                    ),
+                    "location": str(
+                        scene.get("location", "") or ""
+                    ).strip(),
+                    "characters": self._clean_list(
+                        scene.get("characters", []),
+                        limit=6,
+                    ),
+                    "scene_objective": self._limit_text(
+                        scene.get("scene_objective", ""),
+                        180,
+                    ),
+                    "continuity_notes": self._limit_text(
+                        scene.get("continuity_notes", ""),
+                        180,
+                    ),
+                    "scene_function": str(
+                        scene.get("scene_function", "development")
+                        or "development"
+                    ).strip(),
+                    "obligatory_moment": self._limit_text(
+                        scene.get("obligatory_moment", scene.get("description", "")),
+                        220,
+                    ),
                 }
-            ],
-        },
-        {
-            "shot_id": "scene_001_shot_002",
-            "scene_id": "scene_001",
-            "order": 2,
-            "dialogue_events": [
-                {
-                    "speaker": "Eli",
-                    "text": "I will go.",
-                    "continues_from_previous_shot": True,
-                    "continues_to_next_shot": True,
-                }
-            ],
-        },
-        {
-            "shot_id": "scene_002_shot_001",
-            "scene_id": "scene_002",
-            "order": 1,
-            "dialogue_events": [
-                {
-                    "speaker": "Eli",
-                    "text": "I am back.",
-                    "continues_from_previous_shot": True,
-                    "continues_to_next_shot": True,
-                }
-            ],
-        },
-    ]
-    director._normalize_dialogue_continuations(scenes, shots)
-    check(
-        shots[0]["dialogue_events"][0]["continues_to_next_shot"] is True,
-        "Intra-scene dialogue continuation was incorrectly cleared.",
-    )
-    check(
-        shots[1]["dialogue_events"][0]["continues_to_next_shot"] is False,
-        "Final shot of a scene still carries continues_to_next_shot.",
-    )
-    check(
-        shots[2]["dialogue_events"][0]["continues_from_previous_shot"] is False,
-        "First shot of a scene still carries continues_from_previous_shot.",
-    )
-
-    plan = {
-        "shots": [
-            {
-                **shots[0],
-                "characters": ["Eli"],
-                "is_scene_boundary": True,
-            },
-            {
-                **shots[1],
-                "characters": ["Eli"],
-                "is_scene_boundary": False,
-            },
-            {
-                **shots[2],
-                "characters": ["Eli"],
-                "is_scene_boundary": True,
-            },
-        ]
-    }
-    DialogueTimeline([{"name": "Eli", "character_id": "char_eli"}]).apply_to_plan(plan)
-    check(
-        plan["shots"][1]["dialogue_events"][-1]["continues_to_next_shot"] is False,
-        "DialogueTimeline reintroduced scene-end continuation metadata.",
-    )
-    check(
-        plan["shots"][2]["dialogue_events"][0]["continues_from_previous_shot"] is False,
-        "DialogueTimeline allowed continuation into a new scene.",
-    )
-
-
-def test_final_plan_metadata_and_scene_character_sync() -> None:
-    character = Character(
-        character_id="char_alex",
-        name="Alex",
-        role="protagonist",
-        description="Test character",
-        personality="Focused",
-    )
-    plan = {
-        "characters": [],
-        "scenes": [
-            {"scene_id": "scene_001", "characters": []},
-            {"scene_id": "scene_002", "characters": ["Alex"]},
-        ],
-        "shots": [
-            {"shot_id": "scene_001_shot_001", "scene_id": "scene_001", "characters": ["Alex"]},
-            {"shot_id": "scene_001_shot_002", "scene_id": "scene_001", "characters": ["Alex"]},
-            {"shot_id": "scene_002_shot_001", "scene_id": "scene_002", "characters": ["Alex"]},
-        ],
-        "director_pending": True,
-        "preview_ready": False,
-        "character_count": 0,
-        "scene_count": 4,
-        "shot_count": 4,
-    }
-    ProductionOrchestrator._finalize_plan_metadata(plan, [character])
-    check(plan["character_count"] == 1, "Final character_count was not recomputed.")
-    check(plan["scene_count"] == 2, "Final scene_count was not recomputed.")
-    check(plan["shot_count"] == 3, "Final shot_count was not recomputed.")
-    check(plan["director_pending"] is False, "director_pending remained true after Director completion.")
-    check(plan["preview_ready"] is True, "Final enriched plan is not marked preview_ready.")
-    check(
-        plan["scenes"][0]["characters"] == ["Alex"],
-        "Scene roster was not synchronized from final shot-level character bindings.",
-    )
-    check(
-        set(plan["shots"][0]["characters"]) <= set(plan["scenes"][0]["characters"]),
-        "Final shot character is still absent from its scene roster.",
-    )
-
-
-def test_expand_failure_is_source_fallback_without_retry() -> None:
-    director = QwenDirector(ROOT)
-    source = "Eli enters the abandoned station and finds a sealed vault."
-    calls = []
-    original = director._chat_text
-    original_load = director.load
-
-    def fake_load():
-        director._vllm_session = object()
-
-    director.load = fake_load
-    director._count_tokens = lambda text: 100
-
-    def fake_chat(*args, **kwargs):
-        calls.append(kwargs.get("call_name", ""))
-        if kwargs.get("call_name") == "expand_story_text_pass":
-            raise RuntimeError("forced validation failure")
-        raise RuntimeError("unexpected retry")
-
-    director._chat_text = fake_chat
-    try:
-        # Exercise only the contract: a failed expansion must not invoke a retry.
-        try:
-            director.generate(
-                mode="expand_user_story",
-                user_input=source,
-                base_plan={
-                    "story": source,
-                    "characters": [{"name": "Eli"}],
-                    "scenes": [{"scene_id": "scene_001", "order": 1, "characters": ["Eli"], "shot_ids": []}]*4,
-                    "shots": [],
-                },
             )
-        except RuntimeError:
-            pass
-    finally:
-        director._chat_text = original
-        director.load = original_load
-        director._vllm_session = None
 
-    check(
-        "expand_story_text_retry" not in calls,
-        "Expand mode still attempted an expensive Qwen retry.",
-    )
+        system_prompt = """
+    You are the STORYBOARD STRUCTURE EDITOR for MiniMax H3.
 
+    The supplied scene list is over-segmented.
 
-def test_relational_character_identity_pipeline() -> None:
-    """Regression for stable unnamed relational characters versus bare generic roles."""
-    planner = ProductionPlanner(ROOT)
-    story = (
-        "Eli stepped cautiously into the abandoned subway station. His father had disappeared under similar circumstances, "
-        "leaving behind a single note. The older man stepped forward, revealing a face that sent a jolt through Eli's body—"
-        "his father's face, but younger, alive. \"I was trying to protect you,\" the man said, his voice heavy with regret."
-    )
+    Compress it into exactly 4–6 meaningful narrative scenes.
 
-    relation = {
-        "name": "Eli's father",
-        "entity_type": "PERSON",
-        "is_character": True,
-        "aliases": ["his father", "the older man", "the man"],
-        "identity_type": "relational_character",
-        "relationship_to": "Eli",
-        "relationship": "father",
+    Do NOT delete important story events merely to reduce the count.
+    Instead MERGE adjacent or closely related beats into stronger scenes.
+
+    Every source scene has a load-bearing obligatory moment.
+    Treat that moment as protected narrative information.
+    When merging scenes, preserve the obligatory moments of all merged beats inside the resulting scene description/objective.
+    Prefer merging adjacent compatible beats rather than deleting beats.
+    Never solve the budget by silently truncating the source timeline.
+
+    Preserve:
+    - chronological order;
+    - protagonist goals;
+    - important character introductions;
+    - major discoveries;
+    - major conflict/escalation;
+    - climax;
+    - resolution;
+    - important locations and continuity.
+
+    Each resulting scene must represent a real dramatic beat.
+
+    Return JSON only:
+    {
+      "scenes": [
+    {
+      "scene_id": "scene_001",
+      "title": "...",
+      "order": 1,
+      "location": "...",
+      "time_of_day": "...",
+      "weather": "...",
+      "atmosphere": "...",
+      "description": "...",
+      "mood": "...",
+      "lighting": "...",
+      "color_temperature": "...",
+      "environment_details": [],
+      "key_props": [],
+      "characters": [],
+      "scene_objective": "...",
+      "continuity_notes": "..."
     }
-    named = {
-        "name": "Eli",
-        "entity_type": "PERSON",
-        "is_character": True,
-        "aliases": ["Eli"],
-        "identity_type": "named_character",
-        "relationship_to": "",
-        "relationship": "",
+      ]
     }
+    """.strip()
 
-    def extractor(_story, _hints):
-        # Simulate the observed failure: extractor misses the relational identity.
-        return {"candidates": [named]}
-
-    def adjudicator(_story, hints, _semantic):
-        check(
-            "Eli's father" in hints,
-            "Relational identity was not supplied to the bounded adjudication pass.",
-        )
-        return {"candidates": [named, relation]}
-
-    characters = planner.create_characters(
-        story,
-        qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
-    )
-    by_name = {c.name: c for c in characters}
-
-    check(
-        set(by_name) == {"Eli", "Eli's father"},
-        f"Relational canonical roster was not preserved: {sorted(by_name)}",
-    )
-    father = by_name["Eli's father"]
-    check(
-        father.identity_type == "relational_character",
-        "Relational character lost identity_type.",
-    )
-    check(
-        father.relationship_to == "Eli" and father.relationship == "father",
-        "Relational character lost relationship metadata.",
-    )
-    check(
-        "man" in {EntityResolver.normalize(x) for x in father.semantic_aliases},
-        "Generic surface alias 'man' was not retained as a non-canonical alias.",
-    )
-
-    serialized = father.to_dict()
-    check(
-        serialized["identity_type"] == "relational_character"
-        and serialized["relationship_to"] == "Eli"
-        and serialized["relationship"] == "father",
-        "Relational metadata did not survive Character serialization.",
-    )
-
-    director = QwenDirector(ROOT)
-    shots = [{
-        "shot_id": "scene_004_shot_001",
-        "characters": ["Eli"],
-        "dialogue_events": [{
-            "speaker": "man",
-            "text": "I was trying to protect you,",
-        }],
-    }]
-    director._normalize_dialogue_speakers(
-        story,
-        shots,
-        [character.to_dict() for character in characters],
-    )
-    event = shots[0]["dialogue_events"][0]
-    check(
-        event["speaker"] == "Eli's father",
-        "Generic dialogue speaker 'man' did not resolve to the grounded relational identity.",
-    )
-    check(
-        "Eli's father" in shots[0]["characters"],
-        "Resolved relational speaker was not repaired into the shot character binding.",
-    )
-
-    # The generic label itself remains non-canonical.
-    check(
-        director._valid_character_name("man") is False,
-        "Bare generic role 'man' was incorrectly accepted as a canonical identity.",
-    )
-
-    # Ambiguous generic aliases must not guess.
-    ambiguous = [
-        character.to_dict() for character in characters
-    ] + [{
-        **serialized,
-        "character_id": "char_other_father",
-        "name": "Mira's father",
-        "relationship_to": "Mira",
-    }]
-    ambiguous_shots = [{
-        "shot_id": "ambiguous",
-        "characters": ["Eli's father", "Mira's father"],
-        "dialogue_events": [{
-            "speaker": "man",
-            "text": "I was trying to protect you,",
-        }],
-    }]
-    director._normalize_dialogue_speakers(
-        story,
-        ambiguous_shots,
-        ambiguous,
-    )
-    check(
-        ambiguous_shots[0]["dialogue_events"] == [],
-        "Ambiguous generic speaker 'man' was incorrectly guessed to one relational identity.",
-    )
-
-    # A semantic result that explicitly rejects the relational identity must not
-    # be overridden by deterministic hints.
-    rejected = planner.create_characters(
-        story,
-        qwen_character_extractor=extractor,
-        qwen_character_adjudicator=lambda *_args: {"candidates": [named]},
-    )
-    check(
-        {c.name for c in rejected} == {"Eli"},
-        "Deterministic relation hints overrode an explicit semantic rejection.",
-    )
-
-def main() -> None:
-    test_deterministic_foundation_when_director_enabled()
-    test_abbreviation_safe_story_split()
-    test_expand_failure_is_source_fallback_without_retry()
-    test_scene_boundary_dialogue_continuation_is_closed()
-    test_final_plan_metadata_and_scene_character_sync()
-
-    tests = [
-        test_story_modes,
-        test_expand_preservation_gates,
-        test_shot_batch_contract,
-        test_dialogue_speaker_contract,
-        test_explicit_source_speaker_provenance,
-        test_grounding_precedes_binding_failure,
-        test_shot_batch_completion_budget_not_bound_to_topology,
-        test_sanitize_synchronizes_legacy_dialogue_fields,
-        test_legacy_speech_text_direct_speech_bridge_is_bounded,
-        test_dialogue_validator_is_pure,
-        test_narrative_prose_is_not_promoted_to_dialogue,
-        test_dialogue_screen_context_is_sentence_local,
-        test_legacy_speech_text_does_not_promote_long_narrative,
-        test_story_context_budget_preserves_head_and_tail,
-        test_text_generation_disables_thinking_by_default,
-        test_character_sanitization,
-        test_scene_id_sanitization_before_batching,
-        test_shot_id_normalization,
-        test_character_descriptor_deduplication,
-        test_single_paragraph_segmentation,
-        test_director_prompt_contract,
-        test_shot_sampling_contract,
-        test_visual_schema_sanitization,
-        test_shot_schema_cardinality_is_grammar_constrained,
-        test_shot_sanitization_cinematography_fields,
-        test_h3_workflow_duration_updates_float_source,
-        test_h3_workflow_resolution_selector_mapping,
-        test_short_story_rebalances_to_four_units_without_losing_source_text,
-        test_canonical_roster_not_overwritten_by_qwen,
-        test_verified_roster_flag_propagates_to_orchestrator,
-        test_verified_scene_topology_not_orphaned,
-        test_qwen_excluded_candidate_not_silently_readded,
-        test_entity_resolver_shot_rebinding,
-        test_entity_resolution_adversarial_regressions,
-        test_character_appearance_is_locally_scoped,
-        test_cinematic_compiler_cannot_promote_scene_identity,
-        test_h3_optimizer_ownership_guard,
-        test_character_pipeline_has_no_external_ner_dependency,
-        test_semantic_character_reconciliation_adversarial_matrix,
-        test_qwen_semantic_negative_is_authoritative,
-        test_qwen_semantic_authority_prefers_qwen_roster,
-        test_qwen_semantic_alias_anchor,
-        test_entity_resolver_has_no_qwen_handle,
-        test_recorded_semantic_payloads_are_terminal,
-        test_character_semantic_call_budget_is_bounded,
-        test_qwen_semantic_character_reconciliation,
-        test_relational_character_identity_pipeline,
-        test_verified_semantic_character_roster_reaches_final_plan,
-        test_empty_semantic_roster_falls_back_without_overriding_grounded_characters,
-        test_explicit_semantic_negative_remains_authoritative,
-        test_sanitized_identity_fields_are_self_consistent,
-        test_qwen_cache_key_changes_with_generation_contract,
-        test_qwen_semantic_character_extractor_contract,
-        test_mult_word_character_extraction_regression,
-        test_visual_language_partial_merge_preserves_base_fields,
-        test_final_generation_uses_dialogue_normalization_before_compiler,
-        test_cinematic_compiler_deterministic_fallback,
-        test_scene_budget_contract_and_fallback,
-        test_scene_budget_semantic_repair_contract,
-        test_batch_planning_runtime_contract,
-        test_critic_payload_is_compact,
-        test_batch_prompt_is_compact,
-        test_resume_does_not_rewrite_scene_ids,
-    ]
-
-    for test in tests:
-
-        test()
-
-        print(
-            f"PASS: {test.__name__}"
+        user_payload = json.dumps(
+            {
+                "mode": mode,
+                "story": self._limit_text(story, 4500),
+                "characters": [
+                    {
+                        "name": str(
+                            item.get("name", "") or ""
+                        ).strip(),
+                        "role": str(
+                            item.get("role", "") or ""
+                        ).strip(),
+                    }
+                    for item in characters
+                    if isinstance(item, dict)
+                    and str(
+                        item.get("name", "") or ""
+                    ).strip()
+                ],
+                "scenes": scene_payload,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
 
-    print(
-        "Director validation PASSED."
-    )
+        try:
+            repaired = self._chat_json(
+                system_prompt,
+                user_payload,
+                minimum_completion=500,
+                temperature=0.20,
+                top_p=0.82,
+                call_name="scene_budget_compression",
+                max_completion=1600,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=self._scene_compression_json_schema(),
+            )
 
+            compressed = self._sanitize_scenes(
+                repaired.get("scenes", []),
+                character_names,
+            )
 
-def test_qwen_semantic_authority_prefers_qwen_roster() -> None:
-    planner = ProductionPlanner(ROOT)
-    story = "Elena Kovalenko entered the Arctic station. Anton repaired the generator."
-    result = planner.create_characters(
-        story,
-        qwen_character_extractor=lambda _story, _hints: {
-            "candidates": [
-                {"name": "Elena Kovalenko", "entity_type": "PERSON", "is_character": True, "aliases": ["Elena"]},
-                {"name": "Anton", "entity_type": "PERSON", "is_character": True, "aliases": []},
-            ]
-        },
-    )
-    check(
-        {c.name for c in result} == {"Elena Kovalenko", "Anton"},
-        "Qwen semantic roster was not treated as authoritative.",
-    )
+            compressed = self._annotate_scene_functions(
+                compressed
+            )
 
+            if 4 <= len(compressed) <= self.MAX_SCENES:
+                for order, scene in enumerate(compressed, start=1):
+                    scene["order"] = order
+                return compressed
 
-def test_qwen_semantic_alias_anchor() -> None:
-    planner = ProductionPlanner(ROOT)
-    story = "Elena Kovalenko entered the room. Later Elena waited outside."
-    result = planner.create_characters(
-        story,
-        qwen_character_extractor=lambda _story, _hints: {
-            "candidates": [
-                {"name": "Elena", "entity_type": "PERSON", "is_character": True, "aliases": ["Elena Kovalenko"]},
-            ]
-        },
-    )
-    check(len(result) == 1 and result[0].name == "Elena", "Alias-tolerant anchoring failed.")
+        except Exception as exc:
+            print(
+                "[QWEN]",
+                "scene_budget_compression_failed",
+                str(exc),
+                flush=True,
+            )
 
-
-def test_entity_resolver_has_no_qwen_handle() -> None:
-    import inspect
-    signature = inspect.signature(EntityResolver.resolve_scene_aliases)
-    check("qwen_chat" not in signature.parameters, "EntityResolver still exposes a live Qwen callback.")
-
-
-def test_recorded_semantic_payloads_are_terminal() -> None:
-    planner = ProductionPlanner(ROOT)
-    cases = [
-        (
-            "Eli entered the station and waited outside.",
-            {"characters": ["Eli"]},
-        ),
-        (
-            "The station was empty. Dust covered the floor.",
-            {"characters": ["Dust", "They're", "man"]},
-        ),
-    ]
-    for story, semantic in cases:
-        values = planner._reconcile_semantic_characters(
-            story,
-            planner.detect_character_descriptors(story),
-            semantic,
+        # Deterministic fallback preserves ALL source beats by merging
+        # adjacent groups rather than dropping scenes.
+        reduced = self._deterministic_compress_scenes(
+            scenes,
+            target_count=self.MAX_SCENES,
         )
-        check(isinstance(values, list), "Recorded semantic payload did not terminate with a finite roster.")
 
+        for order, scene in enumerate(
+            reduced,
+            start=1,
+        ):
+            scene["order"] = order
 
-def test_character_semantic_call_budget_is_bounded() -> None:
-    director = QwenDirector(ROOT)
-    director._character_semantic_calls = 2
-    failed = False
-    try:
-        director.adjudicate_character_entities(
-            "Eli entered the station.",
-            ["Eli"],
-            {"candidates": []},
-        )
-    except RuntimeError as exc:
-        failed = "max 2" in str(exc)
-    check(
-        failed,
-        "Character semantic Qwen call budget is not hard-bounded at two.",
-    )
-
-
-if __name__ == "__main__":
-    main()
+        return reduced
