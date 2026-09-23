@@ -1546,7 +1546,7 @@ class QwenDirector(
                     )
                     continue
 
-                if bound and normalized_speaker not in bound:
+                if normalized_speaker not in bound:
                     generic_surface = EntityResolver.generic_role_surface(speaker)
                     canonical_payload = next(
                         (item for item in characters
@@ -1568,7 +1568,7 @@ class QwenDirector(
                     # relational character. This does not create a new character:
                     # it restores the canonical identity Qwen omitted from the
                     # shot-level character binding.
-                    if generic_surface and canonical_identity_type == "relational_character":
+                    if canonical_identity_type in {"relational_character", "descriptive_character"}:
                         shot_characters = shot.get("characters")
                         if not isinstance(shot_characters, list):
                             shot_characters = list(shot_characters or [])
