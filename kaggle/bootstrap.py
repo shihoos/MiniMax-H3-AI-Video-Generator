@@ -1382,12 +1382,6 @@ def main():
     # ComfyUI checkout and custom nodes are installed.
     apply_embedded_h3_runtime_overlay()
 
-    # Keep the historical T4/H3 guards active. They are idempotent: after the
-    # embedded overlay they confirm the exact fixes are present, and they can
-    # still apply the patch if a future overlay omits one of them.
-    patch_t4_h3_value_clone(runtime)
-    patch_h3_vae_decoder_dtype(runtime)
-
     install_models()
 
     verify_inventory()
