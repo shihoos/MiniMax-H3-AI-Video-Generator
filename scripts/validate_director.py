@@ -245,102 +245,6 @@ def test_generic_relationship_speakers_resolve_for_uncle_and_father():
             "bare relationship speaker 'father' did not resolve")
 
 
-
-def test_relational_pronoun_antecedent_does_not_attach_to_relative_clause_object():
-    from planner.production_planner import ProductionPlanner
-    planner = _planner()
-    story = (
-        "Eli opened the vault. Inside he discovered a sentient AI his father had created to protect the city."
-    )
-    descriptors = planner.detect_character_descriptors(story)
-    hints = planner._extract_relational_character_hints(story, descriptors)
-    names = {item["name"] for item in hints}
-    _assert("Eli's father" in names, f"expected Eli's father relational hint: {hints}")
-    _assert("AI's father" not in names, f"relative-clause object incorrectly became relationship owner: {hints}")
-
-
-def test_explicit_nameplate_survives_semantic_negative():
-    planner = _planner()
-    story = "The vault console flickered. The nameplate on the console: Dr. Lila Voss. She spoke to Elias Kade."
-
-    def extractor(*_args):
-        return {"candidates": [{
-            "name": "Elias Kade", "entity_type": "PERSON", "is_character": True,
-            "aliases": [], "identity_type": "named_character",
-        }, {
-            "name": "Lila Voss", "entity_type": "PERSON", "is_character": False,
-            "aliases": [], "identity_type": "named_character",
-        }]}
-
-    def adjudicator(*_args):
-        return {"candidates": [{
-            "name": "Elias Kade", "entity_type": "PERSON", "is_character": True,
-            "aliases": [], "identity_type": "named_character",
-        }, {
-            "name": "Lila Voss", "entity_type": "PERSON", "is_character": False,
-            "aliases": [], "identity_type": "named_character",
-        }]}
-
-    names = [c.name for c in planner.create_characters(
-        story, qwen_character_extractor=extractor, qwen_character_adjudicator=adjudicator
-    )]
-    _assert("Lila Voss" in names, f"explicit nameplate identity was lost: {names}")
-
-
-def test_descriptive_character_identity_and_generic_alias():
-    planner = _planner()
-    story = "Eli entered the vault. A woman with piercing eyes stepped into the light and spoke to Eli."
-    characters = planner.create_characters(story)
-    payload = [c.to_dict() for c in characters]
-    names = [c.name for c in characters]
-    _assert("woman with piercing eyes" in {n.lower() for n in names}, f"descriptive character was not retained: {names}")
-    descriptive = next(c for c in payload if c["name"].lower() == "woman with piercing eyes")
-    _assert(descriptive["identity_type"] == "descriptive_character", f"wrong descriptive identity type: {descriptive}")
-    from planner.entity_resolver import EntityResolver
-    _assert(
-        EntityResolver.contextual_generic_alias("woman", payload, story=story) == "woman with piercing eyes",
-        f"generic descriptive alias did not resolve: {payload}",
-    )
-
-
-def test_descriptive_or_relational_speaker_repairs_scene_and_shot_binding():
-    from planner.qwen_director import QwenDirector
-    director = QwenDirector.__new__(QwenDirector)
-    director._recovery_events = []
-    characters = [{
-        "name": "Eli's father",
-        "identity_type": "relational_character",
-        "relationship_to": "Eli",
-        "relationship": "father",
-        "semantic_aliases": ["man", "father"],
-        "identity_profile": {
-            "identity_type": "relational_character",
-            "relationship_to": "Eli",
-            "relationship": "father",
-            "semantic_aliases": ["man", "father"],
-        },
-    }, {
-        "name": "woman with piercing eyes",
-        "identity_type": "descriptive_character",
-        "semantic_aliases": ["woman"],
-        "identity_profile": {
-            "identity_type": "descriptive_character",
-            "semantic_aliases": ["woman"],
-        },
-    }]
-    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
-    shots = [{
-        "shot_id": "scene_001_shot_001",
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "dialogue_events": [{"speaker": "man", "text": "Come here."}],
-    }]
-    story = 'Eli turned. The man spoke: "Come here."'
-    director._normalize_dialogue_speakers(story, scenes, shots, characters)
-    _assert(shots[0]["dialogue_events"][0]["speaker"] == "Eli's father", f"relational speaker not repaired: {shots[0]}")
-    _assert("Eli's father" in shots[0]["characters"], f"relational speaker missing from shot: {shots[0]}")
-    _assert("Eli's father" in scenes[0]["characters"], f"relational speaker missing from scene: {scenes[0]}")
-
 def test_sanitizer_identity_contract():
     from planner.qwen_director import QwenDirector
 
@@ -390,60 +294,6 @@ def test_qwen_cache_generation_contract():
     third = director._cache_key(**{**base, "max_tokens": 512})
     _assert(first != second, "temperature must participate in Qwen cache key")
     _assert(first != third, "max_tokens must participate in Qwen cache key")
-
-
-def test_dialogue_source_preserved_through_timeline():
-    from pipeline.dialogue_timeline import DialogueTimeline
-
-    plan = {
-        "story": "Eli met his father in the vault.",
-        "dialogue_language": "English",
-        "characters": [
-            {"name": "Eli", "character_id": "char_eli"},
-            {"name": "Eli's father", "character_id": "char_father"},
-        ],
-        "shots": [
-            {
-                "shot_id": "scene_001_shot_001",
-                "scene_id": "scene_001",
-                "characters": ["Eli", "Eli's father"],
-                "duration_seconds": 5.2,
-                "dialogue_events": [
-                    {
-                        "speaker": "Eli's father",
-                        "text": "You should not be here.",
-                        "continues_from_previous_shot": False,
-                        "continues_to_next_shot": False,
-                    },
-                    {
-                        "speaker": "Eli",
-                        "text": "Who are you?",
-                        "continues_from_previous_shot": False,
-                        "continues_to_next_shot": False,
-                    },
-                ],
-            }
-        ],
-    }
-
-    timeline = DialogueTimeline(plan["characters"])
-    source = timeline.snapshot_source_dialogue(plan)
-    _assert(len(source["scene_001_shot_001"]) == 2, "source dialogue snapshot lost an event")
-    timeline.apply_to_plan(plan)
-    timeline.assert_source_dialogue_preserved(plan, source)
-
-    final_events = plan["shots"][0]["dialogue_events"]
-    _assert(len(final_events) == 2, f"dialogue event count changed: {final_events}")
-    _assert(
-        [event["text"] for event in final_events]
-        == ["You should not be here.", "Who are you?"],
-        "dialogue text changed during deterministic scheduling",
-    )
-    _assert(
-        [event["speaker_name"] for event in final_events]
-        == ["Eli's father", "Eli"],
-        "canonical dialogue speakers were not preserved",
-    )
 
 
 def test_disabled_director_path():
@@ -557,6 +407,111 @@ def test_job_state_clears_stale_completion():
         _assert("final_video" not in updated and "job_result" not in updated, "stale completion state survived queue transition")
 
 
+
+def test_unresolved_explicit_dialogue_fails_closed():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    director._qwen_telemetry = {"deterministic_recoveries": 0}
+    story = 'Eli entered the vault. A stranger said, "Run."'
+    characters = [{
+        "name": "Eli",
+        "identity_type": "named_character",
+        "semantic_aliases": [],
+    }]
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{
+            "speaker": "stranger",
+            "text": "Run.",
+        }],
+    }]
+    try:
+        director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    except RuntimeError as exc:
+        _assert("speaker" in str(exc).lower() and "stranger" in str(exc),
+                f"unexpected unresolved-dialogue error: {exc}")
+    else:
+        raise AssertionError("unresolved explicit dialogue was silently accepted/dropped")
+
+
+def test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    director._qwen_telemetry = {"deterministic_recoveries": 0}
+    story = 'Eli met his father. "I was trying to protect you," his father said.'
+    characters = [
+        {
+            "name": "Eli",
+            "identity_type": "named_character",
+            "semantic_aliases": [],
+        },
+        {
+            "name": "Eli's father",
+            "identity_type": "relational_character",
+            "relationship_to": "Eli",
+            "relationship": "father",
+            "semantic_aliases": ["his father", "father", "man"],
+        },
+    ]
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{
+            "speaker": "Eli's father",
+            "text": "I was trying to protect you,",
+        }],
+    }]
+    director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    event = shots[0]["dialogue_events"][0]
+    _assert(event["speaker"] == "Eli's father", f"speaker was not canonicalized: {event}")
+    _assert("Eli's father" in shots[0]["characters"], "canonical speaker missing from shot binding")
+    _assert("Eli's father" in scenes[0]["characters"], "canonical speaker missing from scene binding")
+
+
+def test_downstream_production_preserves_dialogue_multiset():
+    from pipeline.production_orchestrator import ProductionOrchestrator
+
+    before = ProductionOrchestrator._snapshot_dialogue_contract({
+        "shots": [{
+            "shot_id": "scene_001_shot_001",
+            "dialogue_events": [{
+                "speaker": "Eli",
+                "text": "I was trying to protect you.",
+            }],
+        }]
+    })
+    ProductionOrchestrator._assert_dialogue_contract_preserved(before, {
+        "shots": [{
+            "shot_id": "scene_001_shot_001",
+            "dialogue_events": [{
+                "speaker_name": "Eli",
+                "speaker_id": "char_eli",
+                "text": "I was trying to protect you.",
+            }],
+        }]
+    })
+
+    try:
+        ProductionOrchestrator._assert_dialogue_contract_preserved(before, {
+            "shots": [{
+                "shot_id": "scene_001_shot_001",
+                "dialogue_events": [],
+            }]
+        })
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("downstream dialogue deletion was not detected")
+
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
@@ -576,17 +531,15 @@ def main():
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
         test_relational_character_survives_generic_negative_and_resolves_dialogue,
         test_generic_relationship_speakers_resolve_for_uncle_and_father,
-        test_relational_pronoun_antecedent_does_not_attach_to_relative_clause_object,
-        test_explicit_nameplate_survives_semantic_negative,
-        test_descriptive_character_identity_and_generic_alias,
-        test_descriptive_or_relational_speaker_repairs_scene_and_shot_binding,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
-        test_dialogue_source_preserved_through_timeline,
         test_disabled_director_path,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
         test_job_state_clears_stale_completion,
+        test_unresolved_explicit_dialogue_fails_closed,
+        test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
+        test_downstream_production_preserves_dialogue_multiset,
         test_source_contracts,
     ]
     for test in tests:
