@@ -2189,8 +2189,6 @@ class ProductionPlanner:
 
         escaped_name = re.escape(name)
         name_tokens = name.split()
-        if len(name_tokens) < 2:
-            return False
 
         subject_verbs = set(cls.NARRATIVE_SUBJECT_VERBS)
         verb_alt = "|".join(
@@ -2841,59 +2839,37 @@ class ProductionPlanner:
                 )
                 semantic_result_final = semantic_result
 
-                semantic_candidates = []
-                if isinstance(semantic_result, dict):
-                    semantic_candidates = list(semantic_result.get("candidates", []) or [])
-                    if not semantic_candidates:
-                        semantic_candidates = list(semantic_result.get("characters", []) or [])
-
-                # Semantic authority is staged. The extractor is a proposal layer;
-                # an explicit negative from extraction cannot override a strong
-                # deterministic character signal without adjudication. Empty or
-                # malformed output is also non-authoritative. Only an adjudicator
-                # decision (or a clean extractor result with no conflict) may become
-                # final semantic authority.
-                def _semantic_decision_state(payload) -> tuple[bool, bool]:
-                    """Return (has_explicit_decision, has_positive_decision).
-
-                    Structured candidates are decisions only when ``is_character``
-                    is explicitly boolean. Bare string candidates are legacy
-                    shorthand for positive character decisions.
-                    """
+                def _semantic_candidates(payload):
                     if not isinstance(payload, dict):
-                        return False, False
+                        return []
                     values = payload.get("candidates")
                     if not isinstance(values, list):
                         values = payload.get("characters")
-                    if not isinstance(values, list):
-                        return False, False
-                    has_decision = False
-                    has_positive = False
+                    return list(values) if isinstance(values, list) else []
+
+                def _semantic_decision_map(payload):
+                    decisions = {}
+                    values = _semantic_candidates(payload)
                     for value in values:
-                        if isinstance(value, str):
-                            if value.strip():
-                                has_decision = True
-                                has_positive = True
+                        if isinstance(value, str) and value.strip():
+                            key = EntityResolver.normalize(value)
+                            decisions[key] = True
                             continue
                         if not isinstance(value, dict):
                             continue
                         name = str(value.get("name", "") or "").strip()
                         if not name or not isinstance(value.get("is_character"), bool):
                             continue
-                        has_decision = True
-                        if value.get("is_character") is True:
-                            has_positive = True
-                    return has_decision, has_positive
+                        decisions[EntityResolver.normalize(name)] = bool(value.get("is_character"))
+                    return decisions
 
-                semantic_has_decision, semantic_has_positive = _semantic_decision_state(
-                    semantic_result
-                )
-                semantic_roster_authoritative = semantic_has_decision
+                semantic_candidates = _semantic_candidates(semantic_result)
+                extractor_decisions = _semantic_decision_map(semantic_result)
+                semantic_has_decision = bool(extractor_decisions)
+                semantic_has_positive = any(extractor_decisions.values())
 
                 invalid_positive = False
                 semantic_names = set()
-                semantic_decision_names = set()
-
                 for raw in semantic_candidates:
                     if isinstance(raw, str):
                         raw = {
@@ -2905,23 +2881,17 @@ class ProductionPlanner:
                         }
                     if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                         continue
-                    candidate_name = str(raw.get("name", "") or "").strip()
-                    if candidate_name:
-                        semantic_decision_names.add(EntityResolver.normalize(candidate_name))
                     identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
                     entity_type = str(raw.get("entity_type", "") or "").strip().upper()
                     if identity_type == "relational_character":
                         valid, canonical, _ = self._relational_candidate_is_grounded(
-                            story,
-                            raw,
-                            descriptors,
+                            story, raw, descriptors,
                         )
                         if valid and canonical:
                             semantic_names.add(EntityResolver.normalize(canonical))
                         else:
                             invalid_positive = True
                         continue
-
                     name = str(raw.get("name", "") or "").strip()
                     aliases = [
                         str(a or "").strip()
@@ -2933,45 +2903,50 @@ class ProductionPlanner:
                         and bool(name)
                         and name.lower() not in self.GENERIC_PERSON_LABELS
                         and name.lower() not in self.RELATIONSHIP_TERMS
-                        and any(
-                            self._story_has_character_name(story, surface)
-                            for surface in [name, *aliases]
-                            if surface
-                        )
+                        and any(self._story_has_character_name(story, surface) for surface in [name, *aliases] if surface)
                     )
                     if valid_named:
                         semantic_names.add(EntityResolver.normalize(name))
                     else:
                         invalid_positive = True
 
-                strong_relation_missing = any(
-                    bool(item.get("strong"))
-                    and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_names
-                    and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_decision_names
-                    for item in relational_hints
-                )
-
                 deterministic_high_confidence = [
                     name for name in descriptors
                     if self._high_confidence_deterministic_character(story, name)
                 ]
+                deterministic_high_confidence_norm = {
+                    EntityResolver.normalize(name) for name in deterministic_high_confidence
+                }
+                relation_norms = {
+                    EntityResolver.normalize(str(item.get("name", "") or ""))
+                    for item in relational_hints
+                    if item.get("strong") and item.get("name")
+                }
+                strong_relation_missing = bool(relation_norms - set(extractor_decisions))
+                strong_character_missing = bool(deterministic_high_confidence_norm - set(extractor_decisions))
+                reconciled_preview = self._reconcile_semantic_characters(
+                    story, descriptors, semantic_result,
+                ) if semantic_has_decision else []
 
+                # Extractor output is only final when it explicitly addresses every
+                # strong deterministic candidate and produces at least one safely
+                # grounded canonical character. Any partial/empty/unusable semantic
+                # result must go through the bounded adjudication call or fall back to
+                # deterministic identity evidence. This prevents a model false-negative
+                # from erasing the canonical roster.
                 needs_adjudication = (
                     not semantic_has_decision
                     or invalid_positive
                     or strong_relation_missing
-                    or (
-                        not semantic_has_positive
-                        and bool(deterministic_high_confidence)
-                    )
+                    or strong_character_missing
+                    or (bool(descriptors) and not reconciled_preview)
                 )
 
-                # Do not let a provisional extractor decision erase a
-                # high-confidence deterministic identity while adjudication is
-                # pending. The deterministic roster remains available as the
-                # safe fallback whenever adjudication is unavailable or unusable.
-                if needs_adjudication:
-                    semantic_roster_authoritative = False
+                semantic_roster_authoritative = bool(
+                    semantic_has_decision
+                    and not needs_adjudication
+                    and bool(reconciled_preview)
+                )
 
                 if needs_adjudication and qwen_character_adjudicator is not None:
                     adjudication_hints = list(dict.fromkeys(
@@ -2983,20 +2958,35 @@ class ProductionPlanner:
                         adjudication_hints,
                         semantic_result,
                     )
-                    if isinstance(adjudicated, dict):
-                        adjudicated_has_decision, _adjudicated_has_positive = _semantic_decision_state(
-                            adjudicated
+                    adjudicator_decisions = _semantic_decision_map(adjudicated)
+                    required = deterministic_high_confidence_norm | relation_norms
+                    adjudication_complete = bool(adjudicator_decisions) and (
+                        not required or required.issubset(adjudicator_decisions)
+                    )
+                    adjudicated_roster = (
+                        self._reconcile_semantic_characters(
+                            story, descriptors, adjudicated,
                         )
-                        if adjudicated_has_decision:
-                            semantic_result_final = adjudicated
-                            semantic_roster_authoritative = True
+                        if adjudication_complete else []
+                    )
+                    if adjudication_complete and adjudicated_roster:
+                        semantic_result_final = adjudicated
+                        semantic_roster_authoritative = True
+                    else:
+                        # An empty/incomplete adjudication is not a semantic veto.
+                        # Keep the deterministic roster so the production contract
+                        # cannot collapse to an empty character set.
+                        semantic_roster_authoritative = False
 
                 if semantic_roster_authoritative:
-                    descriptors = self._reconcile_semantic_characters(
-                        story,
-                        descriptors,
-                        semantic_result_final,
+                    reconciled = self._reconcile_semantic_characters(
+                        story, descriptors, semantic_result_final,
                     )
+                    if reconciled:
+                        descriptors = reconciled
+                    else:
+                        semantic_roster_authoritative = False
+                        descriptors = self._canonicalize_character_descriptors(descriptors)
                 else:
                     descriptors = self._canonicalize_character_descriptors(descriptors)
 
