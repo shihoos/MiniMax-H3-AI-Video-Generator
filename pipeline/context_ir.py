@@ -839,8 +839,8 @@ class H3ContextIRCompiler:
             if not raw: continue
             dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0)})
         production_id = self._clean(plan.get("production_id"))
-        capture_root = ""
-        if production_id:
+        capture_root = str(plan.get("context_ir_capture_root", "") or "").strip()
+        if not capture_root and production_id:
             capture_root = str((Path(__file__).resolve().parents[1] / "data" / "production" / production_id / "context_ir").resolve())
         capture_path = ""
         if capture_root:
@@ -863,7 +863,6 @@ class H3ContextIRCompiler:
                 "task_id": "",
                 "prompt": "",
                 "enhanced_prompt": "",
-                "capture_path": "",
                 "base_prompt_sha256": hashlib.sha256(
                     self._canonical_input_prompt(plan, shot, refs).encode("utf-8")
                 ).hexdigest(),
