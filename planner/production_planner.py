@@ -178,6 +178,17 @@ class ProductionPlanner:
         "pilot", "doctor", "guard", "officer", "stranger",
     }
 
+    # A descriptive character is a recurring person who has no stable proper
+    # name but DOES have a grounded distinguishing description.  Bare role words
+    # such as ``man``/``woman`` are never canonical identities.
+    DESCRIPTIVE_IDENTITY_ROLES = {
+        "man", "woman", "boy", "girl", "person", "child",
+        "detective", "scientist", "soldier", "warrior", "king", "queen",
+        "robot", "android", "pilot", "doctor", "guard", "officer",
+        "stranger", "captain", "commander", "engineer", "teacher",
+        "nurse", "driver", "explorer", "hero", "heroine",
+    }
+
     COMMON_PROPER_WORDS = {
         "The",
         "A",
@@ -876,26 +887,7 @@ class ProductionPlanner:
         if not story:
             return []
 
-        role_names = {
-            "woman",
-            "man",
-            "girl",
-            "boy",
-            "child",
-            "person",
-            "hero",
-            "heroine",
-            "explorer",
-            "detective",
-            "scientist",
-            "soldier",
-            "warrior",
-            "king",
-            "queen",
-            "robot",
-            "android",
-            "pilot",
-        }
+        role_names = set(self.DESCRIPTIVE_IDENTITY_ROLES)
 
         # ========================================================
         # EVIDENCE MODEL
@@ -957,6 +949,7 @@ class ProductionPlanner:
             "fled", "flees", "shed", "sheds", "spread", "spreads", "bore", "bears",
             # Common narrative action verbs unlikely to double as ordinary nouns.
             "guided", "guides", "commanded", "commands", "signaled", "signals",
+            "stepped", "steps", "stood", "stands", "walked", "walks",
             "gestured", "gestures", "muttered", "mutters", "murmured", "murmurs",
             "screamed", "screams", "flinched", "flinches", "hesitated", "hesitates",
             "glanced", "glances", "spotted", "spots", "shoved", "shoves",
@@ -1031,7 +1024,7 @@ class ProductionPlanner:
 
             if (
                 name.lower() in role_names
-                and source != "role"
+                and source not in {"role", "descriptive_role"}
             ):
                 return
 
@@ -1429,6 +1422,18 @@ class ProductionPlanner:
                     100,
                 )
 
+        # Explicit labels/nameplates are hard identity evidence even when the
+        # surrounding sentence does not use a naming verb. This covers forms
+        # such as ``nameplate on the console: Dr. Lila Voss``.
+        nameplate_pattern = re.compile(
+            r"\b(?:nameplate|name tag|badge|plaque)\b"
+            r"[^:;.!?]{0,90}?[:\-]\s*"
+            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s*"
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){1,3})\b"
+        )
+        for match in nameplate_pattern.finditer(story):
+            add_evidence(match.group(1), "explicit", 100)
+
         # ========================================================
         # 2. STRONG SUBJECT + KNOWN VERB
         # ========================================================
@@ -1648,7 +1653,40 @@ class ProductionPlanner:
                 )
 
         # ========================================================
-        # 6. ROLE DESCRIPTORS
+        # 6. GROUNDED DESCRIPTIVE CHARACTER IDENTITIES
+        # ========================================================
+        # Preserve a recurring unnamed person only when the story supplies a
+        # distinguishing phrase. A bare ``man``/``woman`` remains non-canonical.
+        descriptive_roles = "|".join(
+            sorted(self.DESCRIPTIVE_IDENTITY_ROLES, key=len, reverse=True)
+        )
+        descriptive_pattern = re.compile(
+            r"\b(?:a|an|the)\s+"
+            r"((?:[a-z][a-z'-]+\s+){0,3}(?:" + descriptive_roles + r"))"
+            r"\s+((?:with|wearing|in|holding|carrying|covered|marked|standing|sitting|"
+            r"leaning|looking|whose))\s+"
+            r"([^,;.!?]{1,70}?)"
+            r"(?=\s*(?:,|and\b|who\b|that\b|while\b|as\b|[.!?;]))",
+            flags=re.IGNORECASE,
+        )
+        for match in descriptive_pattern.finditer(story):
+            qualifier_tokens = match.group(3).strip().split()
+            trimmed = []
+            for token in qualifier_tokens:
+                if token.lower() in subject_verbs:
+                    break
+                trimmed.append(token)
+            if not trimmed:
+                continue
+            candidate = re.sub(
+                r"\s+", " ",
+                f"{match.group(1)} {match.group(2)} {' '.join(trimmed)}".strip(),
+            )
+            if candidate and candidate.lower() not in self.GENERIC_PERSON_LABELS:
+                add_evidence(candidate, "descriptive_role", 90)
+
+        # ========================================================
+        # 7. ROLE DESCRIPTORS
         # ========================================================
 
         role_pattern = re.compile(
@@ -1760,6 +1798,14 @@ class ProductionPlanner:
                 continue
 
             # Role descriptors retain the deterministic fallback.
+            if (
+                "descriptive_role" in sources
+                and score >= 70
+                and len(name.split()) >= 2
+            ):
+                accepted.append(name)
+                continue
+
             if (
                 "role" in sources
                 and score >= 30
@@ -2524,34 +2570,114 @@ class ProductionPlanner:
             flags=re.IGNORECASE,
         )
         for match in pronoun_pattern.finditer(story):
-            window_start = max(0, match.start() - 420)
-            window = story[window_start:match.start()]
-            candidates = []
-            for canonical in actual_by_norm.values():
-                positions = [
-                    m.start()
-                    for m in re.finditer(
-                        re.escape(canonical),
-                        window,
-                        flags=re.IGNORECASE,
-                    )
-                ]
-                if positions:
-                    candidates.append((positions[-1], canonical))
-            if not candidates:
-                continue
-            candidates.sort(reverse=True)
-            nearest_pos, nearest_owner = candidates[0]
-            if len(candidates) > 1 and candidates[1][0] == nearest_pos:
-                continue
-            sentence_gap = window[nearest_pos:]
-            if sum(sentence_gap.count(mark) for mark in '.!?') > 2:
-                continue
-            add(nearest_owner, match.group(2), match.group(0), True)
+            owners = cls._pronoun_relation_owner_candidates(
+                story, match, list(actual_by_norm.values())
+            )
+            if len(owners) == 1:
+                add(owners[0], match.group(2), match.group(0), True)
 
         for item in records.values():
             item["aliases"] = list(dict.fromkeys(item["aliases"]))
         return list(records.values())
+
+    @classmethod
+    def _pronoun_relation_owner_candidates(
+        cls,
+        story: str,
+        match: re.Match,
+        canonical_names: list[str],
+    ) -> list[str]:
+        """Resolve a possessive-pronoun relationship to a discourse owner.
+
+        Do not choose the nearest noun blindly. In text such as
+        ``a sentient AI his father had created``, ``AI`` is the object of the
+        relative clause, while ``his`` refers back to the established protagonist.
+        A canonical noun phrase immediately introduced by ``a/an/the`` before the
+        pronoun is therefore excluded as the possessor candidate.
+        """
+        # Allow the antecedent to be established in the immediately preceding
+        # sentence, but keep the window bounded so distant characters do not
+        # become accidental owners.
+        window_start = max(0, match.start() - 420)
+        prefix = story[window_start:match.start()]
+        candidates: list[tuple[int, str]] = []
+        for canonical in canonical_names:
+            canonical = str(canonical or "").strip()
+            if not canonical:
+                continue
+            for occurrence in re.finditer(
+                re.escape(canonical), prefix, flags=re.IGNORECASE
+            ):
+                occ_end = occurrence.end()
+                local_before = prefix[max(0, occurrence.start() - 80):occurrence.start()]
+                # Exclude the head of an indefinite/definite noun phrase directly
+                # preceding the possessive pronoun, e.g. ``a sentient AI his``.
+                if re.search(
+                    r"\b(?:a|an|the)\s+(?:[a-z][a-z'-]+\s+){0,5}$",
+                    local_before,
+                    flags=re.IGNORECASE,
+                ):
+                    continue
+                between = prefix[occ_end:]
+                if len(between.split()) > 10:
+                    continue
+                candidates.append((occurrence.start(), canonical))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        unique = []
+        seen = set()
+        for _, name in candidates:
+            key = EntityResolver.normalize(name)
+            if key not in seen:
+                unique.append(name)
+                seen.add(key)
+        return unique[:2]
+
+    @classmethod
+    def _descriptive_identity_is_grounded(
+        cls,
+        story: str,
+        name: str,
+    ) -> bool:
+        normalized = EntityResolver.normalize(name).strip()
+        if not normalized:
+            return False
+        tokens = normalized.split()
+        if len(tokens) < 2:
+            return False
+        core = normalized
+        if core.startswith("the "):
+            core = core[4:]
+        if core.startswith("a "):
+            core = core[2:]
+        if core.startswith("an "):
+            core = core[3:]
+        role_tokens = cls.DESCRIPTIVE_IDENTITY_ROLES
+        if not any(token in role_tokens for token in core.split()):
+            return False
+        # A descriptive identity must contain a qualifier beyond the bare role.
+        if len(core.split()) == 1:
+            return False
+        story_norm = re.sub(r"[^a-z0-9]+", " ", str(story or "").lower()).strip()
+        name_norm = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
+        if name_norm in story_norm.split():
+            return False
+        return bool(re.search(r"\b" + re.escape(name_norm) + r"\b", story_norm))
+
+    @classmethod
+    def _hard_named_source_evidence(cls, story: str, name: str) -> bool:
+        """Return True only for explicit source labels that should survive a Qwen negative."""
+        story = str(story or "")
+        core = re.sub(
+            r"^(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+",
+            "", str(name or "").strip(), flags=re.IGNORECASE
+        ).strip()
+        if not core:
+            return False
+        patterns = [
+            rf"\b(?:named|called)\s+{re.escape(core)}\b",
+            rf"\b(?:nameplate|name tag|badge|plaque)\b[^:;.!?]{{0,90}}[:\-]\s*(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s*{re.escape(core)}\b",
+        ]
+        return any(re.search(pattern, story, flags=re.IGNORECASE) for pattern in patterns)
 
     @classmethod
     def _relational_candidate_is_grounded(
@@ -2606,21 +2732,16 @@ class ProductionPlanner:
         )
 
         pronoun_relation = False
-        for surface in raw_aliases:
-            normalized = EntityResolver.normalize(surface)
-            parts = normalized.split()
-            if len(parts) != 2 or parts[0] not in {"his", "her", "their"} or parts[1] != relationship:
-                continue
-            for owner_match in re.finditer(re.escape(owner), story, flags=re.IGNORECASE):
-                window = story[owner_match.end():owner_match.end() + 420]
-                if re.search(
-                    r"\b" + re.escape(parts[0]) + r"\s+" + re.escape(relationship) + r"\b",
-                    window,
-                    flags=re.IGNORECASE,
-                ):
-                    pronoun_relation = True
-                    break
-            if pronoun_relation:
+        pronoun_pattern = re.compile(
+            r"\b(his|her|their)\s+" + re.escape(relationship) + r"\b",
+            flags=re.IGNORECASE,
+        )
+        for pronoun_match in pronoun_pattern.finditer(story):
+            owners = cls._pronoun_relation_owner_candidates(
+                story, pronoun_match, [owner]
+            )
+            if owners and EntityResolver.normalize(owners[0]) == EntityResolver.normalize(owner):
+                pronoun_relation = True
                 break
 
         grounded = bool(exact_pair or of_form or alias_anchor or pronoun_relation)
@@ -2660,6 +2781,7 @@ class ProductionPlanner:
         canonical_names: list[str],
         semantic_result,
         relational_hints: list[dict] | None = None,
+        descriptive_hints: list[str] | None = None,
     ) -> dict[str, dict]:
         """Return validated semantic identity metadata keyed by canonical name."""
         result: dict[str, dict] = {}
@@ -2687,6 +2809,32 @@ class ProductionPlanner:
                 )
                 if valid and canonical:
                     result[EntityResolver.normalize(canonical)] = metadata
+                continue
+
+            if identity_type == "descriptive_character":
+                name = str(raw.get("name", "") or "").strip()
+                aliases = [
+                    str(alias or "").strip()
+                    for alias in (raw.get("aliases", []) or [])
+                    if str(alias or "").strip()
+                ]
+                candidate = name or (aliases[0] if aliases else "")
+                if not cls._descriptive_identity_is_grounded(story, candidate):
+                    continue
+                if name and cls._descriptive_identity_is_grounded(story, name):
+                    canonical = name
+                else:
+                    canonical = candidate
+                safe_aliases = []
+                for alias in aliases:
+                    if EntityResolver.is_safe_semantic_reference(alias) or EntityResolver.generic_role_surface(alias):
+                        safe_aliases.append(alias)
+                result[EntityResolver.normalize(canonical)] = {
+                    "identity_type": "descriptive_character",
+                    "relationship_to": None,
+                    "relationship": None,
+                    "semantic_aliases": list(dict.fromkeys(safe_aliases)),
+                }
                 continue
 
             entity_type = str(raw.get("entity_type", "") or "").strip().upper()
@@ -2838,6 +2986,14 @@ class ProductionPlanner:
             story,
             descriptors,
         )
+        deterministic_hard_named = [
+            name for name in descriptors
+            if self._hard_named_source_evidence(story, name)
+        ]
+        deterministic_descriptive = [
+            name for name in descriptors
+            if self._descriptive_identity_is_grounded(story, name)
+        ]
         semantic_roster_authoritative = False
         semantic_result_final = None
 
@@ -2930,7 +3086,7 @@ class ProductionPlanner:
                 ]
                 deterministic_high_confidence_norm = {
                     EntityResolver.normalize(name) for name in deterministic_high_confidence
-                }
+                } | {EntityResolver.normalize(name) for name in deterministic_hard_named} | {EntityResolver.normalize(name) for name in deterministic_descriptive}
                 relation_norms = {
                     EntityResolver.normalize(str(item.get("name", "") or ""))
                     for item in relational_hints
@@ -3051,6 +3207,27 @@ class ProductionPlanner:
                 descriptors.append(canonical)
                 existing_norms.add(key)
 
+        for canonical in [*deterministic_hard_named, *deterministic_descriptive]:
+            key = EntityResolver.normalize(canonical)
+            if canonical and key not in existing_norms:
+                descriptors.append(canonical)
+                existing_norms.add(key)
+
+        descriptive_hints = [
+            name for name in descriptors
+            if self._descriptive_identity_is_grounded(story, name)
+        ]
+        hard_named = [
+            name for name in descriptors
+            if self._hard_named_source_evidence(story, name)
+        ]
+        existing_norms = {EntityResolver.normalize(value) for value in descriptors}
+        for canonical in [*descriptive_hints, *hard_named]:
+            key = EntityResolver.normalize(canonical)
+            if key and key not in existing_norms:
+                descriptors.append(canonical)
+                existing_norms.add(key)
+
         descriptors = self._canonicalize_character_descriptors(descriptors)
         if not descriptors:
             return []
@@ -3060,6 +3237,7 @@ class ProductionPlanner:
             descriptors,
             semantic_result_final,
             relational_hints,
+            descriptive_hints,
         )
         self._semantic_character_metadata_cache = metadata
 
@@ -3078,17 +3256,33 @@ class ProductionPlanner:
                     for value in (info.get("semantic_aliases", []) or [])
                     if str(value).strip()
                 ]
-                character.identity_type = identity_type if identity_type in {"named_character", "relational_character"} else "named_character"
+                character.identity_type = identity_type if identity_type in {"named_character", "relational_character", "descriptive_character"} else "named_character"
                 character.relationship_to = str(info.get("relationship_to", "") or "").strip() or None
                 character.relationship = str(info.get("relationship", "") or "").strip() or None
                 character.semantic_aliases = list(dict.fromkeys(aliases))
-                if character.identity_type == "relational_character" and (not character.relationship_to or not character.relationship):
-                    # A malformed semantic candidate never becomes a relational identity.
-                    character.identity_type = "named_character"
-                    character.relationship_to = None
-                    character.relationship = None
-                    character.semantic_aliases = []
-                character.build_identity_profile()
+            elif EntityResolver.normalize(descriptor) in {EntityResolver.normalize(value) for value in descriptive_hints}:
+                character.identity_type = "descriptive_character"
+                core = descriptor.strip()
+                for article in ("the ", "a ", "an "):
+                    if core.lower().startswith(article):
+                        core = core[len(article):]
+                        break
+                role_alias = next((token for token in core.lower().split() if token in self.DESCRIPTIVE_IDENTITY_ROLES), "")
+                character.semantic_aliases = [role_alias] if role_alias else []
+                character.relationship_to = None
+                character.relationship = None
+            if character.identity_type == "relational_character" and (not character.relationship_to or not character.relationship):
+                # A malformed semantic candidate never becomes a relational identity.
+                character.identity_type = "named_character"
+                character.relationship_to = None
+                character.relationship = None
+                character.semantic_aliases = []
+            if character.identity_type == "descriptive_character" and not self._descriptive_identity_is_grounded(story, descriptor):
+                character.identity_type = "named_character"
+                character.relationship_to = None
+                character.relationship = None
+                character.semantic_aliases = []
+            character.build_identity_profile()
             characters.append(character)
 
         self.references.resolve_characters(characters)
