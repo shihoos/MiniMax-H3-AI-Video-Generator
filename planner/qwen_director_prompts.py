@@ -479,7 +479,8 @@ class QwenDirectorPromptMixin:
     Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
     "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a named_character.
     They may appear only as aliases/surface descriptions of a grounded relational_character when the story clearly
-    establishes which persistent character they refer to.
+    establishes which persistent character they refer to. Relationship surfaces such as "father", "uncle",
+    "his father", or "the man" are semantic references, not new canonical entities.
 
     Do NOT invent a relationship or identity. For a relational_character, relationship_to MUST name a canonical
     character actually grounded in the story, relationship MUST be one concrete family/role relation, and the
@@ -547,6 +548,8 @@ class QwenDirectorPromptMixin:
     Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
     relationship is explicitly or unambiguously established by the story. Bare generic role labels remain non-characters.
     Preserve grounded aliases without turning the alias itself into another canonical person.
+    A strongly story-grounded relational character must not be removed merely because a generic role label
+    was classified negatively; explicit source evidence outranks a weak generic-role negative.
     """).strip()
         payload = json.dumps(
             {
