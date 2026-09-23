@@ -119,13 +119,20 @@ class ProductionPlanStore:
         result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         plan = cls.load_unlocked(path)
+        normalized_status = str(status or "unknown").strip().lower()
         plan["job_id"] = str(job_id)
-        plan["job_status"] = str(status)
+        plan["job_status"] = normalized_status
         plan["job_error"] = str(error or "")
-        if isinstance(result, dict):
+        if normalized_status != "completed":
+            plan.pop("job_result", None)
+            plan.pop("final_video", None)
+        elif isinstance(result, dict):
             plan["job_result"] = dict(result)
-            if result.get("final_video"):
-                plan["final_video"] = result["final_video"]
+            final_video = str(result.get("final_video", "") or "").strip()
+            if final_video:
+                plan["final_video"] = final_video
+            else:
+                plan.pop("final_video", None)
         cls.atomic_save_unlocked(path, plan)
         return plan
 
