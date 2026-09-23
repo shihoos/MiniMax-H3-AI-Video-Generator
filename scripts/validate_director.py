@@ -392,6 +392,60 @@ def test_qwen_cache_generation_contract():
     _assert(first != third, "max_tokens must participate in Qwen cache key")
 
 
+def test_dialogue_source_preserved_through_timeline():
+    from pipeline.dialogue_timeline import DialogueTimeline
+
+    plan = {
+        "story": "Eli met his father in the vault.",
+        "dialogue_language": "English",
+        "characters": [
+            {"name": "Eli", "character_id": "char_eli"},
+            {"name": "Eli's father", "character_id": "char_father"},
+        ],
+        "shots": [
+            {
+                "shot_id": "scene_001_shot_001",
+                "scene_id": "scene_001",
+                "characters": ["Eli", "Eli's father"],
+                "duration_seconds": 5.2,
+                "dialogue_events": [
+                    {
+                        "speaker": "Eli's father",
+                        "text": "You should not be here.",
+                        "continues_from_previous_shot": False,
+                        "continues_to_next_shot": False,
+                    },
+                    {
+                        "speaker": "Eli",
+                        "text": "Who are you?",
+                        "continues_from_previous_shot": False,
+                        "continues_to_next_shot": False,
+                    },
+                ],
+            }
+        ],
+    }
+
+    timeline = DialogueTimeline(plan["characters"])
+    source = timeline.snapshot_source_dialogue(plan)
+    _assert(len(source["scene_001_shot_001"]) == 2, "source dialogue snapshot lost an event")
+    timeline.apply_to_plan(plan)
+    timeline.assert_source_dialogue_preserved(plan, source)
+
+    final_events = plan["shots"][0]["dialogue_events"]
+    _assert(len(final_events) == 2, f"dialogue event count changed: {final_events}")
+    _assert(
+        [event["text"] for event in final_events]
+        == ["You should not be here.", "Who are you?"],
+        "dialogue text changed during deterministic scheduling",
+    )
+    _assert(
+        [event["speaker_name"] for event in final_events]
+        == ["Eli's father", "Eli"],
+        "canonical dialogue speakers were not preserved",
+    )
+
+
 def test_disabled_director_path():
     from planner.qwen_director import QwenDirector
 
@@ -528,6 +582,7 @@ def main():
         test_descriptive_or_relational_speaker_repairs_scene_and_shot_binding,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
+        test_dialogue_source_preserved_through_timeline,
         test_disabled_director_path,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
