@@ -202,9 +202,25 @@ class QwenDirector(
                 and str(character.get("name", "")).strip()
             }
             if scenes and shots:
+                normalized_shots = []
+                shots_by_scene = {}
+                for raw_shot in shots:
+                    if isinstance(raw_shot, dict):
+                        shots_by_scene.setdefault(str(raw_shot.get("scene_id", "")).strip(), []).append(raw_shot)
+                for scene in scenes:
+                    if not isinstance(scene, dict):
+                        continue
+                    scene_id = str(scene.get("scene_id", "")).strip()
+                    normalized_shots.extend(
+                        self._sanitize_shots(
+                            shots_by_scene.get(scene_id, []),
+                            scene,
+                            characters,
+                        )
+                    )
                 plan["shots"] = CinematicCompiler(
                     character_names=characters
-                ).compile_all(scenes, shots)
+                ).compile_all(scenes, normalized_shots)
 
             return {
                 "enabled": False,
