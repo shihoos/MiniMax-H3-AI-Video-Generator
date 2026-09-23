@@ -182,8 +182,8 @@ class Character:
                 if profile_value and not getattr(self, field_name):
                     setattr(self, field_name, profile_value)
 
-        if self.identity_type not in {"named_character", "relational_character"}:
-            raise ValueError("identity_type must be 'named_character' or 'relational_character'.")
+        if self.identity_type not in {"named_character", "relational_character", "descriptive_character"}:
+            raise ValueError("identity_type must be 'named_character', 'relational_character', or 'descriptive_character'.")
         if self.identity_type == "relational_character" and (not self.relationship_to or not self.relationship):
             raise ValueError("relational_character requires relationship_to and relationship.")
         self.identity_profile.update({
