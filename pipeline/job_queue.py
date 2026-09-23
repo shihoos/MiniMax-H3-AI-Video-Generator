@@ -14,6 +14,7 @@ class ProductionJobQueue:
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path).resolve()
+        self.last_reconciliation_errors: list[str] = []
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         with self._connect() as conn:
@@ -110,14 +111,14 @@ class ProductionJobQueue:
             cur = conn.execute("UPDATE jobs SET status='queued', updated_at=?, worker_token=NULL, lease_expires_at=NULL, heartbeat_at=NULL WHERE status='running' AND ((lease_expires_at IS NULL AND updated_at < ?) OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))", (now, cutoff, now))
             return int(cur.rowcount)
     def reconcile_plan_states(self, plan_store) -> int:
-        """Reconcile materialized plan job state from the authoritative queue rows.
+        """Materialize authoritative SQLite job state into plan JSON atomically.
 
-        SQLite remains the durable job-state authority; plan JSON is a materialized
-        UI/render view. Reconciliation is idempotent and safe after a crash between
-        queue and plan persistence.
+        Queue rows are authoritative. Reconciliation uses ProductionPlanStore's
+        single job-state transition path so stale final_video/job_result values are
+        cleared when a completed job is requeued, retried, or failed.
         """
-        from contextlib import nullcontext
         changed = 0
+        errors: list[str] = []
         with self._connect() as conn:
             rows = [dict(row) for row in conn.execute("SELECT * FROM jobs ORDER BY created_at").fetchall()]
         for row in rows:
@@ -126,30 +127,25 @@ class ProductionJobQueue:
                 continue
             try:
                 with plan_store.lock(plan_path):
-                    plan = plan_store.load_unlocked(plan_path)
-                    expected = {
-                        "job_id": str(row["job_id"]),
-                        "job_status": str(row["status"]),
-                    }
-                    if row.get("error"):
-                        expected["job_error"] = str(row["error"])
-                    elif "job_error" in plan:
-                        expected["job_error"] = ""
+                    before = plan_store.load_unlocked(plan_path)
+                    result = {}
                     if row.get("result_json"):
-                        try:
-                            result = json.loads(row["result_json"])
-                        except Exception:
-                            result = {}
-                        if isinstance(result, dict):
-                            if result.get("final_video"):
-                                expected["final_video"] = result["final_video"]
-                            expected["job_result"] = result
-                    changed_here = any(plan.get(k) != v for k, v in expected.items())
-                    if changed_here:
-                        plan.update(expected)
-                        plan_store.atomic_save_unlocked(plan_path, plan)
+                        parsed = json.loads(row["result_json"])
+                        if isinstance(parsed, dict):
+                            result = parsed
+                    after = plan_store.set_job_state_unlocked(
+                        plan_path,
+                        job_id=str(row.get("job_id", "")),
+                        status=str(row.get("status", "unknown")),
+                        error=str(row.get("error", "") or ""),
+                        result=result,
+                    )
+                    if before != after:
                         changed += 1
-            except Exception:
-                continue
+            except Exception as exc:
+                errors.append(f"{plan_path}: {exc}")
+        self.last_reconciliation_errors = errors
+        if errors:
+            print("[JOB QUEUE] reconciliation warnings:", *errors, sep="\n", flush=True)
         return changed
 
