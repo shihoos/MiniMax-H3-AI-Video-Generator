@@ -1138,6 +1138,7 @@ class QwenDirector(
         # CinematicCompiler can never embed invalid speech into h3_prompt.
         self._normalize_dialogue_speakers(
             story,
+            scenes,
             all_shots,
             characters,
         )
@@ -1406,6 +1407,7 @@ class QwenDirector(
     def _normalize_dialogue_speakers(
         self,
         story: str,
+        scenes: list[dict],
         shots: list[dict],
         characters: list[dict],
     ) -> None:
@@ -1418,6 +1420,12 @@ class QwenDirector(
         ]
         if not allowed_names:
             return
+
+        scene_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in (scenes or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "") or "").strip()
+        }
 
         canonical_by_norm = {name.lower(): name for name in allowed_names}
         aliases = EntityResolver.build_character_alias_map(characters)
@@ -1573,6 +1581,21 @@ class QwenDirector(
                         if normalized_speaker not in existing_norm:
                             shot_characters.append(canonical)
                         bound.add(normalized_speaker)
+
+                        scene_id = str(shot.get("scene_id", "") or "").strip()
+                        scene = scene_by_id.get(scene_id)
+                        if scene is not None:
+                            scene_characters = scene.get("characters", [])
+                            if not isinstance(scene_characters, list):
+                                scene_characters = list(scene_characters or [])
+                                scene["characters"] = scene_characters
+                            scene_norms = {
+                                EntityResolver.normalize(str(value or ""))
+                                for value in scene_characters
+                                if str(value or "").strip()
+                            }
+                            if normalized_speaker not in scene_norms:
+                                scene_characters.append(canonical)
                     else:
                         # The line is real speech and the identity is canonical, but
                         # Qwen bound it to a character that is not present in this
