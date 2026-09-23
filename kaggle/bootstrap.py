@@ -750,51 +750,180 @@ def _purge_pillow_filesystem() -> int:
     print(f"[PILLOW CLEAN] roots={len(roots)} removed_components={removed}")
     return removed
 
+def _pillow_install_root() -> Path:
+    """Resolve the package root that a fresh worker interpreter uses first."""
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "print('\\n'.join(str(p) for p in sys.path if p))"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    candidates: list[Path] = []
+    for value in probe.stdout.splitlines():
+        try:
+            path = Path(value).expanduser().resolve()
+        except OSError:
+            continue
+        if path.is_dir() and path.name in {"site-packages", "dist-packages"}:
+            if path not in candidates:
+                candidates.append(path)
+
+    if not candidates:
+        raise RuntimeError("Could not resolve the active Python package root for Pillow.")
+
+    # Prefer the root that currently exposes the PIL package, matching the
+    # worker's normal import resolution order.
+    active = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import importlib.util; "
+                "s=importlib.util.find_spec('PIL'); "
+                "print(s.submodule_search_locations.__iter__().__next__() if s and s.submodule_search_locations else '')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    active_line = (active.stdout or "").strip()
+    if active_line:
+        try:
+            active_root = Path(active_line).expanduser().resolve().parent
+            if active_root.name in {"site-packages", "dist-packages"}:
+                return active_root
+        except OSError:
+            pass
+
+    return candidates[0]
+
+
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
-    """Install the exact locked Pillow version from a truly clean tree."""
+    """Materialize the exact Pillow wheel into a staging tree, replace the active PIL tree, and verify the worker-visible import."""
     pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
     if not pillow_version:
         raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
 
-    removed = _purge_pillow_filesystem()
+    install_root = _pillow_install_root()
+    staging_root = ROOT / ".runtime_kaggle" / f"pillow-staging-{pillow_version}"
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+    staging_root.mkdir(parents=True, exist_ok=True)
+
+    print("[PILLOW] active install root:", install_root)
+    print("[PILLOW] staging root:", staging_root)
+
+    # First build a complete wheel installation in isolation. We verify the
+    # staged source before touching the active Python environment.
     run(
-        sys.executable, "-m", "pip", "install",
-        "--no-cache-dir", "--ignore-installed", "--no-deps",
-        "-q", "--disable-pip-version-check", f"Pillow=={pillow_version}",
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--disable-pip-version-check",
+        "--ignore-installed",
+        "--no-deps",
+        "--target",
+        str(staging_root),
+        f"Pillow=={pillow_version}",
     )
 
-    verify_script = """
-from pathlib import Path
-import PIL
-from PIL import Image, ImageText
-from PIL import _typing
-from PIL._typing import _Ink
-pil_root = Path(PIL.__path__[0]).resolve()
-expected = __EXPECTED_PILLOW__
-assert PIL.__version__ == expected, (PIL.__version__, expected)
-assert Image.__version__ == PIL.__version__
-for module in (Image, ImageText, _typing):
-    assert Path(module.__file__).resolve().parent == pil_root, (module.__name__, module.__file__, pil_root)
-assert getattr(_typing, "_Ink", None) is _Ink
-assert getattr(ImageText, "_Ink", None) is _Ink
-print("Pillow", PIL.__version__, "OK")
-print("PIL", PIL.__file__)
-print("Image", Image.__file__)
-print("ImageText", ImageText.__file__)
-print("_typing", _typing.__file__)
-print("_Ink", _Ink)
-""".replace("__EXPECTED_PILLOW__", repr(pillow_version))
+    staged_typing = staging_root / "PIL" / "_typing.py"
+    staged_init = staging_root / "PIL" / "__init__.py"
+    if not staged_typing.is_file() or not staged_init.is_file():
+        raise RuntimeError("Pillow staging tree is incomplete: PIL/_typing.py or PIL/__init__.py is missing.")
 
-    verification = subprocess.run([sys.executable, "-c", verify_script], capture_output=True, text=True, check=False)
+    staged_typing_text = staged_typing.read_text(encoding="utf-8")
+    if "_Ink = float | tuple[int, ...] | str" not in staged_typing_text:
+        raise RuntimeError(
+            "The Pillow 12.3.0 wheel staged by pip does not contain the expected _Ink definition. "
+            f"Staged file: {staged_typing}"
+        )
+
+    # Remove every active copy/metadata first. This avoids mixed trees when
+    # pip's recorded-file state is already inconsistent.
+    removed = _purge_pillow_filesystem()
+
+    install_root.mkdir(parents=True, exist_ok=True)
+    active_pil = install_root / "PIL"
+    active_libs = install_root / "Pillow.libs"
+    if active_pil.exists() or active_pil.is_symlink():
+        if active_pil.is_dir() and not active_pil.is_symlink():
+            shutil.rmtree(active_pil)
+        else:
+            active_pil.unlink(missing_ok=True)
+    if active_libs.exists() or active_libs.is_symlink():
+        if active_libs.is_dir() and not active_libs.is_symlink():
+            shutil.rmtree(active_libs)
+        else:
+            active_libs.unlink(missing_ok=True)
+
+    shutil.copytree(staging_root / "PIL", active_pil)
+    if (staging_root / "Pillow.libs").exists():
+        shutil.copytree(staging_root / "Pillow.libs", active_libs)
+
+    for metadata in staging_root.glob("Pillow-*.dist-info"):
+        destination = install_root / metadata.name
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(metadata, destination)
+
+    # Fresh-process verification is the authoritative check because ComfyUI
+    # workers are also fresh Python processes. Confirm the exact origin path,
+    # version and _Ink symbol they will import.
+    verify_script = f"""
+from pathlib import Path
+import importlib.util
+import sys
+import PIL
+from PIL import Image, ImageText, _typing
+from PIL._typing import _Ink
+expected = {pillow_version!r}
+pil_root = Path(PIL.__path__[0]).resolve()
+typing_path = Path(_typing.__file__).resolve()
+image_path = Path(Image.__file__).resolve()
+image_text_path = Path(ImageText.__file__).resolve()
+assert PIL.__version__ == expected, (PIL.__version__, expected)
+assert pil_root == Path({str(active_pil)!r}).resolve(), (pil_root, {str(active_pil)!r})
+assert typing_path.parent == pil_root, (typing_path, pil_root)
+assert image_path.parent == pil_root, (image_path, pil_root)
+assert image_text_path.parent == pil_root, (image_text_path, pil_root)
+assert getattr(_typing, '_Ink', None) is _Ink
+assert '_Ink = float | tuple[int, ...] | str' in typing_path.read_text(encoding='utf-8')
+print('Pillow', PIL.__version__, 'OK')
+print('PIL', PIL.__file__)
+print('_typing', _typing.__file__)
+print('_Ink', _Ink)
+print('sys.path[0:6]')
+for value in sys.path[:6]:
+    print(value)
+"""
+    verification = subprocess.run(
+        [sys.executable, "-c", verify_script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if verification.returncode != 0:
         raise RuntimeError(
-            "Final Pillow runtime verification failed after clean reinstall.\n"
-            f"The locked Pillow {pillow_version} install is not internally consistent.\n"
+            "Final Pillow worker-runtime verification failed.\n"
+            f"active_root={install_root}\n"
             f"purged_components={removed}\n"
             f"stdout={verification.stdout!r}\n"
-            f"stderr={verification.stderr!r}\n"
+            f"stderr={verification.stderr!r}"
         )
+
     print("[PILLOW]", (verification.stdout or "").strip())
+    shutil.rmtree(staging_root, ignore_errors=True)
 
 def verify_final_shared_runtime(runtime: dict) -> None:
     """Verify the final shared Python/GPU runtime after every package installer finishes."""
