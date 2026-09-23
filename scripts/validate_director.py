@@ -158,6 +158,93 @@ def test_explicit_adjudicated_negative_is_respected_when_other_characters_remain
     _assert(names == ["Lin Mei"], f"complete adjudicator negative was not respected: {names}")
 
 
+def test_relational_character_survives_generic_negative_and_resolves_dialogue():
+    from planner.production_planner import ProductionPlanner
+    from planner.qwen_director import QwenDirector
+
+    story = (
+        "Eli entered the vault. His father had disappeared years ago. "
+        "A voice said, \"You should not be here.\" Eli turned and saw an older man. "
+        "The man stepped forward, revealing his father's face. "
+        "\"I was trying to protect you.\""
+    )
+    planner = ProductionPlanner(ROOT)
+
+    def extractor(*_args):
+        return {"candidates": [{
+            "name": "Eli", "entity_type": "PERSON", "is_character": True,
+            "aliases": [], "identity_type": "named_character",
+            "relationship_to": "", "relationship": "",
+        }, {
+            "name": "Eli's father", "entity_type": "CHARACTER", "is_character": False,
+            "aliases": ["his father", "man"], "identity_type": "relational_character",
+            "relationship_to": "Eli", "relationship": "father",
+        }]}
+
+    def adjudicator(*_args):
+        return {"candidates": [{
+            "name": "Eli", "entity_type": "PERSON", "is_character": True,
+            "aliases": [], "identity_type": "named_character",
+            "relationship_to": "", "relationship": "",
+        }, {
+            "name": "Eli's father", "entity_type": "CHARACTER", "is_character": False,
+            "aliases": ["his father", "man"], "identity_type": "relational_character",
+            "relationship_to": "Eli", "relationship": "father",
+        }]}
+
+    characters = planner.create_characters(
+        story, qwen_character_extractor=extractor, qwen_character_adjudicator=adjudicator
+    )
+    names = [c.name for c in characters]
+    _assert("Eli's father" in names and "man" not in names and "All" not in names,
+            f"generic role leaked into canonical roster or relational identity was lost: {names}")
+
+    payload = [c.to_dict() for c in characters]
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "dialogue_events": [{
+            "speaker": "man",
+            "text": "You should not be here.",
+            "continues_from_previous_shot": False,
+            "continues_to_next_shot": False,
+        }],
+        "speaking_characters": ["man"],
+        "speech_text": "You should not be here.",
+    }]
+    director._normalize_dialogue_speakers(story, scenes, shots, payload)
+    event = shots[0]["dialogue_events"][0]
+    _assert(event["speaker"] == "Eli's father", f"generic dialogue speaker did not resolve: {event}")
+    _assert("Eli's father" in shots[0]["characters"], f"shot binding missing relational speaker: {shots[0]['characters']}")
+    _assert("Eli's father" in scenes[0]["characters"], f"scene binding missing relational speaker: {scenes[0]['characters']}")
+
+
+def test_generic_relationship_speakers_resolve_for_uncle_and_father():
+    from planner.entity_resolver import EntityResolver
+    characters = [{
+        "name": "Eli's uncle",
+        "identity_type": "relational_character",
+        "relationship_to": "Eli",
+        "relationship": "uncle",
+        "semantic_aliases": [],
+    }]
+    story = "Eli's uncle entered the room. The uncle spoke to Eli while the older man watched."
+    _assert(EntityResolver.contextual_generic_alias("uncle", characters, story=story) == "Eli's uncle",
+            "bare relationship speaker 'uncle' did not resolve")
+    _assert(EntityResolver.contextual_generic_alias("father", [{
+        "name": "Eli's father",
+        "identity_type": "relational_character",
+        "relationship_to": "Eli",
+        "relationship": "father",
+        "semantic_aliases": [],
+    }], story="Eli met his father. The father spoke.") == "Eli's father",
+            "bare relationship speaker 'father' did not resolve")
+
+
 def test_sanitizer_identity_contract():
     from planner.qwen_director import QwenDirector
 
@@ -337,6 +424,8 @@ def main():
         test_semantic_partial_positive_is_adjudicated,
         test_semantic_negative_does_not_destroy_strong_deterministic_roster,
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
+        test_relational_character_survives_generic_negative_and_resolves_dialogue,
+        test_generic_relationship_speakers_resolve_for_uncle_and_father,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
