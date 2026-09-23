@@ -109,6 +109,10 @@ class ProductionCheckpoint:
             "quality_gate",
             "retake_recommended",
             "observed_visual_state",
+            "final_video",
+            "shot_outputs",
+            "job_result",
+            "completed_shot_ids",
         ):
             normalized.pop(key, None)
         return cls.digest_object(normalized)
