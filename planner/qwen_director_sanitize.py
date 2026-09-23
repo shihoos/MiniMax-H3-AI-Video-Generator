@@ -291,28 +291,13 @@ class QwenDirectorSanitizeMixin:
                                 [],
                             )
                         ),
-                    "semantic_aliases": self._coerce_list(
-                        value.get(
-                            "semantic_aliases",
-                            (value.get("identity_profile", {}) or {}).get("semantic_aliases", []),
-                        )
-                    ),
-                    "identity_type": str(
-                        value.get(
-                            "identity_type",
-                            (value.get("identity_profile", {}) or {}).get("identity_type", "named_character"),
-                        )
-                        or "named_character"
-                    ).strip(),
-                    "relationship_to": (
-                        str(
-                            value.get(
-                                "relationship_to",
-                                (value.get("identity_profile", {}) or {}).get("relationship_to", ""),
-                            )
-                            or ""
-                        ).strip() or None
-                    ),
+                    # Return the already-sanitized identity contract, not the
+                    # raw model fields.  This keeps top-level character metadata
+                    # exactly aligned with identity_profile after malformed
+                    # relational candidates are downgraded.
+                    "semantic_aliases": list(aliases),
+                    "identity_type": identity_type,
+                    "relationship_to": relationship_to,
                     "relationship": relationship,
                     "identity_profile": profile,
                 }
