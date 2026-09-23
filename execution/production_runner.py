@@ -847,6 +847,38 @@ class ProductionRunner:
 
                 if existing is not None:
 
+                    # Rehydrate all durable runtime state before a resumed shot is
+                    # used as the continuity predecessor. Without this merge, a
+                    # completed shot could be skipped while its observed visual
+                    # state / Context-IR provenance remained trapped in the
+                    # checkpoint, causing the next shot to lose continuity context.
+                    if isinstance(record, dict):
+                        for key in (
+                            "observed_visual_state",
+                            "h3_context_ir",
+                            "h3_effective_prompt",
+                            "h3_prompt",
+                            "visual_feedback",
+                            "visual_feedback_after_retake",
+                            "quality_gate",
+                            "quality_gate_after_retake",
+                            "retake_recommended",
+                            "retake_executed",
+                            "retake_execution",
+                            "audio_duration_seconds",
+                            "audio_duration_source",
+                            "retake_attempts",
+                            "max_auto_retries",
+                        ):
+                            if key in record:
+                                value = record[key]
+                                if isinstance(value, dict):
+                                    shot[key] = dict(value)
+                                elif isinstance(value, list):
+                                    shot[key] = list(value)
+                                else:
+                                    shot[key] = value
+
                     result = Path(
                         existing
                     )
@@ -1193,6 +1225,8 @@ class ProductionRunner:
                         shot["retake_execution"]["official_context_ir"] = dict(
                             retake_result.get("official_context_ir", {}) or {}
                         )
+                        if isinstance(retake_result.get("context_ir"), dict):
+                            shot["h3_context_ir"] = dict(retake_result["context_ir"])
                         if retake_result.get("h3_effective_prompt"):
                             shot["retake_execution"]["h3_effective_prompt"] = str(
                                 retake_result["h3_effective_prompt"]
@@ -1290,6 +1324,14 @@ class ProductionRunner:
                     "retake_executed": bool(shot.get("retake_executed", False)),
                     "retake_execution": dict(shot.get("retake_execution", {}) or {}),
                     "audio_duration_seconds": shot.get("audio_duration_seconds"),
+                    "audio_duration_source": str(shot.get("audio_duration_source", "") or ""),
+                    "h3_context_ir": dict(shot.get("h3_context_ir", {}) or {}),
+                    "h3_effective_prompt": str(shot.get("h3_effective_prompt", "") or ""),
+                    "h3_prompt": str(shot.get("h3_prompt", "") or ""),
+                    "quality_gate_after_retake": dict(shot.get("quality_gate_after_retake", {}) or {}),
+                    "visual_feedback_after_retake": dict(shot.get("visual_feedback_after_retake", {}) or {}),
+                    "retake_attempts": int(shot.get("retake_attempts", 0) or 0),
+                    "max_auto_retries": int(shot.get("max_auto_retries", 0) or 0),
                 }
                 completed_record = dict(completed_shots[shot_id])
 
@@ -1716,24 +1758,41 @@ class ProductionRunner:
                     f"planned shot count: {len(videos)} != {len(shots)}"
                 )
 
-            # Surface durable QA data back into the in-memory production plan
-            # without changing its canonical identity/topology.
+            # Surface all durable render state back into the in-memory production plan
+            # before the final manifest is generated. Identity/topology remain immutable.
             for planned in production_plan.get("shots", []) or []:
                 sid = str(planned.get("shot_id", "") or "").strip()
                 record = completed_shots.get(sid, {})
                 if isinstance(record, dict):
-                    for key in ("quality_gate", "retake_recommended"):
+                    for key in (
+                        "gpu_id",
+                        "observed_visual_state",
+                        "h3_context_ir",
+                        "h3_effective_prompt",
+                        "h3_prompt",
+                        "visual_feedback",
+                        "visual_feedback_after_retake",
+                        "quality_gate",
+                        "quality_gate_after_retake",
+                        "retake_recommended",
+                        "retake_executed",
+                        "retake_execution",
+                        "audio_duration_seconds",
+                        "audio_duration_source",
+                        "retake_attempts",
+                        "max_auto_retries",
+                    ):
                         if key in record:
-                            planned[key] = record[key]
+                            value = record[key]
+                            if isinstance(value, dict):
+                                planned[key] = dict(value)
+                            elif isinstance(value, list):
+                                planned[key] = list(value)
+                            else:
+                                planned[key] = value
 
             diagnostics_path = self.project_root / "data" / "production" / production_id / "runtime_diagnostics.json"
             production_plan["runtime_diagnostics"] = self.runtime_diagnostics.write(diagnostics_path)
-            final_manifest = self.production_manifest.write(
-                production_plan,
-                self.project_root / "data" / "production" / production_id / "production_manifest.json",
-                require_context_ir_results=True,
-            )
-            production_plan["production_manifest"] = final_manifest
 
             assembly_dir = (
                 self.project_root
@@ -1805,6 +1864,15 @@ class ProductionRunner:
                         f"expected={expected_duration:.3f}s actual={actual_duration:.3f}s "
                         f"tolerance={tolerance:.3f}s."
                     )
+
+            production_plan["final_video"] = str(final_video)
+            production_plan["shot_outputs"] = [str(path) for path in videos]
+            final_manifest = self.production_manifest.write(
+                production_plan,
+                self.project_root / "data" / "production" / production_id / "production_manifest.json",
+                require_context_ir_results=True,
+            )
+            production_plan["production_manifest"] = final_manifest
 
             self._update_render_checkpoint(
                 production_id,
