@@ -416,6 +416,7 @@ class QwenDirectorPromptMixin:
                                 "enum": [
                                     "named_character",
                                     "relational_character",
+                                    "descriptive_character",
                                 ],
                             },
                             "relationship_to": {
@@ -546,10 +547,16 @@ class QwenDirectorPromptMixin:
     Use `is_character=false` for NOT_CHARACTER or UNCERTAIN; there is no separate `decision` field.
     Use `entity_type=PERSON` and `identity_type=named_character` for named characters.
     Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
-    relationship is explicitly or unambiguously established by the story. Bare generic role labels remain non-characters.
+    relationship is explicitly or unambiguously established by the story.
+    Use `identity_type=descriptive_character` for a recurring unnamed person whose identity is grounded by a
+    distinctive description (for example, `the woman with piercing eyes`). The canonical descriptive name must
+    contain the distinguishing description; bare `man`/`woman`/`stranger` are never canonical identities.
     Preserve grounded aliases without turning the alias itself into another canonical person.
-    A strongly story-grounded relational character must not be removed merely because a generic role label
-    was classified negatively; explicit source evidence outranks a weak generic-role negative.
+    For possessive pronouns such as `his father`, follow the established discourse owner, not the nearest noun.
+    Example: in `a sentient AI his father had created`, do not invent `AI's father` unless the story explicitly
+    establishes that relationship; the pronoun must resolve from the previously established owner.
+    A strongly story-grounded named, relational, or descriptive character must not be removed merely because a
+    generic role label was classified negatively; explicit source evidence outranks a weak generic-role negative.
     """).strip()
         payload = json.dumps(
             {
