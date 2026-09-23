@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 from typing import Any
 
 from pipeline.context_ir import H3ContextIRCompiler
@@ -202,6 +203,7 @@ class RetakeExecutor:
         return {
             "output": stitched.resolve(),
             "replacement_video": replacement_video,
+            "context_ir": deepcopy(replacement_context_ir),
             "official_context_ir": dict(replacement_context_ir.get("official_context_ir", {}) or {}),
             "h3_effective_prompt": str(replacement.get("h3_effective_prompt", "") or ""),
             "start_seconds": start,
