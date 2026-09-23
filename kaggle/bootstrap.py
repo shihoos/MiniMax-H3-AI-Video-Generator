@@ -775,7 +775,8 @@ assert PIL.__version__ == expected, (PIL.__version__, expected)
 assert Image.__version__ == PIL.__version__
 for module in (Image, ImageText, _typing):
     assert Path(module.__file__).resolve().parent == pil_root, (module.__name__, module.__file__, pil_root)
-assert _Ink.__module__ == "PIL._typing"
+assert getattr(_typing, "_Ink", None) is _Ink
+assert getattr(ImageText, "_Ink", None) is _Ink
 print("Pillow", PIL.__version__, "OK")
 print("PIL", PIL.__file__)
 print("Image", Image.__file__)
@@ -790,7 +791,8 @@ print("_Ink", _Ink)
             "Final Pillow runtime verification failed after clean reinstall.\n"
             f"The locked Pillow {pillow_version} install is not internally consistent.\n"
             f"purged_components={removed}\n"
-            + (verification.stdout or "") + (verification.stderr or "")
+            f"stdout={verification.stdout!r}\n"
+            f"stderr={verification.stderr!r}\n"
         )
     print("[PILLOW]", (verification.stdout or "").strip())
 
@@ -872,7 +874,8 @@ assert str(PIL.__version__) == expected_pillow, (PIL.__version__, expected_pillo
 assert str(Image.__version__) == expected_pillow
 assert Image.__file__.startswith(PIL.__path__[0])
 assert ImageText.__file__.startswith(PIL.__path__[0])
-assert _Ink.__module__ == "PIL._typing"
+assert getattr(PIL._typing, "_Ink", None) is _Ink
+assert getattr(ImageText, "_Ink", None) is _Ink
 assert str(gradio.__version__) == expected_gradio
 major = int(str(transformers.__version__).split(".", 1)[0])
 assert 5 <= major < 6, transformers.__version__
