@@ -254,6 +254,7 @@ class EntityResolver:
 
         named_names = []
         relational_names = []
+        descriptive_names = []
         semantic_alias_owners: dict[str, set[str]] = {}
 
         for item in payloads:
@@ -267,8 +268,11 @@ class EntityResolver:
             ).strip().lower()
             normalized_name = cls.normalize(name)
             is_relational = identity_type == "relational_character"
+            is_descriptive = identity_type == "descriptive_character"
             if is_relational:
                 relational_names.append(name)
+            elif is_descriptive:
+                descriptive_names.append(name)
             elif normalized_name not in cls.GENERIC_ROLE_ALIASES and normalized_name not in cls.GENERIC_REFERENCES:
                 named_names.append(name)
             else:
@@ -286,14 +290,14 @@ class EntityResolver:
                 if alias in cls.PRONOUNS:
                     continue
                 generic_surface = cls.generic_role_surface(alias)
-                if not cls.is_safe_semantic_reference(alias) and not (is_relational and generic_surface):
+                if not cls.is_safe_semantic_reference(alias) and not ((is_relational or is_descriptive) and generic_surface):
                     continue
-                if generic_surface and not is_relational:
+                if generic_surface and not (is_relational or is_descriptive):
                     continue
                 semantic_alias_owners.setdefault(alias, set()).add(normalized_name)
 
         aliases = cls.build_alias_map(named_names)
-        for name in relational_names:
+        for name in [*relational_names, *descriptive_names]:
             normalized = cls.normalize(name)
             if normalized:
                 aliases[normalized] = normalized
@@ -344,7 +348,7 @@ class EntityResolver:
             name = str(item.get("name", "") or "").strip()
             profile = item.get("identity_profile") if isinstance(item.get("identity_profile"), dict) else {}
             identity_type = str(item.get("identity_type", profile.get("identity_type", "")) or "").strip().lower()
-            if identity_type != "relational_character":
+            if identity_type not in {"relational_character", "descriptive_character"}:
                 continue
             norm_name = cls.normalize(name)
             if bound and norm_name not in bound:
