@@ -2847,18 +2847,34 @@ class ProductionPlanner:
                     if not semantic_candidates:
                         semantic_candidates = list(semantic_result.get("characters", []) or [])
 
-                semantic_payload_usable = (
-                    isinstance(semantic_result, dict)
-                    and (
-                        isinstance(semantic_result.get("candidates"), list)
-                        or isinstance(semantic_result.get("characters"), list)
-                    )
-                )
-                semantic_roster_authoritative = semantic_payload_usable
+                # A correctly shaped but EMPTY semantic payload means that the
+                # semantic pass made no roster decision. It must not become an
+                # authoritative empty roster, otherwise a transient/weak Qwen
+                # response can erase a valid deterministic character roster.
+                # Explicit positive/negative decisions remain authoritative only
+                # when they identify a concrete candidate by name.
+                def _has_semantic_decision(payload) -> bool:
+                    if not isinstance(payload, dict):
+                        return False
+                    values = payload.get("candidates")
+                    if not isinstance(values, list):
+                        values = payload.get("characters")
+                    if not isinstance(values, list):
+                        return False
+                    for value in values:
+                        if isinstance(value, str) and value.strip():
+                            return True
+                        if isinstance(value, dict):
+                            name = str(value.get("name", "") or "").strip()
+                            if name:
+                                return True
+                    return False
 
-                true_semantic_count = 0
+                semantic_roster_authoritative = _has_semantic_decision(semantic_result)
+
                 invalid_positive = False
                 semantic_names = set()
+                semantic_decision_names = set()
 
                 for raw in semantic_candidates:
                     if isinstance(raw, str):
@@ -2871,7 +2887,9 @@ class ProductionPlanner:
                         }
                     if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                         continue
-                    true_semantic_count += 1
+                    candidate_name = str(raw.get("name", "") or "").strip()
+                    if candidate_name:
+                        semantic_decision_names.add(EntityResolver.normalize(candidate_name))
                     identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
                     entity_type = str(raw.get("entity_type", "") or "").strip().upper()
                     if identity_type == "relational_character":
@@ -2911,17 +2929,12 @@ class ProductionPlanner:
                 strong_relation_missing = any(
                     bool(item.get("strong"))
                     and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_names
+                    and EntityResolver.normalize(str(item.get("name", "") or "")) not in semantic_decision_names
                     for item in relational_hints
                 )
-
-                deterministic_high_confidence = [
-                    name for name in descriptors
-                    if self._high_confidence_deterministic_character(story, name)
-                ]
                 needs_adjudication = (
-                    not semantic_payload_usable
+                    not semantic_roster_authoritative
                     or invalid_positive
-                    or (true_semantic_count == 0 and bool(deterministic_high_confidence))
                     or strong_relation_missing
                 )
 
@@ -2935,15 +2948,23 @@ class ProductionPlanner:
                         adjudication_hints,
                         semantic_result,
                     )
-                    if (
-                        isinstance(adjudicated, dict)
-                        and (
-                            isinstance(adjudicated.get("candidates"), list)
-                            or isinstance(adjudicated.get("characters"), list)
-                        )
-                    ):
-                        semantic_result_final = adjudicated
-                        semantic_roster_authoritative = True
+                    if isinstance(adjudicated, dict):
+                        values = adjudicated.get("candidates")
+                        if not isinstance(values, list):
+                            values = adjudicated.get("characters")
+                        adjudicated_has_decision = False
+                        if isinstance(values, list):
+                            for value in values:
+                                if isinstance(value, str) and value.strip():
+                                    adjudicated_has_decision = True
+                                    break
+                                if isinstance(value, dict):
+                                    if str(value.get("name", "") or "").strip() or "is_character" in value:
+                                        adjudicated_has_decision = True
+                                        break
+                        if adjudicated_has_decision:
+                            semantic_result_final = adjudicated
+                            semantic_roster_authoritative = True
 
                 if semantic_roster_authoritative:
                     descriptors = self._reconcile_semantic_characters(
