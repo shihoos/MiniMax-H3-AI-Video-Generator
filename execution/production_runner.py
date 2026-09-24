@@ -1417,6 +1417,11 @@ class ProductionRunner:
         production_plan[
             "production_id"
         ] = production_id
+
+        # Initialize production-scoped continuity and identity-anchor state
+        # before any render/checkpoint path can consume it.
+        self._prepare_production_paths(production_id)
+
         self._active_story = str(production_plan.get("story", "") or "")
         self._active_plan = production_plan
         self._active_profile = str(production_plan.get("profile", PROFILE_BASE) or PROFILE_BASE).strip().lower()
