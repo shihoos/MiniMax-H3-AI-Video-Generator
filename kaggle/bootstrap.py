@@ -203,7 +203,7 @@ def link_model(
 
 def _h3_runtime_python() -> Path:
     configured = os.getenv("H3_RUNTIME_PYTHON", "").strip()
-    python = Path(configured).expanduser().resolve() if configured else H3_RUNTIME_PYTHON
+    python = Path(configured).expanduser() if configured else H3_RUNTIME_PYTHON
     if not python.is_file() or not os.access(python, os.X_OK):
         raise RuntimeError(
             "Locked H3 runtime Python is missing or not executable: "
@@ -311,7 +311,7 @@ def ensure_h3_runtime_python(runtime: dict) -> Path:
             + (isolation_probe.stdout or "")
             + (isolation_probe.stderr or "")
         )
-    python = existing_python.resolve()
+    python = existing_python
     os.environ["H3_RUNTIME_PYTHON"] = str(python)
     os.environ["H3_RUNTIME_ENV_DIR"] = str(H3_RUNTIME_ENV_DIR)
     print("[H3 RUNTIME] isolated Python PASS")
