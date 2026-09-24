@@ -254,13 +254,21 @@ def _write_h3_torch_constraints(expected_torch: str, expected_tv: str, expected_
     return H3_TORCH_CONSTRAINTS
 
 
-def _repair_cuda_python_pair(python: Path) -> None:
-    """Align cuda-python with the installed cuda-bindings distribution."""
+def _report_cuda_python_pair() -> None:
+    """Report Kaggle's host CUDA-Python metadata without mutating the host stack.
+
+    Kaggle ships CUDA-12 RAPIDS packages alongside the CUDA-13 Torch runtime.
+    Reinstalling ``cuda-python`` globally to match ``cuda-bindings`` breaks those
+    host packages, so this bootstrap deliberately does not rewrite the host
+    distribution. The Director runtime is isolated with system-site-packages and
+    may install its own matching CUDA-Python dependency there if vLLM requires it.
+    """
     import importlib.metadata as metadata
 
     try:
         bindings_version = metadata.version("cuda-bindings")
     except metadata.PackageNotFoundError:
+        print("[CUDA PYTHON] cuda-bindings not installed in host runtime; no action")
         return
     try:
         python_version = metadata.version("cuda-python")
@@ -268,23 +276,12 @@ def _repair_cuda_python_pair(python: Path) -> None:
         python_version = None
     if python_version == bindings_version:
         print(f"[CUDA PYTHON] cuda-python={python_version} cuda-bindings={bindings_version}: PASS")
-        return
-    print(
-        "[CUDA PYTHON] aligning cuda-python to installed cuda-bindings: "
-        f"cuda-python={python_version!r} -> {bindings_version!r}"
-    )
-    run(
-        python, "-m", "pip", "install", "-q",
-        "--disable-pip-version-check", "--no-cache-dir",
-        f"cuda-python=={bindings_version}",
-    )
-    observed = metadata.version("cuda-python")
-    if observed != bindings_version:
-        raise RuntimeError(
-            "cuda-python/cuda-bindings alignment failed: "
-            f"cuda-python={observed}, cuda-bindings={bindings_version}"
+    else:
+        print(
+            "[CUDA PYTHON] host metadata differs "
+            f"(cuda-python={python_version!r}, cuda-bindings={bindings_version!r}); "
+            "host stack left unchanged"
         )
-    print(f"[CUDA PYTHON] cuda-python={observed} cuda-bindings={bindings_version}: PASS")
 
 
 def install_base_requirements() -> None:
@@ -368,7 +365,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
         verify_companions()
         if not loaded_torch.cuda.is_available():
             raise RuntimeError("Live Kaggle Torch CUDA is unavailable.")
-        _repair_cuda_python_pair(python)
+        _report_cuda_python_pair()
         print(f"[PYTORCH LIVE] torch={actual_torch} cuda={actual_cuda} gpu_count={loaded_torch.cuda.device_count()}: PASS")
         return
 
@@ -392,7 +389,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("Torch CUDA is unavailable after installation.")
     verify_companions()
-    _repair_cuda_python_pair(python)
+    _report_cuda_python_pair()
     print(f"[PYTORCH LIVE] torch={actual_torch} cuda={actual_cuda} gpu_count={torch.cuda.device_count()}: PASS")
 
 
@@ -661,10 +658,35 @@ def install_director_runtime(
             shutil.rmtree(source_dir, ignore_errors=True)
 
         env_dir.parent.mkdir(parents=True, exist_ok=True)
-        run(sys.executable, "-m", "venv", "--system-site-packages", str(env_dir))
+        # Kaggle's /usr/bin/python3.12 does not provide ensurepip, so the
+        # standard ``python -m venv`` path fails during environment creation.
+        # ``--without-pip`` avoids ensurepip while ``--system-site-packages``
+        # preserves the project's existing locked Torch runtime inside the
+        # Director environment.  pip itself is already visible from the system
+        # site-packages and can therefore install only the Director-specific
+        # dependencies into this environment.
+        run(
+            sys.executable,
+            "-m",
+            "venv",
+            "--without-pip",
+            "--system-site-packages",
+            str(env_dir),
+        )
         env_python = env_dir / "bin" / "python"
         if not env_python.is_file():
             raise RuntimeError(f"Failed to create Director Python environment: {env_python}")
+        pip_probe = subprocess.run(
+            [str(env_python), "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if pip_probe.returncode != 0:
+            raise RuntimeError(
+                "Director environment has no usable pip without ensurepip; "
+                "the Kaggle system Python must expose pip through system-site-packages."
+            )
 
         run("git", "clone", "--depth", "1", "--branch", ref, "https://github.com/vllm-project/vllm.git", source_dir)
         use_existing = source_dir / "use_existing_torch.py"
@@ -673,11 +695,19 @@ def install_director_runtime(
         run(env_python, use_existing)
 
         build_requirements = source_dir / "requirements" / "build" / "cuda.txt"
-        run(env_python, "-m", "pip", "install", "-q", "--disable-pip-version-check", "--no-cache-dir", "-r", build_requirements)
+        run(
+            env_python, "-m", "pip", "install", "-q",
+            "--disable-pip-version-check", "--no-cache-dir",
+            "-c", H3_TORCH_CONSTRAINTS, "-r", build_requirements,
+        )
 
         runtime_requirements = source_dir / "requirements" / "cuda.txt"
         if runtime_requirements.is_file():
-            run(env_python, "-m", "pip", "install", "-q", "--disable-pip-version-check", "--no-cache-dir", "-r", runtime_requirements)
+            run(
+                env_python, "-m", "pip", "install", "-q",
+                "--disable-pip-version-check", "--no-cache-dir",
+                "-c", H3_TORCH_CONSTRAINTS, "-r", runtime_requirements,
+            )
 
         build_env = _configure_cuda_environment(_cuda_library_dirs())
         build_env["VLLM_TARGET_DEVICE"] = "cuda"
