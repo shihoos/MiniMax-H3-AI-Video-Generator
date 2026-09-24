@@ -4,13 +4,20 @@ import gc
 import os
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from pipeline.vram_profile import VRAMProfile, resolve_vram_profile
 from planner.config import RUNTIME
+
+
+def _isolated_python_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
 
 
 class H3Runtime:
@@ -25,7 +32,7 @@ class H3Runtime:
     def worker_python(project_root: Path) -> Path:
         configured = os.getenv("H3_RUNTIME_PYTHON", "").strip()
         if configured:
-            python = Path(configured).expanduser().resolve()
+            python = Path(configured).expanduser()
         else:
             python = Path(project_root).resolve().parent / ".h3_runtime_cu130" / "bin" / "python"
         if not python.is_file() or not os.access(python, os.X_OK):
@@ -55,6 +62,7 @@ class H3Runtime:
                     "print(':'.join(dirs))"
                 ),
             ],
+            env=_isolated_python_environment(),
             capture_output=True, text=True, check=False,
         )
         if probe.returncode != 0 or not probe.stdout.strip():
@@ -67,7 +75,7 @@ class H3Runtime:
 
     @classmethod
     def worker_environment(cls, gpu_id: int, *, extra_env: dict[str, str] | None = None) -> dict[str, str]:
-        env = os.environ.copy()
+        env = _isolated_python_environment()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         env["PYTORCH_CUDA_ALLOC_CONF"] = env.get(
             "PYTORCH_CUDA_ALLOC_CONF",
@@ -321,7 +329,7 @@ class H3Runtime:
             )
 
         worker_python = cls.worker_python(project_root)
-        probe_env = os.environ.copy()
+        probe_env = _isolated_python_environment()
         probe_env["H3_RUNTIME_PYTHON"] = str(worker_python)
         probe_env["H3_PROJECT_ROOT"] = str(project_root)
         probe_env["H3_LOCKED_TORCH_RUNTIME"] = "2.10.0+cu130"
