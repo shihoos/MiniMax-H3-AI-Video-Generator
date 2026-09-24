@@ -51,27 +51,25 @@ class H3Runtime:
         python = env_dir / "bin" / "python"
         if not python.is_file():
             raise RuntimeError(f"Locked H3 runtime Python is missing: {python}")
-        probe = subprocess.run(
-            [
-                python, "-c",
-                (
-                    "import site; from pathlib import Path; "
-                    "roots=[Path(x) for x in site.getsitepackages()]; dirs=[]; "
-                    "[dirs.append(str(p)) for r in roots for p in [r/'torch'/'lib'] if p.is_dir() and str(p) not in dirs]; "
-                    "[dirs.append(str(p)) for r in roots for p in (r/'nvidia').rglob('lib') if p.is_dir() and str(p) not in dirs]; "
-                    "print(':'.join(dirs))"
-                ),
-            ],
-            env=_isolated_python_environment(),
-            capture_output=True, text=True, check=False,
-        )
-        if probe.returncode != 0 or not probe.stdout.strip():
+        roots = sorted((env_dir / "lib").glob("python*/site-packages"))
+        if not roots:
+            raise RuntimeError(f"Locked H3 runtime site-packages are missing: {env_dir / 'lib'}")
+        dirs = []
+        for root in roots:
+            torch_lib = root / "torch" / "lib"
+            if torch_lib.is_dir() and str(torch_lib) not in dirs:
+                dirs.append(str(torch_lib))
+            nvidia_root = root / "nvidia"
+            if nvidia_root.is_dir():
+                for lib_dir in sorted(nvidia_root.rglob("lib")):
+                    if lib_dir.is_dir() and str(lib_dir) not in dirs:
+                        dirs.append(str(lib_dir))
+        if not dirs:
             raise RuntimeError(
-                "Unable to resolve locked H3 CUDA library path.\n"
-                + (probe.stdout or "")
-                + (probe.stderr or "")
+                "Unable to resolve locked H3 CUDA library path from "
+                f"{roots[0]}"
             )
-        return probe.stdout.strip()
+        return ":".join(dirs)
 
     @classmethod
     def worker_environment(cls, gpu_id: int, *, extra_env: dict[str, str] | None = None) -> dict[str, str]:
