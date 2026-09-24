@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,16 @@ RUNTIME_MANIFEST = (
     / "configs"
     / "runtime_versions.yaml"
 )
+
+# H3/ComfyUI and the Director use the current Kaggle Python installation.
+# GPU-dependent validation is performed in fresh child interpreters so the
+# long-lived notebook kernel does not need to be restarted.
+H3_TORCH_CONSTRAINTS = Path(
+    os.getenv(
+        "H3_TORCH_CONSTRAINTS",
+        "/tmp/minimax_h3_torch_constraints.txt",
+    )
+).expanduser().resolve()
 
 
 
@@ -189,6 +200,95 @@ def link_model(
         )
 
 
+def _h3_python_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    environment = dict(base_env or os.environ)
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
+
+def _h3_runtime_python() -> Path:
+    """Return the current Kaggle interpreter used by all H3 child workers."""
+    python = Path(sys.executable).resolve()
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise RuntimeError(f"Current Kaggle Python is missing or not executable: {python}")
+    return python
+
+
+def _h3_runtime_site_packages() -> list[Path]:
+    """Return site-packages belonging to the current Kaggle interpreter."""
+    roots: list[Path] = []
+    try:
+        roots.extend(Path(path).resolve() for path in site.getsitepackages())
+    except Exception:
+        pass
+    try:
+        user_root = Path(site.getusersitepackages()).resolve()
+        if user_root not in roots:
+            roots.append(user_root)
+    except Exception:
+        pass
+    return [root for root in roots if root.is_dir()]
+
+
+def _h3_cuda_library_dirs() -> list[Path]:
+    """Resolve Torch/CUDA libraries from the current Kaggle environment."""
+    directories: list[Path] = []
+    for site_root in _h3_runtime_site_packages():
+        torch_lib = site_root / "torch" / "lib"
+        if torch_lib.is_dir() and torch_lib not in directories:
+            directories.append(torch_lib)
+        nvidia_root = site_root / "nvidia"
+        if not nvidia_root.is_dir():
+            continue
+        for directory in sorted(
+            (path for path in nvidia_root.rglob("lib") if path.is_dir()),
+            key=lambda path: str(path),
+        ):
+            if directory not in directories:
+                directories.append(directory)
+    return directories
+
+
+def _h3_runtime_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    environment = _h3_python_environment(base_env)
+    library_dirs = _h3_cuda_library_dirs()
+    if not library_dirs:
+        raise RuntimeError(
+            "Current Kaggle Python has no CUDA/Torch library directories. "
+            f"Check {_h3_runtime_python()}"
+        )
+    existing = environment.get("LD_LIBRARY_PATH", "")
+    values = [str(path) for path in library_dirs]
+    if existing:
+        values.append(existing)
+    environment["LD_LIBRARY_PATH"] = ":".join(values)
+    environment["H3_RUNTIME_PYTHON"] = str(_h3_runtime_python())
+    environment["H3_RUNTIME_LIBRARY_PATH"] = ":".join(str(path) for path in library_dirs)
+    return environment
+
+
+def ensure_h3_runtime_python(runtime: dict) -> Path:
+    """Validate that the current Kaggle Python matches the manifest."""
+    python_lock = str(runtime.get("python", {}).get("kaggle", "") or "").strip()
+    if not python_lock:
+        raise RuntimeError("runtime_versions.yaml python.kaggle is required.")
+    parts = python_lock.split(".")
+    if len(parts) < 2 or not all(part.isdigit() for part in parts[:2]):
+        raise RuntimeError(f"Invalid locked Kaggle Python version: {python_lock!r}")
+    expected_major_minor = f"{int(parts[0])}.{int(parts[1])}"
+    actual_major_minor = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if actual_major_minor != expected_major_minor:
+        raise RuntimeError(
+            "Current Kaggle Python does not match the runtime lock: "
+            f"expected={expected_major_minor}, actual={actual_major_minor}"
+        )
+    python = _h3_runtime_python()
+    os.environ["H3_RUNTIME_PYTHON"] = str(python)
+    print(f"[H3 RUNTIME] current Python PASS: {python}")
+    return python
+
 def _site_packages() -> list[Path]:
 
     result = subprocess.run(
@@ -214,74 +314,8 @@ def _site_packages() -> list[Path]:
     ]
 
 
-def _cuda_library_dirs() -> list[Path]:
-
-    directories = []
-
-    for site_root in _site_packages():
-
-        nvidia_root = (
-            site_root
-            / "nvidia"
-        )
-
-        if not nvidia_root.is_dir():
-            continue
-
-        for pattern in (
-            "libcudart.so*",
-            "libcublas.so*",
-        ):
-
-            for library in nvidia_root.rglob(
-                pattern
-            ):
-
-                if not library.is_file():
-                    continue
-
-                directory = (
-                    library.parent
-                )
-
-                if directory not in directories:
-                    directories.append(
-                        directory
-                    )
-
-    return directories
 
 
-def _configure_cuda_environment(
-    directories: list[Path],
-) -> dict[str, str]:
-
-    environment = dict(
-        os.environ
-    )
-
-    existing = environment.get(
-        "LD_LIBRARY_PATH",
-        "",
-    )
-
-    values = [
-        str(path)
-        for path in directories
-    ]
-
-    if existing:
-        values.append(
-            existing
-        )
-
-    environment[
-        "LD_LIBRARY_PATH"
-    ] = ":".join(
-        values
-    )
-
-    return environment
 
 
 def install_base_requirements() -> None:
@@ -310,205 +344,124 @@ def _base_distribution_version(value: str) -> str:
     return str(value or "").strip().split("+", 1)[0]
 
 
-def _cuda_version_from_tag(cuda_tag: str) -> str:
-    """Convert a CUDA wheel tag (for example, cu130) to torch.version.cuda format."""
-    tag = str(cuda_tag or "").strip().lower()
-    if not tag.startswith("cu") or not tag[2:].isdigit() or len(tag[2:]) < 3:
-        raise RuntimeError(
-            f"Invalid CUDA wheel tag in runtime_versions.yaml: {cuda_tag!r}"
-        )
-    digits = tag[2:]
-    return f"{int(digits[:-1])}.{int(digits[-1])}"
+def _write_h3_torch_constraints(expected_torch: str, expected_tv: str, expected_ta: str) -> Path:
+    """Write an ephemeral constraint file from the central runtime manifest."""
+    H3_TORCH_CONSTRAINTS.parent.mkdir(parents=True, exist_ok=True)
+    H3_TORCH_CONSTRAINTS.write_text(
+        f"torch=={expected_torch}\n"
+        f"torchvision=={expected_tv}\n"
+        f"torchaudio=={expected_ta}\n",
+        encoding="utf-8",
+    )
+    return H3_TORCH_CONSTRAINTS
 
 
 def install_pytorch_runtime(runtime: dict) -> None:
-    """Install or verify the locked PyTorch CUDA runtime without a kernel restart."""
+    """Install the exact Torch/CUDA stack from runtime_versions.yaml into current Python."""
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
     cuda = str(config.get("cuda", "") or "").strip().lower()
     index = str(config.get("index", "") or "").strip()
     torchvision_version = str(config.get("torchvision_version", "") or "").strip()
     torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
-
     if not all((version, cuda, index, torchvision_version, torchaudio_version)):
         raise RuntimeError("runtime_versions.yaml pytorch configuration is incomplete.")
+    python = ensure_h3_runtime_python(runtime)
+    if not cuda.startswith("cu") or not cuda[2:].isdigit():
+        raise RuntimeError(f"Invalid PyTorch CUDA tag in runtime_versions.yaml: {cuda!r}")
+    cuda_digits = cuda[2:]
+    expected_cuda = (
+        f"{int(cuda_digits[:-1])}.{cuda_digits[-1]}"
+        if len(cuda_digits) >= 2
+        else cuda_digits
+    )
     expected_torch = f"{version}+{cuda}"
-    expected_cuda = _cuda_version_from_tag(cuda)
-
-    def verify_companion_distributions() -> None:
-        import importlib.metadata as metadata
-
-        observed_tv = metadata.version("torchvision")
-        observed_ta = metadata.version("torchaudio")
-        expected_tv_base = _base_distribution_version(torchvision_version)
-        expected_ta_base = _base_distribution_version(torchaudio_version)
-
-        if _base_distribution_version(observed_tv) != expected_tv_base:
-            raise RuntimeError(
-                "Torchvision distribution mismatch: "
-                f"expected base={expected_tv_base}, actual={observed_tv}"
-            )
-        if _base_distribution_version(observed_ta) != expected_ta_base:
-            raise RuntimeError(
-                "Torchaudio distribution mismatch: "
-                f"expected base={expected_ta_base}, actual={observed_ta}"
-            )
-        print(
-            "[PYTORCH COMPANIONS] "
-            f"torchvision={observed_tv} torchaudio={observed_ta}: PASS"
-        )
+    expected_tv = f"{_base_distribution_version(torchvision_version)}+{cuda}"
+    expected_ta = f"{_base_distribution_version(torchaudio_version)}+{cuda}"
+    _write_h3_torch_constraints(expected_torch, expected_tv, expected_ta)
 
     print("=" * 80)
-    print("ENFORCING LOCKED PYTORCH RUNTIME")
+    print("INSTALLING LOCKED H3 PYTORCH RUNTIME")
     print("=" * 80)
-
     loaded_torch = sys.modules.get("torch")
     if loaded_torch is not None:
-        actual_torch = str(getattr(loaded_torch, "__version__", ""))
-        actual_cuda = str(getattr(getattr(loaded_torch, "version", None), "cuda", ""))
-        if actual_torch != expected_torch or actual_cuda != expected_cuda:
-            raise RuntimeError(
-                "NO-RESTART bootstrap cannot replace an already-imported native Torch runtime. "
-                f"Expected torch={expected_torch} cuda={expected_cuda}; "
-                f"live kernel has torch={actual_torch!r} cuda={actual_cuda!r}. "
-                "Run the bootstrap before importing torch in the current kernel; do not restart."
-            )
-        verify_companion_distributions()
-        if not loaded_torch.cuda.is_available():
-            raise RuntimeError("Live Kaggle Torch CUDA is unavailable.")
         print(
-            f"[PYTORCH LIVE] already-loaded torch={actual_torch} "
-            f"cuda={actual_cuda} gpu_count={loaded_torch.cuda.device_count()}: PASS"
+            "[PYTORCH NOTEBOOK] preserving already-loaded Torch "
+            f"{getattr(loaded_torch, '__version__', '<unknown>')} / "
+            f"CUDA {getattr(getattr(loaded_torch, 'version', None), 'cuda', '<unknown>')}; "
+            f"H3 workers use {expected_torch} / CUDA {expected_cuda}."
         )
-        return
 
     run(
-        sys.executable,
-        "-m", "pip", "install", "-q",
+        python, "-m", "pip", "install", "-q",
         "--disable-pip-version-check",
         "--no-cache-dir",
-        "--force-reinstall",
         "--index-url", index,
-        f"torch=={version}",
-        f"torchvision=={torchvision_version}",
-        f"torchaudio=={torchaudio_version}",
+        "--extra-index-url", "https://pypi.org/simple",
+        f"torch=={expected_torch}",
+        f"torchvision=={expected_tv}",
+        f"torchaudio=={expected_ta}",
+        env=_h3_python_environment(),
     )
 
-    importlib.invalidate_caches()
-    import torch
+    library_dirs = _h3_cuda_library_dirs()
+    if not library_dirs:
+        raise RuntimeError("H3 runtime has no CUDA/Torch library directories after Torch installation.")
+    os.environ["H3_RUNTIME_LIBRARY_PATH"] = ":".join(str(path) for path in library_dirs)
 
-    actual_torch = str(torch.__version__)
-    actual_cuda = str(torch.version.cuda)
-    if actual_torch != expected_torch:
+    verify_script = """
+import importlib.metadata as metadata
+import os
+import torch
+expected_torch = os.environ["H3_EXPECTED_TORCH"]
+expected_cuda = os.environ["H3_EXPECTED_CUDA"]
+expected_tv = os.environ["H3_EXPECTED_TV"]
+expected_ta = os.environ["H3_EXPECTED_TA"]
+actual_torch = str(torch.__version__)
+actual_cuda = str(torch.version.cuda)
+if actual_torch != expected_torch:
+    raise RuntimeError(f"Fresh H3 Torch mismatch: expected={expected_torch}, actual={actual_torch}")
+if actual_cuda != expected_cuda:
+    raise RuntimeError(f"Fresh H3 CUDA mismatch: expected={expected_cuda}, actual={actual_cuda}")
+if not torch.cuda.is_available():
+    raise RuntimeError("Fresh H3 Torch reports CUDA unavailable.")
+observed_tv = metadata.version("torchvision")
+observed_ta = metadata.version("torchaudio")
+if observed_tv != expected_tv:
+    raise RuntimeError(f"Fresh H3 torchvision mismatch: expected={expected_tv}, actual={observed_tv}")
+if observed_ta != expected_ta:
+    raise RuntimeError(f"Fresh H3 torchaudio mismatch: expected={expected_ta}, actual={observed_ta}")
+print(f"[PYTORCH H3] torch={actual_torch} cuda={actual_cuda} gpu_count={torch.cuda.device_count()}: PASS")
+print(f"[PYTORCH H3] torchvision={observed_tv} torchaudio={observed_ta}: PASS")
+"""
+    environment = _h3_runtime_environment()
+    environment.update({
+        "H3_EXPECTED_TORCH": expected_torch,
+        "H3_EXPECTED_CUDA": expected_cuda,
+        "H3_EXPECTED_TV": expected_tv,
+        "H3_EXPECTED_TA": expected_ta,
+    })
+    verification = subprocess.run(
+        [python, "-c", verify_script],
+        cwd=str(ROOT),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verification.stdout:
+        print(verification.stdout, end="")
+    if verification.stderr:
+        print(verification.stderr, end="")
+    if verification.returncode != 0:
         raise RuntimeError(
-            f"Torch mismatch in live kernel: expected={expected_torch}, actual={actual_torch}"
+            "Fresh H3 PyTorch runtime verification failed.\n"
+            + (verification.stdout or "")
+            + (verification.stderr or "")
         )
-    if actual_cuda != expected_cuda:
-        raise RuntimeError(
-            f"Torch CUDA mismatch in live kernel: expected={expected_cuda}, actual={actual_cuda}"
-        )
-    if not torch.cuda.is_available():
-        raise RuntimeError("Torch CUDA is unavailable in the live Kaggle kernel after installation.")
-    verify_companion_distributions()
-    print(
-        f"[PYTORCH LIVE] torch={actual_torch} cuda={actual_cuda} "
-        f"gpu_count={torch.cuda.device_count()}: PASS"
-    )
 
 
-def patch_t4_h3_value_clone(runtime: dict) -> None:
-    """Apply the narrowly-scoped T4 H3 v-clone workaround to the locked ComfyUI.
 
-    ComfyUI 0.34.0's MiniMax H3 Attention copies the large V tensor before
-    wrapping it in AttentionTensorContainer. On 16-GB-class GPUs that can
-    add about a gigabyte of peak memory and severely degrade throughput.
-    The workaround is applied only when the exact upstream 0.34.0 source
-    pattern is present and only on SM75 GPUs. If the source changes, fail
-    loudly instead of silently patching the wrong code.
-    """
-    enabled = bool(
-        runtime.get("comfyui", {}).get("h3_t4_value_clone_workaround", True)
-    )
-    if not enabled:
-        print("[H3 T4 PATCH] disabled by runtime configuration")
-        return
-
-    try:
-        import torch
-        if not torch.cuda.is_available():
-            print("[H3 T4 PATCH] skipped: CUDA unavailable")
-            return
-        major, minor = torch.cuda.get_device_capability(0)
-        if (major, minor) != (7, 5):
-            print(f"[H3 T4 PATCH] skipped: GPU SM{major}{minor} is not SM75")
-            return
-    except Exception as exc:
-        raise RuntimeError(f"Cannot determine GPU capability for H3 T4 patch: {exc}") from exc
-
-    target = COMFY / "comfy" / "ldm" / "minimax" / "model.py"
-    if not target.is_file():
-        raise RuntimeError(f"H3 model source not found: {target}")
-
-    text = target.read_text(encoding="utf-8")
-    marker = "# H3-T4-WORKAROUND: removed redundant V clone for SM75"
-    if marker in text:
-        print("[H3 T4 PATCH] already applied")
-        return
-
-    exact = "        v = v.clone()\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
-    replacement = "        " + marker + "\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
-    if exact not in text:
-        raise RuntimeError(
-            "Refusing to apply the H3 T4 workaround because ComfyUI's expected "
-            "0.34.0 Attention pattern was not found."
-        )
-    target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
-    print("[H3 T4 PATCH] applied to", target)
-
-def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
-    """Keep MiniMax H3 video VAE decoder input on the decoder's dtype.
-
-    This is deliberately scoped to the locked H3 VAE implementation. It is
-    idempotent and fails closed if the expected 0.34.0 source pattern changes.
-    """
-    enabled = bool(runtime.get("comfyui", {}).get("h3_vae_decoder_dtype_patch", True))
-    if not enabled:
-        print("[H3 VAE PATCH] disabled by runtime configuration")
-        return
-
-    target = COMFY / "comfy" / "ldm" / "minimax" / "vae.py"
-    if not target.is_file():
-        raise RuntimeError(f"H3 VAE source not found: {target}")
-
-    text = target.read_text(encoding="utf-8")
-    marker = "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters"
-    existing_patch = (
-        "        z = self.post_quant_conv(z)\n"
-        "        decoder_dtype = next(self.decoder.parameters()).dtype\n"
-        "        if z.dtype != decoder_dtype:\n"
-        "            z = z.to(decoder_dtype)\n"
-        "        return self.decoder(z)"
-    )
-    if marker in text or existing_patch in text:
-        print("[H3 VAE PATCH] already applied")
-        return
-
-    exact = "        z = self.post_quant_conv(z)\n        return self.decoder(z)"
-    replacement = (
-        "        z = self.post_quant_conv(z)\n"
-        f"        {marker}\n"
-        "        decoder_dtype = next(self.decoder.parameters()).dtype\n"
-        "        if z.dtype != decoder_dtype:\n"
-        "            z = z.to(decoder_dtype)\n"
-        "        return self.decoder(z)"
-    )
-    if exact not in text:
-        raise RuntimeError(
-            "Refusing to apply the H3 VAE dtype patch because the expected "
-            "locked ComfyUI 0.34.0 source pattern was not found."
-        )
-    target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
-    print("[H3 VAE PATCH] applied to", target)
 
 
 def install_director_runtime(
@@ -706,6 +659,21 @@ def install_director_runtime(
         )
 
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
+
+    # The Director environment is installed with --link-mode copy, so the uv
+    # download/build cache is no longer needed after a successful install.
+    # Cleaning it here reduces Kaggle disk usage without touching the runtime
+    # environment that vLLM actually executes from.
+    cache_cleanup = subprocess.run(
+        [uv, "cache", "clean"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if cache_cleanup.returncode == 0:
+        print("[UV CACHE] cleaned after Director installation")
+    else:
+        print("[UV CACHE] cleanup skipped:", (cache_cleanup.stderr or cache_cleanup.stdout or "unknown error").strip()[:500])
 
 
 def install_storyboard_runtime(
@@ -947,6 +915,7 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
     print("[PILLOW]", (verification.stdout or "").strip().replace("\n", " | "))
 
 
+
 EMBEDDED_CONTEXT_IR_NODE = 'from __future__ import annotations\n\nimport hashlib\nimport mimetypes\nimport os\nimport time\nfrom pathlib import Path\nfrom typing import Dict, Tuple\n\nimport requests\n\nDEFAULT_BASE = "https://api.minimax.io"\nCREATE_PATH = "/v2/h3_context_ir"\nQUERY_PATH = "/v2/query/video_generation/{task_id}"\nUPLOAD_PATH = "/v1/files/upload"\nRETRIEVE_PATH = "/v1/files/retrieve"\nFINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}\nTRANSIENT_HTTP = {429, 500, 502, 503, 504}\n_URL_CACHE: Dict[Tuple[str, str, int, int], str] = {}\n\n\ndef _split_paths(value: str) -> list[str]:\n    return [x.strip() for x in str(value or "").splitlines() if x.strip()]\n\n\ndef _config_int(name: str, default: int) -> int:\n    try:\n        return int(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _config_float(name: str, default: float) -> float:\n    try:\n        return float(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _headers(token: str) -> dict[str, str]:\n    return {"Authorization": f"Bearer {token}"}\n\n\ndef _request_with_retry(method: str, url: str, *, token: str, retry: bool = True, **kwargs):\n    retries = max(0, _config_int("H3_CONTEXT_IR_API_RETRIES", 3)) if retry else 0 if retry else 0\n    backoff = max(0.5, _config_float("H3_CONTEXT_IR_RETRY_BACKOFF_SECONDS", 2.0))\n    last = None\n    for attempt in range(retries + 1):\n        try:\n            response = requests.request(\n                method,\n                url,\n                headers={**_headers(token), **kwargs.pop("headers", {})},\n                **kwargs,\n            )\n        except requests.RequestException as exc:\n            last = exc\n            if attempt >= retries:\n                raise\n            time.sleep(backoff * (2 ** attempt))\n            continue\n        if response.status_code in TRANSIENT_HTTP and attempt < retries:\n            retry_after = response.headers.get("Retry-After")\n            try:\n                delay = max(0.5, float(retry_after)) if retry_after else backoff * (2 ** attempt)\n            except ValueError:\n                delay = backoff * (2 ** attempt)\n            time.sleep(delay)\n            continue\n        return response\n    if last:\n        raise last\n    raise RuntimeError("Context-IR request retry loop failed unexpectedly.")\n\n\ndef _resolve_local_file(value: str) -> Path:\n    path = Path(value).expanduser().resolve()\n    if not path.is_file():\n        raise FileNotFoundError(f"Context-IR reference file does not exist: {path}")\n    return path\n\n\ndef _max_upload_bytes(kind: str) -> int:\n    env_name = {\n        "image": "H3_CONTEXT_IR_MAX_IMAGE_MB",\n        "video": "H3_CONTEXT_IR_MAX_VIDEO_MB",\n        "audio": "H3_CONTEXT_IR_MAX_AUDIO_MB",\n    }[kind]\n    limit_mb = max(0.0, _config_float(env_name, {"image": 30.0, "video": 50.0, "audio": 15.0}[kind]))\n    return int(limit_mb * 1024 * 1024)\n\n\ndef _upload_local_file(path: Path, kind: str, token: str, base: str) -> str:\n    stat = path.stat()\n    limit_bytes = _max_upload_bytes(kind)\n    if limit_bytes and stat.st_size > limit_bytes:\n        limit_mb = limit_bytes / (1024 * 1024)\n        actual_mb = stat.st_size / (1024 * 1024)\n        raise ValueError(\n            f"Context-IR {kind} reference exceeds configured upload limit: "\n            f"{path.name} is {actual_mb:.2f} MiB; limit is {limit_mb:.2f} MiB."\n        )\n    key = (str(path), kind, int(stat.st_size), int(stat.st_mtime_ns))\n    cached = _URL_CACHE.get(key)\n    if cached:\n        return cached\n    purpose = "video_generation"\n    mime = mimetypes.guess_type(path.name)[0] or {\n        "image": "image/png", "video": "video/mp4", "audio": "audio/mpeg",\n    }[kind]\n    with path.open("rb") as handle:\n        response = _request_with_retry(\n            "POST",\n            base + UPLOAD_PATH,\n            token=token,\n            files={"file": (path.name, handle, mime)},\n            data={"purpose": purpose},\n            timeout=120,\n        )\n    response.raise_for_status()\n    payload = response.json()\n    file_obj = payload.get("file") or {}\n    file_id = str(file_obj.get("file_id") or file_obj.get("id") or "").strip()\n    url = str(file_obj.get("download_url") or file_obj.get("url") or "").strip()\n    if not url and file_id:\n        retrieve = _request_with_retry(\n            "GET",\n            base + RETRIEVE_PATH,\n            token=token,\n            params={"file_id": file_id},\n            timeout=60,\n        )\n        retrieve.raise_for_status()\n        robj = (retrieve.json().get("file") or {})\n        url = str(robj.get("download_url") or robj.get("url") or "").strip()\n    if not url.startswith(("https://", "http://")):\n        raise RuntimeError(f"MiniMax file upload returned no usable download URL for {path.name}.")\n    _URL_CACHE[key] = url\n    return url\n\n\ndef _media_url(value: str, kind: str, token: str, base: str) -> str:\n    value = str(value).strip()\n    if value.startswith(("https://", "http://")):\n        return value\n    if value.startswith("data:"):\n        return value\n    return _upload_local_file(_resolve_local_file(value), kind, token, base)\n\n\ndef _required_config_int(name: str) -> int:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return int(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _required_config_float(name: str) -> float:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return float(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _poll(base: str, token: str, task_id: str) -> str:\n    timeout_s = max(1, _required_config_int("H3_CONTEXT_IR_TIMEOUT_SECONDS"))\n    interval_s = max(0.1, _required_config_float("H3_CONTEXT_IR_POLL_INTERVAL_SECONDS"))\n    max_polls = max(1, _required_config_int("H3_CONTEXT_IR_MAX_POLLS"))\n    url = base + QUERY_PATH.format(task_id=task_id)\n    started = time.monotonic()\n    for _ in range(max_polls):\n        response = _request_with_retry("GET", url, token=token, timeout=60)\n        response.raise_for_status()\n        payload = response.json()\n        task = payload.get("task") or {}\n        status = str(task.get("status") or payload.get("status") or "").strip().lower()\n        if status in FINAL_STATUSES:\n            if status != "succeeded":\n                raise RuntimeError(f"MiniMax H3 Context-IR task {task_id} ended with status={status}.")\n            prompt = str((task.get("content") or {}).get("prompt") or "").strip()\n            if not prompt:\n                raise RuntimeError("MiniMax H3 Context-IR returned an empty enhanced prompt.")\n            return prompt\n        if time.monotonic() - started >= timeout_s:\n            break\n        time.sleep(interval_s)\n    raise TimeoutError(f"MiniMax H3 Context-IR task {task_id} timed out after {timeout_s}s.")\n\n\nclass MiniMaxH3ContextIR:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {"required": {\n            "prompt": ("STRING", {"multiline": True, "default": ""}),\n            "duration": ("INT", {"default": 5, "min": 4, "max": 15, "step": 1}),\n            "ratio": (["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "adaptive"}),\n            "reference_images": ("STRING", {"multiline": True, "default": ""}),\n            "reference_videos": ("STRING", {"multiline": True, "default": ""}),\n            "reference_audios": ("STRING", {"multiline": True, "default": ""}),\n        }}\n\n    RETURN_TYPES = ("STRING",)\n    RETURN_NAMES = ("enhanced_prompt",)\n    FUNCTION = "enhance"\n    CATEGORY = "MiniMax H3/Prompting"\n    DESCRIPTION = "Official MiniMax H3 Context-IR multimodal prompt enhancer."\n\n    def enhance(self, prompt, duration, ratio, reference_images, reference_videos, reference_audios):\n        # Official MiniMax H3 Context-IR is mandatory. There is deliberately no\n        # no local fallback or disable switch on the production bridge.\n        token = os.getenv("MINIMAX_API_TOKEN", "").strip() or os.getenv("TOKEN", "").strip()\n        if not token:\n            raise RuntimeError("Official MiniMax H3 Context-IR requires MINIMAX_API_TOKEN (or TOKEN).")\n        prompt = str(prompt or "").strip()\n        if not prompt:\n            raise ValueError("Context-IR prompt cannot be empty.")\n        base = (os.getenv("MINIMAX_API_BASE", DEFAULT_BASE).strip() or DEFAULT_BASE).rstrip("/")\n        content = [{"type": "text", "text": prompt}]\n        for value in _split_paths(reference_images):\n            content.append({"type": "image_url", "image_url": {"url": _media_url(value, "image", token, base)}, "role": "reference_image"})\n        for value in _split_paths(reference_videos):\n            content.append({"type": "video_url", "video_url": {"url": _media_url(value, "video", token, base)}, "role": "reference_video"})\n        for value in _split_paths(reference_audios):\n            content.append({"type": "audio_url", "audio_url": {"url": _media_url(value, "audio", token, base)}, "role": "reference_audio"})\n        ratio_value = str(ratio or "adaptive").strip()\n        payload = {\n            "model": "MiniMax-H3",\n            "content": content,\n            "duration": int(max(4, min(15, int(duration)))),\n            "ratio": None if ratio_value.lower() == "adaptive" else ratio_value,\n        }\n        response = _request_with_retry(\n            "POST", base + CREATE_PATH, token=token, retry=False,\n            headers={"Content-Type": "application/json"}, json=payload, timeout=60,\n        )\n        response.raise_for_status()\n        result = response.json()\n        task_id = str(result.get("task_id") or ((result.get("task") or {}).get("id")) or "").strip()\n        if not task_id:\n            raise RuntimeError(f"MiniMax H3 Context-IR did not return task_id: {response.text[:1000]}")\n        enhanced = _poll(base, token, task_id)\n        print(f"[H3 Context-IR] official task={task_id} enhanced_prompt_chars={len(enhanced)}", flush=True)\n        return (enhanced,)\n\n\nNODE_CLASS_MAPPINGS = {"MiniMaxH3ContextIR": MiniMaxH3ContextIR}\nNODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ContextIR": "MiniMax H3 Context IR (Official Prompt Enhancer)"}\n'
 
 def install_embedded_context_ir_node(runtime: dict) -> None:
@@ -958,7 +927,6 @@ def install_embedded_context_ir_node(runtime: dict) -> None:
     destination = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR"
     destination.mkdir(parents=True, exist_ok=True)
     features = runtime.get("features", {}) or {}
-    official_enabled = features.get("context_ir_official_enabled", features.get("context_ir_official_api", True))
     os.environ["H3_CONTEXT_IR_OFFICIAL_ENABLED"] = "1"
     os.environ["H3_CONTEXT_IR_OFFICIAL_PREFERRED"] = "1" if bool(features.get("context_ir_official_preferred", True)) else "0"
     os.environ["H3_CONTEXT_IR_OFFICIAL_REQUIRED"] = "1"
@@ -1003,16 +971,28 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
             f"expected={expected_revision}, actual={actual_revision}"
         )
 
-    library_dirs = _cuda_library_dirs()
+    python = _h3_runtime_python()
+    library_dirs = _h3_cuda_library_dirs()
     if not library_dirs:
         raise RuntimeError(
             "Fresh H3 verification could not locate the installed CUDA runtime libraries."
         )
 
-    environment = _configure_cuda_environment(library_dirs)
+    pytorch_cfg = dict(runtime.get("pytorch", {}) or {})
+    expected_torch_version = str(pytorch_cfg.get("version", "") or "").strip()
+    expected_cuda_tag = str(pytorch_cfg.get("cuda", "") or "").strip().lower()
+    if not expected_torch_version or not expected_cuda_tag.startswith("cu") or not expected_cuda_tag[2:].isdigit():
+        raise RuntimeError("runtime_versions.yaml pytorch version/cuda configuration is incomplete.")
+    cuda_digits = expected_cuda_tag[2:]
+    expected_cuda_runtime = (
+        f"{int(cuda_digits[:-1])}.{cuda_digits[-1]}"
+        if len(cuda_digits) >= 2
+        else cuda_digits
+    )
+    environment = _h3_runtime_environment()
     environment.update({
-        "H3_EXPECTED_TORCH": expected_torch,
-        "H3_EXPECTED_CUDA": expected_cuda,
+        "H3_EXPECTED_TORCH": f"{expected_torch_version}+{expected_cuda_tag}",
+        "H3_EXPECTED_CUDA": expected_cuda_runtime,
         "H3_EXPECTED_H3_REVISION": expected_revision,
         "H3_EXPECTED_H3_VERSION": expected_version,
         "H3_COMFY_ROOT": str(COMFY),
@@ -1109,7 +1089,7 @@ print("[H3 OPT] fresh-process runtime capability check passed; no H3 model gener
 """
 
     verification = subprocess.run(
-        [sys.executable, "-c", verify_script],
+        [python, "-c", verify_script],
         env=environment,
         cwd=str(ROOT),
         capture_output=True,
@@ -1134,7 +1114,7 @@ def install_comfyui(runtime: dict) -> None:
     ComfyUI is an external runtime dependency, so it is cloned into the Kaggle
     working directory at bootstrap time. The checkout is pinned to the exact
     revision declared in runtime_versions.yaml and its own requirements are
-    installed before the project's locked PyTorch runtime is re-applied.
+    installed inside the isolated H3 worker environment under the locked Torch constraints.
     """
     config = dict(runtime.get("comfyui", {}) or {})
     repository = str(config.get("repository", "") or "").strip()
@@ -1210,14 +1190,17 @@ def install_comfyui(runtime: dict) -> None:
     requirements = COMFY / "requirements.txt"
     if requirements.is_file():
         run(
-            sys.executable,
+            _h3_runtime_python(),
             "-m",
             "pip",
             "install",
             "-q",
             "--disable-pip-version-check",
+            "-c",
+            H3_TORCH_CONSTRAINTS,
             "-r",
             requirements,
+            env=_h3_python_environment(),
         )
 
     print(
@@ -1225,6 +1208,21 @@ def install_comfyui(runtime: dict) -> None:
         f"revision={head}",
         f"version={tagged or expected_version or 'untagged'}",
     )
+
+def install_h3_context_ir_dependency() -> None:
+    """Install the dependency used by the embedded official Context-IR node."""
+    run(
+        _h3_runtime_python(),
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        "--no-cache-dir",
+        "requests==2.32.5",
+        env=_h3_python_environment(),
+    )
+
 
 def install_nodes() -> None:
 
@@ -1297,14 +1295,17 @@ def install_nodes() -> None:
 
             if requirements.is_file():
                 run(
-                    sys.executable,
+                    _h3_runtime_python(),
                     "-m",
                     "pip",
                     "install",
                     "-q",
                     "--disable-pip-version-check",
+                    "-c",
+                    H3_TORCH_CONSTRAINTS,
                     "-r",
                     requirements,
+                    env=_h3_python_environment(),
                 )
 
                 print(
@@ -1532,6 +1533,11 @@ def main():
     _enforce_no_restart_execution_mode()
     _warn_if_torch_already_imported()
 
+    for legacy in (ROOT.parent / ".h3_runtime_cu130", Path("/tmp/qwen_vllm_latest")):
+        if legacy.exists() and legacy.is_dir():
+            print("[RUNTIME CLEAN] removing legacy isolated runtime:", legacy)
+            shutil.rmtree(legacy)
+
     runtime = load_yaml(
         RUNTIME_MANIFEST
     )
@@ -1547,22 +1553,15 @@ def main():
         "[DIRECTOR MODEL]",
         director_model,
     )
+    os.environ["H3_RUNTIME_PYTHON"] = str(Path(sys.executable).resolve())
 
     install_base_requirements()
 
-    # Older experimental bootstrap generations created an H3-specific Python
-    # environment. The production architecture uses the current Kaggle Python
-    # for H3 workers, so remove only that obsolete directory and never recreate it.
-    stale_h3_runtime = ROOT.parent / ".h3_runtime_cu130"
-    if stale_h3_runtime.exists():
-        print("[H3 CLEAN] removing obsolete isolated runtime:", stale_h3_runtime)
-        shutil.rmtree(stale_h3_runtime, ignore_errors=True)
-
-    install_comfyui(runtime)
-
-    # vLLM must be installed after the pinned PyTorch/CUDA runtime so its
-    # compiled extensions bind against the intended torch/CUDA stack.
+    # Install the locked Torch family into the current Kaggle Python before
+    # ComfyUI/node requirements. A temporary constraints file keeps later
+    # dependency installs from replacing the manifest-pinned Torch family.
     install_pytorch_runtime(runtime)
+    install_comfyui(runtime)
 
     install_director_runtime(
         runtime
@@ -1573,6 +1572,7 @@ def main():
     )
 
     install_nodes()
+    install_h3_context_ir_dependency()
     install_embedded_context_ir_node(runtime)
 
     # Pillow is enforced at the final dependency boundary because downstream
@@ -1602,7 +1602,6 @@ def main():
 
     verify_inventory()
     verify_runtime_files(runtime)
-    verify_production_import(runtime)
 
     print(
         "=" * 80
