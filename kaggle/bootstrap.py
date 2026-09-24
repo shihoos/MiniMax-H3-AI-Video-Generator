@@ -208,6 +208,122 @@ def install_base_requirements() -> None:
         "-r",
         requirements,
     )
+def install_comfyui(runtime: dict) -> None:
+    """Install the locked ComfyUI checkout and its dependencies."""
+    config = dict(runtime.get("comfyui", {}) or {})
+    repository = str(config.get("repository", "") or "").strip()
+    revision = str(config.get("revision", "") or "").strip()
+    expected_version = str(config.get("expected_version", "") or "").strip()
+    if not repository or not revision:
+        raise RuntimeError("runtime_versions.yaml comfyui.repository/revision are required.")
+
+    COMFY.parent.mkdir(parents=True, exist_ok=True)
+    if COMFY.exists() and not (COMFY / ".git").is_dir():
+        raise RuntimeError(f"ComfyUI path exists but is not a git checkout: {COMFY}")
+    if not COMFY.exists():
+        run("git", "clone", repository, COMFY)
+
+    run("git", "-C", COMFY, "fetch", "--all", "--tags", "--prune")
+    run("git", "-C", COMFY, "checkout", "--detach", revision)
+    run(
+        sys.executable, "-m", "pip", "install", "-q",
+        "--disable-pip-version-check", "-r", COMFY / "requirements.txt",
+    )
+
+    head = subprocess.check_output(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"], text=True
+    ).strip()
+    expected_head = subprocess.check_output(
+        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True
+    ).strip()
+    if head != expected_head:
+        raise RuntimeError(f"ComfyUI checkout mismatch: expected={expected_head}, actual={head}")
+    tagged = subprocess.run(
+        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
+        raise RuntimeError(
+            f"ComfyUI release mismatch: expected={expected_version}, actual={tagged or 'untagged'}"
+        )
+    print(f"[COMFYUI] revision={head} version={tagged or 'untagged'}")
+
+
+def apply_embedded_h3_runtime_overlay() -> None:
+    """Apply the project-owned H3 runtime patches without embedding full upstream source."""
+    targets = (
+        'comfy/ldm/minimax/model.py',
+        'comfy/ldm/minimax/vae.py',
+        'comfy/supported_models.py',
+        'custom_nodes/ComfyUI-MiniMax-H3-Turbo/__init__.py',
+    )
+    required = [COMFY / relative for relative in targets]
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError("H3 runtime overlay targets are missing:\n" + "\n".join(missing))
+
+    runtime = load_yaml(RUNTIME_MANIFEST)
+    patch_h3_fp16_runtime(runtime)
+    patch_h3_vae_decoder_dtype(runtime)
+    patch_t4_h3_value_clone(runtime)
+    print("[H3 COMFY PATCH] embedded runtime overlay applied: 4 files")
+
+
+def verify_inventory() -> None:
+    manifest = load_yaml(MODEL_MANIFEST)
+    expected = {
+        (model["directory"], model["filename"].lower())
+        for model in manifest["models"].values()
+    }
+    placeholders = {
+        "put_diffusion_model_files_here",
+        "put_latent_upscale_models_here",
+        "put_loras_here",
+        "put_text_encoder_files_here",
+        "put_vae_here",
+    }
+    actual = set()
+    for directory_name in {"diffusion_models", "text_encoders", "loras", "vae", "latent_upscale_models"}:
+        directory = MODELS / directory_name
+        if not directory.is_dir():
+            continue
+        for item in directory.iterdir():
+            if item.is_file() and item.name.lower() not in placeholders:
+                actual.add((directory_name, item.name.lower()))
+    missing = expected - actual
+    unexpected = actual - expected
+    if missing:
+        raise RuntimeError("Missing H3 models:\n" + "\n".join(f"{d}/{f}" for d, f in sorted(missing)))
+    if unexpected:
+        raise RuntimeError("Unexpected H3 production models:\n" + "\n".join(f"{d}/{f}" for d, f in sorted(unexpected)))
+
+
+def verify_runtime_files(runtime: dict) -> None:
+    if not (COMFY / "main.py").is_file():
+        raise RuntimeError(f"ComfyUI main.py is missing: {COMFY / 'main.py'}")
+    if not CUSTOM.is_dir():
+        raise RuntimeError(f"ComfyUI custom_nodes directory is missing: {CUSTOM}")
+    if not MODELS.is_dir():
+        raise RuntimeError(f"ComfyUI models directory is missing: {MODELS}")
+    revision = str(runtime.get("comfyui", {}).get("revision", "") or "").strip()
+    expected_version = str(runtime.get("comfyui", {}).get("expected_version", "") or "").strip()
+    head = subprocess.check_output(["git", "-C", str(COMFY), "rev-parse", "HEAD"], text=True).strip()
+    if revision:
+        expected_head = subprocess.check_output(
+            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True
+        ).strip()
+        if head != expected_head:
+            raise RuntimeError("ComfyUI checkout is not at the locked revision.")
+    tagged = subprocess.run(
+        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
+        raise RuntimeError(
+            f"ComfyUI checkout is not the expected release tag: expected={expected_version}, actual={tagged or 'untagged'}"
+        )
+
+
 def install_pytorch_runtime(runtime: dict) -> None:
     """Install and verify the project-locked PyTorch CUDA build last.
     ComfyUI and custom-node requirements are allowed to install their own
@@ -928,9 +1044,7 @@ def main():
     install_embedded_context_ir_node(runtime)
     install_and_verify_pillow_runtime(runtime)
     verify_h3_optimization_runtime(runtime)
-    patch_h3_t4_value_clone(runtime)
-    patch_h3_vae_decoder_dtype(runtime)
-    patch_h3_fp16_runtime(runtime)
+    apply_embedded_h3_runtime_overlay()
     install_models()
     print(
         "=" * 80
