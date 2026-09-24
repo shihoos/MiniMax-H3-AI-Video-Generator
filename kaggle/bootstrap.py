@@ -202,6 +202,14 @@ def link_model(
         )
 
 
+def _h3_python_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    environment = dict(base_env or os.environ)
+    for name in ("PYTHONPATH", "PYTHONHOME", "PYTHONUSERBASE", "PYTHONSTARTUP"):
+        environment.pop(name, None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    return environment
+
+
 def _h3_runtime_python() -> Path:
     configured = os.getenv("H3_RUNTIME_PYTHON", "").strip()
     python = Path(configured).expanduser() if configured else H3_RUNTIME_PYTHON
@@ -242,7 +250,7 @@ def _h3_cuda_library_dirs() -> list[Path]:
 
 
 def _h3_runtime_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
-    environment = dict(base_env or os.environ)
+    environment = _h3_python_environment(base_env)
     library_dirs = _h3_cuda_library_dirs()
     if not library_dirs:
         raise RuntimeError(
@@ -274,6 +282,7 @@ def ensure_h3_runtime_python(runtime: dict) -> Path:
     if existing_python.is_file() and os.access(existing_python, os.X_OK):
         probe = subprocess.run(
             [existing_python, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}'); print(sys.prefix); print(sys.base_prefix)"],
+            env=_h3_python_environment(),
             capture_output=True, text=True, check=False,
         )
         lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
@@ -290,7 +299,17 @@ def ensure_h3_runtime_python(runtime: dict) -> Path:
             print(f"[H3 RUNTIME] rebuilding invalid environment: {H3_RUNTIME_ENV_DIR}")
             shutil.rmtree(H3_RUNTIME_ENV_DIR)
         print(f"[H3 RUNTIME] creating isolated environment: {H3_RUNTIME_ENV_DIR}")
-        run(shutil.which("uv") or "uv", "venv", str(H3_RUNTIME_ENV_DIR), "--python", sys.executable, "--seed", "--link-mode", "copy")
+        run(
+            shutil.which("uv") or "uv",
+            "venv",
+            str(H3_RUNTIME_ENV_DIR),
+            "--python",
+            sys.executable,
+            "--seed",
+            "--link-mode",
+            "copy",
+            env=_h3_python_environment(),
+        )
         existing_python = H3_RUNTIME_ENV_DIR / "bin" / "python"
         if not existing_python.is_file():
             raise RuntimeError(f"Failed to create H3 runtime Python: {existing_python}")
@@ -304,6 +323,7 @@ def ensure_h3_runtime_python(runtime: dict) -> Path:
 
     isolation_probe = subprocess.run(
         [existing_python, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}'); print(sys.prefix); print(sys.base_prefix)"],
+        env=_h3_python_environment(),
         capture_output=True, text=True, check=False,
     )
     if isolation_probe.returncode != 0 or f"{expected_major_minor}." not in isolation_probe.stdout:
@@ -427,6 +447,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
         f"torch=={expected_torch}",
         f"torchvision=={expected_tv}",
         f"torchaudio=={expected_ta}",
+        env=_h3_python_environment(),
     )
 
     library_dirs = _h3_cuda_library_dirs()
@@ -934,6 +955,7 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
         "-q",
         "--disable-pip-version-check",
         f"Pillow=={pillow_version}",
+        env=_h3_python_environment(),
     )
     h3_env = _h3_runtime_environment()
     h3_verify = subprocess.run(
@@ -1236,6 +1258,7 @@ def install_comfyui(runtime: dict) -> None:
             H3_TORCH_CONSTRAINTS,
             "-r",
             requirements,
+            env=_h3_python_environment(),
         )
 
     print(
@@ -1255,6 +1278,7 @@ def install_h3_context_ir_dependency() -> None:
         "--disable-pip-version-check",
         "--no-cache-dir",
         "requests==2.32.5",
+        env=_h3_python_environment(),
     )
 
 
@@ -1339,6 +1363,7 @@ def install_nodes() -> None:
                     H3_TORCH_CONSTRAINTS,
                     "-r",
                     requirements,
+                    env=_h3_python_environment(),
                 )
 
                 print(
