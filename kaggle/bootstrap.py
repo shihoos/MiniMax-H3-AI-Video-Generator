@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import os
 import shutil
+import site
 import subprocess
 import sys
 from pathlib import Path
@@ -343,74 +344,8 @@ def _site_packages() -> list[Path]:
     ]
 
 
-def _cuda_library_dirs() -> list[Path]:
-
-    directories = []
-
-    for site_root in _site_packages():
-
-        nvidia_root = (
-            site_root
-            / "nvidia"
-        )
-
-        if not nvidia_root.is_dir():
-            continue
-
-        for pattern in (
-            "libcudart.so.13*",
-            "libcublas.so.13*",
-        ):
-
-            for library in nvidia_root.rglob(
-                pattern
-            ):
-
-                if not library.is_file():
-                    continue
-
-                directory = (
-                    library.parent
-                )
-
-                if directory not in directories:
-                    directories.append(
-                        directory
-                    )
-
-    return directories
 
 
-def _configure_cuda_environment(
-    directories: list[Path],
-) -> dict[str, str]:
-
-    environment = dict(
-        os.environ
-    )
-
-    existing = environment.get(
-        "LD_LIBRARY_PATH",
-        "",
-    )
-
-    values = [
-        str(path)
-        for path in directories
-    ]
-
-    if existing:
-        values.append(
-            existing
-        )
-
-    environment[
-        "LD_LIBRARY_PATH"
-    ] = ":".join(
-        values
-    )
-
-    return environment
 
 
 def install_base_requirements() -> None:
@@ -551,108 +486,7 @@ print(f"[PYTORCH H3] torchvision={observed_tv} torchaudio={observed_ta}: PASS")
         )
 
 
-def patch_t4_h3_value_clone(runtime: dict) -> None:
-    """Apply the narrowly-scoped T4 H3 v-clone workaround to the locked ComfyUI.
 
-    ComfyUI 0.34.0's MiniMax H3 Attention copies the large V tensor before
-    wrapping it in AttentionTensorContainer. On 16-GB-class GPUs that can
-    add about a gigabyte of peak memory and severely degrade throughput.
-    The workaround is applied only when the exact upstream 0.34.0 source
-    pattern is present and only on SM75 GPUs. If the source changes, fail
-    loudly instead of silently patching the wrong code.
-    """
-    enabled = bool(
-        runtime.get("comfyui", {}).get("h3_t4_value_clone_workaround", True)
-    )
-    if not enabled:
-        print("[H3 T4 PATCH] disabled by runtime configuration")
-        return
-
-    try:
-        python = _h3_runtime_python()
-        environment = _h3_runtime_environment()
-        environment.pop("CUDA_VISIBLE_DEVICES", None)
-        probe = subprocess.run(
-            [
-                python, "-c",
-                "import torch; assert torch.cuda.is_available(); "
-                "print(';'.join(f'{a},{b}' for a,b in (torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count()))))",
-            ],
-            env=environment, capture_output=True, text=True, check=False,
-        )
-        if probe.returncode != 0 or not probe.stdout.strip():
-            raise RuntimeError((probe.stdout or "") + (probe.stderr or ""))
-        capabilities = [value.strip() for value in probe.stdout.strip().split(';') if value.strip()]
-        if not capabilities or any(value != "7,5" for value in capabilities):
-            print(f"[H3 T4 PATCH] skipped: H3 runtime capabilities={capabilities}")
-            return
-    except Exception as exc:
-        raise RuntimeError(f"Cannot determine GPU capability for H3 T4 patch: {exc}") from exc
-
-    target = COMFY / "comfy" / "ldm" / "minimax" / "model.py"
-    if not target.is_file():
-        raise RuntimeError(f"H3 model source not found: {target}")
-
-    text = target.read_text(encoding="utf-8")
-    marker = "# H3-T4-WORKAROUND: removed redundant V clone for SM75"
-    if marker in text:
-        print("[H3 T4 PATCH] already applied")
-        return
-
-    exact = "        v = v.clone()\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
-    replacement = "        " + marker + "\n        q = AttentionTensorContainer(q.transpose(0, 1).unsqueeze(0))"
-    if exact not in text:
-        raise RuntimeError(
-            "Refusing to apply the H3 T4 workaround because ComfyUI's expected "
-            "0.34.0 Attention pattern was not found."
-        )
-    target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
-    print("[H3 T4 PATCH] applied to", target)
-
-def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
-    """Keep MiniMax H3 video VAE decoder input on the decoder's dtype.
-
-    This is deliberately scoped to the locked H3 VAE implementation. It is
-    idempotent and fails closed if the expected 0.34.0 source pattern changes.
-    """
-    enabled = bool(runtime.get("comfyui", {}).get("h3_vae_decoder_dtype_patch", True))
-    if not enabled:
-        print("[H3 VAE PATCH] disabled by runtime configuration")
-        return
-
-    target = COMFY / "comfy" / "ldm" / "minimax" / "vae.py"
-    if not target.is_file():
-        raise RuntimeError(f"H3 VAE source not found: {target}")
-
-    text = target.read_text(encoding="utf-8")
-    marker = "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters"
-    existing_patch = (
-        "        z = self.post_quant_conv(z)\n"
-        "        decoder_dtype = next(self.decoder.parameters()).dtype\n"
-        "        if z.dtype != decoder_dtype:\n"
-        "            z = z.to(decoder_dtype)\n"
-        "        return self.decoder(z)"
-    )
-    if marker in text or existing_patch in text:
-        print("[H3 VAE PATCH] already applied")
-        return
-
-    exact = "        z = self.post_quant_conv(z)\n        return self.decoder(z)"
-    replacement = (
-        "        z = self.post_quant_conv(z)\n"
-        f"        {marker}\n"
-        "        decoder_dtype = next(self.decoder.parameters()).dtype\n"
-        "        if z.dtype != decoder_dtype:\n"
-        "            z = z.to(decoder_dtype)\n"
-        "        return self.decoder(z)"
-    )
-    if exact not in text:
-        raise RuntimeError(
-            "Refusing to apply the H3 VAE dtype patch because the expected "
-            "locked ComfyUI 0.34.0 source pattern was not found."
-        )
-    target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
-    print("[H3 VAE PATCH] applied to", target)
 
 
 def install_director_runtime(
@@ -1140,7 +974,6 @@ def install_embedded_context_ir_node(runtime: dict) -> None:
     destination = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR"
     destination.mkdir(parents=True, exist_ok=True)
     features = runtime.get("features", {}) or {}
-    official_enabled = features.get("context_ir_official_enabled", features.get("context_ir_official_api", True))
     os.environ["H3_CONTEXT_IR_OFFICIAL_ENABLED"] = "1"
     os.environ["H3_CONTEXT_IR_OFFICIAL_PREFERRED"] = "1" if bool(features.get("context_ir_official_preferred", True)) else "0"
     os.environ["H3_CONTEXT_IR_OFFICIAL_REQUIRED"] = "1"
@@ -1798,7 +1631,6 @@ def main():
 
     verify_inventory()
     verify_runtime_files(runtime)
-    verify_production_import(runtime)
 
     print(
         "=" * 80
