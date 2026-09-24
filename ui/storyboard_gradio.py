@@ -47,41 +47,9 @@ SESSIONS_ROOT = (
 )
 
 
-def _ensure_pillow_runtime_before_queue_start() -> None:
-    """Validate/repair the loaded Pillow typing alias before starting the queue thread."""
-    expected_version = str(RUNTIME.get("storyboard", {}).get("pillow_version", "") or "").strip()
-    if not expected_version:
-        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-
-    import PIL
-    from PIL import _typing
-
-    actual_version = str(getattr(PIL, "__version__", "")).strip()
-    if actual_version != expected_version:
-        raise RuntimeError(
-            "Story production is using the wrong Pillow runtime: "
-            f"expected={expected_version}, actual={actual_version}. "
-            "Run kaggle/bootstrap.py and start the storyboard UI again."
-        )
-
-    expected_ink = float | tuple[int, ...] | str
-    if not hasattr(_typing, "_Ink"):
-        _typing._Ink = expected_ink
-
-    from PIL._typing import _Ink
-
-    if _Ink != expected_ink:
-        _typing._Ink = expected_ink
-        from PIL._typing import _Ink as repaired_ink
-        if repaired_ink != expected_ink:
-            raise RuntimeError("Loaded PIL._typing._Ink could not be repaired before queue startup.")
-
-
 class ProductionController:
 
     def __init__(self):
-
-        _ensure_pillow_runtime_before_queue_start()
 
         self._lock = (
             threading.Lock()
