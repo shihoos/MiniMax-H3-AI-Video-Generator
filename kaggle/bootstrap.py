@@ -683,6 +683,64 @@ def install_storyboard_runtime(
         )
 
 
+
+def repair_loaded_pillow_cache() -> None:
+    """Repair a stale Pillow typing module already cached in this process."""
+    loaded = sys.modules.get("PIL._typing")
+    if loaded is None:
+        return
+
+    if hasattr(loaded, "_Ink"):
+        print("[PILLOW CACHE] _Ink already present")
+        return
+
+    loaded._Ink = float | tuple[int, ...] | str
+    print("[PILLOW CACHE] repaired already-loaded PIL._typing._Ink")
+
+    from PIL._typing import _Ink
+    if _Ink != (float | tuple[int, ...] | str):
+        raise RuntimeError("Loaded PIL._typing._Ink could not be repaired in-place.")
+
+
+def verify_production_import(runtime: dict) -> None:
+    """Verify the production controller import in a clean interpreter."""
+    expected_pillow = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
+    if not expected_pillow:
+        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
+
+    environment = os.environ.copy()
+    environment["H3_BOOTSTRAP_ROOT"] = str(ROOT)
+    environment["H3_EXPECTED_PILLOW"] = expected_pillow
+    script = """
+import os, sys
+root = os.environ["H3_BOOTSTRAP_ROOT"]
+sys.path.insert(0, root)
+import PIL
+from PIL import _typing
+from PIL._typing import _Ink
+assert PIL.__version__ == os.environ["H3_EXPECTED_PILLOW"]
+assert _typing._Ink is _Ink
+import ui.storyboard_gradio
+print("Production controller import: PASS")
+print("Pillow", PIL.__version__)
+print("PIL", PIL.__file__)
+"""
+    verification = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=str(ROOT),
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verification.returncode != 0:
+        raise RuntimeError(
+            "Production controller import verification failed.\n"
+            + (verification.stdout or "")
+            + (verification.stderr or "")
+        )
+    print("[PRODUCTION IMPORT]", (verification.stdout or "").strip().replace("\n", " | "))
+
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
     """Install the locked Pillow build cleanly and verify it in a fresh process."""
     pillow_version = str(
@@ -1371,6 +1429,8 @@ def main():
     # package installers can otherwise replace it after an earlier verification.
     install_and_verify_pillow_runtime(runtime)
 
+    repair_loaded_pillow_cache()
+
     # Verify H3 only after the final locked PyTorch runtime is active. The
     # optimizer imports ComfyUI and Torch internals, so checking it earlier
     # would validate against Kaggle's pre-existing runtime instead of the
@@ -1386,6 +1446,7 @@ def main():
 
     verify_inventory()
     verify_runtime_files(runtime)
+    verify_production_import(runtime)
 
     print(
         "=" * 80
