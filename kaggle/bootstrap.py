@@ -289,7 +289,7 @@ def ensure_h3_runtime_python(runtime: dict) -> Path:
             print(f"[H3 RUNTIME] rebuilding invalid environment: {H3_RUNTIME_ENV_DIR}")
             shutil.rmtree(H3_RUNTIME_ENV_DIR)
         print(f"[H3 RUNTIME] creating isolated environment: {H3_RUNTIME_ENV_DIR}")
-        run(sys.executable, "-m", "venv", str(H3_RUNTIME_ENV_DIR))
+        run(shutil.which("uv") or "uv", "venv", str(H3_RUNTIME_ENV_DIR), "--python", sys.executable, "--seed", "--link-mode", "copy")
         existing_python = H3_RUNTIME_ENV_DIR / "bin" / "python"
         if not existing_python.is_file():
             raise RuntimeError(f"Failed to create H3 runtime Python: {existing_python}")
