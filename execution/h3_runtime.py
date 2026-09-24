@@ -3,7 +3,9 @@ from __future__ import annotations
 import gc
 import os
 import socket
+import site
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -30,31 +32,30 @@ class H3Runtime:
 
     @staticmethod
     def worker_python(project_root: Path) -> Path:
-        configured = os.getenv("H3_RUNTIME_PYTHON", "").strip()
-        if configured:
-            python = Path(configured).expanduser()
-        else:
-            python = Path(project_root).resolve().parent / ".h3_runtime_cu130" / "bin" / "python"
+        """Launch H3 workers with the current Kaggle Python executable."""
+        python = Path(sys.executable).resolve()
         if not python.is_file() or not os.access(python, os.X_OK):
-            raise RuntimeError(
-                "Locked H3 worker Python is missing or not executable: "
-                f"{python}. Run kaggle/bootstrap.py first."
-            )
+            raise RuntimeError(f"Current Kaggle Python is missing or not executable: {python}")
         return python
 
     @staticmethod
     def worker_library_path(project_root: Path) -> str:
+        """Resolve Torch/CUDA libraries from the current Python environment."""
         configured = os.getenv("H3_RUNTIME_LIBRARY_PATH", "").strip()
         if configured:
             return configured
-        env_dir = Path(project_root).resolve().parent / ".h3_runtime_cu130"
-        python = env_dir / "bin" / "python"
-        if not python.is_file():
-            raise RuntimeError(f"Locked H3 runtime Python is missing: {python}")
-        roots = sorted((env_dir / "lib").glob("python*/site-packages"))
-        if not roots:
-            raise RuntimeError(f"Locked H3 runtime site-packages are missing: {env_dir / 'lib'}")
-        dirs = []
+        dirs: list[str] = []
+        roots: list[Path] = []
+        try:
+            roots.extend(Path(path).resolve() for path in site.getsitepackages())
+        except Exception:
+            pass
+        try:
+            user_root = Path(site.getusersitepackages()).resolve()
+            if user_root not in roots:
+                roots.append(user_root)
+        except Exception:
+            pass
         for root in roots:
             torch_lib = root / "torch" / "lib"
             if torch_lib.is_dir() and str(torch_lib) not in dirs:
@@ -66,8 +67,8 @@ class H3Runtime:
                         dirs.append(str(lib_dir))
         if not dirs:
             raise RuntimeError(
-                "Unable to resolve locked H3 CUDA library path from "
-                f"{roots[0]}"
+                "Unable to resolve CUDA/Torch library paths from the current Python environment.\n"
+                f"Python={sys.executable}"
             )
         return ":".join(dirs)
 
