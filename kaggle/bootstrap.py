@@ -266,7 +266,48 @@ def apply_embedded_h3_runtime_overlay() -> None:
     patch_h3_fp16_runtime(runtime)
     patch_h3_vae_decoder_dtype(runtime)
     patch_t4_h3_value_clone(runtime)
+
+    model_text = (COMFY / "comfy/ldm/minimax/model.py").read_text(encoding="utf-8")
+    vae_text = (COMFY / "comfy/ldm/minimax/vae.py").read_text(encoding="utf-8")
+    supported_text = (COMFY / "comfy/supported_models.py").read_text(encoding="utf-8")
+    turbo_text = (COMFY / "custom_nodes/ComfyUI-MiniMax-H3-Turbo/__init__.py").read_text(encoding="utf-8")
+    required_signatures = {
+        "model.py": (
+            "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
+            "condition_proj(text_states.to(torch.float32))",
+            "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
+            "low_precision_attention=False",
+            "self.out_proj((out / 64.0).to(torch.float16))",
+        ),
+        "vae.py": (
+            "decoder_dtype = next(self.decoder.parameters()).dtype",
+            "if z.dtype != decoder_dtype:",
+            "z = z.to(decoder_dtype)",
+        ),
+        "supported_models.py": (
+            "memory_usage_factor = 0.17",
+            "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]",
+        ),
+        "ComfyUI-MiniMax-H3-Turbo/__init__.py": (
+            "class MiniMaxH3TurboLoRA",
+        ),
+    }
+    actual_sources = {
+        "model.py": model_text,
+        "vae.py": vae_text,
+        "supported_models.py": supported_text,
+        "ComfyUI-MiniMax-H3-Turbo/__init__.py": turbo_text,
+    }
+    missing = [
+        f"{name}: {signature}"
+        for name, signatures in required_signatures.items()
+        for signature in signatures
+        if signature not in actual_sources[name]
+    ]
+    if missing:
+        raise RuntimeError("H3 runtime overlay verification failed:\n" + "\n".join(missing))
     print("[H3 COMFY PATCH] embedded runtime overlay applied: 4 files")
+    print("[H3 COMFY PATCH] post-overlay source verification: PASS")
 
 
 def verify_inventory() -> None:
@@ -416,9 +457,19 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
         if old not in text: raise RuntimeError("H3 attention source pattern changed.")
         text = text.replace(old, old[:-1] + ", low_precision_attention=False)", 1)
     if "condition_proj(text_states.to(torch.float32))" not in text:
-        old = "text_states = self.token_refiner(self.condition_proj(text_states),\n                                                   transformer_options=transformer_options)"
-        new = "text_states = self.token_refiner(self.condition_proj(text_states.to(torch.float32)),\n                                                   transformer_options=transformer_options)"
-        if old not in text: raise RuntimeError("H3 text-conditioning source pattern changed.")
+        old = (
+            "            text_states = self.token_refiner(self.condition_proj(text_states),\n"
+            "                                             transformer_options=transformer_options)"
+        )
+        new = (
+            "            # CRITICAL H3 T4 boundary: condition_proj must receive FP32 input.\n"
+            "            text_states = self.condition_proj(text_states.to(torch.float32))\n"
+            "            text_states = self.token_refiner(\n"
+            "                text_states,\n"
+            "                transformer_options=transformer_options,\n"
+            "            )"
+        )
+        if old not in text: raise RuntimeError("H3 text-conditioning source pattern changed for ComfyUI v0.34.0.")
         text = text.replace(old, new, 1)
     if "residual_dtype = torch.float32 if dtype == torch.float16 else dtype" not in text:
         old = "h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)"
@@ -429,9 +480,23 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
         if old not in text: raise RuntimeError("H3 embedding source pattern changed.")
         text = text.replace(old, "embed_dtype = torch.float32 if dtype == torch.float16 else dtype\n        video_embed = self.video_patch_proj(all_video_rows).to(embed_dtype)\n        audio_embed = self.audio_patch_proj(all_audio_rows).to(embed_dtype)", 1)
     if "self.out_proj((out / 64.0).to(torch.float16))" not in text:
-        old = "out = out.squeeze(0)\n        return self.out_proj(out)"
-        if old not in text: raise RuntimeError("H3 attention projection source pattern changed.")
-        new = "out = out.squeeze(0)\n        if x.dtype == torch.float32 and getattr(getattr(self.out_proj, 'weight', None), 'dtype', None) == torch.float16:\n            return self.out_proj((out / 64.0).to(torch.float16)).to(torch.float32).mul_(64.0)\n        return self.out_proj(out)"
+        old = "        return self.out_proj(out.squeeze(0))"
+        if old not in text: raise RuntimeError("H3 attention projection source pattern changed for ComfyUI v0.34.0.")
+        new = (
+            "        out = out.squeeze(0)\n"
+            "\n"
+            "        # H3 T4 FP16 numerical boundary: keep the residual stream FP32, but\n"
+            "        # scale the dangerous attention output projection into FP16 range.\n"
+            "        proj_weight = getattr(self.out_proj, \"weight\", None)\n"
+            "        proj_dtype = getattr(proj_weight, \"dtype\", None)\n"
+            "        if x.dtype == torch.float32 and proj_dtype == torch.float16:\n"
+            "            return (\n"
+            "                self.out_proj((out / 64.0).to(torch.float16))\n"
+            "                .to(torch.float32).mul_(64.0)\n"
+            "            )\n"
+            "\n"
+            "        return self.out_proj(out)"
+        )
         text = text.replace(old, new, 1)
     model.write_text(text, encoding="utf-8")
     s = supported.read_text(encoding="utf-8")
@@ -511,7 +576,7 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
     if marker in text or existing_patch in text:
         print("[H3 VAE PATCH] already applied")
         return
-    exact = "        z = self.post_quant_conv(z)\n        return self.decoder(z)"
+    exact = "        return self.decoder(self.post_quant_conv(z))"
     replacement = (
         "        z = self.post_quant_conv(z)\n"
         f"        {marker}\n"
@@ -1046,6 +1111,8 @@ def main():
     verify_h3_optimization_runtime(runtime)
     apply_embedded_h3_runtime_overlay()
     install_models()
+    verify_inventory()
+    verify_runtime_files(runtime)
     print(
         "=" * 80
     )
