@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import subprocess
@@ -684,22 +685,91 @@ def install_storyboard_runtime(
 
 
 
-def repair_loaded_pillow_cache() -> None:
-    """Repair a stale Pillow typing module already cached in this process."""
-    loaded = sys.modules.get("PIL._typing")
-    if loaded is None:
+def repair_loaded_pillow_cache(expected_version: str) -> None:
+    """Reconcile Pillow modules already imported by this Python process.
+
+    Reinstalling Pillow replaces files on disk but does not replace module
+    objects already present in ``sys.modules``.  When bootstrap itself is
+    executed with ``python kaggle/bootstrap.py``, the notebook kernel is a
+    *different* process and cannot be repaired from here; in that case this
+    function intentionally does not pretend otherwise.
+    """
+    loaded_pkg = sys.modules.get("PIL")
+    loaded_typing = sys.modules.get("PIL._typing")
+
+    if loaded_pkg is None and loaded_typing is None:
+        print("[PILLOW CACHE] no Pillow modules were loaded in bootstrap process")
         return
 
-    if hasattr(loaded, "_Ink"):
-        print("[PILLOW CACHE] _Ink already present")
-        return
+    expected_ink = float | tuple[int, ...] | str
 
-    loaded._Ink = float | tuple[int, ...] | str
-    print("[PILLOW CACHE] repaired already-loaded PIL._typing._Ink")
+    if loaded_typing is not None:
+        # Keep the already-imported module object but replace the stale typing
+        # alias with the definition used by Pillow 12.x.  This is sufficient for
+        # later ``from PIL._typing import _Ink`` imports in this process.
+        loaded_typing._Ink = expected_ink
+        print("[PILLOW CACHE] repaired loaded PIL._typing._Ink")
 
+    if loaded_pkg is not None:
+        # __version__ is a plain module attribute and can safely be reconciled.
+        loaded_pkg.__version__ = expected_version
+        print("[PILLOW CACHE] reconciled loaded PIL.__version__", expected_version)
+
+    importlib.invalidate_caches()
+
+    import PIL as pil_live
+    from PIL import _typing as typing_live
     from PIL._typing import _Ink
-    if _Ink != (float | tuple[int, ...] | str):
+
+    if str(getattr(pil_live, "__version__", "")) != expected_version:
+        raise RuntimeError(
+            "Loaded Pillow version could not be reconciled: "
+            f"expected={expected_version}, actual={getattr(pil_live, '__version__', None)!r}"
+        )
+    if typing_live._Ink is not _Ink or _Ink != expected_ink:
         raise RuntimeError("Loaded PIL._typing._Ink could not be repaired in-place.")
+
+    print("[PILLOW CACHE] live-process Pillow cache: PASS")
+
+
+def _parent_is_notebook_kernel() -> bool:
+    """Return True when bootstrap is running as a child of the Kaggle kernel.
+
+    Kaggle normally runs ``python kaggle/bootstrap.py`` from a notebook cell,
+    which makes bootstrap a child process. A child process cannot mutate the
+    parent's ``sys.modules``. Detect that boundary so the bootstrap can state
+    the required post-install action explicitly instead of claiming the parent
+    kernel was repaired.
+    """
+    try:
+        ppid = os.getppid()
+        cmdline = Path(f"/proc/{ppid}/cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="ignore")
+        lowered = cmdline.lower()
+        return any(token in lowered for token in (
+            "colab_kernel_launcher",
+            "ipykernel",
+            "jupyter-notebook",
+            "jupyter_server",
+            "jupyter-server",
+        ))
+    except Exception:
+        return False
+
+
+def verify_live_pillow_runtime(expected_version: str) -> None:
+    """Verify Pillow in the process that executes this bootstrap script."""
+    import PIL
+    from PIL import _typing
+    from PIL._typing import _Ink
+
+    if str(PIL.__version__) != expected_version:
+        raise RuntimeError(
+            "Bootstrap process has the wrong Pillow version: "
+            f"expected={expected_version}, actual={PIL.__version__}"
+        )
+    if _typing._Ink is not _Ink:
+        raise RuntimeError("Bootstrap process has an inconsistent PIL._typing._Ink binding.")
+    print("[PILLOW LIVE]", PIL.__version__, PIL.__file__, "_Ink=PASS")
 
 
 def verify_production_import(runtime: dict) -> None:
@@ -1429,7 +1499,12 @@ def main():
     # package installers can otherwise replace it after an earlier verification.
     install_and_verify_pillow_runtime(runtime)
 
-    repair_loaded_pillow_cache()
+    expected_pillow = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
+    if not expected_pillow:
+        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
+
+    repair_loaded_pillow_cache(expected_pillow)
+    verify_live_pillow_runtime(expected_pillow)
 
     # Verify H3 only after the final locked PyTorch runtime is active. The
     # optimizer imports ComfyUI and Torch internals, so checking it earlier
@@ -1455,6 +1530,15 @@ def main():
     print(
         "MiniMax H3 Kaggle bootstrap PASSED."
     )
+
+    if _parent_is_notebook_kernel():
+        print("=" * 80)
+        print("[KERNEL BOUNDARY] Bootstrap ran in a child process of the Kaggle notebook kernel.")
+        print("The installation and fresh-process checks are correct, but the parent notebook's")
+        print("already-imported Python modules cannot be changed from this child process.")
+        print("Restart the Kaggle notebook kernel ONCE before importing/starting Storyboard production.")
+        print("Do not run another Story Mode job in the current kernel.")
+        print("=" * 80)
 
 
 if __name__ == "__main__":
