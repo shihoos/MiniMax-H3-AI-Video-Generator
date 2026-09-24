@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import gc
 import os
-import socket
 import site
+import socket
 import subprocess
 import sys
 import time
@@ -23,7 +23,7 @@ def _isolated_python_environment() -> dict[str, str]:
 
 
 class H3Runtime:
-    """Manage one isolated ComfyUI worker per physical GPU."""
+    """Manage one current-Python ComfyUI worker per physical GPU."""
 
     @staticmethod
     def clear_cuda():
@@ -31,16 +31,36 @@ class H3Runtime:
         gc.collect()
 
     @staticmethod
+    def _torch_runtime_contract() -> tuple[str, str, str]:
+        pytorch_cfg = dict(RUNTIME.get("pytorch", {}) or {})
+        version = str(pytorch_cfg.get("version", "") or "").strip()
+        cuda_tag = str(pytorch_cfg.get("cuda", "") or "").strip().lower()
+        if not version or not cuda_tag.startswith("cu") or not cuda_tag[2:].isdigit():
+            raise RuntimeError("runtime_versions.yaml pytorch version/cuda configuration is incomplete.")
+        digits = cuda_tag[2:]
+        cuda_version = (
+            f"{int(digits[:-1])}.{digits[-1]}"
+            if len(digits) >= 2
+            else digits
+        )
+        return f"{version}+{cuda_tag}", cuda_tag, cuda_version
+
+    @staticmethod
     def worker_python(project_root: Path) -> Path:
-        """Launch H3 workers with the current Kaggle Python executable."""
-        python = Path(sys.executable).resolve()
+        current = Path(sys.executable).resolve()
+        configured = os.getenv("H3_RUNTIME_PYTHON", "").strip()
+        python = Path(configured).expanduser().resolve() if configured else current
+        if python != current:
+            raise RuntimeError(
+                "H3 workers must use the current Kaggle Python; "
+                f"configured={python}, current={current}."
+            )
         if not python.is_file() or not os.access(python, os.X_OK):
             raise RuntimeError(f"Current Kaggle Python is missing or not executable: {python}")
         return python
 
     @staticmethod
     def worker_library_path(project_root: Path) -> str:
-        """Resolve Torch/CUDA libraries from the current Python environment."""
         configured = os.getenv("H3_RUNTIME_LIBRARY_PATH", "").strip()
         if configured:
             return configured
@@ -66,10 +86,7 @@ class H3Runtime:
                     if lib_dir.is_dir() and str(lib_dir) not in dirs:
                         dirs.append(str(lib_dir))
         if not dirs:
-            raise RuntimeError(
-                "Unable to resolve CUDA/Torch library paths from the current Python environment.\n"
-                f"Python={sys.executable}"
-            )
+            raise RuntimeError("Unable to resolve current Kaggle Torch/CUDA library directories.")
         return ":".join(dirs)
 
     @classmethod
@@ -81,7 +98,8 @@ class H3Runtime:
             "expandable_segments:True",
         )
         env["PYTHONUNBUFFERED"] = "1"
-        env["H3_LOCKED_TORCH_RUNTIME"] = "2.10.0+cu130"
+        expected_torch, _, _ = cls._torch_runtime_contract()
+        env["H3_LOCKED_TORCH_RUNTIME"] = expected_torch
         isolated_libs = cls.worker_library_path(Path(env.get("H3_PROJECT_ROOT", Path.cwd())))
         inherited_libs = env.get("LD_LIBRARY_PATH", "")
         env["LD_LIBRARY_PATH"] = isolated_libs + ((":" + inherited_libs) if inherited_libs else "")
@@ -331,7 +349,8 @@ class H3Runtime:
         probe_env = _isolated_python_environment()
         probe_env["H3_RUNTIME_PYTHON"] = str(worker_python)
         probe_env["H3_PROJECT_ROOT"] = str(project_root)
-        probe_env["H3_LOCKED_TORCH_RUNTIME"] = "2.10.0+cu130"
+        expected_torch, _, _ = cls._torch_runtime_contract()
+        probe_env["H3_LOCKED_TORCH_RUNTIME"] = expected_torch
         isolated_libs = cls.worker_library_path(project_root)
         inherited_libs = probe_env.get("LD_LIBRARY_PATH", "")
         probe_env["LD_LIBRARY_PATH"] = isolated_libs + ((":" + inherited_libs) if inherited_libs else "")
@@ -344,20 +363,17 @@ class H3Runtime:
             cwd=str(project_root), env=probe_env, capture_output=True, text=True, check=False,
         )
         lines = [line.strip() for line in probe.stdout.splitlines() if line.strip()]
-        pytorch_cfg = dict(RUNTIME.get("pytorch", {}) or {})
-        expected_version = str(pytorch_cfg.get("version", "2.10.0") or "2.10.0").strip()
-        expected_cuda = str(pytorch_cfg.get("cuda", "cu130") or "cu130").strip().lower()
-        expected_torch = f"{expected_version}+{expected_cuda}"
+        expected_torch, expected_cuda, expected_cuda_runtime = cls._torch_runtime_contract()
         if probe.returncode != 0 or len(lines) < 4:
             raise RuntimeError(
                 "Fresh H3 runtime Torch probe failed.\n"
                 + (probe.stdout or "") + (probe.stderr or "")
             )
-        if lines[0] != expected_torch or lines[1] != "13.0" or lines[2] != "1":
+        if lines[0] != expected_torch or lines[1] != expected_cuda_runtime or lines[2] != "1":
             raise RuntimeError(
                 "H3 worker runtime does not match the project lock: "
                 f"torch={lines[0]!r}, cuda={lines[1]!r}, cuda_available={lines[2]!r}; "
-                f"expected {expected_torch} / CUDA 13.0."
+                f"expected {expected_torch} / CUDA {expected_cuda_runtime}."
             )
         detected_count = int(lines[3])
         available_gpu_ids = cls.available_gpu_ids()
