@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import gc
 import importlib
 import os
 import shutil
@@ -306,15 +305,13 @@ def install_base_requirements() -> None:
 
 
 
-def install_pytorch_runtime(runtime: dict) -> None:
-    """Enforce the locked PyTorch runtime without breaking an already-live Kaggle kernel.
+def _base_distribution_version(value: str) -> str:
+    """Return the public/base version without a local CUDA build suffix."""
+    return str(value or "").strip().split("+", 1)[0]
 
-    In no-restart mode, replacing a native Torch installation underneath an already
-    imported ``torch`` module is unsafe. When the live kernel already has the exact
-    locked Torch/CUDA build, keep it and verify it in place. When Torch is not loaded,
-    install the lock and import it in this same process. A mismatch in an already-live
-    Torch module fails closed instead of pretending that a reinstall changed it.
-    """
+
+def install_pytorch_runtime(runtime: dict) -> None:
+    """Install or verify the locked PyTorch CUDA runtime without a kernel restart."""
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
     cuda = str(config.get("cuda", "") or "").strip().lower()
@@ -329,26 +326,35 @@ def install_pytorch_runtime(runtime: dict) -> None:
 
     expected_torch = f"{version}+{cuda}"
     expected_cuda = "13.0"
-    loaded_torch = sys.modules.get("torch")
 
     def verify_companion_distributions() -> None:
         import importlib.metadata as metadata
+
         observed_tv = metadata.version("torchvision")
         observed_ta = metadata.version("torchaudio")
-        if observed_tv != torchvision_version:
+        expected_tv_base = _base_distribution_version(torchvision_version)
+        expected_ta_base = _base_distribution_version(torchaudio_version)
+
+        if _base_distribution_version(observed_tv) != expected_tv_base:
             raise RuntimeError(
-                f"Torchvision distribution mismatch: expected={torchvision_version}, actual={observed_tv}"
+                "Torchvision distribution mismatch: "
+                f"expected base={expected_tv_base}, actual={observed_tv}"
             )
-        if observed_ta != torchaudio_version:
+        if _base_distribution_version(observed_ta) != expected_ta_base:
             raise RuntimeError(
-                f"Torchaudio distribution mismatch: expected={torchaudio_version}, actual={observed_ta}"
+                "Torchaudio distribution mismatch: "
+                f"expected base={expected_ta_base}, actual={observed_ta}"
             )
-        print(f"[PYTORCH COMPANIONS] torchvision={observed_tv} torchaudio={observed_ta}: PASS")
+        print(
+            "[PYTORCH COMPANIONS] "
+            f"torchvision={observed_tv} torchaudio={observed_ta}: PASS"
+        )
 
     print("=" * 80)
     print("ENFORCING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
 
+    loaded_torch = sys.modules.get("torch")
     if loaded_torch is not None:
         actual_torch = str(getattr(loaded_torch, "__version__", ""))
         actual_cuda = str(getattr(getattr(loaded_torch, "version", None), "cuda", ""))
@@ -357,10 +363,15 @@ def install_pytorch_runtime(runtime: dict) -> None:
                 "NO-RESTART bootstrap cannot replace an already-imported native Torch runtime. "
                 f"Expected torch={expected_torch} cuda={expected_cuda}; "
                 f"live kernel has torch={actual_torch!r} cuda={actual_cuda!r}. "
-                "Run the bootstrap before importing torch (in the current kernel); do not restart."
+                "Run the bootstrap before importing torch in the current kernel; do not restart."
             )
         verify_companion_distributions()
-        print(f"[PYTORCH LIVE] already-loaded torch={actual_torch} cuda={actual_cuda}: PASS")
+        if not loaded_torch.cuda.is_available():
+            raise RuntimeError("Live Kaggle Torch CUDA is unavailable.")
+        print(
+            f"[PYTORCH LIVE] already-loaded torch={actual_torch} "
+            f"cuda={actual_cuda} gpu_count={loaded_torch.cuda.device_count()}: PASS"
+        )
         return
 
     run(
@@ -377,16 +388,24 @@ def install_pytorch_runtime(runtime: dict) -> None:
 
     importlib.invalidate_caches()
     import torch
+
     actual_torch = str(torch.__version__)
     actual_cuda = str(torch.version.cuda)
     if actual_torch != expected_torch:
-        raise RuntimeError(f"Torch mismatch in live kernel: expected={expected_torch}, actual={actual_torch}")
+        raise RuntimeError(
+            f"Torch mismatch in live kernel: expected={expected_torch}, actual={actual_torch}"
+        )
     if actual_cuda != expected_cuda:
-        raise RuntimeError(f"Torch CUDA mismatch in live kernel: expected={expected_cuda}, actual={actual_cuda}")
+        raise RuntimeError(
+            f"Torch CUDA mismatch in live kernel: expected={expected_cuda}, actual={actual_cuda}"
+        )
     if not torch.cuda.is_available():
         raise RuntimeError("Torch CUDA is unavailable in the live Kaggle kernel after installation.")
     verify_companion_distributions()
-    print(f"[PYTORCH LIVE] torch={actual_torch} cuda={actual_cuda} gpu_count={torch.cuda.device_count()}: PASS")
+    print(
+        f"[PYTORCH LIVE] torch={actual_torch} cuda={actual_cuda} "
+        f"gpu_count={torch.cuda.device_count()}: PASS"
+    )
 
 
 def patch_t4_h3_value_clone(runtime: dict) -> None:
@@ -710,18 +729,50 @@ def install_storyboard_runtime(
 
 
 def repair_loaded_pillow_cache(expected_version: str) -> None:
-    """Refresh Pillow only when the current kernel is not already healthy."""
+    """Reconcile Pillow modules already imported by this Python process.
+
+    Reinstalling Pillow replaces files on disk but does not replace module
+    objects already present in ``sys.modules``.  When bootstrap itself is
+    executed with ``python kaggle/bootstrap.py``, the notebook kernel is a
+    *different* process and cannot be repaired from here; in that case this
+    function intentionally does not pretend otherwise.
+    """
     loaded_pkg = sys.modules.get("PIL")
-    if loaded_pkg is not None and str(getattr(loaded_pkg, "__version__", "")) == expected_version:
-        try:
-            from PIL import _typing
-            from PIL._typing import _Ink  # noqa: F401
-            if _typing._Ink is _Ink:
-                print(f"[PILLOW CACHE] live kernel already healthy: {expected_version}: PASS")
-                return
-        except ImportError:
-            pass
-    _refresh_live_pillow(expected_version)
+    loaded_typing = sys.modules.get("PIL._typing")
+
+    if loaded_pkg is None and loaded_typing is None:
+        print("[PILLOW CACHE] no Pillow modules were loaded in bootstrap process")
+        return
+
+    expected_ink = float | tuple[int, ...] | str
+
+    if loaded_typing is not None:
+        # Keep the already-imported module object but replace the stale typing
+        # alias with the definition used by Pillow 12.x.  This is sufficient for
+        # later ``from PIL._typing import _Ink`` imports in this process.
+        loaded_typing._Ink = expected_ink
+        print("[PILLOW CACHE] repaired loaded PIL._typing._Ink")
+
+    if loaded_pkg is not None:
+        # __version__ is a plain module attribute and can safely be reconciled.
+        loaded_pkg.__version__ = expected_version
+        print("[PILLOW CACHE] reconciled loaded PIL.__version__", expected_version)
+
+    importlib.invalidate_caches()
+
+    import PIL as pil_live
+    from PIL import _typing as typing_live
+    from PIL._typing import _Ink
+
+    if str(getattr(pil_live, "__version__", "")) != expected_version:
+        raise RuntimeError(
+            "Loaded Pillow version could not be reconciled: "
+            f"expected={expected_version}, actual={getattr(pil_live, '__version__', None)!r}"
+        )
+    if typing_live._Ink is not _Ink or _Ink != expected_ink:
+        raise RuntimeError("Loaded PIL._typing._Ink could not be repaired in-place.")
+
+    print("[PILLOW CACHE] live-process Pillow cache: PASS")
 
 
 def _parent_is_notebook_kernel() -> bool:
@@ -803,87 +854,15 @@ print("PIL", PIL.__file__)
         )
     print("[PRODUCTION IMPORT]", (verification.stdout or "").strip().replace("\n", " | "))
 
-
-def verify_live_production_import(runtime: dict) -> None:
-    """Verify Storyboard production import in the current Kaggle kernel."""
-    expected_pillow = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
-    if not expected_pillow:
-        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-
-    import PIL
-    from PIL import _typing
-    from PIL._typing import _Ink
-
-    if str(PIL.__version__) != expected_pillow:
-        raise RuntimeError(
-            "Current Kaggle kernel is still using the wrong Pillow version: "
-            f"expected={expected_pillow}, actual={PIL.__version__!r}"
-        )
-    if _typing._Ink is not _Ink:
-        raise RuntimeError("Current Kaggle kernel has an inconsistent Pillow _Ink binding.")
-
-    importlib.invalidate_caches()
-    module = importlib.import_module("ui.storyboard_gradio")
-    print(
-        "[PRODUCTION IMPORT LIVE] PASS",
-        f"module={getattr(module, '__file__', '<unknown>')}",
-        f"Pillow={PIL.__version__}",
-        f"_Ink={_Ink}",
-    )
-
-def _refresh_live_pillow(expected_version: str) -> None:
-    """Reload Pillow's Python module graph in the *current* notebook kernel.
-
-    Pip changes files on disk, but an already-running kernel keeps old module
-    objects in ``sys.modules``. We deliberately refresh only the Pillow module
-    graph here, before Storyboard production imports its controller.
-    """
-    loaded = [name for name in tuple(sys.modules) if name == "PIL" or name.startswith("PIL.")]
-    if loaded:
-        for name in sorted(loaded, key=len, reverse=True):
-            sys.modules.pop(name, None)
-        gc.collect()
-    importlib.invalidate_caches()
-
-    import PIL
-    from PIL import Image, ImageText, _typing
-    from PIL._typing import _Ink
-
-    if str(PIL.__version__) != expected_version:
-        raise RuntimeError(
-            "Live kernel Pillow refresh failed: "
-            f"expected={expected_version}, actual={PIL.__version__!r}"
-        )
-    if Image.__version__ != PIL.__version__:
-        raise RuntimeError("Live kernel Pillow Image.__version__ mismatch.")
-    if not Image.__file__.startswith(PIL.__path__[0]):
-        raise RuntimeError("Live kernel Pillow Image module resolved outside PIL package root.")
-    if not ImageText.__file__.startswith(PIL.__path__[0]):
-        raise RuntimeError("Live kernel Pillow ImageText module resolved outside PIL package root.")
-    if not _typing.__file__.startswith(PIL.__path__[0]):
-        raise RuntimeError("Live kernel Pillow _typing module resolved outside PIL package root.")
-    if _typing._Ink is not _Ink:
-        raise RuntimeError("Live kernel Pillow _Ink binding is inconsistent.")
-
-    print(f"[PILLOW LIVE] {PIL.__version__} {_typing.__file__} _Ink=PASS")
-
-
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
-    """Install the locked Pillow build and make the *current* Kaggle kernel use it."""
-    pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
+    """Install the locked Pillow build cleanly and verify it in a fresh process."""
+    pillow_version = str(
+        runtime.get("storyboard", {}).get("pillow_version", "")
+    ).strip()
     if not pillow_version:
-        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-
-    live_pil = sys.modules.get("PIL")
-    live_version = str(getattr(live_pil, "__version__", "")) if live_pil is not None else ""
-    if live_version == pillow_version:
-        try:
-            from PIL import _typing
-            from PIL._typing import _Ink  # noqa: F401
-            print(f"[PILLOW LIVE] already-loaded Pillow {live_version}: PASS")
-            return
-        except ImportError:
-            print("[PILLOW LIVE] expected version reported but _Ink is unavailable; refreshing module graph")
+        raise RuntimeError(
+            "runtime_versions.yaml storyboard.pillow_version is missing."
+        )
 
     roots = list(_site_packages())
     try:
@@ -928,10 +907,6 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
         f"Pillow=={pillow_version}",
     )
 
-    importlib.invalidate_caches()
-    _refresh_live_pillow(pillow_version)
-
-    # Also prove the on-disk installation is coherent from a separate interpreter.
     verify_script = (
         "import PIL; "
         "from PIL import Image, ImageText; "
@@ -961,7 +936,7 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
             + (verification.stdout or "")
             + (verification.stderr or "")
         )
-    print("[PILLOW FRESH]", (verification.stdout or "").strip().replace("\n", " | "))
+    print("[PILLOW]", (verification.stdout or "").strip().replace("\n", " | "))
 
 
 EMBEDDED_CONTEXT_IR_NODE = 'from __future__ import annotations\n\nimport hashlib\nimport mimetypes\nimport os\nimport time\nfrom pathlib import Path\nfrom typing import Dict, Tuple\n\nimport requests\n\nDEFAULT_BASE = "https://api.minimax.io"\nCREATE_PATH = "/v2/h3_context_ir"\nQUERY_PATH = "/v2/query/video_generation/{task_id}"\nUPLOAD_PATH = "/v1/files/upload"\nRETRIEVE_PATH = "/v1/files/retrieve"\nFINAL_STATUSES = {"succeeded", "failed", "cancelled", "expired"}\nTRANSIENT_HTTP = {429, 500, 502, 503, 504}\n_URL_CACHE: Dict[Tuple[str, str, int, int], str] = {}\n\n\ndef _split_paths(value: str) -> list[str]:\n    return [x.strip() for x in str(value or "").splitlines() if x.strip()]\n\n\ndef _config_int(name: str, default: int) -> int:\n    try:\n        return int(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _config_float(name: str, default: float) -> float:\n    try:\n        return float(os.getenv(name, str(default)))\n    except (TypeError, ValueError):\n        return default\n\n\ndef _headers(token: str) -> dict[str, str]:\n    return {"Authorization": f"Bearer {token}"}\n\n\ndef _request_with_retry(method: str, url: str, *, token: str, retry: bool = True, **kwargs):\n    retries = max(0, _config_int("H3_CONTEXT_IR_API_RETRIES", 3)) if retry else 0 if retry else 0\n    backoff = max(0.5, _config_float("H3_CONTEXT_IR_RETRY_BACKOFF_SECONDS", 2.0))\n    last = None\n    for attempt in range(retries + 1):\n        try:\n            response = requests.request(\n                method,\n                url,\n                headers={**_headers(token), **kwargs.pop("headers", {})},\n                **kwargs,\n            )\n        except requests.RequestException as exc:\n            last = exc\n            if attempt >= retries:\n                raise\n            time.sleep(backoff * (2 ** attempt))\n            continue\n        if response.status_code in TRANSIENT_HTTP and attempt < retries:\n            retry_after = response.headers.get("Retry-After")\n            try:\n                delay = max(0.5, float(retry_after)) if retry_after else backoff * (2 ** attempt)\n            except ValueError:\n                delay = backoff * (2 ** attempt)\n            time.sleep(delay)\n            continue\n        return response\n    if last:\n        raise last\n    raise RuntimeError("Context-IR request retry loop failed unexpectedly.")\n\n\ndef _resolve_local_file(value: str) -> Path:\n    path = Path(value).expanduser().resolve()\n    if not path.is_file():\n        raise FileNotFoundError(f"Context-IR reference file does not exist: {path}")\n    return path\n\n\ndef _max_upload_bytes(kind: str) -> int:\n    env_name = {\n        "image": "H3_CONTEXT_IR_MAX_IMAGE_MB",\n        "video": "H3_CONTEXT_IR_MAX_VIDEO_MB",\n        "audio": "H3_CONTEXT_IR_MAX_AUDIO_MB",\n    }[kind]\n    limit_mb = max(0.0, _config_float(env_name, {"image": 30.0, "video": 50.0, "audio": 15.0}[kind]))\n    return int(limit_mb * 1024 * 1024)\n\n\ndef _upload_local_file(path: Path, kind: str, token: str, base: str) -> str:\n    stat = path.stat()\n    limit_bytes = _max_upload_bytes(kind)\n    if limit_bytes and stat.st_size > limit_bytes:\n        limit_mb = limit_bytes / (1024 * 1024)\n        actual_mb = stat.st_size / (1024 * 1024)\n        raise ValueError(\n            f"Context-IR {kind} reference exceeds configured upload limit: "\n            f"{path.name} is {actual_mb:.2f} MiB; limit is {limit_mb:.2f} MiB."\n        )\n    key = (str(path), kind, int(stat.st_size), int(stat.st_mtime_ns))\n    cached = _URL_CACHE.get(key)\n    if cached:\n        return cached\n    purpose = "video_generation"\n    mime = mimetypes.guess_type(path.name)[0] or {\n        "image": "image/png", "video": "video/mp4", "audio": "audio/mpeg",\n    }[kind]\n    with path.open("rb") as handle:\n        response = _request_with_retry(\n            "POST",\n            base + UPLOAD_PATH,\n            token=token,\n            files={"file": (path.name, handle, mime)},\n            data={"purpose": purpose},\n            timeout=120,\n        )\n    response.raise_for_status()\n    payload = response.json()\n    file_obj = payload.get("file") or {}\n    file_id = str(file_obj.get("file_id") or file_obj.get("id") or "").strip()\n    url = str(file_obj.get("download_url") or file_obj.get("url") or "").strip()\n    if not url and file_id:\n        retrieve = _request_with_retry(\n            "GET",\n            base + RETRIEVE_PATH,\n            token=token,\n            params={"file_id": file_id},\n            timeout=60,\n        )\n        retrieve.raise_for_status()\n        robj = (retrieve.json().get("file") or {})\n        url = str(robj.get("download_url") or robj.get("url") or "").strip()\n    if not url.startswith(("https://", "http://")):\n        raise RuntimeError(f"MiniMax file upload returned no usable download URL for {path.name}.")\n    _URL_CACHE[key] = url\n    return url\n\n\ndef _media_url(value: str, kind: str, token: str, base: str) -> str:\n    value = str(value).strip()\n    if value.startswith(("https://", "http://")):\n        return value\n    if value.startswith("data:"):\n        return value\n    return _upload_local_file(_resolve_local_file(value), kind, token, base)\n\n\ndef _required_config_int(name: str) -> int:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return int(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _required_config_float(name: str) -> float:\n    value = os.getenv(name, "").strip()\n    if not value:\n        raise RuntimeError(f"Missing pinned Context-IR runtime setting: {name}")\n    try:\n        return float(value)\n    except ValueError as exc:\n        raise RuntimeError(f"Invalid pinned Context-IR runtime setting: {name}={value!r}") from exc\n\n\ndef _poll(base: str, token: str, task_id: str) -> str:\n    timeout_s = max(1, _required_config_int("H3_CONTEXT_IR_TIMEOUT_SECONDS"))\n    interval_s = max(0.1, _required_config_float("H3_CONTEXT_IR_POLL_INTERVAL_SECONDS"))\n    max_polls = max(1, _required_config_int("H3_CONTEXT_IR_MAX_POLLS"))\n    url = base + QUERY_PATH.format(task_id=task_id)\n    started = time.monotonic()\n    for _ in range(max_polls):\n        response = _request_with_retry("GET", url, token=token, timeout=60)\n        response.raise_for_status()\n        payload = response.json()\n        task = payload.get("task") or {}\n        status = str(task.get("status") or payload.get("status") or "").strip().lower()\n        if status in FINAL_STATUSES:\n            if status != "succeeded":\n                raise RuntimeError(f"MiniMax H3 Context-IR task {task_id} ended with status={status}.")\n            prompt = str((task.get("content") or {}).get("prompt") or "").strip()\n            if not prompt:\n                raise RuntimeError("MiniMax H3 Context-IR returned an empty enhanced prompt.")\n            return prompt\n        if time.monotonic() - started >= timeout_s:\n            break\n        time.sleep(interval_s)\n    raise TimeoutError(f"MiniMax H3 Context-IR task {task_id} timed out after {timeout_s}s.")\n\n\nclass MiniMaxH3ContextIR:\n    @classmethod\n    def INPUT_TYPES(cls):\n        return {"required": {\n            "prompt": ("STRING", {"multiline": True, "default": ""}),\n            "duration": ("INT", {"default": 5, "min": 4, "max": 15, "step": 1}),\n            "ratio": (["adaptive", "16:9", "4:3", "1:1", "3:4", "9:16", "21:9"], {"default": "adaptive"}),\n            "reference_images": ("STRING", {"multiline": True, "default": ""}),\n            "reference_videos": ("STRING", {"multiline": True, "default": ""}),\n            "reference_audios": ("STRING", {"multiline": True, "default": ""}),\n        }}\n\n    RETURN_TYPES = ("STRING",)\n    RETURN_NAMES = ("enhanced_prompt",)\n    FUNCTION = "enhance"\n    CATEGORY = "MiniMax H3/Prompting"\n    DESCRIPTION = "Official MiniMax H3 Context-IR multimodal prompt enhancer."\n\n    def enhance(self, prompt, duration, ratio, reference_images, reference_videos, reference_audios):\n        # Official MiniMax H3 Context-IR is mandatory. There is deliberately no\n        # no local fallback or disable switch on the production bridge.\n        token = os.getenv("MINIMAX_API_TOKEN", "").strip() or os.getenv("TOKEN", "").strip()\n        if not token:\n            raise RuntimeError("Official MiniMax H3 Context-IR requires MINIMAX_API_TOKEN (or TOKEN).")\n        prompt = str(prompt or "").strip()\n        if not prompt:\n            raise ValueError("Context-IR prompt cannot be empty.")\n        base = (os.getenv("MINIMAX_API_BASE", DEFAULT_BASE).strip() or DEFAULT_BASE).rstrip("/")\n        content = [{"type": "text", "text": prompt}]\n        for value in _split_paths(reference_images):\n            content.append({"type": "image_url", "image_url": {"url": _media_url(value, "image", token, base)}, "role": "reference_image"})\n        for value in _split_paths(reference_videos):\n            content.append({"type": "video_url", "video_url": {"url": _media_url(value, "video", token, base)}, "role": "reference_video"})\n        for value in _split_paths(reference_audios):\n            content.append({"type": "audio_url", "audio_url": {"url": _media_url(value, "audio", token, base)}, "role": "reference_audio"})\n        ratio_value = str(ratio or "adaptive").strip()\n        payload = {\n            "model": "MiniMax-H3",\n            "content": content,\n            "duration": int(max(4, min(15, int(duration)))),\n            "ratio": None if ratio_value.lower() == "adaptive" else ratio_value,\n        }\n        response = _request_with_retry(\n            "POST", base + CREATE_PATH, token=token, retry=False,\n            headers={"Content-Type": "application/json"}, json=payload, timeout=60,\n        )\n        response.raise_for_status()\n        result = response.json()\n        task_id = str(result.get("task_id") or ((result.get("task") or {}).get("id")) or "").strip()\n        if not task_id:\n            raise RuntimeError(f"MiniMax H3 Context-IR did not return task_id: {response.text[:1000]}")\n        enhanced = _poll(base, token, task_id)\n        print(f"[H3 Context-IR] official task={task_id} enhanced_prompt_chars={len(enhanced)}", flush=True)\n        return (enhanced,)\n\n\nNODE_CLASS_MAPPINGS = {"MiniMaxH3ContextIR": MiniMaxH3ContextIR}\nNODE_DISPLAY_NAME_MAPPINGS = {"MiniMaxH3ContextIR": "MiniMax H3 Context IR (Official Prompt Enhancer)"}\n'
@@ -1510,6 +1485,20 @@ def verify_runtime_files(runtime: dict) -> None:
         )
 
 
+def _warn_if_torch_already_imported() -> None:
+    """Warn when bootstrap is running in a process that already imported Torch."""
+    if "torch" not in sys.modules:
+        return
+
+    print("=" * 80)
+    print("[BOOTSTRAP WARNING] torch is already imported in this process.")
+    print("Reinstalling PyTorch changes files on disk, not the native Torch runtime")
+    print("already loaded into this Python process.")
+    print("GPU-dependent validation/work must run in a FRESH subprocess after bootstrap.")
+    print("Do NOT import or reload torch directly in this same kernel after reinstall.")
+    print("=" * 80)
+
+
 def _in_ipython_kernel_process() -> bool:
     """Return True when this bootstrap is executing inside the live notebook kernel."""
     try:
@@ -1520,25 +1509,14 @@ def _in_ipython_kernel_process() -> bool:
 
 
 def _enforce_no_restart_execution_mode() -> None:
-    """Require in-process execution when a notebook launched this bootstrap."""
+    """Reject child-process execution when it would leave the notebook kernel stale."""
     if _parent_is_notebook_kernel() and not _in_ipython_kernel_process():
         raise RuntimeError(
-            "NO-RESTART MODE: this bootstrap was launched as a child process of the Kaggle "
-            "notebook kernel, so it cannot repair the live kernel's imported modules. "
-            "Run it IN the current notebook process with `%run kaggle/bootstrap.py` "
-            "(or `exec(compile(...), globals())`). Do not use `!python kaggle/bootstrap.py`."
+            "NO-RESTART bootstrap must run inside the current Kaggle notebook kernel. "
+            "Run `%run kaggle/bootstrap.py` (or execute the file in-process); do not use "
+            "`!python kaggle/bootstrap.py`, because a child process cannot repair the "
+            "parent kernel's already-imported Python modules."
         )
-
-
-def _warn_if_torch_already_imported() -> None:
-    """Warn when bootstrap is running in a process that already imported Torch."""
-    if "torch" not in sys.modules:
-        return
-
-    print("=" * 80)
-    print("[BOOTSTRAP INFO] torch is already imported in this live kernel.")
-    print("No-restart mode will NOT replace native Torch in-place; the live version must already match the lock.")
-    print("=" * 80)
 
 
 def main():
@@ -1566,8 +1544,10 @@ def main():
 
     install_comfyui(runtime)
 
-    # Director vLLM is isolated in its own environment and does not mutate the
-    # production ComfyUI/PyTorch runtime used by H3.
+    # vLLM must be installed after the pinned PyTorch/CUDA runtime so its
+    # compiled extensions bind against the intended torch/CUDA stack.
+    install_pytorch_runtime(runtime)
+
     install_director_runtime(
         runtime
     )
@@ -1579,11 +1559,6 @@ def main():
     install_nodes()
     install_embedded_context_ir_node(runtime)
 
-    # Enforce the locked production Torch only after every package installer that
-    # can mutate the shared Kaggle environment has completed. In no-restart mode,
-    # an already-loaded matching Torch runtime is preserved in-place.
-    install_pytorch_runtime(runtime)
-
     # Pillow is enforced at the final dependency boundary because downstream
     # package installers can otherwise replace it after an earlier verification.
     install_and_verify_pillow_runtime(runtime)
@@ -1594,7 +1569,7 @@ def main():
 
     repair_loaded_pillow_cache(expected_pillow)
     verify_live_pillow_runtime(expected_pillow)
-    verify_live_production_import(runtime)
+    verify_production_import(runtime)
 
     # Verify H3 only after the final locked PyTorch runtime is active. The
     # optimizer imports ComfyUI and Torch internals, so checking it earlier
@@ -1620,7 +1595,8 @@ def main():
     print(
         "MiniMax H3 Kaggle bootstrap PASSED — NO RESTART REQUIRED."
     )
-    print("[NO-RESTART] live Kaggle kernel dependencies and production import verified in-process.")
+
+    print("[NO-RESTART] Bootstrap completed in the live Kaggle kernel.")
 
 
 if __name__ == "__main__":
