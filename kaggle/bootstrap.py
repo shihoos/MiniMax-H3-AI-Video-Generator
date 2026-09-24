@@ -568,26 +568,9 @@ def install_director_runtime(
         raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
     if tensor_parallel_size <= 0:
         raise RuntimeError("runtime_versions.yaml director.tensor_parallel_size must be positive.")
-
-    # The manifest remains the sole source of the Director version/path contract.
-    # The configured vllm_env_dir is retained for validation compatibility, but
-    # bootstrap no longer creates a virtual environment there. Instead, point
-    # the unchanged Director launcher at the existing system Python prefix.
-    legacy_dir = Path(env_dir_value).expanduser().resolve()
-    if legacy_dir.exists() and legacy_dir != Path(sys.executable).resolve().parent.parent:
-        if (legacy_dir / "pyvenv.cfg").is_file() or (legacy_dir / "bin" / "python").is_file():
-            print("[DIRECTOR] removing legacy isolated environment:", legacy_dir)
-            shutil.rmtree(legacy_dir)
-
-    current_python = Path(sys.executable).resolve()
-    system_prefix = current_python.parent.parent
-    system_python = system_prefix / "bin" / "python"
-    if not system_python.is_file() or not os.access(system_python, os.X_OK):
-        raise RuntimeError(
-            "Could not resolve an existing bin/python for the current Kaggle Python: "
-            f"{system_python}"
-        )
-    os.environ["H3_DIRECTOR_VLLM_ENV_DIR"] = str(system_prefix)
+    env_dir = Path(
+        os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
+    ).expanduser().resolve()
 
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
@@ -595,36 +578,37 @@ def install_director_runtime(
     print("[DIRECTOR]", f"model={model_path}")
     print("[DIRECTOR]", f"speculator={spec_path}")
     print("[DIRECTOR]", f"backend=vllm version={vllm_version}")
-    print("[DIRECTOR]", f"system_python={current_python}")
+    print("[DIRECTOR]", f"isolated_env={env_dir}")
 
-    # Install only the configured vLLM distribution. Its Torch/CUDA dependencies
-    # are deliberately not resolved here because Torch/CUDA are centrally pinned
-    # by runtime_versions.yaml in the current Kaggle Python environment.
-    try:
-        import importlib.metadata as metadata
-        installed_vllm = metadata.version("vllm")
-    except metadata.PackageNotFoundError:
-        installed_vllm = ""
+    uv = shutil.which("uv")
+    if uv is None:
+        run(sys.executable, "-m", "pip", "install", "-q", "uv")
+        uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("uv is required to create the isolated Director environment.")
 
-    if installed_vllm != vllm_version:
-        install = subprocess.run(
-            [
-                current_python, "-m", "pip", "install", "-q",
-                "--disable-pip-version-check",
-                "--no-cache-dir",
-                "--no-deps",
-                f"vllm=={vllm_version}",
-            ],
-            env=_h3_runtime_environment(),
-            check=False,
-            text=True,
-        )
-        if install.returncode != 0:
-            raise RuntimeError("Failed to install the configured vLLM runtime into the current Kaggle Python.")
+    if not (env_dir / "bin" / "python").is_file():
+        env_dir.parent.mkdir(parents=True, exist_ok=True)
+        run(uv, "venv", str(env_dir), "--python", sys.executable, "--seed", "--link-mode", "copy")
+
+    venv_python = env_dir / "bin" / "python"
+    if not venv_python.is_file() or not os.access(venv_python, os.X_OK):
+        raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
+
+    env = os.environ.copy()
+    env["UV_LINK_MODE"] = "copy"
+    install = subprocess.run(
+        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", "wrapt==2.4.1"],
+        env=env,
+        check=False,
+        text=True,
+    )
+    if install.returncode != 0:
+        raise RuntimeError("Failed to install isolated vLLM runtime.")
 
     verification = subprocess.run(
         [
-            current_python, "-c",
+            str(venv_python), "-c",
             (
                 "import vllm, torch, inspect; "
                 "from vllm.config import SpeculativeConfig; "
@@ -636,16 +620,13 @@ def install_director_runtime(
                 "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
             ),
         ],
-        capture_output=True, text=True, check=False, env=_h3_runtime_environment(),
+        capture_output=True, text=True, check=False, env=env,
     )
-    print(verification.stdout, end="")
+    print(verification.stdout)
     if verification.stderr:
-        print(verification.stderr, end="")
+        print(verification.stderr)
     if verification.returncode != 0:
-        raise RuntimeError(
-            "Configured vLLM runtime verification failed in the current Kaggle Python.\n"
-            + (verification.stdout or "") + (verification.stderr or "")
-        )
+        raise RuntimeError("vLLM isolated runtime verification failed.")
     observed_version = None
     for line in verification.stdout.splitlines():
         if line.startswith("vLLM version:"):
@@ -656,9 +637,13 @@ def install_director_runtime(
             "Director runtime verification version mismatch: "
             f"observed={observed_version!r}, configured={vllm_version!r}."
         )
-    if "EAGLE-3 supported: True" not in verification.stdout:
-        raise RuntimeError("Director runtime verification did not confirm configured EAGLE-3 support.")
+    if f"EAGLE-3 supported: True" not in verification.stdout:
+        raise RuntimeError(
+            f"Director runtime verification did not confirm speculative method {speculative_method!r}."
+        )
 
+    # Request logging is disabled by default in the pinned vLLM runtime.
+    # Do not pass a version-sensitive logging flag to the Director subprocess.
     observed_gpu_count = None
     for line in verification.stdout.splitlines():
         if line.startswith("GPU count:"):
@@ -674,6 +659,7 @@ def install_director_runtime(
         )
 
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
+
 
 def install_storyboard_runtime(
     runtime: dict,
