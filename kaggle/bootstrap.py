@@ -223,11 +223,8 @@ def _h3_runtime_python() -> Path:
 
 def _h3_runtime_site_packages() -> list[Path]:
     python = _h3_runtime_python()
-    result = subprocess.run(
-        [python, "-c", "import site; print('\n'.join(site.getsitepackages()))"],
-        capture_output=True, text=True, check=True,
-    )
-    return [Path(line.strip()) for line in result.stdout.splitlines() if line.strip()]
+    root = python.parent.parent
+    return [root / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"]
 
 
 def _h3_cuda_library_dirs() -> list[Path]:
