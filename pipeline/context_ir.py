@@ -688,7 +688,7 @@ class H3ContextIRCompiler:
 
     @classmethod
     def _canonical_input_prompt(cls, plan: dict[str, Any], shot: dict[str, Any], refs: list[dict[str, Any]]) -> str:
-        """Build the one canonical multimodal intent sent to official Context-IR."""
+        """Build the one canonical multimodal intent consumed by the local H3 Context-IR compiler."""
         lines: list[str] = []
         story = cls._clean(plan.get("story") or shot.get("story"))
         if story:
