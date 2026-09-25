@@ -1033,6 +1033,10 @@ class ProductionRunner:
                 context_plan,
                 shot,
             )
+            self.context_ir.persist_capture(shot["h3_context_ir"])
+            shot["h3_effective_prompt"] = H3ContextIRCompiler.input_prompt(
+                shot["h3_context_ir"]
+            )
 
             result = (
                 executor.execute_shot(
@@ -1056,26 +1060,6 @@ class ProductionRunner:
                     "Shot execution returned an invalid output: "
                     f"{result}"
                 )
-
-            official = dict(shot.get("h3_context_ir", {}).get("official_context_ir", {}) or {})
-            capture_path = str(official.get("capture_path", "") or "").strip()
-            if capture_path:
-                capture = executor.client.read_context_ir_capture(
-                    capture_path,
-                    expected_base_prompt_sha256=str(official.get("base_prompt_sha256", "")),
-                )
-                official.update({
-                    "status": "succeeded",
-                    "task_id": str(capture.get("task_id", "")),
-                    "enhanced_prompt": str(capture.get("enhanced_prompt", "")),
-                    "prompt": str(capture.get("enhanced_prompt", "")),
-                    "effective_prompt_sha256": str(capture.get("effective_prompt_sha256", "")),
-                    "captured_at": str(capture.get("captured_at", "")),
-                })
-                shot["h3_context_ir"]["official_context_ir"] = official
-                shot["h3_effective_prompt"] = official["enhanced_prompt"]
-            else:
-                raise RuntimeError(f"Shot {shot_id} has no official Context-IR capture path.")
 
             try:
                 av_result = FFProbeMediaDurationProvider().validate_video_audio_sync(
@@ -1222,9 +1206,6 @@ class ProductionRunner:
                         shot["retake_execution"]["attempt"] = attempt_number
                         shot["retake_execution"]["max_attempts"] = max_auto_retries
 
-                        shot["retake_execution"]["official_context_ir"] = dict(
-                            retake_result.get("official_context_ir", {}) or {}
-                        )
                         if isinstance(retake_result.get("context_ir"), dict):
                             shot["h3_context_ir"] = dict(retake_result["context_ir"])
                         if retake_result.get("h3_effective_prompt"):
@@ -1426,8 +1407,8 @@ class ProductionRunner:
         self._active_plan = production_plan
         self._active_profile = str(production_plan.get("profile", PROFILE_BASE) or PROFILE_BASE).strip().lower()
         manifest_path = self.project_root / "data" / "production" / production_id / "production_manifest.json"
-        # Pre-render manifest records the immutable source/model/workflow fingerprint,
-        # but official Context-IR results do not exist until each shot executes.
+        # Pre-render manifest records the immutable source/model/workflow fingerprint;
+        # local Context-IR artifacts are persisted as each shot executes.
         self.production_manifest.write(
             production_plan,
             manifest_path,
