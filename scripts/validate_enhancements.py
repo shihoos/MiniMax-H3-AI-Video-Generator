@@ -226,26 +226,26 @@ def main() -> None:
     assert widgets and str(widgets[0]) == ctx["context_ir_input"]
     assert H3ContextIRCompiler.input_prompt(ctx) == ctx["context_ir_input"]
     ctx_nodes = [node for node in built.get("nodes", []) if node.get("type") == "MiniMaxH3ContextIR"]
-    assert len(ctx_nodes) == 1
-    ctx_node = ctx_nodes[0]
+    assert not ctx_nodes, "retired external Context-IR node must not be present"
     ref_node = next(node for node in built.get("nodes", []) if node.get("type") == "MiniMaxH3ReferenceToVideo")
     ref_prompt_slot = next(i for i, item in enumerate(ref_node.get("inputs", [])) if item.get("name") == "prompt")
-    ctx_prompt_link = [
+    prompt_node = prompt_nodes[0]
+    prompt_output = next(i for i, item in enumerate(prompt_node.get("outputs", [])) if str(item.get("name", "")).upper() == "STRING")
+    direct_prompt_links = [
         row for row in built.get("links", [])
         if isinstance(row, list)
         and len(row) >= 6
         and str(row[5]).upper() == "STRING"
-        and int(row[1]) == int(ctx_node["id"])
+        and int(row[1]) == int(prompt_node["id"])
+        and int(row[2]) == prompt_output
         and int(row[3]) == int(ref_node["id"])
         and int(row[4]) == ref_prompt_slot
     ]
-    assert len(ctx_prompt_link) == 1
-    props = ctx_node.get("properties", {})
-    assert props.get("requires_official_api") is True
-    assert props.get("official_api_base_env") == "MINIMAX_API_BASE"
-    assert props.get("official_api_token_env") == "MINIMAX_API_TOKEN"
-    assert props.get("reference_order") == {"images": [], "videos": [], "audios": []}
-    print("PASS: existing official Context-IR API bridge remains wired")
+    assert len(direct_prompt_links) == 1
+    built_text = json.dumps(built)
+    assert "MINIMAX_API_TOKEN" not in built_text
+    assert "MINIMAX_API_BASE" not in built_text
+    print("PASS: local Context-IR prompt is wired directly to Ref2VA without an external API")
 
     # Standard Ref2VA scheduler is deliberately tuned; Turbo stays simple.
     standard_scheduler = next(node for node in built["nodes"] if node.get("type") == "BasicScheduler")
@@ -276,19 +276,15 @@ def main() -> None:
     print("PASS: Kaggle/runtime configuration contract")
 
     runtime_features = yaml.safe_load(runtime)["features"]
-    assert runtime_features["context_ir_official_api"] is True
-    assert runtime_features["context_ir_official_preferred"] is True
-    assert runtime_features["context_ir_official_required"] is True
-    assert int(runtime_features["context_ir_official_timeout_seconds"]) == 180
-    assert int(runtime_features["context_ir_official_poll_interval_seconds"]) == 5
-    assert int(runtime_features["context_ir_official_max_polls"]) == 36
+    assert runtime_features["context_ir_required"] is True
+    assert runtime_features["context_ir_backend"] == "local_compiler"
 
     bootstrap = (ROOT / "kaggle" / "bootstrap.py").read_text(encoding="utf-8")
-    assert 'CREATE_PATH = "/v2/h3_context_ir"' in bootstrap
-    assert 'QUERY_PATH = "/v2/query/video_generation/{task_id}"' in bootstrap
-    assert 'UPLOAD_PATH = "/v1/files/upload"' in bootstrap
+    assert "remove_legacy_context_ir_node" in bootstrap
+    assert "MINIMAX_API_TOKEN" not in bootstrap
+    assert "api.minimax.io" not in bootstrap
     live = (ROOT / "kaggle" / "verify_live_runtime.py").read_text(encoding="utf-8")
-    assert '"MiniMaxH3ContextIR"' in live
+    assert "retired external Context-IR node is still present" in live
 
     production_policy = __import__("execution.execution_policy", fromlist=["ExecutionPolicy"]).ExecutionPolicy.from_runtime(mode="production", gpu_id=None)
     assert production_policy.require_context_ir is True
