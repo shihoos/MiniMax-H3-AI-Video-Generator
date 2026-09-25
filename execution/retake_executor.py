@@ -154,6 +154,10 @@ class RetakeExecutor:
             replacement,
         )
         replacement["h3_context_ir"] = replacement_context_ir
+        H3ContextIRCompiler.persist_capture(replacement_context_ir)
+        replacement["h3_effective_prompt"] = H3ContextIRCompiler.input_prompt(
+            replacement_context_ir
+        )
 
         out_dir = self.project_root / "data" / "production" / str(production_id) / "retakes" / str(shot["shot_id"])
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -164,25 +168,6 @@ class RetakeExecutor:
             upscale=upscale,
             context_ir=replacement_context_ir,
         )
-        official = dict(replacement_context_ir.get("official_context_ir", {}) or {})
-        capture_path = str(official.get("capture_path", "") or "").strip()
-        if not capture_path:
-            raise RuntimeError("Retake Context-IR has no official capture path.")
-        capture = shot_executor.client.read_context_ir_capture(
-            capture_path,
-            expected_base_prompt_sha256=str(official.get("base_prompt_sha256", "")),
-        )
-        official.update({
-            "status": "succeeded",
-            "task_id": str(capture.get("task_id", "")),
-            "enhanced_prompt": str(capture.get("enhanced_prompt", "")),
-            "prompt": str(capture.get("enhanced_prompt", "")),
-            "effective_prompt_sha256": str(capture.get("effective_prompt_sha256", "")),
-            "captured_at": str(capture.get("captured_at", "")),
-        })
-        replacement_context_ir["official_context_ir"] = official
-        replacement["h3_context_ir"] = replacement_context_ir
-        replacement["h3_effective_prompt"] = official["enhanced_prompt"]
         replacement_video = Path(replacement_video).resolve()
         retake_duration = self.probe.duration_seconds(replacement_video, stream_selector="v:0")
         if abs(retake_duration - duration) > 0.45:
@@ -204,7 +189,9 @@ class RetakeExecutor:
             "output": stitched.resolve(),
             "replacement_video": replacement_video,
             "context_ir": deepcopy(replacement_context_ir),
-            "official_context_ir": dict(replacement_context_ir.get("official_context_ir", {}) or {}),
+            "context_ir_provenance": dict(
+                replacement_context_ir.get("context_ir_provenance", {}) or {}
+            ),
             "h3_effective_prompt": str(replacement.get("h3_effective_prompt", "") or ""),
             "start_seconds": start,
             "end_seconds": end,
