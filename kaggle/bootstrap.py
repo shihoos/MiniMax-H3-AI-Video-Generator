@@ -511,7 +511,7 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
     if "condition_proj(text_states.to(torch.float32))" not in text:
         old = (
             "            text_states = self.token_refiner(self.condition_proj(text_states),\n"
-            "                                             transformer_options=transformer_options)"
+            "                                              transformer_options=transformer_options)"
         )
         new = (
             "            # CRITICAL H3 T4 boundary: condition_proj must receive FP32 input.\n"
@@ -873,6 +873,193 @@ def remove_legacy_context_ir_node() -> None:
         os.environ.pop(key, None)
     print("[NODE] retired external MiniMax H3 Context-IR bridge removed")
 
+def patch_h3_embedding_memory_compatibility() -> None:
+    """Allow H3-Optimizations 0.2.41 embedding-memory release with this project's T4 _forward.
+
+    H3-Optimizations intentionally refuses to patch a changed MiniMax H3 _forward
+    unless its source hash matches the locked ComfyUI implementation. This project
+    already applies three narrow T4 numerical changes to that same _forward. This
+    bootstrap patch keeps the optimizer's source guard strict: it accepts either
+    the exact upstream implementation or the exact derivative produced by the
+    three project-owned T4 changes, and it preserves those changes inside the
+    optimizer's replacement forward.
+    """
+    node_dir = CUSTOM / "H3-Optimizations"
+    expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    expected_hash = "14bdfccd6860f252005b8d43ab446aa9a938a13dc819061724b8f914218f5fd1"
+    target = node_dir / "h3_optimizations" / "memory" / "embedding.py"
+    marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V1"
+
+    if not node_dir.is_dir():
+        raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing H3 embedding-memory compatibility patch because the installed "
+            f"H3-Optimizations revision is {actual_revision}, expected {expected_revision}."
+        )
+    if not target.is_file():
+        raise RuntimeError(f"H3 embedding optimizer source is missing: {target}")
+
+    source = target.read_text(encoding="utf-8")
+    if marker in source:
+        print("[H3 OPT MEMORY] project T4 embedding-memory compatibility already applied")
+        return
+
+    required = (
+        f"UPSTREAM_FORWARD_SHA256 = '{expected_hash}'",
+        "def _validate_upstream_forward(forward):",
+        "def make_forward(model, original_forward):",
+        "        video_embed = model.video_patch_proj(all_video_rows).to(dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(dtype)",
+        "        h = torch.empty(layout.seq_len, model.hidden_size, dtype=dtype, device=device)",
+        "        if text_states.shape[-1] != model.hidden_size:\n            text_states = model.token_refiner(model.condition_proj(text_states),\n                                              transformer_options=transformer_options)",
+        "    model_patcher.add_object_patch(FORWARD_KEY, make_forward(model, original))",
+    )
+    missing = [needle for needle in required if needle not in source]
+    if missing:
+        raise RuntimeError(
+            "H3-Optimizations 0.2.41 embedding.py no longer matches the locked "
+            "source contract; refusing to patch:\n" + "\n".join(missing)
+        )
+
+    old_validate = """def _validate_upstream_forward(forward):
+    try:
+        digest = _source_digest(forward)
+    except (OSError, TypeError) as exc:
+        raise H3EmbeddingMemoryPatchError(
+            'cannot inspect MiniMax H3 _forward for embedding-memory compatibility'
+        ) from exc
+    if digest != UPSTREAM_FORWARD_SHA256:
+        raise H3EmbeddingMemoryPatchError(
+            'MiniMax H3 _forward changed; refusing the experimental embedding-memory patch'
+        )
+"""
+    new_validate = """def _validate_upstream_forward(forward):
+    try:
+        source = inspect.getsource(forward)
+        digest = hashlib.sha256(source.encode()).hexdigest()
+    except (OSError, TypeError) as exc:
+        raise H3EmbeddingMemoryPatchError(
+            'cannot inspect MiniMax H3 _forward for embedding-memory compatibility'
+        ) from exc
+    if digest == UPSTREAM_FORWARD_SHA256:
+        return False
+
+    normalized = source
+    reverse_pairs = (
+        (
+            "        if text_states.shape[-1] != self.hidden_size:\\n"
+            "            # CRITICAL H3 T4 boundary: condition_proj must receive FP32 input.\\n"
+            "            text_states = self.condition_proj(text_states.to(torch.float32))\\n"
+            "            text_states = self.token_refiner(\\n"
+            "                text_states,\\n"
+            "                transformer_options=transformer_options,\\n"
+            "            )",
+            "        if text_states.shape[-1] != self.hidden_size:\\n"
+            "            text_states = self.token_refiner(self.condition_proj(text_states),\\n"
+            "                                              transformer_options=transformer_options)",
+        ),
+        (
+            "        embed_dtype = torch.float32 if dtype == torch.float16 else dtype\\n"
+            "        video_embed = self.video_patch_proj(all_video_rows).to(embed_dtype)\\n"
+            "        audio_embed = self.audio_patch_proj(all_audio_rows).to(embed_dtype)",
+            "        video_embed = self.video_patch_proj(all_video_rows).to(dtype)\\n"
+            "        audio_embed = self.audio_patch_proj(all_audio_rows).to(dtype)",
+        ),
+        (
+            "        residual_dtype = torch.float32 if dtype == torch.float16 else dtype\\n"
+            "        h = torch.empty(layout.seq_len, self.hidden_size, dtype=residual_dtype, device=device)",
+            "        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)",
+        ),
+    )
+    replaced = 0
+    for project_text, upstream_text in reverse_pairs:
+        if project_text in normalized:
+            normalized = normalized.replace(project_text, upstream_text, 1)
+            replaced += 1
+    if replaced != 3:
+        raise H3EmbeddingMemoryPatchError(
+            'MiniMax H3 _forward is neither the locked upstream 0.34.0 implementation '
+            'nor the exact project T4-compatible derivative'
+        )
+    normalized_digest = hashlib.sha256(normalized.encode()).hexdigest()
+    if normalized_digest != UPSTREAM_FORWARD_SHA256:
+        raise H3EmbeddingMemoryPatchError(
+            'MiniMax H3 _forward differs from the locked 0.34.0 implementation beyond '
+            'the three approved project T4 changes'
+        )
+    return True
+"""
+
+    def replace_once(text: str, old: str, new: str, label: str) -> str:
+        count = text.count(old)
+        if count != 1:
+            raise RuntimeError(f"H3 embedding-memory source contract for {label} matched {count} times; expected exactly once.")
+        return text.replace(old, new, 1)
+
+    patched = replace_once(source, old_validate, new_validate, "_validate_upstream_forward")
+    patched = replace_once(
+        patched,
+        "def make_forward(model, original_forward):",
+        "def make_forward(model, original_forward, project_t4=False):",
+        "make_forward signature",
+    )
+    patched = replace_once(
+        patched,
+        "        video_embed = model.video_patch_proj(all_video_rows).to(dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(dtype)",
+        "        if project_t4:\n            embed_dtype = torch.float32 if dtype == torch.float16 else dtype\n        else:\n            embed_dtype = dtype\n        video_embed = model.video_patch_proj(all_video_rows).to(embed_dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(embed_dtype)",
+        "embedding dtype boundary",
+    )
+    patched = replace_once(
+        patched,
+        "        text_states = context[0]\n        if text_states.shape[-1] != model.hidden_size:\n            text_states = model.token_refiner(model.condition_proj(text_states),\n                                              transformer_options=transformer_options)",
+        "        text_states = context[0]\n        if text_states.shape[-1] != model.hidden_size:\n            if project_t4:\n                text_states = model.condition_proj(text_states.to(torch.float32))\n                text_states = model.token_refiner(\n                    text_states,\n                    transformer_options=transformer_options,\n                )\n            else:\n                text_states = model.token_refiner(model.condition_proj(text_states),\n                                                  transformer_options=transformer_options)",
+        "text conditioning boundary",
+    )
+    patched = replace_once(
+        patched,
+        "        h = torch.empty(layout.seq_len, model.hidden_size, dtype=dtype, device=device)",
+        "        if project_t4:\n            residual_dtype = torch.float32 if dtype == torch.float16 else dtype\n        else:\n            residual_dtype = dtype\n        h = torch.empty(layout.seq_len, model.hidden_size, dtype=residual_dtype, device=device)",
+        "residual dtype boundary",
+    )
+    patched = replace_once(
+        patched,
+        "        _validate_upstream_forward(original)\n",
+        "        project_t4 = _validate_upstream_forward(original)\n",
+        "validation result",
+    )
+    patched = replace_once(
+        patched,
+        "    model_patcher.add_object_patch(FORWARD_KEY, make_forward(model, original))",
+        "    model_patcher.add_object_patch(FORWARD_KEY, make_forward(model, original, project_t4=project_t4))",
+        "optimized forward installation",
+    )
+    patched = replace_once(
+        patched,
+        "    options.pop(FALLBACK_REASON_KEY, None)\n    options['h3_optimizations_preserved_embedding_patch'] = False\n    return True",
+        "    options.pop(FALLBACK_REASON_KEY, None)\n    options['h3_optimizations_preserved_embedding_patch'] = False\n    logging.info(\n        '[H3 Optimizations] embedding-memory compatibility: %s',\n        'project_t4' if project_t4 else 'upstream_0.34',\n    )\n    return True",
+        "compatibility logging",
+    )
+    patched = replace_once(
+        patched,
+        "FALLBACK_REASON_KEY = 'h3_optimizations_embedding_memory_fallback'\n",
+        "FALLBACK_REASON_KEY = 'h3_optimizations_embedding_memory_fallback'\n" + marker + "\n",
+        "compatibility marker",
+    )
+
+    try:
+        compile(patched, str(target), "exec")
+    except SyntaxError as exc:
+        raise RuntimeError(f"Refusing to write invalid H3 embedding-memory patch: {exc}") from exc
+
+    target.write_text(patched, encoding="utf-8")
+    print(f"[H3 OPT MEMORY] project T4 embedding-memory compatibility applied: {target}")
+
+
 def verify_h3_optimization_runtime(runtime: dict) -> None:
     """Validate H3 optimization in a fresh Python process.
     Kaggle notebooks may already have imported a different Torch/CUDA build in
@@ -1158,6 +1345,7 @@ def main():
     install_and_verify_pillow_runtime(runtime)
     verify_h3_optimization_runtime(runtime)
     apply_embedded_h3_runtime_overlay()
+    patch_h3_embedding_memory_compatibility()
     install_models()
     verify_inventory()
     verify_runtime_files(runtime)
