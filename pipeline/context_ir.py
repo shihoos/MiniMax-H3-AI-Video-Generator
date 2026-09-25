@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 from typing import Any
 import hashlib
 import json
@@ -11,11 +12,11 @@ from datetime import datetime, timezone
 class H3ContextIRCompiler:
     """Compile canonical production state into MiniMax H3 Ref2VA Context-IR.
 
-    This compiler is intentionally deterministic.  The repository's creative
+    This compiler is intentionally deterministic. The repository's creative
     planner remains responsible for story/camera choices; this layer is the
     semantic adapter that makes entities, references, speakers, timing, and
-    sound relationships explicit before the official MiniMax Context-IR API
-    refines the multimodal prompt for H3.
+    sound relationships explicit before the local H3 Ref2VA runtime consumes
+    the compiled prompt.
 
     Public compatibility surface is intentionally unchanged:
       H3ContextIRCompiler().compile(plan, shot)
@@ -48,7 +49,6 @@ class H3ContextIRCompiler:
     REF_PATTERN = re.compile(r"^<(Picture|Video|Audio)\s+(\d+)>$")
     REF_TOKEN_PATTERN = re.compile(r"<(?:Picture|Video|Audio)\s+\d+>")
     SPEAKER_TOKEN_PATTERN = re.compile(r"\(S\d+\)")
-    OFFICIAL_CAPTURE_MARKER = "H3_CONTEXT_IR_CAPTURE_PATH"
 
     @staticmethod
     def _clean(value: Any) -> str:
@@ -799,26 +799,36 @@ class H3ContextIRCompiler:
 
     @classmethod
     def workflow_prompt(cls, context_ir: dict[str, Any]) -> str:
-        """Return the canonical prompt plus a runtime-only capture marker.
+        """Return the exact local semantic prompt consumed by H3.
 
-        The embedded official Context-IR node strips this marker before making
-        the MiniMax API request, so the marker can never become part of the
-        semantic prompt seen by H3.  It exists only to bind the asynchronous
-        official result to the exact production shot that requested it.
+        Kept as a compatibility alias for callers that previously used the
+        workflow-boundary helper. No runtime marker or external service is used.
         """
-        base = cls.input_prompt(context_ir)
-        official = context_ir.get("official_context_ir", {}) or {}
-        capture_path = cls._clean(official.get("capture_path"))
-        if not capture_path:
-            return base
-        return f"[[{cls.OFFICIAL_CAPTURE_MARKER}:{capture_path}]]\n{base}"
+        return cls.input_prompt(context_ir)
 
     @classmethod
     def prompt(cls, context_ir: dict[str, Any]) -> str:
-        # Preserve the public prompt contract: callers receive the exact clean
-        # semantic Context-IR prompt. The runtime capture marker is injected only
-        # at the official pre-generation workflow boundary via workflow_prompt().
         return cls.input_prompt(context_ir)
+
+    @classmethod
+    def persist_capture(cls, context_ir: dict[str, Any]) -> Path:
+        """Persist the compiled local Context-IR for reproducibility."""
+        cls.validate(context_ir)
+        provenance = dict(context_ir.get("context_ir_provenance", {}) or {})
+        capture_path = cls._clean(provenance.get("capture_path"))
+        if not capture_path:
+            raise ValueError("Local Context-IR has no capture path.")
+        target = Path(capture_path).resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(context_ir)
+        payload["context_ir_provenance"] = provenance
+        temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(target)
+        return target
 
     def compile(self, plan: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
         refs=self._canonical_references(shot)
@@ -858,16 +868,17 @@ class H3ContextIRCompiler:
             "context_ir_input":self._canonical_input_prompt(plan,shot,refs),
             "shot":{"shot_id":self._clean(shot.get("shot_id")),"duration_seconds":float(shot.get("duration_seconds",0.0) or 0.0),"camera":{"shot":self._clean(shot.get("camera_shot")),"movement":self._clean(shot.get("camera_movement")),"lens":self._clean(shot.get("lens_and_depth_of_field"))},"composition":self._clean(shot.get("composition_notes")),"lighting":self._clean(shot.get("lighting")),"action":self._clean(shot.get("action"))},
             "continuity":shot.get("continuity_start_state",{}) or {},"references":reference_rows,"speakers":speaker_map,"dialogue":dialogue_rows,"audio":{"soundscape":self._soundscape(shot,refs),"music":self._music(shot,refs)},
-            "official_context_ir": {
-                "status": "required_pending",
-                "task_id": "",
-                "prompt": "",
-                "enhanced_prompt": "",
+            "context_ir_provenance": {
+                "backend": "local_compiler",
+                "status": "compiled",
+                "compiler": "H3ContextIRCompiler",
+                "compiler_version": self.VERSION,
                 "base_prompt_sha256": hashlib.sha256(
                     self._canonical_input_prompt(plan, shot, refs).encode("utf-8")
                 ).hexdigest(),
-                "effective_prompt_sha256": "",
-                "captured_at": "",
+                "effective_prompt_sha256": hashlib.sha256(
+                    self._canonical_input_prompt(plan, shot, refs).encode("utf-8")
+                ).hexdigest(),
                 "capture_path": capture_path,
             },
         }
