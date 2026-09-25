@@ -15,7 +15,7 @@ from pipeline.production_checkpoint import ProductionCheckpoint
 class ProductionManifest:
     """Immutable-ish audit artifact describing exactly what produced a film."""
 
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self, project_root: Path):
         self.project_root = Path(project_root).resolve()
@@ -131,27 +131,64 @@ class ProductionManifest:
             ctx = shot.get("h3_context_ir") or {}
             if require_context_ir_results and not isinstance(ctx, dict):
                 raise RuntimeError(f"Shot {sid} has no production Context-IR record.")
-            official = ctx.get("official_context_ir") if isinstance(ctx, dict) else None
-            if isinstance(official, dict):
+            provenance = ctx.get("context_ir_provenance") if isinstance(ctx, dict) else None
+            if isinstance(provenance, dict):
                 artifact = {
-                    "status": official.get("status", ""),
-                    "task_id": official.get("task_id", ""),
-                    "base_prompt_sha256": official.get("base_prompt_sha256", ""),
-                    "effective_prompt_sha256": official.get("effective_prompt_sha256", ""),
-                    "capture_path": official.get("capture_path", ""),
+                    "backend": provenance.get("backend", ""),
+                    "status": provenance.get("status", ""),
+                    "compiler": provenance.get("compiler", ""),
+                    "compiler_version": provenance.get("compiler_version", ""),
+                    "base_prompt_sha256": provenance.get("base_prompt_sha256", ""),
+                    "effective_prompt_sha256": provenance.get("effective_prompt_sha256", ""),
+                    "capture_path": provenance.get("capture_path", ""),
                 }
-                capture_path = Path(str(official.get("capture_path", "")).strip()) if official.get("capture_path") else None
+                capture_path = (
+                    Path(str(provenance.get("capture_path", "")).strip())
+                    if provenance.get("capture_path")
+                    else None
+                )
                 if capture_path and capture_path.is_file():
                     artifact["capture_sha256"] = self._file_hash(capture_path)
+                    try:
+                        persisted = json.loads(capture_path.read_text(encoding="utf-8"))
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"Shot {sid} has an invalid persisted Context-IR artifact: {capture_path}"
+                        ) from exc
+                    if persisted.get("context_ir_input") != ctx.get("context_ir_input"):
+                        raise RuntimeError(
+                            f"Shot {sid} persisted Context-IR does not match the in-memory compiler output."
+                        )
                 context_ir_artifacts[sid] = artifact
-                if require_context_ir_results and (official.get("status") not in {"succeeded", "captured"} or not capture_path or not capture_path.is_file()):
-                    raise RuntimeError(f"Shot {sid} is missing a successful official Context-IR result.")
-                if shot.get("h3_effective_prompt"):
-                    effective_prompts[sid] = str(shot["h3_effective_prompt"])
+
+                effective_prompt = str(shot.get("h3_effective_prompt", "") or "").strip()
+                expected_base_sha = hashlib.sha256(
+                    str(ctx.get("context_ir_input", "")).encode("utf-8")
+                ).hexdigest()
+                expected_effective_sha = hashlib.sha256(
+                    effective_prompt.encode("utf-8")
+                ).hexdigest() if effective_prompt else ""
+                if require_context_ir_results and (
+                    provenance.get("backend") != "local_compiler"
+                    or provenance.get("status") != "compiled"
+                    or str(provenance.get("base_prompt_sha256", "")) != expected_base_sha
+                    or str(provenance.get("effective_prompt_sha256", "")) != expected_effective_sha
+                    or not capture_path
+                    or not capture_path.is_file()
+                ):
+                    raise RuntimeError(
+                        f"Shot {sid} has inconsistent or missing local Context-IR provenance."
+                    )
+                if effective_prompt:
+                    effective_prompts[sid] = effective_prompt
                 elif require_context_ir_results:
-                    raise RuntimeError(f"Shot {sid} is missing its effective H3 prompt from the official Context-IR result.")
+                    raise RuntimeError(
+                        f"Shot {sid} is missing its effective local H3 prompt."
+                    )
             elif require_context_ir_results:
-                raise RuntimeError(f"Shot {sid} is missing its official Context-IR provenance record.")
+                raise RuntimeError(
+                    f"Shot {sid} is missing its local Context-IR provenance record."
+                )
 
         manifest = {
             "version": self.VERSION,
@@ -164,7 +201,7 @@ class ProductionManifest:
             "runtime": plan.get("runtime_diagnostics", {}) or {},
             "timeline_version": (plan.get("timeline", {}) or {}).get("version", 1),
             "effective_h3_prompts": effective_prompts,
-            "official_context_ir": context_ir_artifacts,
+            "context_ir": context_ir_artifacts,
             "execution": dict(plan.get("execution", {}) or {}),
             "workflow_files": {k: v for k, v in files.items() if k.startswith("workflows/")},
         }
