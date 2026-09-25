@@ -370,7 +370,7 @@ def test_context_ir_capture_root():
             "reference_roles": [],
         }
         result = H3ContextIRCompiler().compile(plan, shot)
-        path = Path(result["official_context_ir"]["capture_path"])
+        path = Path(result["context_ir_provenance"]["capture_path"])
         _assert(path.parent == root.resolve(), f"Context-IR ignored requested capture root: {path}")
 
 
@@ -517,7 +517,7 @@ def test_source_contracts():
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
     runner = (ROOT / "execution/production_runner.py").read_text(encoding="utf-8")
     _assert("require_context_ir_results=False" in orchestrator, "planning manifest must be non-strict before rendering")
-    _assert('"h3_context_ir"' in runner and '"h3_effective_prompt"' in runner, "completed shot records must persist official Context-IR provenance")
+    _assert('"h3_context_ir"' in runner and '"h3_effective_prompt"' in runner, "completed shot records must persist local Context-IR provenance")
     _assert("production_plan[\"final_video\"] = str(final_video)" in runner, "final video must be bound before final manifest")
     _assert(runner.find('require_context_ir_results=True') > runner.find('production_plan["final_video"]'), "strict final manifest must be written after assembly")
 
