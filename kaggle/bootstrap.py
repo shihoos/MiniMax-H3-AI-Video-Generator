@@ -766,7 +766,7 @@ def install_director_runtime(
     env = os.environ.copy()
     env["UV_LINK_MODE"] = "copy"
     install = subprocess.run(
-        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}"],
+        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={WRAPT_VERSION}"],
         env=env,
         check=False,
         text=True,
@@ -777,9 +777,10 @@ def install_director_runtime(
         [
             str(venv_python), "-c",
             (
-                "import vllm, torch, inspect; "
+                "import vllm, torch, inspect, wrapt; "
                 "from vllm.config import SpeculativeConfig; "
                 "print('vLLM import: PASS'); "
+                "print('wrapt version:', wrapt.__version__); "
                 "print('vLLM version:', vllm.__version__); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
@@ -794,6 +795,16 @@ def install_director_runtime(
         print(verification.stderr)
     if verification.returncode != 0:
         raise RuntimeError("vLLM isolated runtime verification failed.")
+    observed_wrapt_version = None
+    for line in verification.stdout.splitlines():
+        if line.startswith("wrapt version:"):
+            observed_wrapt_version = line.split(":", 1)[1].strip()
+            break
+    if observed_wrapt_version != WRAPT_VERSION:
+        raise RuntimeError(
+            "Director isolated runtime wrapt mismatch: "
+            f"observed={observed_wrapt_version!r}, expected={WRAPT_VERSION!r}."
+        )
     observed_version = None
     for line in verification.stdout.splitlines():
         if line.startswith("vLLM version:"):
@@ -874,22 +885,13 @@ def remove_legacy_context_ir_node() -> None:
     print("[NODE] retired external MiniMax H3 Context-IR bridge removed")
 
 def patch_h3_embedding_memory_compatibility() -> None:
-    """Allow H3-Optimizations 0.2.41 embedding-memory release with this project's T4 _forward.
-
-    H3-Optimizations intentionally refuses to patch a changed MiniMax H3 _forward
-    unless its source hash matches the locked ComfyUI implementation. This project
-    already applies three narrow T4 numerical changes to that same _forward. This
-    bootstrap patch keeps the optimizer's source guard strict: it accepts either
-    the exact upstream implementation or the exact derivative produced by the
-    three project-owned T4 changes, and it preserves those changes inside the
-    optimizer's replacement forward.
-    """
+    # Enable H3-Optimizations 0.2.41 embedding release with approved T4 _forward changes.
     node_dir = CUSTOM / "H3-Optimizations"
-    expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
-    expected_hash = "14bdfccd6860f252005b8d43ab446aa9a938a13dc819061724b8f914218f5fd1"
-    expected_comfy_revision = "12d5279438bfefc058a269eae805ceab6047777f"
     target = node_dir / "h3_optimizations" / "memory" / "embedding.py"
-    marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V2"
+    expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    expected_comfy_revision = "12d5279438bfefc058a269eae805ceab6047777f"
+    expected_upstream_hash = "14bdfccd6860f252005b8d43ab446aa9a938a13dc819061724b8f914218f5fd1"
+    marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V3"
 
     if not node_dir.is_dir():
         raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
@@ -905,6 +907,7 @@ def patch_h3_embedding_memory_compatibility() -> None:
         )
     if not target.is_file():
         raise RuntimeError(f"H3 embedding optimizer source is missing: {target}")
+
     actual_comfy_revision = subprocess.check_output(
         ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
         text=True,
@@ -918,11 +921,31 @@ def patch_h3_embedding_memory_compatibility() -> None:
 
     source = target.read_text(encoding="utf-8")
     if marker in source:
-        print("[H3 OPT MEMORY] project T4 embedding-memory compatibility already applied")
+        # Idempotent path: a marker alone is not trusted. Validate the complete
+        # generated contract before accepting an already-patched installation.
+        existing_contract = (
+            marker,
+            "def make_forward(model, original_forward, project_t4=False):",
+            "project_t4 = _validate_upstream_forward(original)",
+            "make_forward(model, original, project_t4=project_t4)",
+            "options['h3_optimizations_preserved_embedding_patch'] = project_t4",
+            "if project_t4:",
+            "embed_dtype = torch.float32 if dtype == torch.float16 else dtype",
+            "text_states = model.condition_proj(text_states.to(torch.float32))",
+            "residual_dtype = torch.float32 if dtype == torch.float16 else dtype",
+        )
+        missing = [item for item in existing_contract if item not in source]
+        if missing:
+            raise RuntimeError(
+                "H3 embedding-memory marker exists but the patched source contract "
+                "is incomplete; refusing to continue:\n" + "\n".join(missing)
+            )
+        compile(source, str(target), "exec")
+        print("[H3 OPT MEMORY] existing T4 embedding-memory compatibility: VERIFIED")
         return
 
     required = (
-        f"UPSTREAM_FORWARD_SHA256 = '{expected_hash}'",
+        f"UPSTREAM_FORWARD_SHA256 = '{expected_upstream_hash}'",
         "def _validate_upstream_forward(forward):",
         "def make_forward(model, original_forward):",
         "        video_embed = model.video_patch_proj(all_video_rows).to(dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(dtype)",
@@ -949,7 +972,7 @@ def patch_h3_embedding_memory_compatibility() -> None:
             'MiniMax H3 _forward changed; refusing the experimental embedding-memory patch'
         )
 """
-    new_validate = """def _validate_upstream_forward(forward):
+    new_validate = f"""def _validate_upstream_forward(forward):
     try:
         source = inspect.getsource(forward)
         digest = hashlib.sha256(source.encode()).hexdigest()
@@ -960,6 +983,9 @@ def patch_h3_embedding_memory_compatibility() -> None:
     if digest == UPSTREAM_FORWARD_SHA256:
         return False
 
+    # The project applies exactly three T4-only source changes to the locked
+    # ComfyUI 0.34 _forward. Reverse only those changes, then require the
+    # resulting source to hash to the exact upstream implementation.
     normalized = source
     reverse_pairs = (
         (
@@ -985,65 +1011,35 @@ def patch_h3_embedding_memory_compatibility() -> None:
             "        h = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)",
         ),
     )
-    replaced = 0
-    for project_text, clean_text in reverse_pairs:
+    replacements = 0
+    for project_text, upstream_text in reverse_pairs:
         count = normalized.count(project_text)
-        if count == 1:
-            normalized = normalized.replace(project_text, clean_text, 1)
-            replaced += 1
-    if replaced != 3:
+        if count != 1:
+            raise H3EmbeddingMemoryPatchError(
+                'MiniMax H3 _forward did not contain exactly one instance of each approved T4 change'
+            )
+        normalized = normalized.replace(project_text, upstream_text, 1)
+        replacements += 1
+    if replacements != 3:
         raise H3EmbeddingMemoryPatchError(
             'MiniMax H3 _forward did not contain exactly the three approved project T4 changes'
         )
 
-    try:
-        from pathlib import Path
-        import ast
-        import subprocess
-        import textwrap
-        comfy_root = Path(__file__).resolve().parents[4]
-        actual_comfy_revision = subprocess.check_output(
-            ['git', '-C', str(comfy_root), 'rev-parse', 'HEAD'],
-            text=True,
-            stderr=subprocess.STDOUT,
-        ).strip()
-        if actual_comfy_revision != '12d5279438bfefc058a269eae805ceab6047777f':
-            raise RuntimeError(
-                f'ComfyUI revision mismatch: expected=12d5279438bfefc058a269eae805ceab6047777f, actual={actual_comfy_revision}'
-            )
-        clean_source = subprocess.check_output(
-            [
-                'git', '-C', str(comfy_root), 'show',
-                '12d5279438bfefc058a269eae805ceab6047777f:comfy/ldm/minimax/model.py',
-            ],
-            text=True,
-            stderr=subprocess.STDOUT,
-        )
-        tree = ast.parse(clean_source)
-        lines = clean_source.splitlines(keepends=True)
-        clean_forward = None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == '_forward':
-                clean_forward = ''.join(lines[node.lineno - 1:node.end_lineno])
-                break
-        if clean_forward is None:
-            raise RuntimeError('locked ComfyUI MiniMaxH3Model._forward was not found')
-        if textwrap.dedent(normalized) != textwrap.dedent(clean_forward):
-            raise RuntimeError(
-                'MiniMax H3 _forward differs from the locked ComfyUI source beyond the approved T4 changes'
-            )
-    except H3EmbeddingMemoryPatchError:
-        raise
-    except Exception as exc:
+    normalized_hash = hashlib.sha256(normalized.encode()).hexdigest()
+    if normalized_hash != UPSTREAM_FORWARD_SHA256:
         raise H3EmbeddingMemoryPatchError(
-            'MiniMax H3 _forward failed the locked-ComfyUI compatibility comparison'
-        ) from exc
+            'MiniMax H3 _forward differs from the locked upstream implementation '
+            'beyond the three approved T4 changes'
+        )
     return True
 """
+
     def replace_once(text: str, old: str, new: str, label: str) -> str:
         count = text.count(old)
         if count != 1:
-            raise RuntimeError(f"H3 embedding-memory source contract for {label} matched {count} times; expected exactly once.")
+            raise RuntimeError(
+                f"H3 embedding-memory source contract for {label} matched {count} times; expected exactly once."
+            )
         return text.replace(old, new, 1)
 
     patched = replace_once(source, old_validate, new_validate, "_validate_upstream_forward")
@@ -1055,20 +1051,43 @@ def patch_h3_embedding_memory_compatibility() -> None:
     )
     patched = replace_once(
         patched,
-        "        video_embed = model.video_patch_proj(all_video_rows).to(dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(dtype)",
-        "        if project_t4:\n            embed_dtype = torch.float32 if dtype == torch.float16 else dtype\n        else:\n            embed_dtype = dtype\n        video_embed = model.video_patch_proj(all_video_rows).to(embed_dtype)\n        audio_embed = model.audio_patch_proj(all_audio_rows).to(embed_dtype)",
+        "        video_embed = model.video_patch_proj(all_video_rows).to(dtype)\n"
+        "        audio_embed = model.audio_patch_proj(all_audio_rows).to(dtype)",
+        "        if project_t4:\n"
+        "            embed_dtype = torch.float32 if dtype == torch.float16 else dtype\n"
+        "        else:\n"
+        "            embed_dtype = dtype\n"
+        "        video_embed = model.video_patch_proj(all_video_rows).to(embed_dtype)\n"
+        "        audio_embed = model.audio_patch_proj(all_audio_rows).to(embed_dtype)",
         "embedding dtype boundary",
     )
     patched = replace_once(
         patched,
-        "        text_states = context[0]\n        if text_states.shape[-1] != model.hidden_size:\n            text_states = model.token_refiner(model.condition_proj(text_states),\n                                              transformer_options=transformer_options)",
-        "        text_states = context[0]\n        if text_states.shape[-1] != model.hidden_size:\n            if project_t4:\n                text_states = model.condition_proj(text_states.to(torch.float32))\n                text_states = model.token_refiner(\n                    text_states,\n                    transformer_options=transformer_options,\n                )\n            else:\n                text_states = model.token_refiner(model.condition_proj(text_states),\n                                                  transformer_options=transformer_options)",
+        "        text_states = context[0]\n"
+        "        if text_states.shape[-1] != model.hidden_size:\n"
+        "            text_states = model.token_refiner(model.condition_proj(text_states),\n"
+        "                                              transformer_options=transformer_options)",
+        "        text_states = context[0]\n"
+        "        if text_states.shape[-1] != model.hidden_size:\n"
+        "            if project_t4:\n"
+        "                text_states = model.condition_proj(text_states.to(torch.float32))\n"
+        "                text_states = model.token_refiner(\n"
+        "                    text_states,\n"
+        "                    transformer_options=transformer_options,\n"
+        "                )\n"
+        "            else:\n"
+        "                text_states = model.token_refiner(model.condition_proj(text_states),\n"
+        "                                                  transformer_options=transformer_options)",
         "text conditioning boundary",
     )
     patched = replace_once(
         patched,
         "        h = torch.empty(layout.seq_len, model.hidden_size, dtype=dtype, device=device)",
-        "        if project_t4:\n            residual_dtype = torch.float32 if dtype == torch.float16 else dtype\n        else:\n            residual_dtype = dtype\n        h = torch.empty(layout.seq_len, model.hidden_size, dtype=residual_dtype, device=device)",
+        "        if project_t4:\n"
+        "            residual_dtype = torch.float32 if dtype == torch.float16 else dtype\n"
+        "        else:\n"
+        "            residual_dtype = dtype\n"
+        "        h = torch.empty(layout.seq_len, model.hidden_size, dtype=residual_dtype, device=device)",
         "residual dtype boundary",
     )
     patched = replace_once(
@@ -1086,7 +1105,13 @@ def patch_h3_embedding_memory_compatibility() -> None:
     patched = replace_once(
         patched,
         "    options.pop(FALLBACK_REASON_KEY, None)\n    options['h3_optimizations_preserved_embedding_patch'] = False\n    return True",
-        "    options.pop(FALLBACK_REASON_KEY, None)\n    options['h3_optimizations_preserved_embedding_patch'] = False\n    logging.info(\n        '[H3 Optimizations] embedding-memory compatibility: %s',\n        'project_t4' if project_t4 else 'upstream_0.34',\n    )\n    return True",
+        "    options.pop(FALLBACK_REASON_KEY, None)\n"
+        "    options['h3_optimizations_preserved_embedding_patch'] = project_t4\n"
+        "    logging.info(\n"
+        "        '[H3 Optimizations] embedding-memory compatibility: %s',\n"
+        "        'project_t4' if project_t4 else 'upstream_0.34',\n"
+        "    )\n"
+        "    return True",
         "compatibility logging",
     )
     patched = replace_once(
@@ -1096,14 +1121,25 @@ def patch_h3_embedding_memory_compatibility() -> None:
         "compatibility marker",
     )
 
-    try:
-        compile(patched, str(target), "exec")
-    except SyntaxError as exc:
-        raise RuntimeError(f"Refusing to write invalid H3 embedding-memory patch: {exc}") from exc
-
+    compile(patched, str(target), "exec")
     target.write_text(patched, encoding="utf-8")
+
+    final_source = target.read_text(encoding="utf-8")
+    final_checks = (
+        marker,
+        "def make_forward(model, original_forward, project_t4=False):",
+        "project_t4 = _validate_upstream_forward(original)",
+        "make_forward(model, original, project_t4=project_t4)",
+        "options['h3_optimizations_preserved_embedding_patch'] = project_t4",
+    )
+    missing = [item for item in final_checks if item not in final_source]
+    if missing:
+        raise RuntimeError(
+            "H3 embedding-memory compatibility post-write verification failed:\n"
+            + "\n".join(missing)
+        )
     print("[H3 OPT MEMORY] project T4 embedding-memory compatibility: PASS")
-    print(f"[H3 OPT MEMORY] H3 revision={actual_revision} ComfyUI revision={actual_comfy_revision}")
+
 
 def verify_h3_optimization_runtime(runtime: dict) -> None:
     """Validate H3 optimization in a fresh Python process.
@@ -1388,9 +1424,9 @@ def main():
     install_nodes()
     remove_legacy_context_ir_node()
     install_and_verify_pillow_runtime(runtime)
-    verify_h3_optimization_runtime(runtime)
     apply_embedded_h3_runtime_overlay()
     patch_h3_embedding_memory_compatibility()
+    verify_h3_optimization_runtime(runtime)
     install_models()
     verify_inventory()
     verify_runtime_files(runtime)
