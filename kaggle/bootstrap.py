@@ -511,7 +511,7 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
     if "condition_proj(text_states.to(torch.float32))" not in text:
         old = (
             "            text_states = self.token_refiner(self.condition_proj(text_states),\n"
-            "                                              transformer_options=transformer_options)"
+            "                                             transformer_options=transformer_options)"
         )
         new = (
             "            # CRITICAL H3 T4 boundary: condition_proj must receive FP32 input.\n"
@@ -887,8 +887,9 @@ def patch_h3_embedding_memory_compatibility() -> None:
     node_dir = CUSTOM / "H3-Optimizations"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
     expected_hash = "14bdfccd6860f252005b8d43ab446aa9a938a13dc819061724b8f914218f5fd1"
+    expected_comfy_revision = "12d5279438bfefc058a269eae805ceab6047777f"
     target = node_dir / "h3_optimizations" / "memory" / "embedding.py"
-    marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V1"
+    marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V2"
 
     if not node_dir.is_dir():
         raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
@@ -904,6 +905,16 @@ def patch_h3_embedding_memory_compatibility() -> None:
         )
     if not target.is_file():
         raise RuntimeError(f"H3 embedding optimizer source is missing: {target}")
+    actual_comfy_revision = subprocess.check_output(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_comfy_revision != expected_comfy_revision:
+        raise RuntimeError(
+            "Refusing H3 embedding-memory compatibility patch because the installed "
+            f"ComfyUI revision is {actual_comfy_revision}, expected {expected_comfy_revision}."
+        )
 
     source = target.read_text(encoding="utf-8")
     if marker in source:
@@ -952,16 +963,14 @@ def patch_h3_embedding_memory_compatibility() -> None:
     normalized = source
     reverse_pairs = (
         (
-            "        if text_states.shape[-1] != self.hidden_size:\\n"
             "            # CRITICAL H3 T4 boundary: condition_proj must receive FP32 input.\\n"
             "            text_states = self.condition_proj(text_states.to(torch.float32))\\n"
             "            text_states = self.token_refiner(\\n"
             "                text_states,\\n"
             "                transformer_options=transformer_options,\\n"
             "            )",
-            "        if text_states.shape[-1] != self.hidden_size:\\n"
             "            text_states = self.token_refiner(self.condition_proj(text_states),\\n"
-            "                                              transformer_options=transformer_options)",
+            "                                             transformer_options=transformer_options)",
         ),
         (
             "        embed_dtype = torch.float32 if dtype == torch.float16 else dtype\\n"
@@ -977,24 +986,60 @@ def patch_h3_embedding_memory_compatibility() -> None:
         ),
     )
     replaced = 0
-    for project_text, upstream_text in reverse_pairs:
-        if project_text in normalized:
-            normalized = normalized.replace(project_text, upstream_text, 1)
+    for project_text, clean_text in reverse_pairs:
+        count = normalized.count(project_text)
+        if count == 1:
+            normalized = normalized.replace(project_text, clean_text, 1)
             replaced += 1
     if replaced != 3:
         raise H3EmbeddingMemoryPatchError(
-            'MiniMax H3 _forward is neither the locked upstream 0.34.0 implementation '
-            'nor the exact project T4-compatible derivative'
+            'MiniMax H3 _forward did not contain exactly the three approved project T4 changes'
         )
-    normalized_digest = hashlib.sha256(normalized.encode()).hexdigest()
-    if normalized_digest != UPSTREAM_FORWARD_SHA256:
+
+    try:
+        from pathlib import Path
+        import ast
+        import subprocess
+        import textwrap
+        comfy_root = Path(__file__).resolve().parents[4]
+        actual_comfy_revision = subprocess.check_output(
+            ['git', '-C', str(comfy_root), 'rev-parse', 'HEAD'],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+        if actual_comfy_revision != '12d5279438bfefc058a269eae805ceab6047777f':
+            raise RuntimeError(
+                f'ComfyUI revision mismatch: expected=12d5279438bfefc058a269eae805ceab6047777f, actual={actual_comfy_revision}'
+            )
+        clean_source = subprocess.check_output(
+            [
+                'git', '-C', str(comfy_root), 'show',
+                '12d5279438bfefc058a269eae805ceab6047777f:comfy/ldm/minimax/model.py',
+            ],
+            text=True,
+            stderr=subprocess.STDOUT,
+        )
+        tree = ast.parse(clean_source)
+        lines = clean_source.splitlines(keepends=True)
+        clean_forward = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == '_forward':
+                clean_forward = ''.join(lines[node.lineno - 1:node.end_lineno])
+                break
+        if clean_forward is None:
+            raise RuntimeError('locked ComfyUI MiniMaxH3Model._forward was not found')
+        if textwrap.dedent(normalized) != textwrap.dedent(clean_forward):
+            raise RuntimeError(
+                'MiniMax H3 _forward differs from the locked ComfyUI source beyond the approved T4 changes'
+            )
+    except H3EmbeddingMemoryPatchError:
+        raise
+    except Exception as exc:
         raise H3EmbeddingMemoryPatchError(
-            'MiniMax H3 _forward differs from the locked 0.34.0 implementation beyond '
-            'the three approved project T4 changes'
-        )
+            'MiniMax H3 _forward failed the locked-ComfyUI compatibility comparison'
+        ) from exc
     return True
 """
-
     def replace_once(text: str, old: str, new: str, label: str) -> str:
         count = text.count(old)
         if count != 1:
@@ -1057,8 +1102,8 @@ def patch_h3_embedding_memory_compatibility() -> None:
         raise RuntimeError(f"Refusing to write invalid H3 embedding-memory patch: {exc}") from exc
 
     target.write_text(patched, encoding="utf-8")
-    print(f"[H3 OPT MEMORY] project T4 embedding-memory compatibility applied: {target}")
-
+    print("[H3 OPT MEMORY] project T4 embedding-memory compatibility: PASS")
+    print(f"[H3 OPT MEMORY] H3 revision={actual_revision} ComfyUI revision={actual_comfy_revision}")
 
 def verify_h3_optimization_runtime(runtime: dict) -> None:
     """Validate H3 optimization in a fresh Python process.
