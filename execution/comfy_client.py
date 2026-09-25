@@ -593,32 +593,22 @@ class ComfyClient:
                     delay = min(delay * 1.5, 10.0)
                     continue
 
-            if prompt_id in history:
+                if prompt_id not in history:
+                    time.sleep(delay)
+                    delay = min(delay * 1.5, 10.0)
+                    continue
 
-                result = history[
-                    prompt_id
-                ]
+                result = history[prompt_id]
+                status = result.get("status", {})
 
-                status = result.get(
-                    "status",
-                    {},
-                )
-
-                if (
-                    status.get(
-                        "status_str"
-                    )
-                    == "error"
-                ):
+                if status.get("status_str") == "error":
                     LOGGER.error(
                         "ComfyUI prompt %s failed: %s",
                         prompt_id,
                         status,
                     )
-
                     raise RuntimeError(
-                        f"ComfyUI failed {prompt_id}: "
-                        f"{status}"
+                        f"ComfyUI failed {prompt_id}: {status}"
                     )
 
                 if result.get("node_errors"):
@@ -630,38 +620,12 @@ class ComfyClient:
                 if status.get("status_str") == "success":
                     return result
 
-                time.sleep(
-                    delay
-                )
-
-                delay = min(
-                    delay * 1.5,
-                    10.0,
-                )
+                time.sleep(delay)
+                delay = min(delay * 1.5, 10.0)
 
         except TimeoutError:
             raise
 
-
-    @staticmethod
-    def read_context_ir_capture(path: str | Path, *, expected_base_prompt_sha256: str | None = None) -> dict:
-        target = Path(path).resolve()
-        if not target.is_file():
-            raise RuntimeError(f"Official Context-IR capture file is missing: {target}")
-        try:
-            payload = json.loads(target.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise RuntimeError(f"Official Context-IR capture is invalid JSON: {target}") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError("Official Context-IR capture must be a JSON object.")
-        if str(payload.get("status", "")).strip().lower() != "succeeded":
-            raise RuntimeError(f"Official Context-IR capture did not succeed: {payload.get('status')!r}")
-        enhanced = str(payload.get("enhanced_prompt", "") or "").strip()
-        if not enhanced:
-            raise RuntimeError("Official Context-IR capture contains no enhanced_prompt.")
-        if expected_base_prompt_sha256 and str(payload.get("base_prompt_sha256", "")) != str(expected_base_prompt_sha256):
-            raise RuntimeError("Official Context-IR capture base prompt fingerprint does not match the production Context-IR input.")
-        return payload
 
     def download_file(
         self,
