@@ -192,6 +192,58 @@ def _configure_cuda_environment(
         values
     )
     return environment
+WRAPT_VERSION = "2.4.1"
+
+
+def ensure_kaggle_startup_wrapt() -> None:
+    """Provide Kaggle's sitecustomize dependency without changing the H3 stack."""
+    probe = subprocess.run(
+        [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    installed_version = (probe.stdout or "").strip() if probe.returncode == 0 else ""
+    if installed_version != WRAPT_VERSION:
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+            "--no-deps",
+            f"wrapt=={WRAPT_VERSION}",
+        )
+
+    verify = subprocess.run(
+        [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if verify.returncode != 0:
+        raise RuntimeError(
+            "Kaggle wrapt verification failed.\n"
+            + (verify.stdout or "")
+            + (verify.stderr or "")
+        )
+    if "Error in sitecustomize" in (verify.stderr or ""):
+        raise RuntimeError(
+            "Kaggle sitecustomize still failed after installing wrapt.\n"
+            + (verify.stderr or "")
+        )
+    verified_version = (verify.stdout or "").strip()
+    if verified_version != WRAPT_VERSION:
+        raise RuntimeError(
+            f"Kaggle wrapt version mismatch: expected={WRAPT_VERSION}, "
+            f"actual={verified_version!r}"
+        )
+    print(f"[KAGGLE STARTUP] wrapt={verified_version}: PASS")
+    print("[KAGGLE STARTUP] sitecustomize: PASS")
+
+
 def install_base_requirements() -> None:
     requirements = ROOT / "requirements.txt"
     if not requirements.is_file():
@@ -1078,6 +1130,7 @@ def _warn_if_torch_already_imported() -> None:
 def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
+    ensure_kaggle_startup_wrapt()
     legacy_runtime = ROOT / ".h3_runtime_cu130"
     if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
     runtime = load_yaml(RUNTIME_MANIFEST)
