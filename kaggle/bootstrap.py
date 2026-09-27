@@ -1209,33 +1209,16 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
         f"at H3-Optimizations {actual_revision}"
     )
 
-def patch_h3_t4_gpu_parallel_attention(runtime: dict) -> None:
-    """Persist the latest T4 dual-GPU streamed-attention fixes.
-
-    The project repository intentionally does not vendor H3-Optimizations;
-    install_nodes() checks out the pinned revision and this function applies
-    the runtime overlay to that exact checkout.
-
-    Fixes persisted here:
-      1. keep the native ConvRot binding alive across all streamed Q slabs;
-      2. run streamed dense attention on cuda:1 with PyTorch efficient
-         attention, while preserving the H3 HND output contract.
-
-    Only the current efficient-attention implementation is installed.
-    """
+def patch_h3_qkv_binding_lifetime(runtime: dict) -> None:
+    """Keep the native ConvRot QKV binding alive while streamed Q is consumed."""
     del runtime
-
     node_dir = CUSTOM / "H3-Optimizations"
-    package_dir = node_dir / "h3_optimizations"
-    bf16 = package_dir / "qkv" / "bf16.py"
-    attention = package_dir / "attention_forward.py"
+    target = node_dir / "h3_optimizations" / "qkv" / "bf16.py"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    marker = "# MINIMAX_H3_T4_KEEP_CONVROT_BINDING_FOR_Q_STREAM"
 
-    if not node_dir.is_dir():
-        raise RuntimeError(
-            f"H3-Optimizations runtime directory is missing: {node_dir}"
-        )
-
+    if not target.is_file():
+        raise RuntimeError(f"H3 QKV BF16 source is missing: {target}")
     actual_revision = subprocess.check_output(
         ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
         text=True,
@@ -1243,211 +1226,122 @@ def patch_h3_t4_gpu_parallel_attention(runtime: dict) -> None:
     ).strip()
     if actual_revision != expected_revision:
         raise RuntimeError(
-            "Refusing H3 T4 GPU-parallel attention patch because the installed "
+            "Refusing the H3 T4 QKV binding-lifetime patch because the installed "
             f"H3-Optimizations revision is {actual_revision}, expected {expected_revision}."
         )
 
-    if not bf16.is_file():
-        raise RuntimeError(f"H3 QKV source is missing: {bf16}")
-    if not attention.is_file():
-        raise RuntimeError(f"H3 attention source is missing: {attention}")
-
-    # ------------------------------------------------------------------
-    # Fix 1: retain the native ConvRot binding for streamed Q slabs.
-    # ------------------------------------------------------------------
-    bf16_text = bf16.read_text(encoding="utf-8")
-    bf16_marker = "# MINIMAX_H3_T4_QKV_BINDING_LIFETIME"
-
-    if bf16_marker not in bf16_text:
-        release_block = """            if _held_cast_handle(held) is not None:
-
-                held.__exit__(
-                    None,
-                    None,
-                    None,
-                )
-
-                held = None
-
-"""
-        compact_release_block = """            if _held_cast_handle(held) is not None:
-                held.__exit__(None, None, None)
-                held = None
-
-"""
-        replacement = (
-            "            " + bf16_marker + "\n"
-            "            # Keep the same native ConvRot session alive so every\n"
-            "            # bounded Q slab reuses the binding acquired during K/V projection.\n\n"
-        )
-
-        if bf16_text.count(release_block) == 1:
-            bf16_text = bf16_text.replace(release_block, replacement, 1)
-        elif bf16_text.count(compact_release_block) == 1:
-            bf16_text = bf16_text.replace(compact_release_block, replacement, 1)
-        else:
+    source = target.read_text(encoding="utf-8")
+    if marker in source:
+        required = (marker, "held=held,", "binding_factory=None,")
+        missing = [needle for needle in required if needle not in source]
+        if missing:
             raise RuntimeError(
-                "H3 qkv/bf16.py no longer matches the locked native-binding "
-                "lifetime source contract; refusing to guess or patch an unknown state."
+                "H3 T4 QKV binding-lifetime marker exists but the complete source "
+                "contract is missing:\n" + "\n".join(missing)
             )
-
-        compile(bf16_text, str(bf16), "exec")
-        bf16.write_text(bf16_text, encoding="utf-8")
-        print("[H3 T4 QKV FIX] bf16.py patched: PASS")
-    else:
+        compile(source, str(target), "exec")
         print("[H3 T4 QKV FIX] bf16.py already patched: VERIFIED")
+        return
 
-    bf16_text = bf16.read_text(encoding="utf-8")
-    if bf16_marker not in bf16_text:
-        raise RuntimeError("H3 T4 QKV binding-lifetime marker missing after patch.")
-
-    marker_pos = bf16_text.index(bf16_marker)
-    return_pos = bf16_text.index(
-        "return PreparedStreamedDenseBF16QKV(",
-        marker_pos,
+    old = (
+        "            if _held_cast_handle(held) is not None:\n"
+        "                held.__exit__(None, None, None)\n"
+        "                held = None\n"
+        "            return PreparedStreamedDenseBF16QKV(\n"
+        "                x=x,\n"
+        "                k=k_full,\n"
+        "                v=v_full,\n"
+        "                rope_freqs=rope_freqs,\n"
+        "                held=held,\n"
+        "                binding_factory=(binding_factory if held is None else None),\n"
+        "                chunk_rows=self.chunk_rows,\n"
+        "                projection_mode=self.projection_mode,\n"
+        "            )\n"
     )
-    marker_region = bf16_text[marker_pos:return_pos]
-    if "held = None" in marker_region:
-        raise RuntimeError(
-            "H3 T4 QKV binding-lifetime patch still releases the native handle before streamed Q."
-        )
-    if "held=held" not in bf16_text:
-        raise RuntimeError(
-            "H3 T4 QKV binding-lifetime patch no longer preserves held=held."
-        )
-
-    compile(bf16_text, str(bf16), "exec")
-    print("[H3 T4 QKV FIX] final verification: PASS")
-
-    # ------------------------------------------------------------------
-    # Fix 2: replace streamed dense attention with the newest dual-GPU
-    # efficient-attention implementation.
-    # ------------------------------------------------------------------
-    attention_text = attention.read_text(encoding="utf-8")
-    helper_marker = "# MINIMAX_H3_T4_EFFICIENT_ATTENTION"
-    new_streamed_function = r'''def _minimax_h3_t4_efficient_attention(
-    module,
-    q_slab,
-    k_gpu1,
-    v_gpu1,
-):
-    """Run one bounded H3 attention slab on the second T4.
-
-    Q is produced on cuda:0 by the native streamed projector. K/V are retained
-    on cuda:1 and the attention kernel runs there in FP16 using PyTorch's
-    memory-efficient SDPA backend. The returned tensor is converted back to the
-    original Q device/dtype and normalized to H3 HND [B,H,N,D].
-    """
-    # MINIMAX_H3_T4_EFFICIENT_ATTENTION
-    import torch
-    import torch.nn.functional as F
-
-    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-        raise RuntimeError(
-            "H3 T4 efficient attention requires at least two CUDA devices"
-        )
-
-    if q_slab.ndim != 4:
-        raise RuntimeError(
-            "H3 T4 efficient attention expected Q rank 4 HND, got rank-%d"
-            % q_slab.ndim
-        )
-
-    heads = int(module.heads)
-    head_dim = int(module.head_dim)
-    expected_width = heads * head_dim
-
-    if q_slab.shape[1] != heads or q_slab.shape[-1] != head_dim:
-        raise RuntimeError(
-            "H3 T4 efficient attention received invalid Q shape %s; "
-            "expected [B,%d,N,%d]"
-            % (tuple(q_slab.shape), heads, head_dim)
-        )
-
-    device0 = q_slab.device
-    original_dtype = q_slab.dtype
-    device1 = torch.device("cuda:1")
-
-    q_gpu1 = q_slab.to(
-        device=device1,
-        dtype=torch.float16,
-        non_blocking=True,
+    replacement = (
+        "            # MINIMAX_H3_T4_KEEP_CONVROT_BINDING_FOR_Q_STREAM\n"
+        "            # Keep the native ConvRot-256 binding alive after K/V projection.\n"
+        "            # PreparedStreamedDenseBF16QKV.stream_q() reuses it for every Q slab.\n"
+        "            return PreparedStreamedDenseBF16QKV(\n"
+        "                x=x,\n"
+        "                k=k_full,\n"
+        "                v=v_full,\n"
+        "                rope_freqs=rope_freqs,\n"
+        "                held=held,\n"
+        "                binding_factory=None,\n"
+        "                chunk_rows=self.chunk_rows,\n"
+        "                projection_mode=self.projection_mode,\n"
+        "            )\n"
     )
-
-    # These are normally already FP16 and on cuda:1. Keep the guards so the
-    # helper remains explicit about the attention precision contract.
-    if k_gpu1.device != device1 or k_gpu1.dtype != torch.float16:
-        k_gpu1 = k_gpu1.to(
-            device=device1,
-            dtype=torch.float16,
-            non_blocking=True,
+    if source.count(old) != 1:
+        raise RuntimeError(
+            "H3-Optimizations 0.2.41 qkv/bf16.py no longer matches the locked "
+            "binding-lifetime source contract; refusing to patch."
         )
-    if v_gpu1.device != device1 or v_gpu1.dtype != torch.float16:
-        v_gpu1 = v_gpu1.to(
-            device=device1,
-            dtype=torch.float16,
-            non_blocking=True,
+    patched = source.replace(old, replacement, 1)
+    compile(patched, str(target), "exec")
+    target.write_text(patched, encoding="utf-8")
+    print("[H3 T4 QKV FIX] bf16.py patched: PASS")
+
+
+def patch_h3_efficient_attention(runtime: dict) -> None:
+    """Use PyTorch memory-efficient SDPA inside each existing H3 worker."""
+    node_dir = CUSTOM / "H3-Optimizations"
+    target = node_dir / "h3_optimizations" / "attention_forward.py"
+    expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    marker = "# MINIMAX_H3_T4_EFFICIENT_ATTENTION"
+    chunk_rows = int(runtime.get("h3_optimization", {}).get("chunk_rows", 0) or 0)
+
+    if chunk_rows != 2560:
+        raise RuntimeError(
+            f"Production H3 efficient-attention patch requires chunk_rows=2560; got {chunk_rows}."
+        )
+    if not target.is_file():
+        raise RuntimeError(f"H3 attention source is missing: {target}")
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing the H3 T4 efficient-attention patch because the installed "
+            f"H3-Optimizations revision is {actual_revision}, expected {expected_revision}."
         )
 
-    with torch.nn.attention.sdpa_kernel(
-        torch.nn.attention.SDPBackend.EFFICIENT_ATTENTION
-    ):
-        out = F.scaled_dot_product_attention(
-            q_gpu1,
-            k_gpu1,
-            v_gpu1,
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=False,
+    source = target.read_text(encoding="utf-8")
+    if marker in source:
+        required = (
+            marker,
+            "SDPBackend.EFFICIENT_ATTENTION",
+            "q_attention = q.to(dtype=attention_dtype)",
+            "k_attention = k_full.to(dtype=attention_dtype)",
+            "v_attention = v_full.to(dtype=attention_dtype)",
+            "rank-3 output",
+            "rank-4 output",
+            "return output",
         )
-
-    # Latest shape-contract fix: flatten_attention_output() expects HND rank 4.
-    # Preserve the validated rank-3 -> HND conversion for a backend returning
-    # [B,N,H*D].
-    if out.ndim == 3:
-        width = int(out.shape[-1])
-        if width != expected_width:
+        missing = [needle for needle in required if needle not in source]
+        if missing:
             raise RuntimeError(
-                "H3 T4 efficient attention rank-3 output width %d does not "
-                "match heads*head_dim=%d"
-                % (width, expected_width)
+                "H3 efficient-attention marker exists but the complete source "
+                "contract is missing:\n" + "\n".join(missing)
             )
-        out = out.reshape(
-            int(out.shape[0]),
-            int(out.shape[1]),
-            heads,
-            head_dim,
-        ).transpose(1, 2).contiguous()
-    elif out.ndim != 4:
+        compile(source, str(target), "exec")
+        print("[H3 T4 EFFICIENT ATTENTION] attention_forward.py already patched: VERIFIED")
+        return
+
+    marker_start = "def _finish_streamed_dense_bf16_projected("
+    next_marker = "def make_forward("
+    start = source.find(marker_start)
+    end = source.find(next_marker, start)
+    if start < 0 or end < 0 or end <= start:
         raise RuntimeError(
-            "H3 T4 efficient attention returned rank-%d output; expected HND rank 4"
-            % out.ndim
+            "H3-Optimizations 0.2.41 attention_forward.py no longer exposes the "
+            "locked streamed-BF16 attention function boundary; refusing to patch."
         )
 
-    if (
-        out.shape[1] != heads
-        or out.shape[-1] != head_dim
-        or out.shape[-2] != q_slab.shape[-2]
-    ):
-        raise RuntimeError(
-            "H3 T4 efficient attention returned invalid HND output shape %s; "
-            "expected [B,%d,%d,%d]"
-            % (
-                tuple(out.shape),
-                heads,
-                int(q_slab.shape[-2]),
-                head_dim,
-            )
-        )
-
-    return out.to(
-        device=device0,
-        dtype=original_dtype,
-        non_blocking=True,
-    )
-
-
-def _finish_streamed_dense_bf16_projected(
+    new_function = '''def _finish_streamed_dense_bf16_projected(
     module,
     projected,
     *,
@@ -1455,134 +1349,125 @@ def _finish_streamed_dense_bf16_projected(
     transformer_options,
     out_projection=None,
 ):
-    """Consume Q slabs against complete BF16 K/V and project each output slab."""
+    """Consume bounded Q slabs with CUDA memory-efficient SDPA on the local worker GPU."""
+    del layer_index, transformer_options
+    import torch
+    import torch.nn.functional as F
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
     output = attention_output_buffer(projected.x)
-    external_consumer = get_streamed_h3_qkv_consumer(transformer_options)
-    k_gpu1 = None
-    v_gpu1 = None
+    attention_dtype = torch.float16
+    hidden = int(module.heads) * int(module.head_dim)
+    local_device = projected.k.device
+    if local_device.type != 'cuda':
+        raise RuntimeError(
+            'H3 T4 efficient attention requires CUDA K/V tensors; got %s' % local_device
+        )
+
+    k_full = projected.k
+    v_full = projected.v
+    k_attention = k_full.to(device=local_device, dtype=attention_dtype)
+    v_attention = v_full.to(device=local_device, dtype=attention_dtype)
+
     try:
-        if external_consumer is None:
-            import torch
+        # MINIMAX_H3_T4_EFFICIENT_ATTENTION
+        if not getattr(_finish_streamed_dense_bf16_projected, '_h3_t4_logged', False):
+            print(
+                '[H3 T4 EFFICIENT ATTENTION] '
+                'backend=PyTorch EFFICIENT_ATTENTION '
+                'device=%s q_rows=%d attention_dtype=%s'
+                % (local_device, int(projected.chunk_rows), attention_dtype),
+                flush=True,
+            )
+            _finish_streamed_dense_bf16_projected._h3_t4_logged = True
+        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+            for start, end, q in projected.stream_q():
+                local_rows = int(end - start)
+                target_dtype = q.dtype
+                q_attention = q.to(device=local_device, dtype=attention_dtype)
 
-            if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
-                raise RuntimeError(
-                    "H3 T4 dual-GPU attention requires at least two CUDA devices"
+                raw = F.scaled_dot_product_attention(
+                    q_attention,
+                    k_attention,
+                    v_attention,
+                    attn_mask=None,
+                    dropout_p=0.0,
+                    is_causal=False,
                 )
 
-            # Keep complete K/V on cuda:1. Q slabs remain source-native on cuda:0
-            # until each bounded slab is transferred for efficient attention.
-            k_gpu1 = projected.k.to(
-                device="cuda:1",
-                dtype=torch.float16,
-                non_blocking=True,
-            )
-            v_gpu1 = projected.v.to(
-                device="cuda:1",
-                dtype=torch.float16,
-                non_blocking=True,
-            )
+                # Preserve the existing flatten_attention_output() HND contract.
+                if raw.ndim == 3:
+                    if (
+                        int(raw.shape[0]) == local_rows
+                        and int(raw.shape[1]) == int(module.heads)
+                        and int(raw.shape[2]) == int(module.head_dim)
+                    ):
+                        raw = raw.transpose(0, 1).unsqueeze(0).contiguous()
+                    elif (
+                        int(raw.shape[-1]) == hidden
+                        and int(raw.shape[1]) == local_rows
+                    ):
+                        raw = raw.reshape(
+                            int(raw.shape[0]),
+                            local_rows,
+                            int(module.heads),
+                            int(module.head_dim),
+                        ).transpose(1, 2).contiguous()
+                    else:
+                        raise RuntimeError(
+                            'H3 T4 efficient attention returned rank-3 output with unsupported shape %s'
+                            % (tuple(raw.shape),)
+                        )
 
-        for start, end, q in projected.stream_q():
-            if external_consumer is None:
-                raw = _minimax_h3_t4_efficient_attention(
-                    module,
-                    q,
-                    k_gpu1,
-                    v_gpu1,
-                )
-            else:
-                raw = consume_streamed_h3_qkv(
-                    external_consumer,
-                    q,
-                    projected.k,
-                    projected.v,
-                    q_start=start,
-                    q_total=projected.sequence,
-                    layer_index=layer_index,
-                    transformer_options=transformer_options,
-                )
-            out = flatten_attention_output(
-                module,
-                raw,
-                "streamed_dense_bf16",
-            )
-            del raw
-            with diagnostics.stage("attention_out"):
-                output[start:end].copy_(
-                    _project_attention_output(
-                        module,
-                        out.squeeze(0),
-                        out_projection,
+                if raw.ndim != 4:
+                    raise RuntimeError(
+                        'H3 T4 efficient attention returned rank-%d output; expected rank-4 output'
+                        % raw.ndim
                     )
+                if (
+                    int(raw.shape[0]) != 1
+                    or int(raw.shape[1]) != int(module.heads)
+                    or int(raw.shape[2]) != local_rows
+                    or int(raw.shape[3]) != int(module.head_dim)
+                ):
+                    raise RuntimeError(
+                        'H3 T4 efficient attention returned invalid HND shape %s; '
+                        'expected [1,%d,%d,%d]'
+                        % (
+                            tuple(raw.shape),
+                            int(module.heads),
+                            local_rows,
+                            int(module.head_dim),
+                        )
+                    )
+
+                raw = raw.to(dtype=target_dtype)
+                out = flatten_attention_output(
+                    module,
+                    raw,
+                    'h3_t4_efficient_attention',
                 )
-            del q, out
+                del raw, q_attention
+                with diagnostics.stage('attention_out'):
+                    output[start:end].copy_(
+                        _project_attention_output(
+                            module,
+                            out.squeeze(0),
+                            out_projection,
+                        )
+                    )
+                del q, out
         return output
     finally:
-        k_gpu1 = None
-        v_gpu1 = None
+        del k_attention, v_attention
         projected.release()
+
+
 '''
-
-    import ast
-
-    try:
-        tree = ast.parse(attention_text, filename=str(attention))
-    except SyntaxError as exc:
-        raise RuntimeError(
-            f"Cannot parse H3 attention source before patching: {exc}"
-        ) from exc
-
-    target_nodes = [
-        node
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_finish_streamed_dense_bf16_projected"
-    ]
-    if len(target_nodes) != 1:
-        raise RuntimeError(
-            "Expected exactly one _finish_streamed_dense_bf16_projected() "
-            "definition in the locked H3 attention source."
-        )
-    target_node = target_nodes[0]
-
-    lines = attention_text.splitlines(keepends=True)
-    start_index = target_node.lineno - 1
-    end_index = target_node.end_lineno
-    before = "".join(lines[:start_index])
-    after = "".join(lines[end_index:])
-
-    # The helper/function replacement is intentionally source-level and scoped
-    # to the locked function boundary. This removes any old helper injected in
-    # a live notebook and installs exactly one current implementation.
-    attention_text = before + new_streamed_function + "\n" + after
-
-    compile(attention_text, str(attention), "exec")
-    attention.write_text(attention_text, encoding="utf-8")
-    print("[H3 T4 GPU PATCH] attention_forward.py patched: PASS")
-
-    # Final verification: the new efficient attention is present and the
-    # streamed function calls it.
-    attention_text = attention.read_text(encoding="utf-8")
-    required = (
-        helper_marker,
-        "def _minimax_h3_t4_efficient_attention(",
-        "SDPBackend.EFFICIENT_ATTENTION",
-        "dtype=torch.float16",
-        "rank-3 -> HND",
-        "def _finish_streamed_dense_bf16_projected(",
-        "_minimax_h3_t4_efficient_attention(",
-    )
-    missing = [needle for needle in required if needle not in attention_text]
-    if missing:
-        raise RuntimeError(
-            "H3 T4 GPU attention patch verification failed:\n"
-            + "\n".join(missing)
-        )
-
-    compile(attention_text, str(attention), "exec")
-    print("[H3 T4 GPU PATCH] final verification: PASS")
-    print("[H3 T4 GPU PATCH] GPU1 efficient attention + HND shape fix persisted")
-
+    patched = source[:start] + new_function + source[end:]
+    compile(patched, str(target), "exec")
+    target.write_text(patched, encoding="utf-8")
+    print("[H3 T4 EFFICIENT ATTENTION] attention_forward.py patched: PASS")
 
 def patch_h3_embedding_memory_compatibility() -> None:
     # Enable H3-Optimizations 0.2.41 embedding release with approved T4 _forward changes.
@@ -2125,7 +2010,8 @@ def main():
     remove_legacy_context_ir_node()
     install_and_verify_pillow_runtime(runtime)
     patch_h3_bounded_qkv(runtime)
-    patch_h3_t4_gpu_parallel_attention(runtime)
+    patch_h3_qkv_binding_lifetime(runtime)
+    patch_h3_efficient_attention(runtime)
     apply_embedded_h3_runtime_overlay()
     patch_h3_embedding_memory_compatibility()
     verify_h3_optimization_runtime(runtime)
