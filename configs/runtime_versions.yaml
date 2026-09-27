@@ -98,6 +98,14 @@ pytorch:
   index: https://download.pytorch.org/whl/cu130
   torchvision_version: 0.25.0
   torchaudio_version: 2.10.0
+sage_attention:
+  repository: https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git
+  revision: 9f1c9a29be73abc3e92a56649bb24ce4278aea47
+  version: 2.1.1-sm75.4
+  directory: SageAttention-T4
+  required: true
+  smooth_k: true
+  qk_quant_gran: per_warp
 h3_optimization:
   repository: https://github.com/Zironic/H3-Optimizations.git
   revision: 379f9c7922b3d7831dd93ae069ba0cb82cb4cf36
