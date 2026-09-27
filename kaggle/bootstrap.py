@@ -884,6 +884,331 @@ def remove_legacy_context_ir_node() -> None:
         os.environ.pop(key, None)
     print("[NODE] retired external MiniMax H3 Context-IR bridge removed")
 
+def patch_h3_bounded_qkv(runtime: dict) -> None:
+    """Apply the tested T4 bounded native QKV fix to locked H3-Optimizations.
+
+    H3-Optimizations is cloned at runtime, so the project-owned QKV safety fix
+    is applied here rather than vendoring or changing the locked upstream
+    repository. The patch is deliberately exact, idempotent, and fails closed
+    if the pinned H3-Optimizations source contract changes.
+    """
+    node_dir = CUSTOM / "H3-Optimizations"
+    providers = node_dir / "h3_optimizations" / "qkv" / "providers.py"
+    apply_source = node_dir / "h3_optimizations" / "apply.py"
+    expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    configured_revision = str(
+        runtime.get("h3_optimization", {}).get("revision", "")
+    ).strip()
+
+    if configured_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing the H3 T4 bounded-QKV patch because runtime_versions.yaml "
+            "does not pin the source contract this patch targets: "
+            f"expected={expected_revision}, configured={configured_revision or 'missing'}."
+        )
+    if not node_dir.is_dir():
+        raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
+
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing the H3 T4 bounded-QKV patch because the installed "
+            f"H3-Optimizations revision is {actual_revision}, expected {expected_revision}."
+        )
+    for target in (providers, apply_source):
+        if not target.is_file():
+            raise RuntimeError(f"H3-Optimizations source is missing: {target}")
+
+    provider_source = providers.read_text(encoding="utf-8")
+    provider_markers = (
+        "# MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT",
+        "# MINIMAX_H3_T4_FORCE_BOUNDED_QKV",
+    )
+    provider_contract = (
+        "QKV_BF16_CHUNKED",
+        "inventory.qkv_convrot_int8_256",
+        "backend_kind == 'existing'",
+        "memory_optimize",
+        "[H3T4_BOUNDED_QKV_SELECTED]",
+    )
+    provider_count = sum(marker in provider_source for marker in provider_markers)
+    if provider_count == len(provider_markers):
+        missing = [needle for needle in provider_contract if needle not in provider_source]
+        if missing:
+            raise RuntimeError(
+                "H3 T4 bounded-QKV provider markers exist but the source contract "
+                "is incomplete; refusing to continue:\n" + "\n".join(missing)
+            )
+        compile(provider_source, str(providers), "exec")
+        print("[H3 T4 QKV PATCH] providers.py already patched: VERIFIED")
+    elif provider_count:
+        raise RuntimeError(
+            "H3 T4 bounded-QKV provider patch is only partially present; refusing "
+            "to guess or merge an unknown source state."
+        )
+    else:
+        preserve_anchor = """        return QKVProviderResolution(
+            (
+                QKV_DENSE_KITCHEN_CHUNKED
+                if backend_kind == 'comfy_kitchen_int8'
+                else QKV_STREAMED_BF16_KITCHEN
+            ),
+            backend_kind != 'comfy_kitchen_int8',
+            'checkpoint-native ConvRot-256 INT8 QKV streams BF16 projection chunks into the Kitchen INT8 carrier',
+        )
+    if not _qkv_is_native_bf16(inventory):"""
+        preserve_replacement = """        return QKVProviderResolution(
+            (
+                QKV_DENSE_KITCHEN_CHUNKED
+                if backend_kind == 'comfy_kitchen_int8'
+                else QKV_STREAMED_BF16_KITCHEN
+            ),
+            backend_kind != 'comfy_kitchen_int8',
+            'checkpoint-native ConvRot-256 INT8 QKV streams BF16 projection chunks into the Kitchen INT8 carrier',
+        )
+    # MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT
+    #
+    # The ref2va pruned ConvRot-256 INT8 H3 checkpoint has a 21,504-wide
+    # packed QKV projection. For the T4/native existing-attention path,
+    # projecting the complete packed sequence in one INT8 GEMM can exceed
+    # the kernel's 32-bit indexing domain:
+    #
+    #     sequence * qkv_width >= 2**31
+    #
+    # Preserve native semantics, but force the existing bounded QKV
+    # projector so the native ConvRot weights are consumed in token chunks.
+    if (
+        backend_kind == 'existing'
+        and memory_optimize
+        and inventory.qkv_convrot_int8_256
+        and request == FUSED_QKV_PRESERVE_BF16
+    ):
+        return QKVProviderResolution(
+            QKV_BF16_CHUNKED,
+            False,
+            (
+                'T4 H3 safety: bounded native ConvRot-256 INT8 QKV '
+                'projection selected for existing dense attention to avoid '
+                'full-sequence INT8 GEMM 32-bit indexing overflow'
+            ),
+        )
+
+    if not _qkv_is_native_bf16(inventory):"""
+        if provider_source.count(preserve_anchor) != 1:
+            raise RuntimeError(
+                "H3-Optimizations 0.2.41 providers.py no longer matches the locked "
+                "QKV preserve-precision source contract; refusing to patch."
+            )
+        provider_source = provider_source.replace(
+            preserve_anchor, preserve_replacement, 1
+        )
+
+        resolver_anchor = """    fp8_available=False,
+):
+    if request == FUSED_QKV_OFF:"""
+        resolver_replacement = """    fp8_available=False,
+):
+    # MINIMAX_H3_T4_FORCE_BOUNDED_QKV
+    #
+    # MiniMax H3 Ref2VA pruned ConvRot-256 INT8 has a very wide packed
+    # QKV projection (56 heads * 128 head_dim * 3 = 21504 output width).
+    # On Tesla T4, the full-sequence INT8 GEMM can exceed the kernel's
+    # 32-bit indexing domain for long H3 sequences.
+    #
+    # For existing ComfyUI dense attention, always route this native
+    # ConvRot-256 INT8 checkpoint through the bounded native QKV projector.
+    if (
+        backend_kind == 'existing'
+        and memory_optimize
+        and inventory.qkv_convrot_int8_256
+    ):
+        print(
+            '[H3T4_BOUNDED_QKV_SELECTED] '
+            'backend=existing '
+            'memory_optimize=True '
+            'qkv=ConvRot-256-INT8 '
+            'provider=chunked_bf16_qkv '
+            'reason=force_t4_bounded_native_projection',
+            flush=True,
+        )
+        return QKVProviderResolution(
+            QKV_BF16_CHUNKED,
+            False,
+            'T4 H3 safety: force bounded native ConvRot-256 INT8 QKV '
+            'for existing dense attention',
+        )
+
+    if request == FUSED_QKV_OFF:"""
+        if provider_source.count(resolver_anchor) != 1:
+            raise RuntimeError(
+                "H3-Optimizations 0.2.41 providers.py no longer matches the locked "
+                "QKV resolver source contract; refusing to patch."
+            )
+        provider_source = provider_source.replace(
+            resolver_anchor, resolver_replacement, 1
+        )
+        compile(provider_source, str(providers), "exec")
+        providers.write_text(provider_source, encoding="utf-8")
+        print("[H3 T4 QKV PATCH] providers.py patched: PASS")
+
+    apply_text = apply_source.read_text(encoding="utf-8")
+    apply_markers = (
+        "# MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV",
+        "# MINIMAX_H3_T4_QKV_RUNTIME_SELECTION",
+    )
+    apply_contract = (
+        "qkv.provider_id == QKV_STANDARD",
+        "tuple(getattr(environment, 'capability', ()) or ()) == (7, 5)",
+        "qkv = QKVProviderResolution(",
+        "StreamedDenseBF16QKVProjector(",
+        "QKV runtime selection: provider=%s projector=%s",
+    )
+    apply_count = sum(marker in apply_text for marker in apply_markers)
+    if apply_count == len(apply_markers):
+        missing = [needle for needle in apply_contract if needle not in apply_text]
+        if missing:
+            raise RuntimeError(
+                "H3 T4 bounded-QKV apply markers exist but the source contract is "
+                "incomplete; refusing to continue:\n" + "\n".join(missing)
+            )
+        compile(apply_text, str(apply_source), "exec")
+        print("[H3 T4 QKV PATCH] apply.py already patched: VERIFIED")
+    elif apply_count:
+        raise RuntimeError(
+            "H3 T4 bounded-QKV apply patch is only partially present; refusing "
+            "to guess or merge an unknown source state."
+        )
+    else:
+        qkv_anchor = """    qkv = resolve_qkv_provider(
+        inventory,
+        request=(FUSED_QKV_OFF if memory is None else _qkv_request(plan)),
+        backend_kind=dense.backend_kind,
+        kitchen_producer_available=producer_api_available(
+            device=getattr(environment, 'device_index', None)
+        ),
+        triton_available=dense_carrier_available,
+        memory_optimize=memory is not None,
+        fp8_available=_fp8_execution_available(environment),
+    )
+    backend = None
+    projector = None"""
+        qkv_replacement = """    qkv = resolve_qkv_provider(
+        inventory,
+        request=(FUSED_QKV_OFF if memory is None else _qkv_request(plan)),
+        backend_kind=dense.backend_kind,
+        kitchen_producer_available=producer_api_available(
+            device=getattr(environment, 'device_index', None)
+        ),
+        triton_available=dense_carrier_available,
+        memory_optimize=memory is not None,
+        fp8_available=_fp8_execution_available(environment),
+    )
+    # MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV
+    #
+    # T4/SM75 safety rule:
+    # MiniMax H3 long-sequence Ref2VA cannot safely use the ordinary full-QKV
+    # projection at this sequence length. Force the package-owned streamed
+    # native QKV projector at the integration point where it is actually
+    # attached to H3 attention.
+    #
+    # QKV_BF16_CHUNKED does NOT mean "convert the model to BF16".
+    # StreamedDenseBF16QKVProjector uses projection_mode="native", which selects
+    # the native checkpoint-aware binding (ConvRot INT8 / W4A8 / FP8 / BF16).
+    #
+    # Only replace STANDARD fallback. If a compatible specialized provider
+    # was already selected, preserve that provider.
+    if (
+        memory is not None
+        and dense.backend_kind == ATTENTION_EXISTING
+        and tuple(getattr(environment, 'capability', ()) or ()) == (7, 5)
+        and qkv.provider_id == QKV_STANDARD
+    ):
+        qkv = QKVProviderResolution(
+            QKV_BF16_CHUNKED,
+            False,
+            'T4 safety: forced streamed native H3 QKV at integration layer',
+        )
+        logging.warning(
+            '%s T4 BOUNDED QKV FORCED: provider=%s backend=%s',
+            LOG_PREFIX,
+            qkv.provider_id,
+            dense.backend_kind,
+        )
+
+    backend = None
+    projector = None"""
+        if apply_text.count(qkv_anchor) != 1:
+            raise RuntimeError(
+                "H3-Optimizations 0.2.41 apply.py no longer matches the locked "
+                "QKV integration source contract; refusing to patch."
+            )
+        apply_text = apply_text.replace(qkv_anchor, qkv_replacement, 1)
+
+        log_anchor = """        environment.device_name,
+    )
+    if phase == 'prepare':"""
+        log_replacement = """        environment.device_name,
+    )
+    # MINIMAX_H3_T4_QKV_RUNTIME_SELECTION
+    logging.warning(
+        '%s QKV runtime selection: provider=%s projector=%s '
+        'backend_kind=%s chunk_rows=%s reason=%s',
+        LOG_PREFIX,
+        qkv.provider_id,
+        getattr(attention.projector, 'name', None),
+        attention.backend_kind,
+        getattr(attention.projector, 'chunk_rows', None),
+        qkv.reason,
+    )
+    if phase == 'prepare':"""
+        if apply_text.count(log_anchor) != 1:
+            raise RuntimeError(
+                "H3-Optimizations 0.2.41 apply.py no longer matches the locked "
+                "QKV reconciliation source contract; refusing to patch."
+            )
+        apply_text = apply_text.replace(log_anchor, log_replacement, 1)
+        compile(apply_text, str(apply_source), "exec")
+        apply_source.write_text(apply_text, encoding="utf-8")
+        print("[H3 T4 QKV PATCH] apply.py patched: PASS")
+
+    # Final source-level verification after both files are handled.
+    provider_source = providers.read_text(encoding="utf-8")
+    apply_text = apply_source.read_text(encoding="utf-8")
+    final_required = {
+        str(providers): provider_markers + provider_contract + (
+            "request == FUSED_QKV_PRESERVE_BF16",
+            "reason=force_t4_bounded_native_projection",
+        ),
+        str(apply_source): apply_markers + apply_contract + (
+            "projection_mode=_streamed_projection_mode(qkv, inventory)",
+            "getattr(attention.projector, 'chunk_rows', None)",
+        ),
+    }
+    final_sources = {
+        str(providers): provider_source,
+        str(apply_source): apply_text,
+    }
+    missing = [
+        f"{path}: {needle}"
+        for path, needles in final_required.items()
+        for needle in needles
+        if needle not in final_sources[path]
+    ]
+    if missing:
+        raise RuntimeError(
+            "H3 T4 bounded-QKV patch verification failed:\n" + "\n".join(missing)
+        )
+    compile(provider_source, str(providers), "exec")
+    compile(apply_text, str(apply_source), "exec")
+    print(
+        "[H3 T4 QKV PATCH] PASS: providers.py + apply.py patched/verified "
+        f"at H3-Optimizations {actual_revision}"
+    )
+
 def patch_h3_embedding_memory_compatibility() -> None:
     # Enable H3-Optimizations 0.2.41 embedding release with approved T4 _forward changes.
     node_dir = CUSTOM / "H3-Optimizations"
@@ -1424,6 +1749,7 @@ def main():
     install_nodes()
     remove_legacy_context_ir_node()
     install_and_verify_pillow_runtime(runtime)
+    patch_h3_bounded_qkv(runtime)
     apply_embedded_h3_runtime_overlay()
     patch_h3_embedding_memory_compatibility()
     verify_h3_optimization_runtime(runtime)
