@@ -884,6 +884,28 @@ def remove_legacy_context_ir_node() -> None:
         os.environ.pop(key, None)
     print("[NODE] retired external MiniMax H3 Context-IR bridge removed")
 
+def prepare_locked_h3_optimization_source(runtime: dict) -> None:
+    """Return the locked H3-Optimizations checkout to pristine source before patching."""
+    node_dir = CUSTOM / "H3-Optimizations"
+    expected_revision = str(runtime.get("h3_optimization", {}).get("revision", "")).strip()
+    if not node_dir.is_dir():
+        raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
+    if len(expected_revision) != 40:
+        raise RuntimeError("runtime_versions.yaml contains no valid H3-Optimizations SHA")
+    run("git", "-C", node_dir, "reset", "--hard", expected_revision)
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_revision != expected_revision:
+        raise RuntimeError(
+            "H3-Optimizations source reset did not reach the locked revision: "
+            f"expected={expected_revision}, actual={actual_revision}"
+        )
+    print("[H3 OPT] locked source reset: PASS")
+
+
 def patch_h3_bounded_qkv(runtime: dict) -> None:
     """Apply the tested T4 bounded native QKV fix to locked H3-Optimizations.
 
@@ -1284,20 +1306,30 @@ def patch_h3_qkv_binding_lifetime(runtime: dict) -> None:
     print("[H3 T4 QKV FIX] bf16.py patched: PASS")
 
 
-def patch_h3_efficient_attention(runtime: dict) -> None:
-    """Use PyTorch memory-efficient SDPA inside each existing H3 worker."""
+def patch_h3_sage_attention(runtime: dict) -> None:
+    """Route the existing bounded H3 Q slabs into the pinned SM75 Sage kernel.
+
+    This preserves the project-owned QKV lifetime/chunking contract and the
+    existing output-projection contract. Sage is used as the local per-worker
+    attention engine; no cross-GPU Q/K/V transfers are introduced.
+    """
     node_dir = CUSTOM / "H3-Optimizations"
     target = node_dir / "h3_optimizations" / "attention_forward.py"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
-    marker = "# MINIMAX_H3_T4_EFFICIENT_ATTENTION"
+    sage_cfg = dict(runtime.get("sage_attention", {}) or {})
+    sage_version = str(sage_cfg.get("version", "") or "").strip()
+    marker = "# MINIMAX_H3_T4_SAGE_ATTENTION"
     chunk_rows = int(runtime.get("h3_optimization", {}).get("chunk_rows", 0) or 0)
 
     if chunk_rows != 2560:
         raise RuntimeError(
-            f"Production H3 efficient-attention patch requires chunk_rows=2560; got {chunk_rows}."
+            f"Production H3 Sage-attention patch requires chunk_rows=2560; got {chunk_rows}."
         )
+    if not sage_version:
+        raise RuntimeError("runtime_versions.yaml sage_attention.version is missing.")
     if not target.is_file():
         raise RuntimeError(f"H3 attention source is missing: {target}")
+
     actual_revision = subprocess.check_output(
         ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
         text=True,
@@ -1305,7 +1337,7 @@ def patch_h3_efficient_attention(runtime: dict) -> None:
     ).strip()
     if actual_revision != expected_revision:
         raise RuntimeError(
-            "Refusing the H3 T4 efficient-attention patch because the installed "
+            "Refusing the H3 T4 Sage-attention patch because the installed "
             f"H3-Optimizations revision is {actual_revision}, expected {expected_revision}."
         )
 
@@ -1313,22 +1345,22 @@ def patch_h3_efficient_attention(runtime: dict) -> None:
     if marker in source:
         required = (
             marker,
-            "SDPBackend.EFFICIENT_ATTENTION",
-            "q_attention = q.to(dtype=attention_dtype)",
-            "k_attention = k_full.to(dtype=attention_dtype)",
-            "v_attention = v_full.to(dtype=attention_dtype)",
-            "rank-3 output",
-            "rank-4 output",
-            "return output",
+            "from sageattention import sageattn",
+            "sageattn(",
+            "tensor_layout='HND'",
+            "qk_quant_gran='per_warp'",
+            "smooth_k=True",
+            "SageAttention-SM75",
+            "projected.release()",
         )
         missing = [needle for needle in required if needle not in source]
         if missing:
             raise RuntimeError(
-                "H3 efficient-attention marker exists but the complete source "
-                "contract is missing:\n" + "\n".join(missing)
+                "H3 Sage-attention marker exists but the complete source contract is missing:\n"
+                + "\n".join(missing)
             )
         compile(source, str(target), "exec")
-        print("[H3 T4 EFFICIENT ATTENTION] attention_forward.py already patched: VERIFIED")
+        print("[H3 T4 SAGE ATTENTION] attention_forward.py already patched: VERIFIED")
         return
 
     marker_start = "def _finish_streamed_dense_bf16_projected("
@@ -1349,125 +1381,144 @@ def patch_h3_efficient_attention(runtime: dict) -> None:
     transformer_options,
     out_projection=None,
 ):
-    """Consume bounded Q slabs with CUDA memory-efficient SDPA on the local worker GPU."""
+    """Consume bounded Q slabs with the pinned SM75 SageAttention kernel."""
     del layer_index, transformer_options
     import torch
-    import torch.nn.functional as F
-    from torch.nn.attention import SDPBackend, sdpa_kernel
+    from sageattention import sageattn
 
     output = attention_output_buffer(projected.x)
     attention_dtype = torch.float16
-    hidden = int(module.heads) * int(module.head_dim)
     local_device = projected.k.device
     if local_device.type != 'cuda':
         raise RuntimeError(
-            'H3 T4 efficient attention requires CUDA K/V tensors; got %s' % local_device
+            'H3 T4 SageAttention requires CUDA K/V tensors; got %s' % local_device
+        )
+    if int(module.head_dim) not in (64, 128):
+        raise RuntimeError(
+            'H3 T4 SageAttention SM75 supports head_dim 64/128; got %d'
+            % int(module.head_dim)
+        )
+    if int(module.heads) != 56:
+        raise RuntimeError(
+            'MiniMax H3 T4 SageAttention integration expects 56 heads; got %d'
+            % int(module.heads)
         )
 
-    k_full = projected.k
-    v_full = projected.v
-    k_attention = k_full.to(device=local_device, dtype=attention_dtype)
-    v_attention = v_full.to(device=local_device, dtype=attention_dtype)
+    k_attention = projected.k.to(
+        device=local_device,
+        dtype=attention_dtype,
+    ).contiguous()
+    v_attention = projected.v.to(
+        device=local_device,
+        dtype=attention_dtype,
+    ).contiguous()
 
     try:
-        # MINIMAX_H3_T4_EFFICIENT_ATTENTION
+        # MINIMAX_H3_T4_SAGE_ATTENTION
         if not getattr(_finish_streamed_dense_bf16_projected, '_h3_t4_logged', False):
             print(
-                '[H3 T4 EFFICIENT ATTENTION] '
-                'backend=PyTorch EFFICIENT_ATTENTION '
-                'device=%s q_rows=%d attention_dtype=%s'
-                % (local_device, int(projected.chunk_rows), attention_dtype),
+                '[H3 T4 SAGE ATTENTION] '
+                'backend=SageAttention-SM75 '
+                'device=%s q_rows=%d heads=%d head_dim=%d dtype=%s '
+                'smooth_k=True qk_quant_gran=per_warp'
+                % (
+                    local_device,
+                    int(projected.chunk_rows),
+                    int(module.heads),
+                    int(module.head_dim),
+                    attention_dtype,
+                ),
                 flush=True,
             )
             _finish_streamed_dense_bf16_projected._h3_t4_logged = True
-        with sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-            for start, end, q in projected.stream_q():
-                local_rows = int(end - start)
-                target_dtype = q.dtype
-                q_attention = q.to(device=local_device, dtype=attention_dtype)
 
-                raw = F.scaled_dot_product_attention(
-                    q_attention,
-                    k_attention,
-                    v_attention,
-                    attn_mask=None,
-                    dropout_p=0.0,
-                    is_causal=False,
+        for start, end, q in projected.stream_q():
+            local_rows = int(end - start)
+            target_dtype = q.dtype
+            q_attention = q.to(
+                device=local_device,
+                dtype=attention_dtype,
+            ).contiguous()
+            if q_attention.ndim != 4:
+                raise RuntimeError(
+                    'H3 T4 SageAttention expected rank-4 HND Q; got rank-%d'
+                    % q_attention.ndim
+                )
+            if (
+                int(q_attention.shape[0]) != 1
+                or int(q_attention.shape[1]) != int(module.heads)
+                or int(q_attention.shape[2]) != local_rows
+                or int(q_attention.shape[3]) != int(module.head_dim)
+            ):
+                raise RuntimeError(
+                    'H3 T4 SageAttention received invalid Q shape %s; '
+                    'expected [1,%d,%d,%d]'
+                    % (
+                        tuple(q_attention.shape),
+                        int(module.heads),
+                        local_rows,
+                        int(module.head_dim),
+                    )
                 )
 
-                # Preserve the existing flatten_attention_output() HND contract.
-                if raw.ndim == 3:
-                    if (
-                        int(raw.shape[0]) == local_rows
-                        and int(raw.shape[1]) == int(module.heads)
-                        and int(raw.shape[2]) == int(module.head_dim)
-                    ):
-                        raw = raw.transpose(0, 1).unsqueeze(0).contiguous()
-                    elif (
-                        int(raw.shape[-1]) == hidden
-                        and int(raw.shape[1]) == local_rows
-                    ):
-                        raw = raw.reshape(
-                            int(raw.shape[0]),
-                            local_rows,
-                            int(module.heads),
-                            int(module.head_dim),
-                        ).transpose(1, 2).contiguous()
-                    else:
-                        raise RuntimeError(
-                            'H3 T4 efficient attention returned rank-3 output with unsupported shape %s'
-                            % (tuple(raw.shape),)
-                        )
-
-                if raw.ndim != 4:
-                    raise RuntimeError(
-                        'H3 T4 efficient attention returned rank-%d output; expected rank-4 output'
-                        % raw.ndim
-                    )
-                if (
-                    int(raw.shape[0]) != 1
-                    or int(raw.shape[1]) != int(module.heads)
-                    or int(raw.shape[2]) != local_rows
-                    or int(raw.shape[3]) != int(module.head_dim)
-                ):
-                    raise RuntimeError(
-                        'H3 T4 efficient attention returned invalid HND shape %s; '
-                        'expected [1,%d,%d,%d]'
-                        % (
-                            tuple(raw.shape),
-                            int(module.heads),
-                            local_rows,
-                            int(module.head_dim),
-                        )
-                    )
-
-                raw = raw.to(dtype=target_dtype)
-                out = flatten_attention_output(
-                    module,
-                    raw,
-                    'h3_t4_efficient_attention',
+            raw = sageattn(
+                q_attention,
+                k_attention,
+                v_attention,
+                tensor_layout='HND',
+                is_causal=False,
+                smooth_k=True,
+                qk_quant_gran='per_warp',
+            )
+            if raw.ndim != 4:
+                raise RuntimeError(
+                    'H3 T4 SageAttention returned rank-%d output; expected rank-4 HND'
+                    % raw.ndim
                 )
-                del raw, q_attention
-                with diagnostics.stage('attention_out'):
-                    output[start:end].copy_(
-                        _project_attention_output(
-                            module,
-                            out.squeeze(0),
-                            out_projection,
-                        )
+            if (
+                int(raw.shape[0]) != 1
+                or int(raw.shape[1]) != int(module.heads)
+                or int(raw.shape[2]) != local_rows
+                or int(raw.shape[3]) != int(module.head_dim)
+            ):
+                raise RuntimeError(
+                    'H3 T4 SageAttention returned invalid HND shape %s; '
+                    'expected [1,%d,%d,%d]'
+                    % (
+                        tuple(raw.shape),
+                        int(module.heads),
+                        local_rows,
+                        int(module.head_dim),
                     )
-                del q, out
+                )
+
+            raw = raw.to(dtype=target_dtype)
+            out = flatten_attention_output(
+                module,
+                raw,
+                'h3_t4_sage_attention',
+            )
+            del raw, q_attention
+            with diagnostics.stage('attention_out'):
+                output[start:end].copy_(
+                    _project_attention_output(
+                        module,
+                        out.squeeze(0),
+                        out_projection,
+                    )
+                )
+            del q, out
         return output
     finally:
         del k_attention, v_attention
         projected.release()
 
-
 '''
     patched = source[:start] + new_function + source[end:]
     compile(patched, str(target), "exec")
     target.write_text(patched, encoding="utf-8")
-    print("[H3 T4 EFFICIENT ATTENTION] attention_forward.py patched: PASS")
+    print("[H3 T4 SAGE ATTENTION] attention_forward.py patched: PASS")
+
 
 def patch_h3_embedding_memory_compatibility() -> None:
     # Enable H3-Optimizations 0.2.41 embedding release with approved T4 _forward changes.
@@ -1762,8 +1813,10 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
         "H3_EXPECTED_CUDA": "13.0",
         "H3_EXPECTED_H3_REVISION": expected_revision,
         "H3_EXPECTED_H3_VERSION": expected_version,
+        "H3_EXPECTED_SAGE_VERSION": str(runtime.get("sage_attention", {}).get("version", "") or "").strip(),
         "H3_COMFY_ROOT": str(COMFY),
         "H3_NODE_ROOT": str(node_dir),
+        "H3_SAGE_ROOT": str(CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "SageAttention-T4") or "SageAttention-T4")),
     })
     verify_script = """
 import os
@@ -1777,6 +1830,8 @@ expected_version = os.environ["H3_EXPECTED_H3_VERSION"]
 comfy = Path(os.environ["H3_COMFY_ROOT"]).resolve()
 node_dir = Path(os.environ["H3_NODE_ROOT"]).resolve()
 import torch
+import sageattention
+from sageattention import sageattn
 actual_torch = str(torch.__version__)
 actual_cuda = str(torch.version.cuda)
 if actual_torch != expected_torch:
@@ -1826,6 +1881,27 @@ if missing:
 provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
 if provider_id != "convrot_int8_two_slice":
     raise RuntimeError(f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}")
+attention_source = (node_dir / "h3_optimizations" / "attention_forward.py").read_text(encoding="utf-8")
+required_attention_markers = (
+    "# MINIMAX_H3_T4_SAGE_ATTENTION",
+    "from sageattention import sageattn",
+    "qk_quant_gran='per_warp'",
+    "smooth_k=True",
+)
+missing_attention_markers = [m for m in required_attention_markers if m not in attention_source]
+if missing_attention_markers:
+    raise RuntimeError("H3 Sage attention source marker verification failed: " + ", ".join(missing_attention_markers))
+expected_sage_version = str(os.environ.get("H3_EXPECTED_SAGE_VERSION", "")).strip()
+if expected_sage_version and str(getattr(sageattention, "__version__", "")).strip() != expected_sage_version:
+    raise RuntimeError(
+        f"SageAttention package mismatch: expected={expected_sage_version}, actual={getattr(sageattention, '__version__', '')}"
+    )
+sage_package = Path(getattr(sageattention, "__file__", "")).resolve()
+expected_sage_root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
+if not sage_package.is_relative_to(expected_sage_root / "sageattention"):
+    raise RuntimeError(f"SageAttention imported outside pinned checkout: {sage_package}")
+if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
+    raise RuntimeError("SageAttention SM75 CUDA extension is not enabled in fresh H3 verification")
 actual_revision = subprocess.check_output(
     ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
     text=True,
@@ -1837,7 +1913,7 @@ if actual_revision != expected_revision:
     )
 print(f"[FRESH RUNTIME] torch={actual_torch} cuda={actual_cuda} gpu=SM{major}{minor}")
 print(
-    "[H3 OPT] revision={} version={} bounded_mlp=PASS ConvRotTwoSliceMLP=PASS provider={}".format(
+    "[H3 OPT] revision={} version={} bounded_mlp=PASS ConvRotTwoSliceMLP=PASS provider={} sage=PASS source_marker=PASS".format(
         actual_revision, package_version, provider_id
     )
 )
@@ -1907,6 +1983,8 @@ def install_nodes() -> None:
                 "--tags",
                 "--prune",
             )
+            if node["name"] == "H3-Optimizations":
+                run("git", "-C", destination, "reset", "--hard")
             run(
                 "git",
                 "-C",
@@ -1941,6 +2019,145 @@ def install_nodes() -> None:
                     "name"
                 ],
             )
+def install_sageattention_sm75(runtime: dict) -> None:
+    """Clone, build, and verify the pinned SM75 SageAttention fork for the T4 workers."""
+    cfg = dict(runtime.get("sage_attention", {}) or {})
+    repository = str(cfg.get("repository", "") or "").strip()
+    revision = str(cfg.get("revision", "") or "").strip()
+    expected_version = str(cfg.get("version", "") or "").strip()
+    install_dir = CUSTOM / str(cfg.get("directory", "SageAttention-T4") or "SageAttention-T4")
+    if not repository or len(revision) != 40:
+        raise RuntimeError("runtime_versions.yaml sage_attention.repository/revision are required and must be SHA-pinned.")
+    if not expected_version:
+        raise RuntimeError("runtime_versions.yaml sage_attention.version is required.")
+
+    CUSTOM.mkdir(parents=True, exist_ok=True)
+    if install_dir.exists() and not (install_dir / ".git").is_dir():
+        raise RuntimeError(f"SageAttention path exists but is not a git checkout: {install_dir}")
+    if not install_dir.exists():
+        run("git", "clone", repository, install_dir)
+
+    run("git", "-C", install_dir, "fetch", "--all", "--tags", "--prune")
+    run("git", "-C", install_dir, "reset", "--hard", revision)
+    actual_revision = subprocess.check_output(
+        ["git", "-C", str(install_dir), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+    if actual_revision != revision:
+        raise RuntimeError(
+            "SageAttention checkout mismatch: "
+            f"expected={revision}, actual={actual_revision}"
+        )
+
+    for relative in ("build", "dist", "sageattention.egg-info"):
+        path = install_dir / relative
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        elif path.exists():
+            path.unlink()
+    sage_pkg_dir = install_dir / "sageattention"
+    if sage_pkg_dir.is_dir():
+        for artifact in sage_pkg_dir.glob("*.so"):
+            artifact.unlink()
+
+    build_env = dict(os.environ)
+    build_env["TORCH_CUDA_ARCH_LIST"] = "7.5"
+    build_env["MAX_JOBS"] = "1"
+    build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        "--no-deps",
+        "--no-build-isolation",
+        "-e",
+        install_dir,
+        env=build_env,
+    )
+
+    library_dirs = _cuda_library_dirs()
+    if not library_dirs:
+        raise RuntimeError("SageAttention verification could not locate CUDA runtime libraries.")
+    for gpu_id in (0, 1):
+        child_env = _configure_cuda_environment(library_dirs)
+        child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+        child_env["H3_EXPECTED_SAGE_VERSION"] = expected_version
+        child_env["H3_SAGE_ROOT"] = str(install_dir)
+        probe = r'''import os
+from pathlib import Path
+import torch
+import torch.nn.functional as F
+import sageattention
+from sageattention import sageattn
+expected = os.environ["H3_EXPECTED_SAGE_VERSION"]
+root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
+if str(getattr(sageattention, "__version__", "")).strip() != expected:
+    raise RuntimeError(
+        f"SageAttention version mismatch: expected={expected}, actual={getattr(sageattention, '__version__', '')}"
+    )
+package_file = Path(getattr(sageattention, "__file__", "")).resolve()
+if not package_file.is_relative_to(root / "sageattention"):
+    raise RuntimeError(f"SageAttention imported outside pinned checkout: {package_file}")
+if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
+    raise RuntimeError("SageAttention SM75 CUDA extension is not enabled")
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA is unavailable during SageAttention verification")
+capability = torch.cuda.get_device_capability(0)
+if capability != (7, 5):
+    raise RuntimeError(f"Expected SM75/T4, got {capability}")
+torch.cuda.set_device(0)
+q = torch.randn((1, 56, 64, 128), device="cuda", dtype=torch.float16)
+k = torch.randn((1, 56, 256, 128), device="cuda", dtype=torch.float16)
+v = torch.randn((1, 56, 256, 128), device="cuda", dtype=torch.float16)
+out = sageattn(
+    q.contiguous(),
+    k.contiguous(),
+    v.contiguous(),
+    tensor_layout="HND",
+    is_causal=False,
+    smooth_k=True,
+    qk_quant_gran="per_warp",
+)
+torch.cuda.synchronize()
+if tuple(out.shape) != tuple(q.shape):
+    raise RuntimeError(f"SageAttention smoke output shape mismatch: {tuple(out.shape)} != {tuple(q.shape)}")
+if not torch.isfinite(out).all().item():
+    raise RuntimeError("SageAttention smoke output contains non-finite values")
+ref = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+max_abs = float((out - ref).abs().max().item())
+mean_abs = float((out - ref).abs().mean().item())
+print(
+    f"[SAGE SM75] version={sageattention.__version__} "
+    f"gpu={torch.cuda.get_device_name(0)} capability=sm75 "
+    f"shape={tuple(out.shape)} finite=PASS max_abs_vs_sdpa={max_abs:.6g} mean_abs_vs_sdpa={mean_abs:.6g}"
+)'''
+        verification = subprocess.run(
+            [sys.executable, "-c", probe],
+            env=child_env,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if verification.stdout:
+            print(verification.stdout, end="")
+        if verification.stderr:
+            print(verification.stderr, end="")
+        if verification.returncode != 0:
+            raise RuntimeError(
+                f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
+            )
+
+    print(
+        f"[SAGE SM75] repository={repository} revision={actual_revision} "
+        f"version={expected_version} build=PASS gpu0=PASS gpu1=PASS"
+    )
+
+
 def install_models() -> None:
     manifest = load_yaml(
         MODEL_MANIFEST
@@ -2009,9 +2226,11 @@ def main():
     install_nodes()
     remove_legacy_context_ir_node()
     install_and_verify_pillow_runtime(runtime)
+    install_sageattention_sm75(runtime)
+    prepare_locked_h3_optimization_source(runtime)
     patch_h3_bounded_qkv(runtime)
     patch_h3_qkv_binding_lifetime(runtime)
-    patch_h3_efficient_attention(runtime)
+    patch_h3_sage_attention(runtime)
     apply_embedded_h3_runtime_overlay()
     patch_h3_embedding_memory_compatibility()
     verify_h3_optimization_runtime(runtime)
