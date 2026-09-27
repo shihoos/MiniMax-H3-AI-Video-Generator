@@ -1318,6 +1318,15 @@ def patch_h3_sage_attention(runtime: dict) -> None:
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
     sage_cfg = dict(runtime.get("sage_attention", {}) or {})
     sage_version = str(sage_cfg.get("version", "") or "").strip()
+    smooth_k = sage_cfg.get("smooth_k", True)
+    if not isinstance(smooth_k, bool):
+        raise RuntimeError("runtime_versions.yaml sage_attention.smooth_k must be boolean.")
+    qk_quant_gran = str(sage_cfg.get("qk_quant_gran", "per_warp") or "").strip().lower()
+    if qk_quant_gran != "per_warp":
+        raise RuntimeError(
+            "Production H3 T4 SageAttention requires qk_quant_gran='per_warp'; "
+            f"got {qk_quant_gran!r}."
+        )
     marker = "# MINIMAX_H3_T4_SAGE_ATTENTION"
     chunk_rows = int(runtime.get("h3_optimization", {}).get("chunk_rows", 0) or 0)
 
@@ -1348,8 +1357,8 @@ def patch_h3_sage_attention(runtime: dict) -> None:
             "from sageattention import sageattn",
             "sageattn(",
             "tensor_layout='HND'",
-            "qk_quant_gran='per_warp'",
-            "smooth_k=True",
+            f"qk_quant_gran={qk_quant_gran!r}",
+            f"smooth_k={smooth_k!r}",
             "SageAttention-SM75",
             "projected.release()",
         )
@@ -1420,7 +1429,7 @@ def patch_h3_sage_attention(runtime: dict) -> None:
                 '[H3 T4 SAGE ATTENTION] '
                 'backend=SageAttention-SM75 '
                 'device=%s q_rows=%d heads=%d head_dim=%d dtype=%s '
-                'smooth_k=True qk_quant_gran=per_warp'
+                'smooth_k=__SAGE_SMOOTH_K__ qk_quant_gran=__SAGE_QK_QUANT_GRAN__'
                 % (
                     local_device,
                     int(projected.chunk_rows),
@@ -1467,8 +1476,8 @@ def patch_h3_sage_attention(runtime: dict) -> None:
                 v_attention,
                 tensor_layout='HND',
                 is_causal=False,
-                smooth_k=True,
-                qk_quant_gran='per_warp',
+                smooth_k=__SAGE_SMOOTH_K__,
+                qk_quant_gran=__SAGE_QK_QUANT_GRAN__,
             )
             if raw.ndim != 4:
                 raise RuntimeError(
@@ -1514,6 +1523,8 @@ def patch_h3_sage_attention(runtime: dict) -> None:
         projected.release()
 
 '''
+    new_function = new_function.replace("__SAGE_SMOOTH_K__", repr(smooth_k))
+    new_function = new_function.replace("__SAGE_QK_QUANT_GRAN__", repr(qk_quant_gran))
     patched = source[:start] + new_function + source[end:]
     compile(patched, str(target), "exec")
     target.write_text(patched, encoding="utf-8")
@@ -1814,6 +1825,8 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
         "H3_EXPECTED_H3_REVISION": expected_revision,
         "H3_EXPECTED_H3_VERSION": expected_version,
         "H3_EXPECTED_SAGE_VERSION": str(runtime.get("sage_attention", {}).get("version", "") or "").strip(),
+        "H3_EXPECTED_SAGE_SMOOTH_K": str(bool(runtime.get("sage_attention", {}).get("smooth_k", True))).lower(),
+        "H3_EXPECTED_SAGE_QK_GRAN": str(runtime.get("sage_attention", {}).get("qk_quant_gran", "per_warp") or "per_warp").strip().lower(),
         "H3_COMFY_ROOT": str(COMFY),
         "H3_NODE_ROOT": str(node_dir),
         "H3_SAGE_ROOT": str(CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "SageAttention-T4") or "SageAttention-T4")),
@@ -1849,6 +1862,7 @@ import h3_optimizations
 from h3_optimizations.memory import forward as h3_forward
 from h3_optimizations.memory import linear as h3_linear
 from h3_optimizations.qkv import providers as h3_providers
+from h3_optimizations import attention_forward as h3_attention
 package_file = Path(getattr(h3_optimizations, "__file__", "")).resolve()
 expected_package_root = (node_dir / "h3_optimizations").resolve()
 if not package_file.is_relative_to(expected_package_root):
@@ -1871,6 +1885,8 @@ required_symbols = (
     (h3_forward, "iter_mod_chunks"),
     (h3_providers, "MLP_CONVROT_INT8_TWO_SLICE"),
     (h3_providers, "resolve_mlp_provider"),
+    (h3_attention, "make_forward"),
+    (h3_attention, "_finish_streamed_dense_bf16_projected"),
 )
 missing = [name for module, name in required_symbols if not hasattr(module, name)]
 if missing:
@@ -1882,11 +1898,13 @@ provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
 if provider_id != "convrot_int8_two_slice":
     raise RuntimeError(f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}")
 attention_source = (node_dir / "h3_optimizations" / "attention_forward.py").read_text(encoding="utf-8")
+expected_sage_smooth = str(os.environ.get("H3_EXPECTED_SAGE_SMOOTH_K", "true")).strip().lower()
+expected_sage_qk = str(os.environ.get("H3_EXPECTED_SAGE_QK_GRAN", "per_warp")).strip().lower()
 required_attention_markers = (
     "# MINIMAX_H3_T4_SAGE_ATTENTION",
     "from sageattention import sageattn",
-    "qk_quant_gran='per_warp'",
-    "smooth_k=True",
+    f"qk_quant_gran={expected_sage_qk!r}",
+    f"smooth_k={expected_sage_smooth == 'true'!r}",
 )
 missing_attention_markers = [m for m in required_attention_markers if m not in attention_source]
 if missing_attention_markers:
@@ -2127,9 +2145,15 @@ if tuple(out.shape) != tuple(q.shape):
     raise RuntimeError(f"SageAttention smoke output shape mismatch: {tuple(out.shape)} != {tuple(q.shape)}")
 if not torch.isfinite(out).all().item():
     raise RuntimeError("SageAttention smoke output contains non-finite values")
-ref = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+k_reference = k - k.mean(dim=2, keepdim=True)
+ref = F.scaled_dot_product_attention(q, k_reference, v, attn_mask=None, dropout_p=0.0, is_causal=False)
 max_abs = float((out - ref).abs().max().item())
 mean_abs = float((out - ref).abs().mean().item())
+if not torch.allclose(out, ref, atol=5e-2, rtol=1e-2):
+    raise RuntimeError(
+        f"SageAttention SM75 numerical verification failed: max_abs={max_abs:.6g}, "
+        f"mean_abs={mean_abs:.6g}; expected atol=0.05 rtol=0.01"
+    )
 print(
     f"[SAGE SM75] version={sageattention.__version__} "
     f"gpu={torch.cuda.get_device_name(0)} capability=sm75 "
