@@ -197,7 +197,7 @@ def _configure_cuda_environment(
     return environment
 def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
     """Provide Kaggle's sitecustomize dependency from the runtime lock."""
-    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
+    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     probe = subprocess.run(
         [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
         capture_output=True,
@@ -742,7 +742,7 @@ def install_director_runtime(
     if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
-    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
+    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not vllm_version:
@@ -1332,6 +1332,13 @@ def patch_h3_sage_attention(runtime: dict) -> None:
     node_dir = CUSTOM / "H3-Optimizations"
     target = node_dir / "h3_optimizations" / "attention_forward.py"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    configured_revision = str(runtime.get("h3_optimization", {}).get("revision", "") or "").strip()
+    if configured_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing the H3 T4 Sage-attention patch because runtime_versions.yaml "
+            "does not pin the H3 source contract this patch targets: "
+            f"expected={expected_revision}, configured={configured_revision or 'missing'}."
+        )
     sage_cfg = dict(runtime.get("sage_attention", {}) or {})
     sage_version = str(sage_cfg.get("version", "") or "").strip()
     if "smooth_k" not in sage_cfg:
@@ -2507,7 +2514,8 @@ def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
     runtime = load_yaml(RUNTIME_MANIFEST)
-    legacy_runtime = ROOT / f".h3_runtime_{runtime["pytorch"]["cuda"]}"
+    pytorch_cuda = str(runtime["pytorch"]["cuda"])
+    legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
     if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
     ensure_kaggle_startup_wrapt(runtime)
     director_model = Path(
