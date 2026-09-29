@@ -142,7 +142,10 @@ def _site_packages() -> list[Path]:
         for line in result.stdout.splitlines()
         if line.strip()
     ]
-def _cuda_library_dirs() -> list[Path]:
+def _cuda_library_dirs(runtime: dict) -> list[Path]:
+    cuda_cfg = runtime["cuda_runtime"]
+    runtime_major = str(cuda_cfg["runtime_version"]).split(".", 1)[0]
+    cublas_major = str(cuda_cfg["cublas_version"]).split(".", 1)[0]
     directories = []
     for site_root in _site_packages():
         nvidia_root = (
@@ -152,8 +155,8 @@ def _cuda_library_dirs() -> list[Path]:
         if not nvidia_root.is_dir():
             continue
         for pattern in (
-            "libcudart.so.13*",
-            "libcublas.so.13*",
+            f"libcudart.so.{runtime_major}*",
+            f"libcublas.so.{cublas_major}*",
         ):
             for library in nvidia_root.rglob(
                 pattern
@@ -192,11 +195,9 @@ def _configure_cuda_environment(
         values
     )
     return environment
-WRAPT_VERSION = "2.4.1"
-
-
-def ensure_kaggle_startup_wrapt() -> None:
-    """Provide Kaggle's sitecustomize dependency without changing the H3 stack."""
+def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
+    """Provide Kaggle's sitecustomize dependency from the runtime lock."""
+    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
     probe = subprocess.run(
         [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
         capture_output=True,
@@ -204,7 +205,7 @@ def ensure_kaggle_startup_wrapt() -> None:
         check=False,
     )
     installed_version = (probe.stdout or "").strip() if probe.returncode == 0 else ""
-    if installed_version != WRAPT_VERSION:
+    if installed_version != wrapt_version:
         run(
             sys.executable,
             "-m",
@@ -214,7 +215,7 @@ def ensure_kaggle_startup_wrapt() -> None:
             "--disable-pip-version-check",
             "--no-cache-dir",
             "--no-deps",
-            f"wrapt=={WRAPT_VERSION}",
+            f"wrapt=={wrapt_version}",
         )
 
     verify = subprocess.run(
@@ -235,9 +236,9 @@ def ensure_kaggle_startup_wrapt() -> None:
             + (verify.stderr or "")
         )
     verified_version = (verify.stdout or "").strip()
-    if verified_version != WRAPT_VERSION:
+    if verified_version != wrapt_version:
         raise RuntimeError(
-            f"Kaggle wrapt version mismatch: expected={WRAPT_VERSION}, "
+            f"Kaggle wrapt version mismatch: expected={wrapt_version}, "
             f"actual={verified_version!r}"
         )
     print(f"[KAGGLE STARTUP] wrapt={verified_version}: PASS")
@@ -432,8 +433,11 @@ def install_pytorch_runtime(runtime: dict) -> None:
     torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
     if not all((version, cuda, index, torchvision_version, torchaudio_version)):
         raise RuntimeError("runtime_versions.yaml pytorch configuration is incomplete.")
-    if cuda != "cu130":
-        raise RuntimeError(f"This Ref2VA project is locked to cu130, got {cuda!r}.")
+    if not cuda.startswith("cu") or not cuda[2:].isdigit():
+        raise RuntimeError(
+            "runtime_versions.yaml pytorch.cuda must use a cuNNN wheel tag; "
+            f"got {cuda!r}."
+        )
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
@@ -448,13 +452,18 @@ def install_pytorch_runtime(runtime: dict) -> None:
         f"torchvision=={torchvision_version}",
         f"torchaudio=={torchaudio_version}",
     )
+    cuda_digits = cuda[2:]
+    if len(cuda_digits) != 3:
+        raise RuntimeError(f"Unsupported PyTorch CUDA wheel tag: {cuda!r}")
+    expected_torch = f"{version}+{cuda}"
+    expected_cuda = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
     verify = subprocess.run(
         [
             sys.executable, "-c",
             (
                 "import torch; "
-                f"assert torch.__version__ == '2.10.0+{cuda}'; "
-                "assert torch.version.cuda == '13.0'; "
+                f"assert torch.__version__ == {expected_torch!r}; "
+                f"assert torch.version.cuda == {expected_cuda!r}; "
                 "print(torch.__version__); "
                 "print(torch.version.cuda)"
             ),
@@ -733,6 +742,7 @@ def install_director_runtime(
     if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
+    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not vllm_version:
@@ -766,7 +776,7 @@ def install_director_runtime(
     env = os.environ.copy()
     env["UV_LINK_MODE"] = "copy"
     install = subprocess.run(
-        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={WRAPT_VERSION}"],
+        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={wrapt_version}"],
         env=env,
         check=False,
         text=True,
@@ -800,10 +810,10 @@ def install_director_runtime(
         if line.startswith("wrapt version:"):
             observed_wrapt_version = line.split(":", 1)[1].strip()
             break
-    if observed_wrapt_version != WRAPT_VERSION:
+    if observed_wrapt_version != wrapt_version:
         raise RuntimeError(
             "Director isolated runtime wrapt mismatch: "
-            f"observed={observed_wrapt_version!r}, expected={WRAPT_VERSION!r}."
+            f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
         )
     observed_version = None
     for line in verification.stdout.splitlines():
@@ -1233,10 +1243,16 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
 
 def patch_h3_qkv_binding_lifetime(runtime: dict) -> None:
     """Keep the native ConvRot QKV binding alive while streamed Q is consumed."""
-    del runtime
     node_dir = CUSTOM / "H3-Optimizations"
     target = node_dir / "h3_optimizations" / "qkv" / "bf16.py"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
+    configured_revision = str(runtime.get("h3_optimization", {}).get("revision", "") or "").strip()
+    if configured_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing the H3 T4 QKV binding-lifetime patch because runtime_versions.yaml "
+            "does not pin the source contract this patch targets: "
+            f"expected={expected_revision}, configured={configured_revision or 'missing'}."
+        )
     marker = "# MINIMAX_H3_T4_KEEP_CONVROT_BINDING_FOR_Q_STREAM"
 
     if not target.is_file():
@@ -1318,10 +1334,14 @@ def patch_h3_sage_attention(runtime: dict) -> None:
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
     sage_cfg = dict(runtime.get("sage_attention", {}) or {})
     sage_version = str(sage_cfg.get("version", "") or "").strip()
-    smooth_k = sage_cfg.get("smooth_k", True)
+    if "smooth_k" not in sage_cfg:
+        raise RuntimeError("runtime_versions.yaml sage_attention.smooth_k is required.")
+    smooth_k = sage_cfg["smooth_k"]
     if not isinstance(smooth_k, bool):
         raise RuntimeError("runtime_versions.yaml sage_attention.smooth_k must be boolean.")
-    qk_quant_gran = str(sage_cfg.get("qk_quant_gran", "per_warp") or "").strip().lower()
+    if "qk_quant_gran" not in sage_cfg:
+        raise RuntimeError("runtime_versions.yaml sage_attention.qk_quant_gran is required.")
+    qk_quant_gran = str(sage_cfg["qk_quant_gran"] or "").strip().lower()
     if qk_quant_gran != "per_warp":
         raise RuntimeError(
             "Production H3 T4 SageAttention requires qk_quant_gran='per_warp'; "
@@ -1531,12 +1551,27 @@ def patch_h3_sage_attention(runtime: dict) -> None:
     print("[H3 T4 SAGE ATTENTION] attention_forward.py patched: PASS")
 
 
-def patch_h3_embedding_memory_compatibility() -> None:
+def patch_h3_embedding_memory_compatibility(runtime: dict) -> None:
     # Enable H3-Optimizations 0.2.41 embedding release with approved T4 _forward changes.
     node_dir = CUSTOM / "H3-Optimizations"
     target = node_dir / "h3_optimizations" / "memory" / "embedding.py"
     expected_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
     expected_comfy_revision = "12d5279438bfefc058a269eae805ceab6047777f"
+    configured_revision = str(runtime.get("h3_optimization", {}).get("revision", "") or "").strip()
+    if configured_revision != expected_revision:
+        raise RuntimeError(
+            "Refusing H3 embedding-memory compatibility patch because runtime_versions.yaml "
+            "does not pin the H3 source contract this patch targets: "
+            f"expected={expected_revision}, configured={configured_revision or 'missing'}."
+        )
+    configured_comfy_revision = str(runtime.get("comfyui", {}).get("revision", "") or "").strip()
+    if configured_comfy_revision != expected_comfy_revision:
+        raise RuntimeError(
+            "Refusing H3 embedding-memory compatibility patch because runtime_versions.yaml "
+            "does not pin the ComfyUI source contract this patch targets: "
+            f"expected={expected_comfy_revision}, configured={configured_comfy_revision or 'missing'}."
+        )
+    # Patch-contract fingerprint for the locked ComfyUI _forward after the approved H3 source transforms; this is not a runtime version pin.
     expected_upstream_hash = "14bdfccd6860f252005b8d43ab446aa9a938a13dc819061724b8f914218f5fd1"
     marker = "# MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V3"
 
@@ -1798,6 +1833,16 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
     cfg = dict(runtime.get("h3_optimization", {}) or {})
     expected_revision = str(cfg.get("revision", "")).strip()
     expected_version = str(cfg.get("version", "")).strip()
+    pytorch_cfg = dict(runtime.get("pytorch", {}) or {})
+    pytorch_version = str(pytorch_cfg.get("version", "") or "").strip()
+    pytorch_cuda = str(pytorch_cfg.get("cuda", "") or "").strip().lower()
+    if not pytorch_version or not pytorch_cuda.startswith("cu") or not pytorch_cuda[2:].isdigit():
+        raise RuntimeError("runtime_versions.yaml pytorch version/cuda configuration is incomplete.")
+    cuda_digits = pytorch_cuda[2:]
+    if len(cuda_digits) != 3:
+        raise RuntimeError(f"Unsupported PyTorch CUDA wheel tag: {pytorch_cuda!r}")
+    expected_torch = f"{pytorch_version}+{pytorch_cuda}"
+    expected_cuda = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
     node_dir = CUSTOM / "H3-Optimizations"
     if not node_dir.is_dir():
         raise RuntimeError(f"H3-Optimizations runtime directory is missing: {node_dir}")
@@ -1813,23 +1858,23 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
             "Installed H3-Optimizations revision does not match the runtime lock: "
             f"expected={expected_revision}, actual={actual_revision}"
         )
-    library_dirs = _cuda_library_dirs()
+    library_dirs = _cuda_library_dirs(runtime)
     if not library_dirs:
         raise RuntimeError(
             "Fresh H3 verification could not locate the installed CUDA runtime libraries."
         )
     environment = _configure_cuda_environment(library_dirs)
     environment.update({
-        "H3_EXPECTED_TORCH": "2.10.0+cu130",
-        "H3_EXPECTED_CUDA": "13.0",
+        "H3_EXPECTED_TORCH": expected_torch,
+        "H3_EXPECTED_CUDA": expected_cuda,
         "H3_EXPECTED_H3_REVISION": expected_revision,
         "H3_EXPECTED_H3_VERSION": expected_version,
-        "H3_EXPECTED_SAGE_VERSION": str(runtime.get("sage_attention", {}).get("version", "") or "").strip(),
-        "H3_EXPECTED_SAGE_SMOOTH_K": str(bool(runtime.get("sage_attention", {}).get("smooth_k", True))).lower(),
-        "H3_EXPECTED_SAGE_QK_GRAN": str(runtime.get("sage_attention", {}).get("qk_quant_gran", "per_warp") or "per_warp").strip().lower(),
+        "H3_EXPECTED_SAGE_VERSION": str(runtime["sage_attention"]["version"]).strip(),
+        "H3_EXPECTED_SAGE_SMOOTH_K": str(bool(runtime["sage_attention"]["smooth_k"])).lower(),
+        "H3_EXPECTED_SAGE_QK_GRAN": str(runtime["sage_attention"]["qk_quant_gran"]).strip().lower(),
         "H3_COMFY_ROOT": str(COMFY),
         "H3_NODE_ROOT": str(node_dir),
-        "H3_SAGE_ROOT": str(CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "SageAttention-T4") or "SageAttention-T4")),
+        "H3_SAGE_ROOT": str(CUSTOM / str(runtime["sage_attention"]["directory"])),
     })
     verify_script = """
 import os
@@ -1898,8 +1943,8 @@ provider_id = str(h3_providers.MLP_CONVROT_INT8_TWO_SLICE)
 if provider_id != "convrot_int8_two_slice":
     raise RuntimeError(f"Unexpected H3 ConvRot MLP provider identifier: {provider_id!r}")
 attention_source = (node_dir / "h3_optimizations" / "attention_forward.py").read_text(encoding="utf-8")
-expected_sage_smooth = str(os.environ.get("H3_EXPECTED_SAGE_SMOOTH_K", "true")).strip().lower()
-expected_sage_qk = str(os.environ.get("H3_EXPECTED_SAGE_QK_GRAN", "per_warp")).strip().lower()
+expected_sage_smooth = os.environ["H3_EXPECTED_SAGE_SMOOTH_K"].strip().lower()
+expected_sage_qk = os.environ["H3_EXPECTED_SAGE_QK_GRAN"].strip().lower()
 required_attention_markers = (
     "# MINIMAX_H3_T4_SAGE_ATTENTION",
     "from sageattention import sageattn",
@@ -2053,7 +2098,10 @@ def install_sageattention_sm75(runtime: dict) -> None:
     repository = str(cfg.get("repository", "") or "").strip()
     revision = str(cfg.get("revision", "") or "").strip()
     expected_version = str(cfg.get("version", "") or "").strip()
-    install_dir = CUSTOM / str(cfg.get("directory", "SageAttention-T4") or "SageAttention-T4")
+    directory = str(cfg.get("directory", "") or "").strip()
+    if not directory:
+        raise RuntimeError("runtime_versions.yaml sage_attention.directory is required.")
+    install_dir = CUSTOM / directory
     if not repository or len(revision) != 40:
         raise RuntimeError("runtime_versions.yaml sage_attention.repository/revision are required and must be SHA-pinned.")
     if not expected_version:
@@ -2141,7 +2189,7 @@ def install_sageattention_sm75(runtime: dict) -> None:
         env=build_env,
     )
 
-    library_dirs = _cuda_library_dirs()
+    library_dirs = _cuda_library_dirs(runtime)
     if not library_dirs:
         raise RuntimeError("SageAttention verification could not locate CUDA runtime libraries.")
     for gpu_id in (0, 1):
@@ -2458,10 +2506,10 @@ def _warn_if_torch_already_imported() -> None:
 def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
-    ensure_kaggle_startup_wrapt()
-    legacy_runtime = ROOT / ".h3_runtime_cu130"
-    if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
     runtime = load_yaml(RUNTIME_MANIFEST)
+    legacy_runtime = ROOT / f".h3_runtime_{runtime["pytorch"]["cuda"]}"
+    if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
+    ensure_kaggle_startup_wrapt(runtime)
     director_model = Path(
         os.getenv(
             "H3_DIRECTOR_MODEL_PATH",
@@ -2490,7 +2538,7 @@ def main():
     patch_h3_qkv_binding_lifetime(runtime)
     patch_h3_sage_attention(runtime)
     apply_embedded_h3_runtime_overlay()
-    patch_h3_embedding_memory_compatibility()
+    patch_h3_embedding_memory_compatibility(runtime)
     verify_h3_optimization_runtime(runtime)
     install_models()
     verify_inventory()
