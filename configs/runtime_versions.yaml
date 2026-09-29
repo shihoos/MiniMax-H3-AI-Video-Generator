@@ -5,7 +5,7 @@ python:
 comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
   expected_version: 0.34.0
-  revision: v0.34.0
+  revision: 12d5279438bfefc058a269eae805ceab6047777f
   h3_t4_value_clone_workaround: true
 cuda_runtime:
   runtime_package: nvidia-cuda-runtime
