@@ -1,6 +1,7 @@
 python:
   ci: '3.11'
   kaggle: '3.12'
+  wrapt_version: '2.4.1'
 comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
   expected_version: 0.34.0
@@ -66,6 +67,7 @@ runtime:
     disable_pinned_memory: auto
     fast_disk: false
     ram_available_floor: 0.18
+  wrapt_version: 2.4.1
 features:
   live_preview: true
   vlm_enabled: true
