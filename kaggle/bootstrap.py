@@ -2105,130 +2105,226 @@ def install_sageattention_sm75(runtime: dict) -> None:
         child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         child_env["H3_EXPECTED_SAGE_VERSION"] = expected_version
         child_env["H3_SAGE_ROOT"] = str(install_dir)
-        probe = r'''import os
+        probe = r'''import inspect
+import os
 from pathlib import Path
 import torch
 import torch.nn.functional as F
 import sageattention
 from sageattention import sageattn
+
 expected = os.environ["H3_EXPECTED_SAGE_VERSION"]
 root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
+
 if str(getattr(sageattention, "__version__", "")).strip() != expected:
     raise RuntimeError(
         f"SageAttention version mismatch: expected={expected}, actual={getattr(sageattention, '__version__', '')}"
     )
+
 package_file = Path(getattr(sageattention, "__file__", "")).resolve()
 if not package_file.is_relative_to(root / "sageattention"):
     raise RuntimeError(f"SageAttention imported outside pinned checkout: {package_file}")
-if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
+if not bool(getattr(sageattention, "SM75_ENABLED", False)):
     raise RuntimeError("SageAttention SM75 CUDA extension is not enabled")
+if not bool(getattr(sageattention, "FUSED_ENABLED", False)):
+    raise RuntimeError("SageAttention fused CUDA extension is not enabled")
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable during SageAttention verification")
 capability = torch.cuda.get_device_capability(0)
 if capability != (7, 5):
     raise RuntimeError(f"Expected SM75/T4, got {capability}")
 torch.cuda.set_device(0)
-q = torch.randn((1, 56, 64, 128), device="cuda", dtype=torch.float16)
-k = torch.randn((1, 56, 256, 128), device="cuda", dtype=torch.float16)
-v = torch.randn((1, 56, 256, 128), device="cuda", dtype=torch.float16)
-out = sageattn(
-    q.contiguous(),
-    k.contiguous(),
-    v.contiguous(),
-    tensor_layout="HND",
-    is_causal=False,
-    smooth_k=True,
-    qk_quant_gran="per_warp",
-)
-torch.cuda.synchronize()
-if tuple(out.shape) != tuple(q.shape):
-    raise RuntimeError(f"SageAttention smoke output shape mismatch: {tuple(out.shape)} != {tuple(q.shape)}")
-if not torch.isfinite(out).all().item():
-    raise RuntimeError("SageAttention smoke output contains non-finite values")
 
-# INT8 attention is intentionally not elementwise-equivalent to FP16 SDPA.
-# First validate the SM75 kernel against a reference built from the exact
-# quantized Q/K tensors and scale factors that the Sage kernel consumes.
+# This verifier is intentionally coupled to the SHA-pinned SM75 implementation.
+# A change to the internal quantizer contract must fail closed rather than
+# silently falling back to a weaker FP16-vs-INT8 statistical test.
 from sageattention.quant import per_warp_int8
-km = k.mean(dim=2, keepdim=True)
-q_int8, q_scale, k_int8, k_scale = per_warp_int8(
-    q.contiguous(),
-    k.contiguous(),
-    km=km.contiguous(),
-    tensor_layout="HND",
-    BLKQ=64,
-    WARPQ=16,
-    BLKK=64,
-)
-q_rows = torch.arange(q.shape[2], device=q.device)
-k_rows = torch.arange(k.shape[2], device=k.device)
-q_scale_idx = (q_rows // 16).clamp_max(q_scale.shape[-1] - 1)
-k_scale_idx = (k_rows // 64).clamp_max(k_scale.shape[-1] - 1)
-q_scale_expanded = q_scale.index_select(2, q_scale_idx).unsqueeze(-1)
-k_scale_expanded = k_scale.index_select(2, k_scale_idx).unsqueeze(-1)
-q_dequant = q_int8.float() * q_scale_expanded
-k_dequant = k_int8.float() * k_scale_expanded
-quant_scores = torch.matmul(
-    q_dequant,
-    k_dequant.transpose(-2, -1),
-) * (128.0 ** -0.5)
-quant_reference = torch.softmax(quant_scores, dim=-1).matmul(v.float()).to(torch.float32)
-quant_diff = out.float() - quant_reference
-quant_ref_norm = float(torch.linalg.vector_norm(quant_reference).item())
-quant_err_norm = float(torch.linalg.vector_norm(quant_diff).item())
-quant_relative_l2 = quant_err_norm / max(quant_ref_norm, 1e-12)
-quant_cosine = float(
-    torch.nn.functional.cosine_similarity(
-        out.float().reshape(1, -1),
-        quant_reference.reshape(1, -1),
-        dim=1,
-    ).item()
-)
-quant_max_abs = float(quant_diff.abs().max().item())
-quant_mean_abs = float(quant_diff.abs().mean().item())
-
-# Then report (but do not elementwise-gate) the expected quantization error
-# versus full-precision SDPA on the original FP16 Q/K inputs.
-k_reference = k - km
-fp16_reference = F.scaled_dot_product_attention(
-    q,
-    k_reference,
-    v,
-    attn_mask=None,
-    dropout_p=0.0,
-    is_causal=False,
-)
-fp16_diff = out.float() - fp16_reference.float()
-fp16_max_abs = float(fp16_diff.abs().max().item())
-fp16_mean_abs = float(fp16_diff.abs().mean().item())
-
-# This gate validates the CUDA kernel's computation independently of INT8
-# quantization error. A large difference here indicates an actual SM75 kernel
-# mapping/accumulation problem and must stop bootstrap.
-MAX_QUANT_RELATIVE_L2 = 0.10
-MIN_QUANT_COSINE = 0.98
-if (
-    quant_relative_l2 > MAX_QUANT_RELATIVE_L2
-    or quant_cosine < MIN_QUANT_COSINE
-):
+quant_params = set(inspect.signature(per_warp_int8).parameters)
+required_quant_params = {
+    "q", "k", "km", "BLKQ", "WARPQ", "BLKK", "tensor_layout",
+}
+missing = required_quant_params - quant_params
+if missing:
     raise RuntimeError(
-        f"SageAttention SM75 kernel verification failed against dequantized INT8 reference: "
-        f"relative_l2={quant_relative_l2:.6g}, cosine={quant_cosine:.6g}, "
-        f"max_abs={quant_max_abs:.6g}, mean_abs={quant_mean_abs:.6g}; "
-        f"required relative_l2<={MAX_QUANT_RELATIVE_L2} and cosine>={MIN_QUANT_COSINE}"
+        "Pinned SageAttention per_warp_int8 contract changed; refusing to weaken verification. "
+        f"Missing parameters: {sorted(missing)}"
+    )
+
+# These are part of the pinned SM75 implementation in core.py/attn_cuda_sm75.h:
+# Q is quantized with BLKQ=64 and WARPQ=16; K is quantized per 64-key block.
+BLKQ = 64
+WARPQ = 16
+BLKK = 64
+EXPECTED_HEAD_DIMS = (64, 128)
+MAX_KERNEL_RELATIVE_L2 = 0.02
+MIN_KERNEL_COSINE = 0.999
+
+
+def _reference_from_exact_quantized_inputs(q, v, q_int8, q_scale, k_int8, k_scale, sm_scale):
+    """Reproduce the mathematical contract of the SM75 INT8-QK/FP16-PV kernel."""
+    q_len = q.shape[-2]
+    k_len = k_int8.shape[-2]
+    expected_q_scales = ((q_len + BLKQ - 1) // BLKQ) * (BLKQ // WARPQ)
+    expected_k_scales = (k_len + BLKK - 1) // BLKK
+
+    if q_scale.ndim != 3 or q_scale.shape[-1] != expected_q_scales:
+        raise RuntimeError(
+            "SM75 Q scale layout mismatch: "
+            f"shape={tuple(q_scale.shape)}, expected last dim={expected_q_scales} "
+            f"for BLKQ={BLKQ}, WARPQ={WARPQ}, q_len={q_len}"
+        )
+    if k_scale.ndim != 3 or k_scale.shape[-1] != expected_k_scales:
+        raise RuntimeError(
+            "SM75 K scale layout mismatch: "
+            f"shape={tuple(k_scale.shape)}, expected last dim={expected_k_scales} "
+            f"for BLKK={BLKK}, k_len={k_len}"
+        )
+
+    q_row_scales = torch.arange(q_len, device=q.device) // WARPQ
+    k_row_scales = torch.arange(k_len, device=q.device) // BLKK
+    q_scale_expanded = q_scale.index_select(2, q_row_scales).unsqueeze(-1)
+    k_scale_expanded = k_scale.index_select(2, k_row_scales).unsqueeze(-1)
+
+    q_dequant = q_int8.float() * q_scale_expanded
+    k_dequant = k_int8.float() * k_scale_expanded
+
+    scores = torch.matmul(q_dequant, k_dequant.transpose(-2, -1)) * sm_scale
+    probs = torch.softmax(scores, dim=-1)
+    # The CUDA kernel returns FP16, so round the dense reference to FP16 before
+    # computing error metrics. This removes pure output-cast noise from the gate.
+    return torch.matmul(probs, v.float()).to(torch.float16)
+
+
+def _verify_case(head_dim, smooth_k, qo_len=1024, kv_len=1024, num_heads=56, seed=1729):
+    torch.manual_seed(seed + head_dim + int(smooth_k) + qo_len + kv_len)
+    dtype = torch.float16
+    q = torch.randn((1, num_heads, qo_len, head_dim), device="cuda", dtype=dtype).contiguous()
+    k = torch.randn((1, num_heads, kv_len, head_dim), device="cuda", dtype=dtype).contiguous()
+    v = torch.randn((1, num_heads, kv_len, head_dim), device="cuda", dtype=dtype).contiguous()
+
+    sm_scale = head_dim ** -0.5
+    out = sageattn(
+        q,
+        k,
+        v,
+        tensor_layout="HND",
+        is_causal=False,
+        sm_scale=sm_scale,
+        smooth_k=smooth_k,
+        qk_quant_gran="per_warp",
+    )
+    torch.cuda.synchronize()
+
+    if tuple(out.shape) != tuple(q.shape):
+        raise RuntimeError(
+            f"SageAttention output shape mismatch: {tuple(out.shape)} != {tuple(q.shape)}"
+        )
+    if out.dtype != torch.float16:
+        raise RuntimeError(f"SageAttention SM75 output dtype mismatch: {out.dtype} != torch.float16")
+    if not torch.isfinite(out).all().item():
+        raise RuntimeError("SageAttention SM75 output contains non-finite values")
+
+    km = k.mean(dim=2, keepdim=True) if smooth_k else None
+    q_int8, q_scale, k_int8, k_scale = per_warp_int8(
+        q,
+        k,
+        km=km,
+        tensor_layout="HND",
+        BLKQ=BLKQ,
+        WARPQ=WARPQ,
+        BLKK=BLKK,
+    )
+
+    for name, tensor, expected_dtype in (
+        ("q_int8", q_int8, torch.int8),
+        ("k_int8", k_int8, torch.int8),
+        ("q_scale", q_scale, torch.float32),
+        ("k_scale", k_scale, torch.float32),
+    ):
+        if tensor.dtype != expected_dtype:
+            raise RuntimeError(f"{name} dtype mismatch: {tensor.dtype} != {expected_dtype}")
+        if not tensor.is_contiguous():
+            raise RuntimeError(f"{name} must be contiguous")
+        if not torch.isfinite(tensor.float()).all().item():
+            raise RuntimeError(f"{name} contains non-finite values")
+
+    quant_reference = _reference_from_exact_quantized_inputs(
+        q, v, q_int8, q_scale, k_int8, k_scale, sm_scale
+    )
+
+    diff = out.float() - quant_reference.float()
+    ref_norm = float(torch.linalg.vector_norm(quant_reference.float()).item())
+    err_norm = float(torch.linalg.vector_norm(diff).item())
+    relative_l2 = err_norm / max(ref_norm, 1e-12)
+    cosine = float(
+        F.cosine_similarity(
+            out.float().reshape(1, -1),
+            quant_reference.float().reshape(1, -1),
+            dim=1,
+        ).item()
+    )
+    max_abs = float(diff.abs().max().item())
+    mean_abs = float(diff.abs().mean().item())
+
+    # Diagnostic only: compare the INT8 kernel to true FP16 SDPA. This must NOT
+    # be used as a kernel-correctness gate because INT8 Q/K quantization is expected.
+    k_reference = k - km if smooth_k else k
+    fp16_reference = F.scaled_dot_product_attention(
+        q, k_reference, v,
+        attn_mask=None,
+        dropout_p=0.0,
+        is_causal=False,
+        scale=sm_scale,
+    )
+    fp16_diff = out.float() - fp16_reference.float()
+    fp16_max_abs = float(fp16_diff.abs().max().item())
+    fp16_mean_abs = float(fp16_diff.abs().mean().item())
+
+    print(
+        f"[SAGE SM75 CASE] hd={head_dim} smooth_k={smooth_k} "
+        f"shape={tuple(out.shape)} finite=PASS "
+        f"kernel_relative_l2={relative_l2:.6g} "
+        f"kernel_cosine={cosine:.8f} "
+        f"kernel_max_abs={max_abs:.6g} "
+        f"kernel_mean_abs={mean_abs:.6g} "
+        f"fp16_max_abs={fp16_max_abs:.6g} "
+        f"fp16_mean_abs={fp16_mean_abs:.6g}"
+    )
+
+    if relative_l2 > MAX_KERNEL_RELATIVE_L2 or cosine < MIN_KERNEL_COSINE:
+        raise RuntimeError(
+            "SageAttention SM75 kernel correctness gate failed: "
+            f"hd={head_dim}, smooth_k={smooth_k}, relative_l2={relative_l2:.6g}, "
+            f"cosine={cosine:.8f}, max_abs={max_abs:.6g}, mean_abs={mean_abs:.6g}; "
+            f"required relative_l2<={MAX_KERNEL_RELATIVE_L2} and cosine>={MIN_KERNEL_COSINE}"
+        )
+
+
+# H3 production-shape validation: 56 heads, non-causal HND, per-warp Q/K, FP32
+# accumulation, and a 1024x1024 multi-tile attention matrix. The head_dim=64 and
+# smooth-K-off cases isolate architecture/quantization behavior without changing production behavior.
+for _head_dim, _smooth_k in (
+    (64, False),
+    (64, True),
+    (128, False),
+    (128, True),
+):
+    if _head_dim not in EXPECTED_HEAD_DIMS:
+        raise RuntimeError(f"Unexpected SageAttention verification head_dim={_head_dim}")
+    _verify_case(
+        head_dim=_head_dim,
+        smooth_k=_smooth_k,
+        qo_len=1024,
+        kv_len=1024,
+        num_heads=56,
     )
 
 print(
     f"[SAGE SM75] version={sageattention.__version__} "
     f"gpu={torch.cuda.get_device_name(0)} capability=sm75 "
-    f"shape={tuple(out.shape)} finite=PASS "
-    f"kernel_relative_l2={quant_relative_l2:.6g} "
-    f"kernel_cosine={quant_cosine:.6g} "
-    f"kernel_max_abs={quant_max_abs:.6g} "
-    f"kernel_mean_abs={quant_mean_abs:.6g} "
-    f"fp16_max_abs={fp16_max_abs:.6g} "
-    f"fp16_mean_abs={fp16_mean_abs:.6g}"
+    f"all_kernel_correctness_gates=PASS"
 )'''
+
         verification = subprocess.run(
             [sys.executable, "-c", probe],
             env=child_env,
