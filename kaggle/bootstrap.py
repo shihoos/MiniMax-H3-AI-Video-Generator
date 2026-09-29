@@ -2078,6 +2078,40 @@ def install_sageattention_sm75(runtime: dict) -> None:
             f"expected={revision}, actual={actual_revision}"
         )
 
+    # The pinned SM75 fork currently launches CTA_K=64 with WARP_K=16. That
+    # creates four independent K warps for each Q warp, but the kernel keeps
+    # softmax state and final O ownership at Q-warp scope. There is no
+    # cross-K-warp reduction, and the direct output address does not include
+    # warp_idx_k, so the four K warps race on the same output rows. The result
+    # is numerically invalid even when Q/K quantization and scale contracts are
+    # correct. Pair each Q warp with the full CTA_K tile so softmax state and
+    # output ownership are warp-local and unique.
+    sage_kernel = install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+    if not sage_kernel.is_file():
+        raise RuntimeError(f"Pinned SageAttention SM75 kernel source is missing: {sage_kernel}")
+    sage_source = sage_kernel.read_text(encoding="utf-8")
+    legacy = "constexpr int WARP_K_SM75 = 16;"
+    fixed = "constexpr int WARP_K_SM75 = 64;"
+    patch_marker = "// H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.\n"
+    if fixed not in sage_source:
+        if sage_source.count(legacy) != 1:
+            raise RuntimeError(
+                "Pinned SageAttention SM75 kernel source contract changed: expected exactly one "
+                "WARP_K_SM75=16 declaration before applying the H3 T4 runtime fix."
+            )
+        sage_source = sage_source.replace(legacy, patch_marker + fixed, 1)
+        sage_kernel.write_text(sage_source, encoding="utf-8")
+        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: PASS")
+    elif "H3-T4-SM75-KERNEL-FIX" in sage_source:
+        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: ALREADY_APPLIED")
+    else:
+        raise RuntimeError(
+            "Pinned SageAttention SM75 kernel contains WARP_K_SM75=64 without the expected "
+            "H3 T4 runtime-fix marker; refusing to trust an unknown source mutation."
+        )
+    if fixed not in sage_kernel.read_text(encoding="utf-8"):
+        raise RuntimeError("SageAttention SM75 WARP_K runtime correction did not persist.")
+
     for relative in ("build", "dist", "sageattention.egg-info"):
         path = install_dir / relative
         if path.is_dir():
