@@ -209,7 +209,7 @@ def _configure_cuda_environment(
     return environment
 def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
     """Provide Kaggle's sitecustomize dependency from the runtime lock."""
-    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
+    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     probe = subprocess.run(
         [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
         capture_output=True,
@@ -754,7 +754,7 @@ def install_director_runtime(
     if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
-    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
+    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not vllm_version:
