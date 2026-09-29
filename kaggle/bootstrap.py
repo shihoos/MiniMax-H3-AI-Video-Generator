@@ -1909,6 +1909,8 @@ required_attention_markers = (
 missing_attention_markers = [m for m in required_attention_markers if m not in attention_source]
 if missing_attention_markers:
     raise RuntimeError("H3 Sage attention source marker verification failed: " + ", ".join(missing_attention_markers))
+# Pinned 9f1c9a29... package export contract is checked below:
+# SM75_CUDA_ENABLED at package level + direct _fused extension import.
 expected_sage_version = str(os.environ.get("H3_EXPECTED_SAGE_VERSION", "")).strip()
 if expected_sage_version and str(getattr(sageattention, "__version__", "")).strip() != expected_sage_version:
     raise RuntimeError(
@@ -1918,8 +1920,16 @@ sage_package = Path(getattr(sageattention, "__file__", "")).resolve()
 expected_sage_root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
 if not sage_package.is_relative_to(expected_sage_root / "sageattention"):
     raise RuntimeError(f"SageAttention imported outside pinned checkout: {sage_package}")
+# Match install_sageattention_sm75(): the pinned package exports
+# SM75_CUDA_ENABLED; the fused extension is verified by direct import.
 if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
     raise RuntimeError("SageAttention SM75 CUDA extension is not enabled in fresh H3 verification")
+try:
+    from sageattention import _fused as _sage_fused
+except Exception as exc:
+    raise RuntimeError(
+        "SageAttention fused CUDA extension is not importable in fresh H3 verification"
+    ) from exc
 actual_revision = subprocess.check_output(
     ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
     text=True,
@@ -2116,6 +2126,8 @@ from sageattention import sageattn
 expected = os.environ["H3_EXPECTED_SAGE_VERSION"]
 root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
 
+# Pinned 9f1c9a29... package export contract: __init__.py defines
+# SM75_CUDA_ENABLED and does not define SM75_ENABLED/FUSED_ENABLED.
 if str(getattr(sageattention, "__version__", "")).strip() != expected:
     raise RuntimeError(
         f"SageAttention version mismatch: expected={expected}, actual={getattr(sageattention, '__version__', '')}"
@@ -2124,10 +2136,18 @@ if str(getattr(sageattention, "__version__", "")).strip() != expected:
 package_file = Path(getattr(sageattention, "__file__", "")).resolve()
 if not package_file.is_relative_to(root / "sageattention"):
     raise RuntimeError(f"SageAttention imported outside pinned checkout: {package_file}")
-if not bool(getattr(sageattention, "SM75_ENABLED", False)):
+# The pinned SageAttention package exports SM75_CUDA_ENABLED from
+# sageattention/__init__.py. FUSED_ENABLED is internal to core.py and is
+# intentionally verified by importing the compiled _fused extension itself.
+# Keep these checks identical to the fresh-process H3 verifier below.
+if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
     raise RuntimeError("SageAttention SM75 CUDA extension is not enabled")
-if not bool(getattr(sageattention, "FUSED_ENABLED", False)):
-    raise RuntimeError("SageAttention fused CUDA extension is not enabled")
+try:
+    from sageattention import _fused as _sage_fused
+except Exception as exc:
+    raise RuntimeError(
+        "SageAttention fused CUDA extension is not importable"
+    ) from exc
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable during SageAttention verification")
 capability = torch.cuda.get_device_capability(0)
@@ -2155,6 +2175,15 @@ if missing:
 BLKQ = 64
 WARPQ = 16
 BLKK = 64
+
+# The Q scale indexing below is defined per WARPQ rows inside each BLKQ
+# quantization tile. The pinned SM75 implementation requires BLKQ to be an
+# exact multiple of WARPQ; fail closed if that geometry ever changes.
+if BLKQ % WARPQ != 0:
+    raise RuntimeError(
+        f"Invalid SM75 quantization geometry: BLKQ={BLKQ} must be divisible by WARPQ={WARPQ}"
+    )
+
 EXPECTED_HEAD_DIMS = (64, 128)
 MAX_KERNEL_RELATIVE_L2 = 0.02
 MIN_KERNEL_COSINE = 0.999
@@ -2224,6 +2253,11 @@ def _verify_case(head_dim, smooth_k, qo_len=1024, kv_len=1024, num_heads=56, see
     if not torch.isfinite(out).all().item():
         raise RuntimeError("SageAttention SM75 output contains non-finite values")
 
+    # Pinned SM75 smooth-K contract: when enabled, SageAttention computes the
+    # sequence-wise K mean (km) and applies the same mean-centered K contract
+    # used by the fused kernel. The verifier passes that exact km to the same
+    # pinned quantizer; it intentionally fails closed if the fork changes this
+    # semantic contract rather than silently accepting a weaker reference.
     km = k.mean(dim=2, keepdim=True) if smooth_k else None
     q_int8, q_scale, k_int8, k_scale = per_warp_int8(
         q,
