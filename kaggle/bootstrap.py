@@ -209,7 +209,7 @@ def _configure_cuda_environment(
     return environment
 def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
     """Provide Kaggle's sitecustomize dependency from the runtime lock."""
-    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
+    wrapt_version = str(runtime["runtime"]["wrapt_version"]).strip()
     probe = subprocess.run(
         [sys.executable, "-c", "import wrapt; print(wrapt.__version__)"],
         capture_output=True,
