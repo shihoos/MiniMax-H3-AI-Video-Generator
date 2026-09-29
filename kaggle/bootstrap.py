@@ -144,8 +144,20 @@ def _site_packages() -> list[Path]:
     ]
 def _cuda_library_dirs(runtime: dict) -> list[Path]:
     cuda_cfg = runtime["cuda_runtime"]
-    runtime_major = str(cuda_cfg["runtime_version"]).split(".", 1)[0]
-    cublas_major = str(cuda_cfg["cublas_version"]).split(".", 1)[0]
+    runtime_version = str(cuda_cfg["runtime_version"]).strip()
+    cublas_version = str(cuda_cfg["cublas_version"]).strip()
+    if not runtime_version or not cublas_version:
+        raise RuntimeError(
+            "runtime_versions.yaml cuda_runtime.runtime_version and "
+            "cuda_runtime.cublas_version are required."
+        )
+    runtime_major = runtime_version.split(".", 1)[0]
+    cublas_major = cublas_version.split(".", 1)[0]
+    if not runtime_major.isdigit() or not cublas_major.isdigit():
+        raise RuntimeError(
+            "runtime_versions.yaml cuda_runtime versions must begin with numeric major versions: "
+            f"runtime_version={runtime_version!r}, cublas_version={cublas_version!r}."
+        )
     directories = []
     for site_root in _site_packages():
         nvidia_root = (
