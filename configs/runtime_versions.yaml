@@ -67,7 +67,6 @@ runtime:
     disable_pinned_memory: auto
     fast_disk: false
     ram_available_floor: 0.18
-  wrapt_version: 2.4.1
 features:
   live_preview: true
   vlm_enabled: true
