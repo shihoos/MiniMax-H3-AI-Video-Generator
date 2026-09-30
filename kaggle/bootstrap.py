@@ -2160,21 +2160,23 @@ def install_sageattention_sm75(runtime: dict) -> None:
     legacy = "constexpr int WARP_K_SM75 = 16;"
     fixed = "constexpr int WARP_K_SM75 = 64;"
     patch_marker = "// H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.\n"
-    if fixed not in sage_source:
-        if sage_source.count(legacy) != 1:
-            raise RuntimeError(
-                "Pinned SageAttention SM75 kernel source contract changed: expected exactly one "
-                "WARP_K_SM75=16 declaration before applying the H3 T4 runtime fix."
-            )
-        sage_source = sage_source.replace(legacy, patch_marker + fixed, 1)
+    fixed_count = sage_source.count(fixed)
+    marker_count = sage_source.count("H3-T4-SM75-KERNEL-FIX")
+    legacy_count = sage_source.count(legacy)
+    if fixed_count == 2 and marker_count == 2 and legacy_count == 0:
+        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: ALREADY_APPLIED")
+    elif fixed_count == 0 and marker_count == 0 and legacy_count == 2:
+        sage_source = sage_source.replace(
+            legacy,
+            patch_marker + fixed,
+        )
         sage_kernel.write_text(sage_source, encoding="utf-8")
         print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: PASS")
-    elif "H3-T4-SM75-KERNEL-FIX" in sage_source:
-        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: ALREADY_APPLIED")
     else:
         raise RuntimeError(
-            "Pinned SageAttention SM75 kernel contains WARP_K_SM75=64 without the expected "
-            "H3 T4 runtime-fix marker; refusing to trust an unknown source mutation."
+            "Pinned SageAttention SM75 kernel source contract changed: expected exactly two "
+            "WARP_K_SM75=16 declarations before applying the H3 T4 runtime fix, or exactly two "
+            "already-marked WARP_K_SM75=64 declarations after the fix."
         )
     if fixed not in sage_kernel.read_text(encoding="utf-8"):
         raise RuntimeError("SageAttention SM75 WARP_K runtime correction did not persist.")
