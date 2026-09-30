@@ -1,7 +1,7 @@
 python:
   ci: '3.11'
   kaggle: '3.12'
-  wrapt_version: '2.4.1'
+  wrapt_version: 2.4.1
 comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
   expected_version: 0.34.0
@@ -40,7 +40,7 @@ director:
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
-  gpu_memory_utilization: 0.90
+  gpu_memory_utilization: 0.9
   host: 127.0.0.1
   port: 8000
   max_num_seqs: 1
