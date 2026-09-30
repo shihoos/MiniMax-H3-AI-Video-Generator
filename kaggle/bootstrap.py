@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import os
 import shutil
 import subprocess
@@ -2113,6 +2114,191 @@ def install_nodes() -> None:
                     "name"
                 ],
             )
+
+# Project-owned SageAttention SM75 correction recipe.
+# This is intentionally embedded here so the bootstrap is self-contained:
+# no external patch file is required at runtime.
+SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn_cuda_sm75.h
+--- a/csrc/qattn/attn_cuda_sm75.h
++++ b/csrc/qattn/attn_cuda_sm75.h
+@@ -358,29 +358,17 @@
+-            // CRITICAL FIX: Renormalize RO AFTER computing both mq but BEFORE PV MMA
+-            // This ensures: O_new = exp(m_old - m_new) * O_old + P @ V
+-            // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
+-            // Use __shfl_sync to fetch m_old/m_i from the lane that computed
+-            // the matching Q row (groupOf=4: src_lane = (row % 8) * 4).
+-            {
+-                uint32_t thread_row0 = (lane_id / 4) * 2;
+-                uint32_t thread_row1 = thread_row0 + 1;
+-
+-                uint32_t src_lane0 = (thread_row0 % 8) * 4;
+-                uint32_t src_lane1 = (thread_row1 % 8) * 4;
+-
+-                float m_old_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane0) : __shfl_sync(0xffffffff, m_old[1], src_lane0);
+-                float m_i_0   = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane0) : __shfl_sync(0xffffffff, m_i[1],   src_lane0);
+-                float m_old_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane1) : __shfl_sync(0xffffffff, m_old[1], src_lane1);
+-                float m_i_1   = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane1) : __shfl_sync(0xffffffff, m_i[1],   src_lane1);
+-
+-                float o_scale_0 = math::ptx_exp2(m_old_0 - m_i_0);
+-                float o_scale_1 = math::ptx_exp2(m_old_1 - m_i_1);
+-
+-                #pragma unroll
+-                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+-                    RO_accum[fk * 4 + 0] *= o_scale_0;
+-                    RO_accum[fk * 4 + 1] *= o_scale_0;
+-                    RO_accum[fk * 4 + 2] *= o_scale_1;
+-                    RO_accum[fk * 4 + 3] *= o_scale_1;
+-                }
+-            }
++            // H3-T4-SM75-PV-FRAGMENT-FIX
++            // m16n8k8 accumulator layout: c0/c1 -> row=groupID,
++            // c2/c3 -> row=groupID+8. m_old[0]/m_i[0] already belong to
++            // the top 8 Q rows and m_old[1]/m_i[1] to the bottom 8 rows.
++            {
++                float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);
++                float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);
++
++                #pragma unroll
++                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
++                    RO_accum[fk * 4 + 0] *= o_scale_top;
++                    RO_accum[fk * 4 + 1] *= o_scale_top;
++                    RO_accum[fk * 4 + 2] *= o_scale_bottom;
++                    RO_accum[fk * 4 + 3] *= o_scale_bottom;
++                }
++            }
+             // --- PV Computation (m16n8k8 FP16 MMA): RO += P Ã— V ---
+@@ -425,26 +413,15 @@
+-    // --- Final Normalization ---
+-    // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
+-    // Use __shfl_sync to fetch l_i from the lane group that computed
+-    // the matching Q row. src_lane = (row % 8) * 4 (groupOf=4 layout).
+-    {
+-        uint32_t thread_row0 = (lane_id / 4) * 2;
+-        uint32_t thread_row1 = thread_row0 + 1;
+-
+-        uint32_t src_lane0 = (thread_row0 % 8) * 4;
+-        float l_i_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane0) : __shfl_sync(0xffffffff, l_i[1], src_lane0);
+-
+-        uint32_t src_lane1 = (thread_row1 % 8) * 4;
+-        float l_i_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane1) : __shfl_sync(0xffffffff, l_i[1], src_lane1);
+-
+-        float l_rcp_0 = (l_i_0 > 0.0f) ? math::ptx_rcp(l_i_0) : 0.0f;
+-        float l_rcp_1 = (l_i_1 > 0.0f) ? math::ptx_rcp(l_i_1) : 0.0f;
+-
+-        #pragma unroll
+-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+-            RO_accum[fk * 4 + 0] *= l_rcp_0;
+-            RO_accum[fk * 4 + 1] *= l_rcp_0;
+-            RO_accum[fk * 4 + 2] *= l_rcp_1;
+-            RO_accum[fk * 4 + 3] *= l_rcp_1;
+-        }
+-    }
++    // --- Final Normalization ---
++    // m16n8k8 maps c0/c1 to row=groupID and c2/c3 to row=groupID+8.
++    {
++        float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;
++        float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;
++
++        #pragma unroll
++        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
++            RO_accum[fk * 4 + 0] *= l_rcp_top;
++            RO_accum[fk * 4 + 1] *= l_rcp_top;
++            RO_accum[fk * 4 + 2] *= l_rcp_bottom;
++            RO_accum[fk * 4 + 3] *= l_rcp_bottom;
++        }
++    }
+     // --- Output ---
+@@ -455,7 +432,6 @@
+-        // For m16n8k8, each thread covers a 2Ã—2 block of the 16Ã—8 output.
+-        // Thread i = lane_id: rows = 2*(i/4) and 2*(i/4)+1, cols = 2*(i%4) and 2*(i%4)+1
+-        uint32_t thread_row0 = (lane_id / 4) * 2;
+-        uint32_t thread_row1 = thread_row0 + 1;
+-        uint32_t thread_col0 = (lane_id % 4) * 2;
+-        uint32_t thread_col1 = thread_col0 + 1;
++        // H3-T4-SM75-PV-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
++        uint32_t thread_row0 = lane_id / 4;
++        uint32_t thread_row1 = thread_row0 + 8;
++        uint32_t thread_col0 = (lane_id % 4) * 2;
++        uint32_t thread_col1 = thread_col0 + 1;
+         uint32_t smem_row_base = o_start_row_warp;
+@@ -484,28 +460,24 @@
+-        // Path B: Direct scattered write using the 2Ã—2 per-thread mapping
+-        #pragma unroll
+-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+-            uint32_t col_base = fk * MMA_SV_N_SM75;
+-            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4) * 2;
+-            uint32_t thread_row1 = thread_row0 + 1;
+-            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
+-            uint32_t thread_col1 = thread_col0 + 1;
+-
+-            // Check bounds and write (only write if global row < qo_len)
+-            if (thread_row0 < qo_len + o_start_row_warp) {
+-                uint32_t global_row0 = q_start_row_block + thread_row0;
+-                if (global_row0 < qo_len) {
+-                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
+-                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
+-                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
+-                }
+-            }
+-            if (thread_row1 < qo_len + o_start_row_warp) {
+-                uint32_t global_row1 = q_start_row_block + thread_row1;
+-                if (global_row1 < qo_len) {
+-                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
+-                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
+-                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
+-                }
+-            }
+-        }
++            // Path B: Direct scattered write using the SM75 fragment row mapping.
++        #pragma unroll
++        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
++            uint32_t col_base = fk * MMA_SV_N_SM75;
++            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);
++            uint32_t thread_row1 = thread_row0 + 8;
++            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
++            uint32_t thread_col1 = thread_col0 + 1;
++
++            uint32_t global_row0 = q_start_row_block + thread_row0;
++            if (global_row0 < qo_len) {
++                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
++                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
++                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
++            }
++
++            uint32_t global_row1 = q_start_row_block + thread_row1;
++            if (global_row1 < qo_len) {
++                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
++                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
++                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
++            }
++        }
+     }
+@@ -623,5 +595,6 @@
+-               constexpr int CTA_Q_SM75 = 32;
+-               constexpr int CTA_K_SM75 = 64;
+-               constexpr int WARP_Q_SM75 = 16;
+-              constexpr int WARP_K_SM75 = 16;
++               constexpr int CTA_Q_SM75 = 32;
++               constexpr int CTA_K_SM75 = 64;
++               constexpr int WARP_Q_SM75 = 16;
++              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
++              constexpr int WARP_K_SM75 = 64;
+ 
+@@ -783,6 +756,7 @@
+-             using DTypeOut = half;
+-               constexpr int CTA_Q_SM75 = 32;
+-               constexpr int CTA_K_SM75 = 64;
+-               constexpr int WARP_Q_SM75 = 16;
+-              constexpr int WARP_K_SM75 = 16;
++             using DTypeOut = half;
++               constexpr int CTA_Q_SM75 = 32;
++               constexpr int CTA_K_SM75 = 64;
++               constexpr int WARP_Q_SM75 = 16;
++              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
++              constexpr int WARP_K_SM75 = 64;
+                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
+'''
+
 def install_sageattention_sm75(runtime: dict) -> None:
     """Clone, apply the proven SM75 fragment-mapping fix, build, and verify the pinned fork."""
     cfg = dict(runtime.get("sage_attention", {}) or {})
@@ -2147,246 +2333,72 @@ def install_sageattention_sm75(runtime: dict) -> None:
             f"expected={revision}, actual={actual_revision}"
         )
 
-    # The pinned SM75 fork currently launches CTA_K=64 with WARP_K=16. That
-    # creates four independent K warps for each Q warp, but the kernel keeps
-    # softmax state and final O ownership at Q-warp scope. There is no
-    # cross-K-warp reduction, and the direct output address does not include
-    # warp_idx_k, so the four K warps race on the same output rows. The result
-    # is numerically invalid even when Q/K quantization and scale contracts are
-    # correct. Pair each Q warp with the full CTA_K tile so softmax state and
-    # output ownership are warp-local and unique.
+    # The SageAttention checkout is reset to the exact pinned revision above.
+    # Apply the project-owned SM75 corrections directly from the embedded
+    # unified diff. This keeps the bootstrap self-contained while retaining
+    # git's fail-closed pre-image checking.
+    expected_patch_sha256 = str(cfg.get("patch_sha256", "") or "").strip().lower()
+    if len(expected_patch_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in expected_patch_sha256):
+        raise RuntimeError(
+            "runtime_versions.yaml sage_attention.patch_sha256 must be a 64-character lowercase SHA-256 hex digest."
+        )
+    embedded_patch_sha256 = hashlib.sha256(SAGE_SM75_PATCH.encode("utf-8")).hexdigest()
+    if embedded_patch_sha256 != expected_patch_sha256:
+        raise RuntimeError(
+            "Embedded SageAttention SM75 patch checksum mismatch: "
+            f"expected={expected_patch_sha256}, actual={embedded_patch_sha256}"
+        )
+
+    git_apply_check = subprocess.run(
+        ["git", "-C", str(install_dir), "apply", "--check", "-"],
+        input=SAGE_SM75_PATCH,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if git_apply_check.returncode != 0:
+        raise RuntimeError(
+            "SageAttention SM75 embedded patch pre-image check failed:\n"
+            + (git_apply_check.stderr or git_apply_check.stdout or "unknown git apply error")
+        )
+
+    git_apply = subprocess.run(
+        ["git", "-C", str(install_dir), "apply", "-"],
+        input=SAGE_SM75_PATCH,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if git_apply.returncode != 0:
+        raise RuntimeError(
+            "SageAttention SM75 embedded patch application failed:\n"
+            + (git_apply.stderr or git_apply.stdout or "unknown git apply error")
+        )
+
     sage_kernel = install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
     if not sage_kernel.is_file():
         raise RuntimeError(f"Pinned SageAttention SM75 kernel source is missing: {sage_kernel}")
     sage_source = sage_kernel.read_text(encoding="utf-8")
-    legacy = "constexpr int WARP_K_SM75 = 16;"
-    fixed = "constexpr int WARP_K_SM75 = 64;"
-    patch_marker = "// H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.\n"
-    fixed_count = sage_source.count(fixed)
-    marker_count = sage_source.count("H3-T4-SM75-KERNEL-FIX")
-    legacy_count = sage_source.count(legacy)
-    if fixed_count == 2 and marker_count == 2 and legacy_count == 0:
-        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: ALREADY_APPLIED")
-    elif fixed_count == 0 and marker_count == 0 and legacy_count == 2:
-        sage_source = sage_source.replace(
-            legacy,
-            patch_marker + fixed,
-        )
-        sage_kernel.write_text(sage_source, encoding="utf-8")
-        print("[SAGE SM75 PATCH] WARP_K_SM75=64 runtime kernel correction: PASS")
-    else:
+    required_patch_contract = (
+        "H3-T4-SM75-KERNEL-FIX",
+        "constexpr int WARP_K_SM75 = 64;",
+        "H3-T4-SM75-PV-FRAGMENT-FIX",
+        "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
+        "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
+        "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
+        "float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;",
+        "uint32_t thread_row1 = thread_row0 + 8;",
+        "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
+    )
+    missing = [needle for needle in required_patch_contract if needle not in sage_source]
+    if missing:
         raise RuntimeError(
-            "Pinned SageAttention SM75 kernel source contract changed: expected exactly two "
-            "WARP_K_SM75=16 declarations before applying the H3 T4 runtime fix, or exactly two "
-            "already-marked WARP_K_SM75=64 declarations after the fix."
+            "SageAttention SM75 embedded patch application verification failed:\n"
+            + "\n".join(missing)
         )
-    if fixed not in sage_kernel.read_text(encoding="utf-8"):
-        raise RuntimeError("SageAttention SM75 WARP_K runtime correction did not persist.")
-
-    sage_source = sage_kernel.read_text(encoding="utf-8")
-
-    # H3-T4-SM75-PV-FRAGMENT-FIX:
-    # NVIDIA's SM75 m16n8k8 FP32 accumulator fragment maps c0/c1 to
-    # row=groupID and c2/c3 to row=groupID+8. The pinned fork treated the
-    # two row pairs as adjacent rows (2*r, 2*r+1) during online-softmax
-    # renormalization, final normalization, and output storage. That makes
-    # the PV result and its normalization belong to different Q rows.
-    # Correct the mapping without changing the tensor-core kernels or their
-    # tiling; this is an index/ownership fix and does not add a slower path.
-    pv_marker = "H3-T4-SM75-PV-FRAGMENT-FIX"
-    if pv_marker not in sage_source:
-        old_renorm = """            // CRITICAL FIX: Renormalize RO AFTER computing both mq but BEFORE PV MMA
-            // This ensures: O_new = exp(m_old - m_new) * O_old + P @ V
-            // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
-            // Use __shfl_sync to fetch m_old/m_i from the lane that computed
-            // the matching Q row (groupOf=4: src_lane = (row % 8) * 4).
-            {
-                uint32_t thread_row0 = (lane_id / 4) * 2;
-                uint32_t thread_row1 = thread_row0 + 1;
-
-                uint32_t src_lane0 = (thread_row0 % 8) * 4;
-                uint32_t src_lane1 = (thread_row1 % 8) * 4;
-
-                float m_old_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane0) : __shfl_sync(0xffffffff, m_old[1], src_lane0);
-                float m_i_0   = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane0) : __shfl_sync(0xffffffff, m_i[1],   src_lane0);
-                float m_old_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane1) : __shfl_sync(0xffffffff, m_old[1], src_lane1);
-                float m_i_1   = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane1) : __shfl_sync(0xffffffff, m_i[1],   src_lane1);
-
-                float o_scale_0 = math::ptx_exp2(m_old_0 - m_i_0);
-                float o_scale_1 = math::ptx_exp2(m_old_1 - m_i_1);
-
-                #pragma unroll
-                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-                    RO_accum[fk * 4 + 0] *= o_scale_0;
-                    RO_accum[fk * 4 + 1] *= o_scale_0;
-                    RO_accum[fk * 4 + 2] *= o_scale_1;
-                    RO_accum[fk * 4 + 3] *= o_scale_1;
-                }
-            }
-"""
-        new_renorm = """            // H3-T4-SM75-PV-FRAGMENT-FIX
-            // m16n8k8 accumulator layout: c0/c1 -> row=groupID,
-            // c2/c3 -> row=groupID+8. m_old[0]/m_i[0] already belong to
-            // the top 8 Q rows and m_old[1]/m_i[1] to the bottom 8 rows.
-            {
-                float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);
-                float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);
-
-                #pragma unroll
-                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-                    RO_accum[fk * 4 + 0] *= o_scale_top;
-                    RO_accum[fk * 4 + 1] *= o_scale_top;
-                    RO_accum[fk * 4 + 2] *= o_scale_bottom;
-                    RO_accum[fk * 4 + 3] *= o_scale_bottom;
-                }
-            }
-"""
-        if old_renorm not in sage_source:
-            raise RuntimeError("SM75 PV renormalization source contract changed; refusing to patch.")
-        sage_source=sage_source.replace(old_renorm,new_renorm,1)
-
-        old_final = """    // --- Final Normalization ---
-    // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
-    // Use __shfl_sync to fetch l_i from the lane group that computed
-    // the matching Q row. src_lane = (row % 8) * 4 (groupOf=4 layout).
-    {
-        uint32_t thread_row0 = (lane_id / 4) * 2;
-        uint32_t thread_row1 = thread_row0 + 1;
-
-        uint32_t src_lane0 = (thread_row0 % 8) * 4;
-        float l_i_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane0) : __shfl_sync(0xffffffff, l_i[1], src_lane0);
-
-        uint32_t src_lane1 = (thread_row1 % 8) * 4;
-        float l_i_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane1) : __shfl_sync(0xffffffff, l_i[1], src_lane1);
-
-        float l_rcp_0 = (l_i_0 > 0.0f) ? math::ptx_rcp(l_i_0) : 0.0f;
-        float l_rcp_1 = (l_i_1 > 0.0f) ? math::ptx_rcp(l_i_1) : 0.0f;
-
-        #pragma unroll
-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-            RO_accum[fk * 4 + 0] *= l_rcp_0;
-            RO_accum[fk * 4 + 1] *= l_rcp_0;
-            RO_accum[fk * 4 + 2] *= l_rcp_1;
-            RO_accum[fk * 4 + 3] *= l_rcp_1;
-        }
-    }
-"""
-        new_final = """    // --- Final Normalization ---
-    // m16n8k8 maps c0/c1 to row=groupID and c2/c3 to row=groupID+8.
-    {
-        float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;
-        float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;
-
-        #pragma unroll
-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-            RO_accum[fk * 4 + 0] *= l_rcp_top;
-            RO_accum[fk * 4 + 1] *= l_rcp_top;
-            RO_accum[fk * 4 + 2] *= l_rcp_bottom;
-            RO_accum[fk * 4 + 3] *= l_rcp_bottom;
-        }
-    }
-"""
-        if old_final not in sage_source:
-            raise RuntimeError("SM75 PV final-normalization source contract changed; refusing to patch.")
-        sage_source=sage_source.replace(old_final,new_final,1)
-
-        old_smem = """        // For m16n8k8, each thread covers a 2×2 block of the 16×8 output.
-        // Thread i = lane_id: rows = 2*(i/4) and 2*(i/4)+1, cols = 2*(i%4) and 2*(i%4)+1
-        uint32_t thread_row0 = (lane_id / 4) * 2;
-        uint32_t thread_row1 = thread_row0 + 1;
-        uint32_t thread_col0 = (lane_id % 4) * 2;
-        uint32_t thread_col1 = thread_col0 + 1;
-"""
-        new_smem = """        // H3-T4-SM75-PV-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
-        uint32_t thread_row0 = lane_id / 4;
-        uint32_t thread_row1 = thread_row0 + 8;
-        uint32_t thread_col0 = (lane_id % 4) * 2;
-        uint32_t thread_col1 = thread_col0 + 1;
-"""
-        if old_smem not in sage_source:
-            raise RuntimeError("SM75 PV shared-memory output mapping source contract changed; refusing to patch.")
-        sage_source=sage_source.replace(old_smem,new_smem,1)
-
-        old_direct = """        // Path B: Direct scattered write using the 2×2 per-thread mapping
-        #pragma unroll
-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-            uint32_t col_base = fk * MMA_SV_N_SM75;
-            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4) * 2;
-            uint32_t thread_row1 = thread_row0 + 1;
-            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
-            uint32_t thread_col1 = thread_col0 + 1;
-
-            // Check bounds and write (only write if global row < qo_len)
-            if (thread_row0 < qo_len + o_start_row_warp) {
-                uint32_t global_row0 = q_start_row_block + thread_row0;
-                if (global_row0 < qo_len) {
-                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
-                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
-                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
-                }
-            }
-            if (thread_row1 < qo_len + o_start_row_warp) {
-                uint32_t global_row1 = q_start_row_block + thread_row1;
-                if (global_row1 < qo_len) {
-                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
-                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
-                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
-                }
-            }
-        }
-"""
-        new_direct = """            // Path B: Direct scattered write using the SM75 fragment row mapping.
-        #pragma unroll
-        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
-            uint32_t col_base = fk * MMA_SV_N_SM75;
-            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);
-            uint32_t thread_row1 = thread_row0 + 8;
-            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
-            uint32_t thread_col1 = thread_col0 + 1;
-
-            uint32_t global_row0 = q_start_row_block + thread_row0;
-            if (global_row0 < qo_len) {
-                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
-                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
-                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
-            }
-
-            uint32_t global_row1 = q_start_row_block + thread_row1;
-            if (global_row1 < qo_len) {
-                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
-                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
-                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
-            }
-        }
-"""
-        if old_direct not in sage_source:
-            raise RuntimeError("SM75 PV direct-output mapping source contract changed; refusing to patch.")
-        sage_source=sage_source.replace(old_direct,new_direct,1)
-
-        # A final source fingerprint ensures all four row-ownership fixes were applied.
-        required_pv_contract=(
-            pv_marker,
-            "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
-            "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
-            "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
-            "uint32_t thread_row1 = thread_row0 + 8;",
-            "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
-        )
-        missing=[needle for needle in required_pv_contract if needle not in sage_source]
-        if missing:
-            raise RuntimeError("SM75 PV fragment fix incomplete:\n"+"\n".join(missing))
-        sage_kernel.write_text(sage_source,encoding="utf-8")
-        print("[SAGE SM75 PATCH] m16n8k8 PV fragment row mapping/normalization correction: PASS")
-    else:
-        required_pv_contract=(pv_marker,
-            "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
-            "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
-            "uint32_t thread_row1 = thread_row0 + 8;",
-        )
-        missing=[needle for needle in required_pv_contract if needle not in sage_source]
-        if missing:
-            raise RuntimeError("SM75 PV fragment fix marker exists but source contract is incomplete:\n"+"\n".join(missing))
-        print("[SAGE SM75 PATCH] m16n8k8 PV fragment row mapping/normalization correction: ALREADY_APPLIED")
+    if "constexpr int WARP_K_SM75 = 16;" in sage_source:
+        raise RuntimeError("SageAttention SM75 patch application left a legacy WARP_K_SM75=16 declaration.")
+    print("[SAGE SM75 PATCH] embedded bootstrap patch applied: PASS")
 
     for relative in ("build", "dist", "sageattention.egg-info"):
         path = install_dir / relative
