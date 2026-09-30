@@ -2112,7 +2112,7 @@ def install_nodes() -> None:
                 ],
             )
 def install_sageattention_sm75(runtime: dict) -> None:
-    """Clone, build, and verify the pinned SM75 SageAttention fork for the T4 workers."""
+    """Clone, apply the proven SM75 fragment-mapping fix, build, and verify the pinned fork."""
     cfg = dict(runtime.get("sage_attention", {}) or {})
     repository = str(cfg.get("repository", "") or "").strip()
     revision = str(cfg.get("revision", "") or "").strip()
@@ -2180,6 +2180,211 @@ def install_sageattention_sm75(runtime: dict) -> None:
         )
     if fixed not in sage_kernel.read_text(encoding="utf-8"):
         raise RuntimeError("SageAttention SM75 WARP_K runtime correction did not persist.")
+
+    sage_source = sage_kernel.read_text(encoding="utf-8")
+
+    # H3-T4-SM75-PV-FRAGMENT-FIX:
+    # NVIDIA's SM75 m16n8k8 FP32 accumulator fragment maps c0/c1 to
+    # row=groupID and c2/c3 to row=groupID+8. The pinned fork treated the
+    # two row pairs as adjacent rows (2*r, 2*r+1) during online-softmax
+    # renormalization, final normalization, and output storage. That makes
+    # the PV result and its normalization belong to different Q rows.
+    # Correct the mapping without changing the tensor-core kernels or their
+    # tiling; this is an index/ownership fix and does not add a slower path.
+    pv_marker = "H3-T4-SM75-PV-FRAGMENT-FIX"
+    if pv_marker not in sage_source:
+        old_renorm = """            // CRITICAL FIX: Renormalize RO AFTER computing both mq but BEFORE PV MMA
+            // This ensures: O_new = exp(m_old - m_new) * O_old + P @ V
+            // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
+            // Use __shfl_sync to fetch m_old/m_i from the lane that computed
+            // the matching Q row (groupOf=4: src_lane = (row % 8) * 4).
+            {
+                uint32_t thread_row0 = (lane_id / 4) * 2;
+                uint32_t thread_row1 = thread_row0 + 1;
+
+                uint32_t src_lane0 = (thread_row0 % 8) * 4;
+                uint32_t src_lane1 = (thread_row1 % 8) * 4;
+
+                float m_old_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane0) : __shfl_sync(0xffffffff, m_old[1], src_lane0);
+                float m_i_0   = (thread_row0 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane0) : __shfl_sync(0xffffffff, m_i[1],   src_lane0);
+                float m_old_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_old[0], src_lane1) : __shfl_sync(0xffffffff, m_old[1], src_lane1);
+                float m_i_1   = (thread_row1 < 8) ? __shfl_sync(0xffffffff, m_i[0],   src_lane1) : __shfl_sync(0xffffffff, m_i[1],   src_lane1);
+
+                float o_scale_0 = math::ptx_exp2(m_old_0 - m_i_0);
+                float o_scale_1 = math::ptx_exp2(m_old_1 - m_i_1);
+
+                #pragma unroll
+                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                    RO_accum[fk * 4 + 0] *= o_scale_0;
+                    RO_accum[fk * 4 + 1] *= o_scale_0;
+                    RO_accum[fk * 4 + 2] *= o_scale_1;
+                    RO_accum[fk * 4 + 3] *= o_scale_1;
+                }
+            }
+"""
+        new_renorm = """            // H3-T4-SM75-PV-FRAGMENT-FIX
+            // m16n8k8 accumulator layout: c0/c1 -> row=groupID,
+            // c2/c3 -> row=groupID+8. m_old[0]/m_i[0] already belong to
+            // the top 8 Q rows and m_old[1]/m_i[1] to the bottom 8 rows.
+            {
+                float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);
+                float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);
+
+                #pragma unroll
+                for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+                    RO_accum[fk * 4 + 0] *= o_scale_top;
+                    RO_accum[fk * 4 + 1] *= o_scale_top;
+                    RO_accum[fk * 4 + 2] *= o_scale_bottom;
+                    RO_accum[fk * 4 + 3] *= o_scale_bottom;
+                }
+            }
+"""
+        if old_renorm not in sage_source:
+            raise RuntimeError("SM75 PV renormalization source contract changed; refusing to patch.")
+        sage_source=sage_source.replace(old_renorm,new_renorm,1)
+
+        old_final = """    // --- Final Normalization ---
+    // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
+    // Use __shfl_sync to fetch l_i from the lane group that computed
+    // the matching Q row. src_lane = (row % 8) * 4 (groupOf=4 layout).
+    {
+        uint32_t thread_row0 = (lane_id / 4) * 2;
+        uint32_t thread_row1 = thread_row0 + 1;
+
+        uint32_t src_lane0 = (thread_row0 % 8) * 4;
+        float l_i_0 = (thread_row0 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane0) : __shfl_sync(0xffffffff, l_i[1], src_lane0);
+
+        uint32_t src_lane1 = (thread_row1 % 8) * 4;
+        float l_i_1 = (thread_row1 < 8) ? __shfl_sync(0xffffffff, l_i[0], src_lane1) : __shfl_sync(0xffffffff, l_i[1], src_lane1);
+
+        float l_rcp_0 = (l_i_0 > 0.0f) ? math::ptx_rcp(l_i_0) : 0.0f;
+        float l_rcp_1 = (l_i_1 > 0.0f) ? math::ptx_rcp(l_i_1) : 0.0f;
+
+        #pragma unroll
+        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+            RO_accum[fk * 4 + 0] *= l_rcp_0;
+            RO_accum[fk * 4 + 1] *= l_rcp_0;
+            RO_accum[fk * 4 + 2] *= l_rcp_1;
+            RO_accum[fk * 4 + 3] *= l_rcp_1;
+        }
+    }
+"""
+        new_final = """    // --- Final Normalization ---
+    // m16n8k8 maps c0/c1 to row=groupID and c2/c3 to row=groupID+8.
+    {
+        float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;
+        float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;
+
+        #pragma unroll
+        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+            RO_accum[fk * 4 + 0] *= l_rcp_top;
+            RO_accum[fk * 4 + 1] *= l_rcp_top;
+            RO_accum[fk * 4 + 2] *= l_rcp_bottom;
+            RO_accum[fk * 4 + 3] *= l_rcp_bottom;
+        }
+    }
+"""
+        if old_final not in sage_source:
+            raise RuntimeError("SM75 PV final-normalization source contract changed; refusing to patch.")
+        sage_source=sage_source.replace(old_final,new_final,1)
+
+        old_smem = """        // For m16n8k8, each thread covers a 2×2 block of the 16×8 output.
+        // Thread i = lane_id: rows = 2*(i/4) and 2*(i/4)+1, cols = 2*(i%4) and 2*(i%4)+1
+        uint32_t thread_row0 = (lane_id / 4) * 2;
+        uint32_t thread_row1 = thread_row0 + 1;
+        uint32_t thread_col0 = (lane_id % 4) * 2;
+        uint32_t thread_col1 = thread_col0 + 1;
+"""
+        new_smem = """        // H3-T4-SM75-PV-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
+        uint32_t thread_row0 = lane_id / 4;
+        uint32_t thread_row1 = thread_row0 + 8;
+        uint32_t thread_col0 = (lane_id % 4) * 2;
+        uint32_t thread_col1 = thread_col0 + 1;
+"""
+        if old_smem not in sage_source:
+            raise RuntimeError("SM75 PV shared-memory output mapping source contract changed; refusing to patch.")
+        sage_source=sage_source.replace(old_smem,new_smem,1)
+
+        old_direct = """            // Path B: Direct scattered write using the 2×2 per-thread mapping
+        #pragma unroll
+        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+            uint32_t col_base = fk * MMA_SV_N_SM75;
+            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4) * 2;
+            uint32_t thread_row1 = thread_row0 + 1;
+            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
+            uint32_t thread_col1 = thread_col0 + 1;
+
+            // Check bounds and write (only write if global row < qo_len)
+            if (thread_row0 < qo_len + o_start_row_warp) {
+                uint32_t global_row0 = q_start_row_block + thread_row0;
+                if (global_row0 < qo_len) {
+                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
+                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
+                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
+                }
+            }
+            if (thread_row1 < qo_len + o_start_row_warp) {
+                uint32_t global_row1 = q_start_row_block + thread_row1;
+                if (global_row1 < qo_len) {
+                    uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
+                    O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
+                    O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
+                }
+            }
+        }
+"""
+        new_direct = """            // Path B: Direct scattered write using the SM75 fragment row mapping.
+        #pragma unroll
+        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
+            uint32_t col_base = fk * MMA_SV_N_SM75;
+            uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);
+            uint32_t thread_row1 = thread_row0 + 8;
+            uint32_t thread_col0 = col_base + (lane_id % 4) * 2;
+            uint32_t thread_col1 = thread_col0 + 1;
+
+            uint32_t global_row0 = q_start_row_block + thread_row0;
+            if (global_row0 < qo_len) {
+                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row0 * stride_seq_o;
+                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 0]);
+                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 1]);
+            }
+
+            uint32_t global_row1 = q_start_row_block + thread_row1;
+            if (global_row1 < qo_len) {
+                uint32_t o_offset = batch_id * stride_bz_o + head_id * stride_h_o + global_row1 * stride_seq_o;
+                O[o_offset + thread_col0] = __float2half_rn(RO_accum[fk * 4 + 2]);
+                O[o_offset + thread_col1] = __float2half_rn(RO_accum[fk * 4 + 3]);
+            }
+        }
+"""
+        if old_direct not in sage_source:
+            raise RuntimeError("SM75 PV direct-output mapping source contract changed; refusing to patch.")
+        sage_source=sage_source.replace(old_direct,new_direct,1)
+
+        # A final source fingerprint ensures all four row-ownership fixes were applied.
+        required_pv_contract=(
+            pv_marker,
+            "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
+            "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
+            "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
+            "uint32_t thread_row1 = thread_row0 + 8;",
+            "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
+        )
+        missing=[needle for needle in required_pv_contract if needle not in sage_source]
+        if missing:
+            raise RuntimeError("SM75 PV fragment fix incomplete:\n"+"\n".join(missing))
+        sage_kernel.write_text(sage_source,encoding="utf-8")
+        print("[SAGE SM75 PATCH] m16n8k8 PV fragment row mapping/normalization correction: PASS")
+    else:
+        required_pv_contract=(pv_marker,
+            "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
+            "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
+            "uint32_t thread_row1 = thread_row0 + 8;",
+        )
+        missing=[needle for needle in required_pv_contract if needle not in sage_source]
+        if missing:
+            raise RuntimeError("SM75 PV fragment fix marker exists but source contract is incomplete:\n"+"\n".join(missing))
+        print("[SAGE SM75 PATCH] m16n8k8 PV fragment row mapping/normalization correction: ALREADY_APPLIED")
 
     for relative in ("build", "dist", "sageattention.egg-info"):
         path = install_dir / relative
