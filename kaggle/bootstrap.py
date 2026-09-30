@@ -2305,7 +2305,7 @@ def install_sageattention_sm75(runtime: dict) -> None:
             raise RuntimeError("SM75 PV shared-memory output mapping source contract changed; refusing to patch.")
         sage_source=sage_source.replace(old_smem,new_smem,1)
 
-        old_direct = """            // Path B: Direct scattered write using the 2×2 per-thread mapping
+        old_direct = """        // Path B: Direct scattered write using the 2×2 per-thread mapping
         #pragma unroll
         for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
             uint32_t col_base = fk * MMA_SV_N_SM75;
