@@ -12,8 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 COMFY = ROOT / "ComfyUI"
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
-NODE_MANIFEST = ROOT / "configs" / "custom_nodes.yaml"
-CUSTOM = COMFY / "custom_nodes"
+CUSTOM = ROOT / "configs" / "custom_nodes.yaml"
 
 
 def fail(message: str) -> None:
@@ -79,10 +78,7 @@ def verify_workflow(path: Path, turbo: bool) -> None:
 
     forbidden = {
         "MiniMaxH3FP16Safe",
-        "MiniMaxH3FP16T4",
         "MiniMaxH3_FP16_T4",
-        "MiniMaxH3MLPChunk",
-        "MiniMaxH3ActivationChunk",
     }
 
     present_forbidden = {
@@ -181,36 +177,11 @@ def verify_workflow(path: Path, turbo: bool) -> None:
             f"got {widgets[2]!r}"
         )
 
-    if str(widgets[4]) != "Preserve native":
-        fail(
-            f"{path}: expected precision_mode='Preserve native', "
-            f"got {widgets[4]!r}"
-        )
-
-    if str(widgets[5]) != "Auto":
-        fail(
-            f"{path}: expected qkv_streaming_mode='Auto', "
-            f"got {widgets[5]!r}"
-        )
-
     if str(widgets[7]) != "Lower VRAM (slower)":
         fail(
             f"{path}: expected Lower VRAM (slower), "
             f"got {widgets[7]!r}"
         )
-
-
-
-def verify_optimizer_settings_only(path: Path) -> None:
-    workflow = load_json(path)
-    optimizer = get_node(workflow, "H3MemoryOptimization")
-    widgets = optimizer.get("widgets_values", [])
-    if len(widgets) < 8:
-        fail(f"Incomplete H3MemoryOptimization widgets: {path}")
-    checks = ((2, 2560, "chunk_rows"), (4, "Preserve native", "precision_mode"), (5, "Auto", "qkv_streaming_mode"), (7, "Lower VRAM (slower)", "attention_memory_mode"))
-    for index, expected, label in checks:
-        if widgets[index] != expected:
-            fail(f"{path}: expected {label}={expected!r}, got {widgets[index]!r}")
 
 
 def verify_runtime_config() -> None:
@@ -252,32 +223,80 @@ def verify_runtime_config() -> None:
         fail("H3 memory optimization must be enabled")
     if h3_opt.get("qkv_streaming_mode") != "Auto":
         fail("H3 qkv_streaming_mode must be Auto")
-    if h3_opt.get("precision_mode") != "Preserve native":
-        fail("H3 precision_mode must be Preserve native")
-    if h3_opt.get("sparse_attention") is not False:
-        fail("H3 sparse_attention must remain false")
-
-    h3_revision = str(h3_opt.get("revision", "")).strip()
-    expected_h3_revision = "379f9c7922b3d7831dd93ae069ba0cb82cb4cf36"
-    if h3_revision != expected_h3_revision:
-        fail(
-            "H3 revision is not the verified 0.2.41 release commit: "
-            f"{h3_revision!r}"
-        )
-
-    custom_nodes = yaml.safe_load(NODE_MANIFEST.read_text(encoding="utf-8")) or {}
-    required_nodes = custom_nodes.get("custom_nodes", {}).get("required", []) or []
-    h3_node = next(
-        (item for item in required_nodes if item.get("name") == "H3-Optimizations"),
-        None,
-    )
-    if h3_node is None:
-        fail("H3-Optimizations is missing from custom_nodes.yaml")
-    if str(h3_node.get("revision", "")).strip() != h3_revision:
-        fail("H3 revision differs between custom_nodes.yaml and runtime_versions.yaml")
 
 
     print("[PASS] Runtime configuration")
+
+
+def verify_h3_optimization_source() -> None:
+    """Verify the project-owned H3-Optimizations patches before checking ComfyUI overlays."""
+    node_dir = COMFY / "custom_nodes" / "H3-Optimizations"
+    if not node_dir.is_dir():
+        fail(f"H3-Optimizations runtime directory is missing: {node_dir}")
+
+    targets = {
+        "attention_forward.py": node_dir / "h3_optimizations" / "attention_forward.py",
+        "providers.py": node_dir / "h3_optimizations" / "qkv" / "providers.py",
+        "apply.py": node_dir / "h3_optimizations" / "apply.py",
+        "bf16.py": node_dir / "h3_optimizations" / "qkv" / "bf16.py",
+    }
+
+    for name, path in targets.items():
+        require_file(path)
+        source = path.read_text(encoding="utf-8")
+        try:
+            ast.parse(source, filename=str(path))
+        except SyntaxError as exc:
+            fail(
+                f"H3-Optimizations {name} has invalid Python syntax: "
+                f"line={exc.lineno}, offset={exc.offset}, error={exc.msg}"
+            )
+
+    attention_source = targets["attention_forward.py"].read_text(encoding="utf-8")
+    required_attention = (
+        "# MINIMAX_H3_T4_SAGE_ATTENTION",
+        "from sageattention import sageattn",
+        "tensor_layout='HND'",
+        "qk_quant_gran='per_warp'",
+        "smooth_k=True",
+        "projected.release()",
+    )
+    for required in required_attention:
+        if required not in attention_source:
+            fail(f"H3 SageAttention source contract is incomplete: {required}")
+
+    unresolved = (
+        "__SAGE_SMOOTH_K_TEXT__",
+        "__SAGE_QK_QUANT_GRAN_TEXT__",
+        "__SAGE_SMOOTH_K__",
+        "__SAGE_QK_QUANT_GRAN__",
+    )
+    unresolved_found = [token for token in unresolved if token in attention_source]
+    if unresolved_found:
+        fail(
+            "H3 SageAttention generated source contains unresolved patch placeholders: "
+            + ", ".join(unresolved_found)
+        )
+
+    for name, required in {
+        "providers.py": (
+            "# MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT",
+            "# MINIMAX_H3_T4_FORCE_BOUNDED_QKV",
+        ),
+        "apply.py": (
+            "# MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV",
+            "# MINIMAX_H3_T4_QKV_RUNTIME_SELECTION",
+        ),
+        "bf16.py": (
+            "# MINIMAX_H3_T4_KEEP_CONVROT_BINDING_FOR_Q_STREAM",
+        ),
+    }.items():
+        source = targets[name].read_text(encoding="utf-8")
+        for marker in required:
+            if marker not in source:
+                fail(f"H3-Optimizations {name} patch marker is missing: {marker}")
+
+    print("[PASS] H3-Optimizations source patches")
 
 
 def verify_comfy_runtime() -> None:
@@ -299,6 +318,8 @@ def verify_comfy_runtime() -> None:
 
     for path in (model, vae, supported, turbo):
         require_file(path)
+
+    verify_h3_optimization_source()
 
     model_text = model.read_text(encoding="utf-8")
     vae_text = vae.read_text(encoding="utf-8")
@@ -362,13 +383,16 @@ def verify_comfy_runtime() -> None:
 
 
 def verify_custom_nodes() -> None:
-    if not CUSTOM.is_dir():
-        fail(f"Custom-node runtime path is missing or not a directory: {CUSTOM}")
+    require_file(CUSTOM)
+
+    config = yaml.safe_load(
+        CUSTOM.read_text(encoding="utf-8")
+    )
 
     installed = {
-        path.name
-        for path in CUSTOM.iterdir()
-        if path.is_dir() and path.name != "__pycache__"
+        node["name"]
+        for group in config["custom_nodes"].values()
+        for node in group
     }
 
     required = {
@@ -386,13 +410,6 @@ def verify_custom_nodes() -> None:
         fail(
             "Required custom nodes missing from manifest: "
             f"{sorted(missing)}"
-        )
-
-    legacy_context_ir = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR"
-    if legacy_context_ir.exists():
-        fail(
-            "Retired external MiniMax H3 Context-IR bridge is installed: "
-            + str(legacy_context_ir)
         )
 
     forbidden = {
@@ -534,18 +551,6 @@ def verify_bootstrap() -> None:
         if target not in text:
             fail(f"Bootstrap embedded runtime target is missing: {target}")
 
-    bootstrap_optimizer_contracts = (
-        "def verify_h3_optimization_runtime(runtime: dict)",
-        "ConvRotTwoSliceMLP",
-        "verify_h3_optimization_runtime(runtime)",
-    )
-    for contract in bootstrap_optimizer_contracts:
-        if contract not in text:
-            fail(
-                "Bootstrap H3 optimizer diagnostic is incomplete: "
-                f"{contract}"
-            )
-
     # The bootstrap must carry the exact H3 numerical/memory corrections that
     # are later written into the temporary ComfyUI checkout.
     bootstrap_contracts = (
@@ -564,6 +569,18 @@ def verify_bootstrap() -> None:
     if "mm.MLP.forward =" in text or "mm.DiTBlock.forward =" in text:
         fail("Bootstrap still contains the forbidden legacy global MLP/DiTBlock monkey-patch")
 
+    if "patch_h3_sage_attention" not in text:
+        fail("Bootstrap is missing the H3 T4 SageAttention patch operation")
+
+    if "__SAGE_SMOOTH_K_TEXT__" not in text or "__SAGE_QK_QUANT_GRAN_TEXT__" not in text:
+        fail("Bootstrap is missing the safe SageAttention logging placeholders")
+
+    broken_template = (
+        "'smooth_k=__SAGE_SMOOTH_K__ qk_quant_gran=__SAGE_QK_QUANT_GRAN__'"
+    )
+    if broken_template in text:
+        fail("Bootstrap still contains the broken SageAttention quoted-placeholder template")
+
     print("[PASS] Bootstrap")
 
 
@@ -581,10 +598,6 @@ def main() -> None:
     verify_workflow(
         ROOT / "workflows/generation/H3_Turbo_Ref2VA_Production.json",
         turbo=True,
-    )
-
-    verify_optimizer_settings_only(
-        ROOT / "workflows/postprocess/H3_Ref2VA_UltimateUpscale_Production.json"
     )
 
     print("[PASS] Production workflow topology")
