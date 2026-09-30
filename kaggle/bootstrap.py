@@ -1468,7 +1468,7 @@ def patch_h3_sage_attention(runtime: dict) -> None:
                 '[H3 T4 SAGE ATTENTION] '
                 'backend=SageAttention-SM75 '
                 'device=%s q_rows=%d heads=%d head_dim=%d dtype=%s '
-                'smooth_k=__SAGE_SMOOTH_K__ qk_quant_gran=__SAGE_QK_QUANT_GRAN__'
+                'smooth_k=__SAGE_SMOOTH_K_TEXT__ qk_quant_gran=__SAGE_QK_QUANT_GRAN_TEXT__'
                 % (
                     local_device,
                     int(projected.chunk_rows),
@@ -1564,6 +1564,8 @@ def patch_h3_sage_attention(runtime: dict) -> None:
 '''
     new_function = new_function.replace("__SAGE_SMOOTH_K__", repr(smooth_k))
     new_function = new_function.replace("__SAGE_QK_QUANT_GRAN__", repr(qk_quant_gran))
+    new_function = new_function.replace("__SAGE_SMOOTH_K_TEXT__", str(smooth_k))
+    new_function = new_function.replace("__SAGE_QK_QUANT_GRAN_TEXT__", qk_quant_gran)
     patched = source[:start] + new_function + source[end:]
     compile(patched, str(target), "exec")
     target.write_text(patched, encoding="utf-8")
