@@ -875,6 +875,47 @@ class ProductionPlanner:
 
         return result
 
+    @staticmethod
+    def _identity_detection_text(story: str) -> str:
+        """Normalize prose-only markup/punctuation for character evidence matching."""
+        text = str(story or "")
+        # Character identity detection is semantic; Markdown emphasis is not.
+        text = re.sub(r"(?<!\w)[*_~`]+|[*_~`]+(?!\w)", "", text)
+        # Treat em/en dashes as clause boundaries for descriptive-identity matching.
+        text = re.sub(r"\s*(?:—|–|--)+\s*", ", ", text)
+        return text
+
+    @classmethod
+    def _explicit_source_character_names(cls, story: str) -> list[str]:
+        """Discover explicit source-grounded named identities independently of weak heuristics."""
+        text = cls._identity_detection_text(story)
+        found: list[str] = []
+        title = (
+            r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|"
+            r"Commander|Detective|Agent)\.?\s+"
+        )
+        proper = (
+            r"([A-Z][A-Za-z0-9'_-]+(?:\s+(?!and\b|or\b|but\b)"
+            r"[A-Z][A-Za-z0-9'_-]+){0,2})"
+        )
+        patterns = (
+            rf"\b(?:named|called)\s+(?:{title})?{proper}\b",
+            rf"\b(?:nameplate|name tag|badge|plaque)\b"
+            rf"[^:;.!?]{{0,90}}[:\-]\s*(?:{title})?{proper}\b",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                value = str(match.group(1) or "").strip()
+                if not value:
+                    continue
+                value = re.sub(
+                    r"^(?:dr|doctor|prof|professor|mr|mrs|ms|miss|captain|commander|detective|agent)\.?\s+",
+                    "", value, count=1, flags=re.IGNORECASE,
+                ).strip()
+                if value and value not in cls.COMMON_PROPER_WORDS:
+                    found.append(value)
+        return cls._canonicalize_character_descriptors(found)
+
     def detect_character_descriptors(
         self,
         story: str,
@@ -883,6 +924,7 @@ class ProductionPlanner:
         story = self._clean_text(
             story
         )
+        detection_story = self._identity_detection_text(story)
 
         if not story:
             return []
@@ -1422,16 +1464,19 @@ class ProductionPlanner:
                     100,
                 )
 
-        # Explicit labels/nameplates are hard identity evidence even when the
-        # surrounding sentence does not use a naming verb. This covers forms
-        # such as ``nameplate on the console: Dr. Lila Voss``.
+        # Explicit source labels are hard identity evidence even when the
+        # surrounding sentence does not use a naming verb. Discover them before
+        # Qwen so a model omission cannot erase a source-grounded identity.
+        for source_name in self._explicit_source_character_names(story):
+            add_evidence(source_name, "explicit", 100)
+
         nameplate_pattern = re.compile(
             r"\b(?:nameplate|name tag|badge|plaque)\b"
             r"[^:;.!?]{0,90}?[:\-]\s*"
             r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s*"
             r"([A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){1,3})\b"
         )
-        for match in nameplate_pattern.finditer(story):
+        for match in nameplate_pattern.finditer(detection_story):
             add_evidence(match.group(1), "explicit", 100)
 
         # ========================================================
@@ -1665,15 +1710,15 @@ class ProductionPlanner:
             r"((?:[a-z][a-z'-]+\s+){0,3}(?:" + descriptive_roles + r"))"
             r"\s+((?:with|wearing|in|holding|carrying|covered|marked|standing|sitting|"
             r"leaning|looking|whose))\s+"
-            r"([^,;.!?]{1,70}?)"
-            r"(?=\s*(?:,|and\b|who\b|that\b|while\b|as\b|[.!?;]))",
+            r"([^,;.!?—–]{1,70}?)"
+            r"(?=\s*(?:,|—|–|--|\b(?:and|who|that|while|as)\b|[.!?;]|$))",
             flags=re.IGNORECASE,
         )
-        for match in descriptive_pattern.finditer(story):
+        for match in descriptive_pattern.finditer(detection_story):
             qualifier_tokens = match.group(3).strip().split()
             trimmed = []
             for token in qualifier_tokens:
-                if token.lower() in subject_verbs:
+                if token.lower() in subject_verbs or token.lower() in self.AUXILIARY_SUBJECT_VERBS:
                     break
                 trimmed.append(token)
             if not trimmed:
@@ -2666,7 +2711,7 @@ class ProductionPlanner:
     @classmethod
     def _hard_named_source_evidence(cls, story: str, name: str) -> bool:
         """Return True only for explicit source labels that should survive a Qwen negative."""
-        story = str(story or "")
+        story = cls._identity_detection_text(story)
         core = re.sub(
             r"^(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+",
             "", str(name or "").strip(), flags=re.IGNORECASE
@@ -2925,7 +2970,17 @@ class ProductionPlanner:
 
             identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
             entity_type = str(raw.get("entity_type", "") or "").strip().upper()
-            if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}:
+
+            if identity_type == "descriptive_character":
+                name = str(raw.get("name", "") or "").strip()
+                aliases = [
+                    str(alias or "").strip()
+                    for alias in (raw.get("aliases", []) or [])
+                    if str(alias or "").strip()
+                ]
+                candidate = name or (aliases[0] if aliases else "")
+                if candidate and cls._descriptive_identity_is_grounded(story, candidate):
+                    normalized.append(candidate)
                 continue
 
             if identity_type == "relational_character":
@@ -2940,6 +2995,11 @@ class ProductionPlanner:
 
             name = str(raw.get("name", "") or "").strip()
             if not name:
+                continue
+            if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"} and not any(
+                EntityResolver.normalize(name) == EntityResolver.normalize(value)
+                for value in known_names
+            ):
                 continue
             lowered = name.lower()
             if lowered in cls.GENERIC_PERSON_LABELS or lowered in cls.RELATIONSHIP_TERMS:
@@ -2980,7 +3040,10 @@ class ProductionPlanner:
         self._semantic_character_metadata_cache = {}
 
         descriptors = self._canonicalize_character_descriptors(
-            self.detect_character_descriptors(story)
+            [
+                *self.detect_character_descriptors(story),
+                *self._explicit_source_character_names(story),
+            ]
         )
         relational_hints = self._extract_relational_character_hints(
             story,
@@ -3086,7 +3149,7 @@ class ProductionPlanner:
                 ]
                 deterministic_high_confidence_norm = {
                     EntityResolver.normalize(name) for name in deterministic_high_confidence
-                } | {EntityResolver.normalize(name) for name in deterministic_hard_named} | {EntityResolver.normalize(name) for name in deterministic_descriptive}
+                }
                 relation_norms = {
                     EntityResolver.normalize(str(item.get("name", "") or ""))
                     for item in relational_hints
