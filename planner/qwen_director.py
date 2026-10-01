@@ -113,8 +113,6 @@ class QwenDirector(
         "visual_prompt",
     }
 
-    VALID_GENERIC_ROLES = set(EntityResolver.GENERIC_ROLE_ALIASES)
-
     _MODE_LABELS = {
         AI_STORY_MODE: "AI STORY MODE",
         EXPAND_USER_STORY_MODE: "EXPAND STORY MODE",
@@ -143,7 +141,6 @@ class QwenDirector(
 
         self._fallback_planner = None
         self._entity_resolver = EntityResolver()
-        self._current_visual_language: dict = {}
         self._reference_visual_context: dict[str, dict] = {}
         self._character_semantic_calls = 0
 
@@ -210,7 +207,6 @@ class QwenDirector(
 
     @staticmethod
     def _story_quality_precheck(
-        mode: str,
         story: str,
     ) -> list[str]:
         """Run conservative deterministic checks before/after the LLM quality gate.
@@ -220,8 +216,6 @@ class QwenDirector(
         quality reviewer, so the deterministic precheck does not invent semantic
         rules that could reject valid stories.
         """
-        del mode
-
         normalized = re.sub(
             r"\s+",
             " ",
@@ -248,7 +242,7 @@ class QwenDirector(
         source_character_names: list[str] | None = None,
     ) -> str:
         """Reject weak narrative drafts and perform one targeted editorial repair."""
-        deterministic_issues = self._story_quality_precheck(mode, story)
+        deterministic_issues = self._story_quality_precheck(story)
 
         try:
             review = self._chat_json(
@@ -310,7 +304,7 @@ class QwenDirector(
             repaired,
         )
 
-        repaired_issues = self._story_quality_precheck(mode, repaired)
+        repaired_issues = self._story_quality_precheck(repaired)
         repaired_review = self._chat_json(
             self._story_quality_review_system(mode),
             self._story_quality_review_user(
@@ -530,30 +524,11 @@ class QwenDirector(
                 )
             )
 
-            story_plan = deepcopy(
-                prior_director_plan
-            )
-
-            self._current_visual_language = (
-                self._sanitize_visual_language(
-                    story_plan.get(
-                        "visual_language",
-                        {},
-                    )
-                )
-            )
-
         elif mode == PRESERVE_USER_STORY_MODE:
 
             story = self._normalize_story(
                 user_input
             )
-
-            story_plan = {
-                "story": story,
-            }
-
-            self._current_visual_language = {}
 
         else:
 
@@ -694,71 +669,31 @@ class QwenDirector(
                     source_character_names=source_character_names,
                 )
 
-            story_plan = {
-                "story": story,
-            }
-
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
         # ----------------------------------------------------
         #
-        # The ProductionPlanner has already created the canonical
-        # characters and scene topology. Do not spend a Qwen call
-        # regenerating deterministic metadata. Qwen is only the creative
-        # enrichment layer from this point onward.
-        #
-        # This also guarantees that the Director always has canonical
-        # entities/scene IDs even when the Director is enabled.
-        base_characters = deepcopy(
-            base_plan.get("characters", [])
-            or []
+        # The ProductionPlanner owns the canonical production roster and scene
+        # topology. Qwen supplies the final narrative and creative shot direction;
+        # it does not regenerate deterministic production identity here.
+
+        story = self._normalize_story(story)
+
+        metadata_source = (
+            prior_director_plan
+            if resuming
+            else base_plan
         )
-
-        base_scenes = deepcopy(
-            base_plan.get("scenes", [])
-            or []
-        )
-
-        story_plan = {
-            "story": story,
-            "characters": base_characters,
-            "scenes": base_scenes,
-        }
-
-        story = self._normalize_story(
-            story_plan.get(
-                "story",
-                story,
-            )
-            or story
-        )
-
         director_notes = str(
-            story_plan.get(
-                "director_notes",
-                "",
-            )
-            or ""
+            metadata_source.get("director_notes", "") or ""
         ).strip()
 
-        visual_language = (
-            self._sanitize_visual_language(
-                story_plan.get(
-                    "visual_language",
-                    {},
-                )
-            )
+        visual_language = self._sanitize_visual_language(
+            metadata_source.get("visual_language", {})
         )
-        baseline_visual_language = self._baseline_visual_language()
-        for key, value in baseline_visual_language.items():
+        for key, value in self._baseline_visual_language().items():
             if not visual_language.get(key):
                 visual_language[key] = value
-
-        self._current_visual_language = (
-            dict(
-                visual_language
-            )
-        )
 
         print("[DIRECTOR] resolving canonical roster", flush=True)
 
