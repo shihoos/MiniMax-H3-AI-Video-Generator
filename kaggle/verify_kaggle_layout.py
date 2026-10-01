@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -230,11 +229,11 @@ def verify_runtime_config() -> None:
     print("[PASS] Runtime configuration")
 
 
-def verify_sage_attention_embedded_patch() -> None:
-    """Verify the embedded SageAttention SM75 patch against runtime configuration."""
+def verify_sage_attention_patch_recipe() -> None:
+    """Verify the inline SageAttention SM75 source-replacement recipe and live result."""
     source = BOOTSTRAP.read_text(encoding="utf-8")
     try:
-        tree = ast.parse(source, filename=str(BOOTSTRAP))
+        ast.parse(source, filename=str(BOOTSTRAP))
     except SyntaxError as exc:
         fail(
             f"kaggle/bootstrap.py has invalid Python syntax: "
@@ -242,51 +241,85 @@ def verify_sage_attention_embedded_patch() -> None:
         )
         return
 
-    patch_text = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            if node.targets[0].id == "SAGE_SM75_PATCH":
-                try:
-                    patch_text = ast.literal_eval(node.value)
-                except Exception as exc:
-                    fail(f"Unable to read embedded SageAttention patch: {exc}")
-                break
+    forbidden = (
+        "SAGE_SM75_PATCH",
+        "git apply --check",
+        'patch_sha256',
+    )
+    present_forbidden = [needle for needle in forbidden if needle in source]
+    if present_forbidden:
+        fail(
+            "Bootstrap still contains retired SageAttention patch machinery:\n"
+            + "\n".join(present_forbidden)
+        )
 
-    if not isinstance(patch_text, str) or not patch_text.strip():
-        fail("bootstrap.py embedded SageAttention patch is missing")
+    required_recipe = (
+        '_apply_sage_sm75_source_corrections',
+        'legacy_warp = "constexpr int WARP_K_SM75 = 16;"',
+        'fixed_warp = "constexpr int WARP_K_SM75 = 64;"',
+        'H3-T4-SM75-KERNEL-FIX',
+        'H3-T4-SM75-PV-FRAGMENT-FIX',
+        'SM75 PV renormalization correction',
+        'SM75 final normalization correction',
+        'SM75 staged-output fragment mapping correction',
+        'SM75 direct-output fragment mapping correction',
+        'SM75 base WARP_K correction',
+        'SM75 smem-O WARP_K correction',
+        'source.count(old)',
+        'if count != 1:',
+    )
+    missing = [needle for needle in required_recipe if needle not in source]
+    if missing:
+        fail(
+            "Bootstrap SageAttention source-replacement recipe is incomplete:\n"
+            + "\n".join(missing)
+        )
 
     runtime = yaml.safe_load(RUNTIME.read_text(encoding="utf-8")) or {}
     sage = runtime.get("sage_attention") or {}
-    expected_sha = str(sage.get("patch_sha256", "") or "").strip().lower()
-    if len(expected_sha) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha):
-        fail("runtime_versions.yaml sage_attention.patch_sha256 is invalid")
+    if "patch_sha256" in sage:
+        fail("runtime_versions.yaml still contains retired sage_attention.patch_sha256")
 
-    actual_sha = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
-    if actual_sha != expected_sha:
-        fail(
-            "Embedded SageAttention patch checksum mismatch: "
-            f"expected={expected_sha}, actual={actual_sha}"
-        )
+    directory = str(sage.get("directory", "") or "").strip()
+    if not directory:
+        fail("runtime_versions.yaml sage_attention.directory is required")
+        return
 
-    required = (
-        "diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn_cuda_sm75.h",
+    sage_kernel = (
+        ROOT
+        / "ComfyUI"
+        / "custom_nodes"
+        / directory
+        / "csrc"
+        / "qattn"
+        / "attn_cuda_sm75.h"
+    )
+    if not sage_kernel.is_file():
+        fail(f"Installed SageAttention SM75 kernel source is missing: {sage_kernel}")
+        return
+
+    sage_source = sage_kernel.read_text(encoding="utf-8")
+    required_live = (
         "H3-T4-SM75-KERNEL-FIX",
         "constexpr int WARP_K_SM75 = 64;",
         "H3-T4-SM75-PV-FRAGMENT-FIX",
         "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
+        "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
         "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
+        "float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;",
         "uint32_t thread_row1 = thread_row0 + 8;",
+        "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
     )
-    missing = [needle for needle in required if needle not in patch_text]
-    if missing:
+    missing_live = [needle for needle in required_live if needle not in sage_source]
+    if missing_live:
         fail(
-            "Embedded SageAttention patch is missing required corrections:\n"
-            + "\n".join(missing)
+            "Installed SageAttention SM75 source is missing required corrections:\n"
+            + "\n".join(missing_live)
         )
-    if "constexpr int WARP_K_SM75 = 16;" in patch_text:
-        fail("Embedded SageAttention patch still contains legacy WARP_K_SM75 = 16")
-    print("[PASS] Embedded SageAttention patch matches runtime_versions.yaml")
+    if "constexpr int WARP_K_SM75 = 16;" in sage_source:
+        fail("Installed SageAttention SM75 source still contains WARP_K_SM75=16")
 
+    print("[PASS] SageAttention inline source-replacement recipe")
 
 def verify_h3_optimization_source() -> None:
     """Verify the project-owned H3-Optimizations patches before checking ComfyUI overlays."""
@@ -647,7 +680,7 @@ def verify_bootstrap() -> None:
 def main() -> None:
     verify_bootstrap()
     verify_runtime_config()
-    verify_sage_attention_embedded_patch()
+    verify_sage_attention_patch_recipe()
     verify_custom_nodes()
     verify_comfy_runtime()
 
