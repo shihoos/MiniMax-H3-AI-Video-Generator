@@ -2319,48 +2319,23 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
     source = source.replace(old, new, 1)
     print("[SAGE SM75 PATCH] SM75 direct-output fragment mapping correction: PASS")
 
-    old = r"""              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              constexpr int WARP_K_SM75 = 16;
-
-"""
-    new = r"""              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
-              constexpr int WARP_K_SM75 = 64;
-"""
-    count = source.count(old)
-    if count != 1:
+    legacy = "constexpr int WARP_K_SM75 = 16;"
+    fixed = "constexpr int WARP_K_SM75 = 64;"
+    patch_marker = (
+        "// H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile "
+        "to eliminate cross-K-warp softmax/output races.\n"
+    )
+    legacy_count = source.count(legacy)
+    fixed_count = source.count(fixed)
+    marker_count = source.count("H3-T4-SM75-KERNEL-FIX")
+    if not (legacy_count == 2 and fixed_count == 0 and marker_count == 0):
         raise RuntimeError(
-            f"SageAttention SM75 base WARP_K correction: expected exactly one source match, found {count}"
+            "SageAttention SM75 WARP_K source contract changed: expected exactly "
+            "two unmodified WARP_K_SM75=16 declarations before applying the fix "
+            f"(legacy={legacy_count}, fixed={fixed_count}, markers={marker_count})"
         )
-    source = source.replace(old, new, 1)
-    print("[SAGE SM75 PATCH] SM75 base WARP_K correction: PASS")
-
-    old = r"""            using DTypeOut = half;
-              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              constexpr int WARP_K_SM75 = 16;
-                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
-"""
-    new = r"""            using DTypeOut = half;
-              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
-              constexpr int WARP_K_SM75 = 64;
-                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
-"""
-    count = source.count(old)
-    if count != 1:
-        raise RuntimeError(
-            f"SageAttention SM75 smem-O WARP_K correction: expected exactly one source match, found {count}"
-        )
-    source = source.replace(old, new, 1)
-    print("[SAGE SM75 PATCH] SM75 smem-O WARP_K correction: PASS")
+    source = source.replace(legacy, patch_marker + fixed)
+    print("[SAGE SM75 PATCH] SM75 WARP_K dual-declaration correction: PASS")
 
     return source
 
