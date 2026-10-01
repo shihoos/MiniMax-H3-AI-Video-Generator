@@ -34,13 +34,6 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.30.0
-  torch_version: 2.13.0
-  torchvision_version: 0.28.0
-  torchaudio_version: 2.11.0
-  transformers_version: 5.18.0
-  tokenizers_version: 0.23.2
-  huggingface_hub_version: 1.31.0
-  flashinfer_index: https://flashinfer.ai/whl/
   vllm_env_dir: /tmp/qwen_vllm_latest
   context: 8192
   max_tokens: 7000
