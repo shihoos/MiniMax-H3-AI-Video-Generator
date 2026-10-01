@@ -14,6 +14,7 @@ COMFY = ROOT / "ComfyUI"
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
 CUSTOM = ROOT / "configs" / "custom_nodes.yaml"
+BOOTSTRAP = ROOT / "kaggle" / "bootstrap.py"
 
 
 def fail(message: str) -> None:
