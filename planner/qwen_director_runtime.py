@@ -43,6 +43,10 @@ from planner.config import (
 
 NO_THINK_SUFFIX = "\n/no_think"
 
+# Pin the Director sampling stream at the request layer as well as the server layer.
+# This removes run-to-run RNG-state drift while preserving the existing temperature/top-p profile.
+DIRECTOR_VLLM_SEED = int(os.getenv("H3_DIRECTOR_VLLM_SEED", "0"))
+
 
 def _with_faulthandler_watchdog(func):
     """Arm a long-lived traceback watchdog around one Director operation."""
@@ -323,6 +327,7 @@ class QwenDirectorRuntimeMixin:
                 "generation_config": str(DIRECTOR_VLLM_GENERATION_CONFIG),
                 "tensor_parallel": int(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
                 "max_model_len": int(DIRECTOR_VLLM_MAX_MODEL_LEN),
+                "seed": int(DIRECTOR_VLLM_SEED),
                 "speculative_method": str(DIRECTOR_VLLM_SPECULATIVE_METHOD),
                 "speculative_model_path": str(DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH),
                 "speculative_tokens": int(DIRECTOR_VLLM_SPECULATIVE_TOKENS),
@@ -716,6 +721,8 @@ class QwenDirectorRuntimeMixin:
                 str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
                 "--max-num-seqs",
                 str(DIRECTOR_VLLM_MAX_NUM_SEQS),
+                "--seed",
+                str(DIRECTOR_VLLM_SEED),
                 "--generation-config",
                 DIRECTOR_VLLM_GENERATION_CONFIG,
                 "--speculative-config",
@@ -1002,6 +1009,7 @@ class QwenDirectorRuntimeMixin:
             "temperature": float(temperature),
             "top_p": float(top_p),
             "max_tokens": int(max_tokens),
+            "seed": int(DIRECTOR_VLLM_SEED),
         }
         if response_format is not None:
             payload["response_format"] = response_format
@@ -1363,6 +1371,16 @@ class QwenDirectorRuntimeMixin:
                 response_format=None,
                 finish_reason=finish_reason,
                 error=error_text,
+            )
+
+            self._trace_call(
+                call_name,
+                system_prompt,
+                user_prompt,
+                response,
+                elapsed,
+                error_text,
+                None,
             )
 
         try:
