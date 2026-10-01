@@ -15,8 +15,6 @@ from planner.entity_resolver import (
     EntityResolver,
 )
 from planner.config import (
-    AI_STORY_MODE,
-    EXPAND_USER_STORY_MODE,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
     H3_HEIGHT,
@@ -26,7 +24,6 @@ from planner.config import (
     H3_MAX_REFERENCE_VIDEOS,
     H3_STEPS,
     H3_WIDTH,
-    PRESERVE_USER_STORY_MODE,
     TURBO_STEPS,
     VALID_STORY_MODES,
     WORKFLOW_AUTO,
@@ -826,56 +823,6 @@ class ProductionPlanner:
     # ============================================================
 
     @staticmethod
-    def _proper_names(
-        story: str,
-    ) -> list[str]:
-
-        values = re.findall(
-            r"\b[A-Z][A-Za-z0-9'_-]+(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2}\b",
-            story,
-        )
-
-        result = []
-        seen = set()
-
-        for value in values:
-            value = value.strip()
-
-            if value in ProductionPlanner.COMMON_PROPER_WORDS:
-                continue
-
-            words = value.split()
-
-            if not words:
-                continue
-
-            if len(words) == 1 and value in {
-                "City",
-                "Street",
-                "Road",
-                "House",
-                "Tower",
-                "Castle",
-                "Forest",
-                "Mountain",
-                "River",
-                "Ocean",
-            }:
-                continue
-
-            key = value.lower()
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-            result.append(
-                value
-            )
-
-        return result
-
-    @staticmethod
     def _identity_detection_text(story: str) -> str:
         """Normalize prose-only markup/punctuation for character evidence matching."""
         text = str(story or "")
@@ -1175,26 +1122,6 @@ class ProductionPlanner:
                 r"(?<![A-Za-z0-9'_-])[a-z][a-z'-]*"
                 r"(?![A-Za-z0-9'_-])",
                 gap,
-            ) is not None
-
-        def has_lowercase_token_after_candidate(
-            match: re.Match,
-        ) -> bool:
-            """
-            Reject capitalized noun modifiers used as object references.
-
-            Example:
-                "entered Arctic station"
-                        ^^^^^^
-            must not make "Arctic" a character.
-            """
-            tail = story[
-                match.end(1):
-            ]
-
-            return re.match(
-                r"\s+[a-z][a-z'-]*\b",
-                tail,
             ) is not None
 
         def has_non_person_semantic_head(
@@ -2374,179 +2301,6 @@ class ProductionPlanner:
             flags=re.MULTILINE,
         )
         return bool(vocative_pattern.search(story))
-
-    @classmethod
-    def _semantic_candidate_has_structural_character_evidence(
-        cls,
-        story: str,
-        name: str,
-    ) -> bool:
-        """Require independent grammatical/entity evidence for Qwen-only additions.
-
-        Qwen is a semantic classifier/recovery layer, not an unrestricted entity
-        generator. A candidate that merely occurs as text is insufficient. This
-        gate reuses the planner's deterministic signals and adds only generic
-        grammatical contexts, so entity vocabulary never becomes a blacklist.
-        """
-        story = str(story or "")
-        candidate = str(name or "").strip()
-        if not story or not candidate:
-            return False
-
-        # Re-run the deterministic detector without constructing a planner:
-        # its implementation is instance-based, so this helper instead tests
-        # the same canonical candidate through the public descriptor evidence
-        # paths below. High-confidence protection remains available for strong
-        # multi-token identities.
-        if cls._high_confidence_deterministic_character(story, candidate):
-            return True
-
-        core = candidate[4:].strip() if candidate.lower().startswith("the ") else candidate
-        escaped = re.escape(candidate)
-        escaped_core = re.escape(core)
-
-        # Explicit naming.
-        if re.search(
-            r"\b(?:named|called)\s+" + escaped_core + r"\b",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        # Direct address.
-        if re.search(
-            r"(?:^|[\"'“”])\s*" + escaped_core
-            + r"\s*,\s*(?=[a-z][a-z'-]+\b)",
-            story,
-            flags=re.MULTILINE,
-        ):
-            return True
-
-        # Appositive identity. Permit an honorific/title immediately before
-        # the canonical name because titles are not part of canonical identity.
-        if re.search(
-            r"(?<![A-Za-z0-9'_-])(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
-            + escaped_core
-            + r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
-            story,
-            flags=re.IGNORECASE,
-        ) or re.search(
-            r"(?<![A-Za-z0-9'_-])" + escaped_core
-            + r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        # Title + name followed by a descriptive appositive/action clause,
-        # e.g. "Captain Rho, exhausted after the journey, entered."
-        title_appositive = re.search(
-            r"(?<![A-Za-z0-9'_-])(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent)\.?\s+"
-            + escaped_core
-            + r"\s*,\s*[^.!?;]{0,100}?,\s*"
-            + r"[a-z][a-z'-]*(?:ed|ing|s)\b",
-            story,
-            flags=re.IGNORECASE,
-        )
-        if title_appositive:
-            return True
-
-        # Possessive entity reference, e.g. Sara's notebook. The semantic
-        # classifier must already have labelled the candidate PERSON/CHARACTER.
-        if re.search(
-            r"(?<![A-Za-z0-9'_-])" + escaped_core + r"(?:'s|’s)\b",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        # Vocative/direct-address evidence.
-        if re.search(
-            r"(?:^|[,;.!?])\s*" + escaped_core
-            + r"\s*,\s*(?=[a-z])",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        # Multi-token proper-name spans are meaningful semantic recovery
-        # candidates when they occur in a capitalized entity context. Qwen's
-        # entity_type/is_character fields remain the semantic classification
-        # boundary; this test only establishes that the story contains a real
-        # name-like span rather than an isolated modifier.
-        if len(core.split()) >= 2:
-            if re.search(
-                r"(?<![A-Za-z0-9'_-])" + escaped_core
-                + r"(?![A-Za-z0-9'_-])",
-                story,
-                flags=re.IGNORECASE,
-            ):
-                return True
-            return False
-
-        # Single-token candidates need an actual predicate/argument role.
-        # Known narrative verbs provide strong evidence.
-        verbs = sorted(
-            {str(value).strip().lower() for value in cls.NARRATIVE_SUBJECT_VERBS
-             if str(value).strip()},
-            key=len,
-            reverse=True,
-        )
-        if verbs:
-            verb_alt = "|".join(re.escape(value) for value in verbs)
-            if re.search(
-                r"(?<![A-Za-z0-9'_-])" + escaped_core
-                + r"\s+(?:" + verb_alt + r")\b",
-                story,
-                flags=re.IGNORECASE,
-            ):
-                return True
-            if re.search(
-                r"(?:" + verb_alt + r")\s+" + escaped_core
-                + r"(?![A-Za-z0-9'_-])",
-                story,
-                flags=re.IGNORECASE,
-            ):
-                return True
-
-        # Prepositional object/reference evidence can introduce a character
-        # before any subject verb is seen, e.g. "spoke to Eli" or
-        # "waited beside Marcus Chen". The semantic entity classification
-        # remains mandatory; this is only the grammatical anchor.
-        if re.search(
-            r"\b(?:to|from|with|for|near|beside|behind|between|toward|towards|"
-            r"against|around|across|after|before|during|without)\s+"
-            + escaped_core + r"(?![A-Za-z0-9'_-])",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        # Relative/subordinate-clause subjects can use verbs not present in the
-        # maintained vocabulary, e.g. "what Sara meant". Generic clause-marker
-        # structure recovers these without naming any entities.
-        clause_subject = re.compile(
-            r"\b(?:what|that|who|which|when|while|where|because|although|"
-            r"though|after|before|until|unless|if|as)\s+"
-            + escaped_core + r"\s+[a-z][a-z'-]+\b",
-            flags=re.IGNORECASE,
-        )
-        if clause_subject.search(story):
-            return True
-
-        # Generic finite/participle predicate morphology. Because the candidate
-        # must be immediately adjacent to the predicate, "Arctic station" does
-        # not qualify: the lowercase noun sits between the candidate and the
-        # predicate.
-        if re.search(
-            r"(?<![A-Za-z0-9'_-])" + escaped_core
-            + r"\s+[a-z][a-z'-]*(?:ed|ing|s)\b",
-            story,
-            flags=re.IGNORECASE,
-        ):
-            return True
-
-        return False
 
     @classmethod
     def _extract_relational_character_hints(
