@@ -2251,7 +2251,7 @@ SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn
 -                }
 -            }
 -        }
-+            // Path B: Direct scattered write using the SM75 fragment row mapping.
++        // Path B: Direct scattered write using the SM75 fragment row mapping.
 +        #pragma unroll
 +        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
 +            uint32_t col_base = fk * MMA_SV_N_SM75;
