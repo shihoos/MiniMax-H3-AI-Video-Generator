@@ -743,61 +743,6 @@ class QwenDirectorSanitizeMixin:
         return result
 
     @staticmethod
-    def _normalize_shot_response(
-        response: dict,
-    ) -> list[dict]:
-
-        if not isinstance(
-            response,
-            dict,
-        ):
-            return []
-
-        shots = response.get(
-            "shots"
-        )
-
-        if isinstance(
-            shots,
-            list,
-        ):
-            return [
-                item
-                for item
-                in shots
-                if isinstance(
-                    item,
-                    dict,
-                )
-            ]
-
-        # Qwen3 sometimes returns a single shot object even when the
-        # prompt requests {"shots": [...]}. That response is still useful.
-        shot_fields = {
-            "shot_id",
-            "camera_shot",
-            "camera_movement",
-            "lens_and_depth_of_field",
-            "composition_notes",
-            "lighting",
-            "color_temperature",
-            "mood",
-            "visual_prompt",
-        }
-
-        if (
-            shot_fields
-            & set(
-                response.keys()
-            )
-        ):
-            return [
-                response
-            ]
-
-        return []
-
-    @staticmethod
     def _normalize_batch_shot_response(
         response: dict,
     ) -> dict[str, list[dict]]:
