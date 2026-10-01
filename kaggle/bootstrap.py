@@ -2121,7 +2121,7 @@ def install_nodes() -> None:
 SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn_cuda_sm75.h
 --- a/csrc/qattn/attn_cuda_sm75.h
 +++ b/csrc/qattn/attn_cuda_sm75.h
-@@ -358,29 +358,17 @@
+@@ -358,30 +358,18 @@
 -            // CRITICAL FIX: Renormalize RO AFTER computing both mq but BEFORE PV MMA
 -            // This ensures: O_new = exp(m_old - m_new) * O_old + P @ V
 -            // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
@@ -2166,8 +2166,9 @@ SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn
 +                    RO_accum[fk * 4 + 3] *= o_scale_bottom;
 +                }
 +            }
-             // --- PV Computation (m16n8k8 FP16 MMA): RO += P Ã— V ---
-@@ -425,26 +413,15 @@
+ 
+             // --- PV Computation (m16n8k8 FP16 MMA): RO += P × V ---
+@@ -425,27 +413,16 @@
 -    // --- Final Normalization ---
 -    // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
 -    // Use __shfl_sync to fetch l_i from the lane group that computed
@@ -2207,9 +2208,10 @@ SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn
 +            RO_accum[fk * 4 + 3] *= l_rcp_bottom;
 +        }
 +    }
+ 
      // --- Output ---
 @@ -455,7 +432,6 @@
--        // For m16n8k8, each thread covers a 2Ã—2 block of the 16Ã—8 output.
+-        // For m16n8k8, each thread covers a 2×2 block of the 16×8 output.
 -        // Thread i = lane_id: rows = 2*(i/4) and 2*(i/4)+1, cols = 2*(i%4) and 2*(i%4)+1
 -        uint32_t thread_row0 = (lane_id / 4) * 2;
 -        uint32_t thread_row1 = thread_row0 + 1;
@@ -2222,7 +2224,7 @@ SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn
 +        uint32_t thread_col1 = thread_col0 + 1;
          uint32_t smem_row_base = o_start_row_warp;
 @@ -484,28 +460,24 @@
--        // Path B: Direct scattered write using the 2Ã—2 per-thread mapping
+-        // Path B: Direct scattered write using the 2×2 per-thread mapping
 -        #pragma unroll
 -        for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
 -            uint32_t col_base = fk * MMA_SV_N_SM75;
@@ -2274,29 +2276,29 @@ SAGE_SM75_PATCH = r'''diff --git a/csrc/qattn/attn_cuda_sm75.h b/csrc/qattn/attn
 +        }
      }
 @@ -623,5 +595,6 @@
--               constexpr int CTA_Q_SM75 = 32;
--               constexpr int CTA_K_SM75 = 64;
--               constexpr int WARP_Q_SM75 = 16;
+-              constexpr int CTA_Q_SM75 = 32;
+-              constexpr int CTA_K_SM75 = 64;
+-              constexpr int WARP_Q_SM75 = 16;
 -              constexpr int WARP_K_SM75 = 16;
-+               constexpr int CTA_Q_SM75 = 32;
-+               constexpr int CTA_K_SM75 = 64;
-+               constexpr int WARP_Q_SM75 = 16;
++              constexpr int CTA_Q_SM75 = 32;
++              constexpr int CTA_K_SM75 = 64;
++              constexpr int WARP_Q_SM75 = 16;
 +              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
 +              constexpr int WARP_K_SM75 = 64;
  
-@@ -783,6 +756,7 @@
--             using DTypeOut = half;
--               constexpr int CTA_Q_SM75 = 32;
--               constexpr int CTA_K_SM75 = 64;
--               constexpr int WARP_Q_SM75 = 16;
+@@ -781,6 +756,7 @@
+-            using DTypeOut = half;
+-              constexpr int CTA_Q_SM75 = 32;
+-              constexpr int CTA_K_SM75 = 64;
+-              constexpr int WARP_Q_SM75 = 16;
 -              constexpr int WARP_K_SM75 = 16;
-+             using DTypeOut = half;
-+               constexpr int CTA_Q_SM75 = 32;
-+               constexpr int CTA_K_SM75 = 64;
-+               constexpr int WARP_Q_SM75 = 16;
++            using DTypeOut = half;
++              constexpr int CTA_Q_SM75 = 32;
++              constexpr int CTA_K_SM75 = 64;
++              constexpr int WARP_Q_SM75 = 16;
 +              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
 +              constexpr int WARP_K_SM75 = 64;
-                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
+                 constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
 '''
 
 def install_sageattention_sm75(runtime: dict) -> None:
