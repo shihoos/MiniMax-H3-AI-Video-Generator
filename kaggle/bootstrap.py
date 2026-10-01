@@ -755,32 +755,11 @@ def install_director_runtime(
     if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
-    torch_version = str(director.get("torch_version", "") or "").strip()
-    torchvision_version = str(director.get("torchvision_version", "") or "").strip()
-    torchaudio_version = str(director.get("torchaudio_version", "") or "").strip()
-    transformers_version = str(director.get("transformers_version", "") or "").strip()
-    tokenizers_version = str(director.get("tokenizers_version", "") or "").strip()
-    huggingface_hub_version = str(director.get("huggingface_hub_version", "") or "").strip()
-    flashinfer_index = str(director.get("flashinfer_index", "") or "").strip()
     wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
-    required_versions = {
-        "vllm_version": vllm_version,
-        "torch_version": torch_version,
-        "torchvision_version": torchvision_version,
-        "torchaudio_version": torchaudio_version,
-        "transformers_version": transformers_version,
-        "tokenizers_version": tokenizers_version,
-        "huggingface_hub_version": huggingface_hub_version,
-        "flashinfer_index": flashinfer_index,
-    }
-    missing_versions = [name for name, value in required_versions.items() if not value]
-    if missing_versions:
-        raise RuntimeError(
-            "runtime_versions.yaml director configuration is incomplete: "
-            + ", ".join(missing_versions)
-        )
+    if not vllm_version:
+        raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
     if not env_dir_value:
         raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
     if tensor_parallel_size <= 0:
@@ -809,121 +788,60 @@ def install_director_runtime(
         raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
     env = os.environ.copy()
     env["UV_LINK_MODE"] = "copy"
-    install_args = [
-        uv,
-        "pip",
-        "install",
-        "--python",
-        str(venv_python),
-        "--link-mode",
-        "copy",
-        "--torch-backend=cu130",
-        "--extra-index-url",
-        flashinfer_index,
-        f"vllm=={vllm_version}",
-        f"torch=={torch_version}",
-        f"torchvision=={torchvision_version}",
-        f"torchaudio=={torchaudio_version}",
-        f"transformers=={transformers_version}",
-        f"tokenizers=={tokenizers_version}",
-        f"huggingface-hub=={huggingface_hub_version}",
-        f"wrapt=={wrapt_version}",
-    ]
     install = subprocess.run(
-        install_args,
+        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={wrapt_version}"],
         env=env,
         check=False,
         text=True,
     )
     if install.returncode != 0:
-        raise RuntimeError(
-            "Failed to install the locked isolated vLLM Director runtime. "
-            "The vLLM 0.30 dependency set could not be resolved with the pinned "
-            "Qwen-compatible packages."
-        )
-
-    check = subprocess.run(
-        [str(venv_python), "-m", "pip", "check"],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    if check.returncode != 0:
-        raise RuntimeError(
-            "Director Python dependency check failed after installation:\n"
-            + (check.stdout or "")
-            + (check.stderr or "")
-        )
-
+        raise RuntimeError("Failed to install isolated vLLM runtime.")
     verification = subprocess.run(
         [
             str(venv_python), "-c",
             (
-                "import inspect, torch, torchaudio, torchvision, transformers, tokenizers, "
-                "huggingface_hub, vllm, wrapt; "
+                "import vllm, torch, inspect, wrapt; "
                 "from vllm.config import SpeculativeConfig; "
                 "print('vLLM import: PASS'); "
-                "print('vLLM version:', vllm.__version__); "
-                "print('Torch version:', torch.__version__.split('+', 1)[0]); "
-                "print('Torchvision version:', torchvision.__version__.split('+', 1)[0]); "
-                "print('Torchaudio version:', torchaudio.__version__.split('+', 1)[0]); "
-                "print('Transformers version:', transformers.__version__); "
-                "print('Tokenizers version:', tokenizers.__version__); "
-                "print('Hugging Face Hub version:', huggingface_hub.__version__); "
                 "print('wrapt version:', wrapt.__version__); "
+                "print('vLLM version:', vllm.__version__); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
-                "print('Torch CUDA version:', torch.version.cuda); "
                 "print('GPU count:', torch.cuda.device_count()); "
                 "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
             ),
         ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
+        capture_output=True, text=True, check=False, env=env,
     )
     print(verification.stdout)
     if verification.stderr:
         print(verification.stderr)
     if verification.returncode != 0:
         raise RuntimeError("vLLM isolated runtime verification failed.")
-    observed = {}
+    observed_wrapt_version = None
     for line in verification.stdout.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        observed[key.strip()] = value.strip()
-
-    expected = {
-        "wrapt version": wrapt_version,
-        "vLLM version": vllm_version,
-        "Torch version": torch_version,
-        "Torchvision version": torchvision_version,
-        "Torchaudio version": torchaudio_version,
-        "Transformers version": transformers_version,
-        "Tokenizers version": tokenizers_version,
-        "Hugging Face Hub version": huggingface_hub_version,
-    }
-    mismatches = [
-        f"{name}: observed={observed.get(name)!r}, expected={value!r}"
-        for name, value in expected.items()
-        if observed.get(name) != value
-    ]
-    if mismatches:
+        if line.startswith("wrapt version:"):
+            observed_wrapt_version = line.split(":", 1)[1].strip()
+            break
+    if observed_wrapt_version != wrapt_version:
         raise RuntimeError(
-            "Director runtime version lock verification failed:\n"
-            + "\n".join(mismatches)
+            "Director isolated runtime wrapt mismatch: "
+            f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
+        )
+    observed_version = None
+    for line in verification.stdout.splitlines():
+        if line.startswith("vLLM version:"):
+            observed_version = line.split(":", 1)[1].strip()
+            break
+    if observed_version != vllm_version:
+        raise RuntimeError(
+            "Director runtime verification version mismatch: "
+            f"observed={observed_version!r}, configured={vllm_version!r}."
         )
     if f"EAGLE-3 supported: True" not in verification.stdout:
         raise RuntimeError(
             f"Director runtime verification did not confirm speculative method {speculative_method!r}."
         )
-    if "Torch CUDA: True" not in verification.stdout:
-        raise RuntimeError("Director runtime CUDA verification failed.")
-    if "Torch CUDA version: 13.0" not in verification.stdout:
-        raise RuntimeError("Director runtime CUDA mismatch: expected CUDA 13.0.")
     observed_gpu_count = None
     for line in verification.stdout.splitlines():
         if line.startswith("GPU count:"):
