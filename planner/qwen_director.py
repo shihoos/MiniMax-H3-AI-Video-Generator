@@ -211,10 +211,8 @@ class QwenDirector(
     ) -> list[str]:
         """Run conservative deterministic checks before/after the LLM quality gate.
 
-        This gate intentionally checks only malformed or obviously underdeveloped
-        narrative output. Narrative judgment remains with the structured Qwen
-        quality reviewer, so the deterministic precheck does not invent semantic
-        rules that could reject valid stories.
+        Narrative judgment remains with the structured Qwen quality reviewer;
+        this deterministic gate only rejects clearly malformed output.
         """
         normalized = re.sub(
             r"\s+",
@@ -524,11 +522,13 @@ class QwenDirector(
                 )
             )
 
+
         elif mode == PRESERVE_USER_STORY_MODE:
 
             story = self._normalize_story(
                 user_input
             )
+
 
         else:
 
@@ -676,7 +676,6 @@ class QwenDirector(
         # The ProductionPlanner owns the canonical production roster and scene
         # topology. Qwen supplies the final narrative and creative shot direction;
         # it does not regenerate deterministic production identity here.
-
         story = self._normalize_story(story)
 
         metadata_source = (
@@ -1717,88 +1716,36 @@ class QwenDirector(
                     )
 
                 if bound and normalized_speaker not in bound:
-                    generic_surface = EntityResolver.generic_role_surface(speaker)
-                    canonical_payload = next(
-                        (item for item in characters
-                         if isinstance(item, dict)
-                         and EntityResolver.normalize(str(item.get("name", "") or "")) == normalized_speaker),
-                        None,
-                    )
-                    canonical_profile = (canonical_payload or {}).get("identity_profile", {})
-                    canonical_identity_type = str(
-                        (canonical_payload or {}).get(
-                            "identity_type",
-                            canonical_profile.get("identity_type", ""),
-                        )
-                        or ""
-                    ).strip().lower()
+                    # The speaker already resolved to a canonical identity. If Qwen
+                    # omitted that identity from the shot binding, restore the existing
+                    # canonical entity deterministically rather than deleting dialogue.
+                    shot_characters = shot.get("characters")
+                    if not isinstance(shot_characters, list):
+                        shot_characters = list(shot_characters or [])
+                        shot["characters"] = shot_characters
+                    existing_norm = {
+                        EntityResolver.normalize(str(value or ""))
+                        for value in shot_characters
+                        if str(value or "").strip()
+                    }
+                    if normalized_speaker not in existing_norm:
+                        shot_characters.append(canonical)
+                    bound.add(normalized_speaker)
 
-                    # A grounded generic speaker can be repaired into the shot
-                    # binding when it resolves uniquely to an already-approved
-                    # relational character. This does not create a new character:
-                    # it restores the canonical identity Qwen omitted from the
-                    # shot-level character binding.
-                    if generic_surface and canonical_identity_type == "relational_character":
-                        shot_characters = shot.get("characters")
-                        if not isinstance(shot_characters, list):
-                            shot_characters = list(shot_characters or [])
-                            shot["characters"] = shot_characters
-                        existing_norm = {
+                    scene_id = str(shot.get("scene_id", "") or "").strip()
+                    scene = scene_by_id.get(scene_id)
+                    if scene is not None:
+                        scene_characters = scene.get("characters", [])
+                        if not isinstance(scene_characters, list):
+                            scene_characters = list(scene_characters or [])
+                            scene["characters"] = scene_characters
+                        scene_norms = {
                             EntityResolver.normalize(str(value or ""))
-                            for value in shot_characters
+                            for value in scene_characters
                             if str(value or "").strip()
                         }
-                        if normalized_speaker not in existing_norm:
-                            shot_characters.append(canonical)
-                        bound.add(normalized_speaker)
-
-                        scene_id = str(shot.get("scene_id", "") or "").strip()
-                        scene = scene_by_id.get(scene_id)
-                        if scene is not None:
-                            scene_characters = scene.get("characters", [])
-                            if not isinstance(scene_characters, list):
-                                scene_characters = list(scene_characters or [])
-                                scene["characters"] = scene_characters
-                            scene_norms = {
-                                EntityResolver.normalize(str(value or ""))
-                                for value in scene_characters
-                                if str(value or "").strip()
-                            }
-                            if normalized_speaker not in scene_norms:
-                                scene_characters.append(canonical)
-                    else:
-                        # The identity is already canonical. If Qwen omitted it from
-                        # the shot binding, repair the binding deterministically rather
-                        # than deleting the explicit dialogue. This is safe because
-                        # no new entity is created; only an existing canonical entity
-                        # is restored to the shot/scene.
-                        shot_characters = shot.get("characters")
-                        if not isinstance(shot_characters, list):
-                            shot_characters = list(shot_characters or [])
-                            shot["characters"] = shot_characters
-                        existing_norm = {
-                            EntityResolver.normalize(str(value or ""))
-                            for value in shot_characters
-                            if str(value or "").strip()
-                        }
-                        if normalized_speaker not in existing_norm:
-                            shot_characters.append(canonical)
-                        bound.add(normalized_speaker)
-
-                        scene_id = str(shot.get("scene_id", "") or "").strip()
-                        scene = scene_by_id.get(scene_id)
-                        if scene is not None:
-                            scene_characters = scene.get("characters", [])
-                            if not isinstance(scene_characters, list):
-                                scene_characters = list(scene_characters or [])
-                                scene["characters"] = scene_characters
-                            scene_norms = {
-                                EntityResolver.normalize(str(value or ""))
-                                for value in scene_characters
-                                if str(value or "").strip()
-                            }
-                            if normalized_speaker not in scene_norms:
-                                scene_characters.append(canonical)
+                        if normalized_speaker not in scene_norms:
+                            scene_characters.append(canonical)
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
