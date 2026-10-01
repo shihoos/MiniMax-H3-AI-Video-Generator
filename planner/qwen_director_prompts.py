@@ -141,13 +141,25 @@ class QwenDirectorPromptMixin:
     2. INTERIORITY. Include at least two sentences that reveal the protagonist's
        specific fear, memory, desire, or private realization through concrete
        imagery or sensory association. Show why the moment matters to them.
-    3. DIALOGUE. Include at least one short line of spoken dialogue by a named
-       character. In AI-STORY and EXPAND-STORY output, every spoken line MUST be
-       enclosed in quotation marks; never present spoken dialogue as unquoted narrative. The line must change a decision, reveal information, create
-       conflict, or foreshadow the central reversal. No filler dialogue.
-    4. RESOLUTION. End with a complete aftermath paragraph showing what happened
-       to the protagonist and what changed. Do not stop mid-action, mid-sentence,
-       mid-word, or on an ellipsis.
+    3. DIALOGUE. Include several short lines of spoken dialogue between the
+       protagonist and the principal secondary character. Dialogue must change
+       a decision, reveal information, create conflict, or force a response.
+       No filler dialogue.
+    4. SECONDARY CHARACTER ARC. Introduce the principal secondary character,
+       antagonist, or relationship counterpart through an actual character action
+       or direct interaction by roughly the first half of the story. Do NOT first
+       introduce that character as a nameplate, recorded message, disembodied voice,
+       screen label, logbook entry, or other exposition device and reveal them later.
+       Give the secondary character a concrete goal or position that conflicts with
+       or complicates the protagonist's objective. Make their action or revelation
+       materially change the protagonist's next decision.
+    5. ESCALATION AND CHOICE. The story must build through at least two meaningful
+       complications before the climax, then force the protagonist to make a
+       consequential choice rather than merely observe the final reveal.
+    6. RESOLUTION. End with a concrete aftermath showing consequences for the
+       protagonist and the central relationship or conflict. Avoid generic moral
+       endings such as “he was now a guardian of something greater” unless the
+       story has earned that exact transformation through a specific event.
 
     Additional constraints:
     - Aim for 400-650 words, but always finish the story completely.
@@ -174,7 +186,11 @@ class QwenDirectorPromptMixin:
     1. Preserve an existing twist if one exists. If none exists, introduce one
        unexpected reveal or reversal that is caused by a concrete detail already
        established in the source; do not add a random secret, artifact, monster,
-       or organization solely for surprise.
+       organization, or new persistent character solely for surprise.
+       Do not introduce a new named or persistent unnamed human/sentient character
+       unless that identity is already grounded by the supplied source story.
+       Prefer the source's existing characters, relationships, and implications
+       when creating the reversal.
     2. Add at least two sentences of meaningful interiority for the protagonist,
        tied to a specific fear, memory, desire, or private realization.
     3. Preserve or add at least one short line of spoken dialogue by a named
@@ -202,20 +218,294 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
         story: str,
+        source_character_names: list[str] | None = None,
     ) -> str:
 
         source_text = self._compact_story_context(
             story,
             DIRECTOR_STORY_CONTEXT_CHARS,
         )
-        return (
+        result = (
             "MODE: "
             + str(mode)
             + "\n\nSOURCE STORY / PREMISE:\n"
             + source_text
-            + "\n\nFINAL OUTPUT REQUIREMENTS:\n"
+        )
+        if mode == EXPAND_USER_STORY_MODE and source_character_names:
+            anchors = list(dict.fromkeys(
+                str(value).strip()
+                for value in source_character_names
+                if str(value).strip()
+            ))
+            if anchors:
+                result += (
+                    "\n\nSOURCE CHARACTER ANCHORS:\n"
+                    + ", ".join(anchors[:16])
+                    + "\nThese are the source-grounded persistent characters. Preserve them. "
+                    + "Do not turn a transient role, prop, voice, or generic description into a new persistent character."
+                )
+        result += (
+            "\n\nFINAL OUTPUT REQUIREMENTS:\n"
             + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
             + "End on a complete sentence with terminal punctuation. Include the required causal reversal, protagonist interiority, and functional dialogue."
+        )
+        return result
+
+    @staticmethod
+    def _story_architecture_json_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "protagonist": {"type": "string"},
+                "protagonist_goal": {"type": "string"},
+                "secondary_character": {"type": "string"},
+                "secondary_goal": {"type": "string"},
+                "relationship_tension": {"type": "string"},
+                "inciting_incident": {"type": "string"},
+                "early_character_action": {"type": "string"},
+                "escalation_beats": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 5,
+                    "items": {"type": "string"},
+                },
+                "midpoint_reversal": {"type": "string"},
+                "climax_choice": {"type": "string"},
+                "ending_consequence": {"type": "string"},
+                "cliche_traps_to_avoid": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 6,
+                    "items": {"type": "string"},
+                },
+            },
+            "required": [
+                "protagonist",
+                "protagonist_goal",
+                "secondary_character",
+                "secondary_goal",
+                "relationship_tension",
+                "inciting_incident",
+                "early_character_action",
+                "escalation_beats",
+                "midpoint_reversal",
+                "climax_choice",
+                "ending_consequence",
+                "cliche_traps_to_avoid",
+            ],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _story_architecture_system(mode: str) -> str:
+        if mode == AI_STORY_MODE:
+            return textwrap.dedent("""
+    You are the story architect for MiniMax H3.
+
+    Before the prose writer drafts the story, design a compact causal architecture for a high-quality
+    cinematic short film. The target quality is the successful two-character pattern used by the Director:
+    a named protagonist with a concrete objective, a principal secondary character with an independent
+    goal or position, direct two-way conflict, escalating complications, a reversal rooted in an earlier
+    concrete detail, a costly climax choice, and a concrete aftermath.
+
+    The secondary character must be a real dramatic participant. Do not make them a late nameplate,
+    recording, disembodied voice, screen message, or exposition device. Avoid generic endings such as
+    “guardian of something greater,” “the world had changed,” “some secrets were meant to stay buried,”
+    or other vague moral transformations unless the premise specifically earns them.
+
+    Every beat must causally alter the next decision. Avoid random monsters, secret organizations, destiny
+    prophecies, or twists introduced only for surprise.
+    """).strip()
+
+        return textwrap.dedent("""
+    You are the story architect for MiniMax H3 Expand Story mode.
+
+    Preserve the source story's core characters, events, chronology, setting, and outcome. Plan an expansion
+    that deepens the existing character relationship and causal chain rather than replacing the story.
+    Keep the persistent character set stable and do not invent a new persistent human/sentient identity merely
+    to create a twist. Build meaningful escalation, a grounded reversal, a consequential climax choice, and
+    concrete aftermath.
+    """).strip()
+
+    @staticmethod
+    def _story_architecture_user(
+        mode: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        payload = {
+            "mode": mode,
+            "source_story": str(story or "").strip(),
+        }
+        if source_character_names:
+            payload["source_character_anchors"] = list(dict.fromkeys(
+                str(value).strip()
+                for value in source_character_names
+                if str(value).strip()
+            ))[:16]
+        return (
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+            + "\nReturn JSON only. Do not write the story prose yet."
+        )
+
+    @staticmethod
+    def _story_writer_blueprint_instruction(blueprint: dict) -> str:
+        return (
+            "\n\nSTORY ARCHITECTURE BLUEPRINT:\n"
+            + json.dumps(blueprint, ensure_ascii=False, indent=2)
+            + "\n\nUse the blueprint as the causal skeleton, not as prose to copy. "
+            + "Write one continuous finished story. Every major beat must change what the protagonist can do next. "
+            + "The secondary character must act, pursue their own objective, and materially change the protagonist's decision. "
+            + "The reversal must reinterpret an earlier concrete detail. The climax must force a real choice and the ending "
+            + "must show concrete consequences."
+        )
+
+    @staticmethod
+    def _story_quality_json_schema() -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "pass": {"type": "boolean"},
+                "score": {"type": "integer", "minimum": 0, "maximum": 40},
+                "secondary_character_arc": {"type": "integer", "minimum": 0, "maximum": 5},
+                "character_conflict": {"type": "integer", "minimum": 0, "maximum": 5},
+                "causal_reversal": {"type": "integer", "minimum": 0, "maximum": 5},
+                "escalation_choice": {"type": "integer", "minimum": 0, "maximum": 5},
+                "dialogue": {"type": "integer", "minimum": 0, "maximum": 5},
+                "interiority": {"type": "integer", "minimum": 0, "maximum": 5},
+                "resolution": {"type": "integer", "minimum": 0, "maximum": 5},
+                "originality": {"type": "integer", "minimum": 0, "maximum": 5},
+                "problems": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 8,
+                },
+            },
+            "required": [
+                "pass",
+                "score",
+                "secondary_character_arc",
+                "character_conflict",
+                "causal_reversal",
+                "escalation_choice",
+                "dialogue",
+                "interiority",
+                "resolution",
+                "originality",
+                "problems",
+            ],
+            "additionalProperties": False,
+        }
+
+    @staticmethod
+    def _story_quality_review_system(mode: str) -> str:
+        return textwrap.dedent(f"""
+    You are the strict narrative-quality gate for MiniMax H3 {mode}.
+
+    Judge the supplied completed story as a short-film narrative, not as a list of
+    style requirements. A story passes only when it is genuinely character-driven,
+    causally coherent, dramatically escalating, and complete.
+
+    QUALITY TARGET:
+    - The protagonist has a concrete objective and a personal stake.
+    - A principal secondary character is a real dramatic participant, not a late
+      nameplate/voice/screen reveal. That character has a distinct position,
+      motivation, or relationship to the protagonist and materially changes the plot.
+    - Their interaction creates conflict or competing goals, not just exposition.
+    - The reversal grows from earlier concrete details rather than arriving as a
+      random monster/secret/device.
+    - The climax contains a consequential choice.
+    - Dialogue exposes conflict, information, or a decision; it is not filler.
+    - Interiority is specific and tied to events.
+    - The ending shows concrete consequences instead of a generic moral statement.
+    - The story should feel at least as dramatically developed as a strong two-character
+      short-film example: active secondary character, meaningful two-way dialogue,
+      causal reveal, escalating stakes, and earned consequences.
+
+    HARD FAIL CONDITIONS:
+    - the secondary character first appears only through a nameplate, recording,
+      disembodied voice, screen label, or exposition;
+    - the protagonist simply learns a secret without having to make a consequential
+      choice because of it;
+    - the second character is mostly an information dispenser;
+    - the final paragraph becomes a generic “guardian / greater purpose / changed man”
+      moral without concrete consequences;
+    - the story is substantially weaker than its own central character conflict.
+
+    Score each dimension 0-5. Pass requires every core dimension to be at least 4,
+    originality at least 3, and total score at least 32/40.
+
+    Return JSON only.
+    """).strip()
+
+    @staticmethod
+    def _story_quality_review_user(
+        mode: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        anchors = ""
+        if source_character_names:
+            values = [str(v).strip() for v in source_character_names if str(v).strip()]
+            if values:
+                anchors = "\nSOURCE CHARACTER ANCHORS:\n" + ", ".join(values[:16])
+        return (
+            "STORY:\n"
+            + str(story).strip()
+            + anchors
+            + "\n\nReturn the strict JSON quality assessment."
+        )
+
+    @staticmethod
+    def _story_quality_repair_system(mode: str) -> str:
+        return textwrap.dedent(f"""
+    You are the senior narrative editor for MiniMax H3 {mode}.
+
+    Repair the supplied story into a stronger short-film narrative without throwing
+    away its premise, core events, setting, or established characters.
+
+    The repaired story MUST:
+    - keep the protagonist's objective and personal stake;
+    - introduce the principal secondary character through action/direct interaction,
+      never first through a nameplate, recording, disembodied voice, screen label,
+      or exposition-only reveal;
+    - make the secondary character an active participant with a distinct position or
+      goal that conflicts with or complicates the protagonist;
+    - include several purposeful exchanges between them;
+    - build at least two complications into an earned climax;
+    - force a consequential protagonist choice;
+    - make the central reversal causally emerge from earlier details;
+    - retain concrete, specific interiority;
+    - finish with concrete aftermath and consequences, not a generic moral;
+    - preserve source characters/chronology/outcome in EXPAND-STORY mode;
+    - never invent a new persistent character in EXPAND-STORY merely to create a twist.
+
+    Preserve strong material from the supplied draft. Repair weak material rather than
+    replacing the entire story with unrelated plot.
+
+    Output ONLY the repaired story prose.
+    """).strip()
+
+    @staticmethod
+    def _story_quality_repair_user(
+        mode: str,
+        story: str,
+        review: dict,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        anchors = ""
+        if source_character_names:
+            values = [str(v).strip() for v in source_character_names if str(v).strip()]
+            if values:
+                anchors = "\nSOURCE CHARACTER ANCHORS: " + ", ".join(values[:16])
+        problems = review.get("problems", []) if isinstance(review, dict) else []
+        return (
+            "CURRENT STORY:\n"
+            + str(story).strip()
+            + anchors
+            + "\n\nQUALITY FAILURES TO REPAIR:\n"
+            + "\n".join(f"- {str(p).strip()}" for p in problems if str(p).strip())
+            + "\n\nReturn only the fully repaired story."
         )
 
     def _sampling_for_mode(
@@ -471,28 +761,34 @@ class QwenDirectorPromptMixin:
         system_prompt = textwrap.dedent("""
     You are a strict character/entity extraction component for a cinematic production planner.
     Return JSON only. Analyze the supplied story and classify stable human/sentient identities that can receive
-    an identity lock. There are TWO valid character identity types:
+    an identity lock. There are THREE valid character identity types:
 
     1) named_character: a proper/named character such as "Eli" or "Lin Mei".
     2) relational_character: a persistent unnamed character whose identity is grounded by a named story
-       character and a relationship, such as "Eli's father", "Sara's sister", or "Mira's commander".
+       character and a concrete relationship, such as "Eli's father", "Sara's sister", or "Mira's commander".
+    3) descriptive_character: a persistent unnamed person whose identity is grounded by a distinctive,
+       recurring description, such as "the man in the suit" or "the woman with piercing eyes".
 
     Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
-    "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a named_character.
-    They may appear only as aliases/surface descriptions of a grounded relational_character when the story clearly
-    establishes which persistent character they refer to. Relationship surfaces such as "father", "uncle",
-    "his father", or "the man" are semantic references, not new canonical entities.
+    "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a canonical
+    identity. A descriptive_character must contain a distinguishing description beyond the bare role.
+    Relationship surfaces such as "father", "uncle", "his father", or "the man" are semantic references,
+    not new canonical entities unless the story establishes a persistent relational/descriptive identity.
 
     Do NOT invent a relationship or identity. For a relational_character, relationship_to MUST name a canonical
     character actually grounded in the story, relationship MUST be one concrete family/role relation, and the
     supplied story must contain enough evidence to support that link. Prefer a canonical name in the form
-    "<Canonical Character>'s <relationship>" and include grounded surface forms (for example "his father",
-    "the older man") in aliases.
+    "<Canonical Character>'s <relationship>" and include grounded surface forms in aliases.
+    For a descriptive_character, do not invent a relationship; preserve the most specific stable descriptor
+    actually grounded in the story and include generic surface forms (for example "man") only as aliases.
 
     Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
     weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
-    Preserve the most complete canonical identity. Review the deterministic candidate hints and recover stable
-    relational identities that the deterministic scan may not have named yet.
+    For every deterministic candidate that is textually grounded, explicitly classify it; do not silently omit
+    a supplied named or source-labeled character merely because the introduction uses a nameplate, badge, title,
+    dialogue attribution, or another narrative surface. Qwen may reject a candidate only when the story evidence
+    actually shows that it is not a character. Recover stable named, relational, and descriptive identities that
+    the deterministic scan may not have named yet.
     """).strip()
 
         user_payload = json.dumps(
@@ -549,8 +845,10 @@ class QwenDirectorPromptMixin:
     Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
     relationship is explicitly or unambiguously established by the story.
     Use `identity_type=descriptive_character` for a recurring unnamed person whose identity is grounded by a
-    distinctive description (for example, `the woman with piercing eyes`). The canonical descriptive name must
-    contain the distinguishing description; bare `man`/`woman`/`stranger` are never canonical identities.
+    distinctive description (for example, `the woman with piercing eyes` or `the man in the suit`). The
+    canonical descriptive name must contain the distinguishing description; bare `man`/`woman`/`stranger`
+    are never canonical identities. If a candidate has no concrete supported relationship, do NOT force it into
+    `relational_character`; classify it as `descriptive_character` when its distinguishing description is stable.
     Preserve grounded aliases without turning the alias itself into another canonical person.
     For possessive pronouns such as `his father`, follow the established discourse owner, not the nearest noun.
     Example: in `a sentient AI his father had created`, do not invent `AI's father` unless the story explicitly
