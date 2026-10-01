@@ -38,7 +38,6 @@ class QwenDirector(
     QwenDirectorSceneMixin,
     QwenDirectorSanitizeMixin,
 ):
-
     # Production planning limits. Keep the narrative rich, but bound the
     # production graph so an LLM cannot accidentally explode a short film
     # into dozens of scenes and therefore dozens of expensive Qwen calls.
@@ -170,6 +169,110 @@ class QwenDirector(
             "cache_hits": 0,
             "deterministic_recoveries": 0,
         }
+
+    def _enforce_story_quality(
+        self,
+        mode: str,
+        user_input: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        """Reject weak narrative drafts and perform one targeted editorial repair."""
+        deterministic_issues = self._story_quality_precheck(mode, story)
+
+        try:
+            review = self._chat_json(
+                self._story_quality_review_system(mode),
+                self._story_quality_review_user(
+                    mode,
+                    story,
+                    source_character_names=source_character_names,
+                ),
+                minimum_completion=192,
+                temperature=0.10,
+                top_p=0.80,
+                call_name="story_quality_review",
+                max_completion=700,
+                json_mode=True,
+                disable_thinking=False,
+                response_schema=self._story_quality_json_schema(),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Story quality reviewer failed; refusing to accept an unreviewed narrative: "
+                + str(exc)
+            ) from exc
+
+        if self._story_quality_is_pass(review) and not deterministic_issues:
+            return story
+
+        problems = list(deterministic_issues)
+        if isinstance(review, dict):
+            problems.extend(
+                str(value).strip()
+                for value in (review.get("problems", []) or [])
+                if str(value).strip()
+            )
+        problems = list(dict.fromkeys(problems))[:12]
+
+        repair_review = dict(review) if isinstance(review, dict) else {}
+        repair_review["problems"] = problems
+
+        repaired = self._chat_text(
+            self._story_quality_repair_system(mode),
+            self._story_quality_repair_user(
+                mode,
+                story,
+                repair_review,
+                source_character_names=source_character_names,
+            ),
+            minimum_completion=350,
+            temperature=0.62,
+            top_p=0.88,
+            call_name="story_quality_repair",
+            max_completion=2200,
+            disable_thinking=False,
+        )
+
+        self._validate_mode_output(
+            mode,
+            user_input,
+            repaired,
+        )
+
+        repaired_issues = self._story_quality_precheck(mode, repaired)
+        repaired_review = self._chat_json(
+            self._story_quality_review_system(mode),
+            self._story_quality_review_user(
+                mode,
+                repaired,
+                source_character_names=source_character_names,
+            ),
+            minimum_completion=192,
+            temperature=0.10,
+            top_p=0.80,
+            call_name="story_quality_verify",
+            max_completion=512,
+            json_mode=True,
+            disable_thinking=True,
+            response_schema=self._story_quality_json_schema(),
+        )
+
+        if not self._story_quality_is_pass(repaired_review) or repaired_issues:
+            details = list(repaired_issues)
+            if isinstance(repaired_review, dict):
+                details.extend(
+                    str(value).strip()
+                    for value in (repaired_review.get("problems", []) or [])
+                    if str(value).strip()
+                )
+            details = list(dict.fromkeys(details))[:10]
+            raise RuntimeError(
+                "Story quality gate could not produce an acceptable narrative: "
+                + "; ".join(details)
+            )
+
+        return repaired
 
     def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
         self._reference_visual_context = {
@@ -343,6 +446,9 @@ class QwenDirector(
         # PASS 1A: narrative
         # ----------------------------------------------------
 
+        generated_story = False
+        source_character_names: list[str] = []
+
         if resuming and prior_director_plan.get(
             "story"
         ):
@@ -389,18 +495,56 @@ class QwenDirector(
                 )
             )
 
+            source_character_names = [
+                str(character.get("name", "")).strip()
+                for character in (base_plan.get("characters", []) or [])
+                if isinstance(character, dict) and str(character.get("name", "")).strip()
+            ]
             story_user = (
                 self._story_text_user(
                     mode,
                     user_input,
+                    source_character_names=source_character_names,
                 )
             )
 
             try:
+                story_blueprint = {}
+                try:
+                    story_blueprint = self._chat_json(
+                        self._story_architecture_system(mode),
+                        self._story_architecture_user(
+                            mode,
+                            user_input,
+                            source_character_names=source_character_names,
+                        ),
+                        minimum_completion=320,
+                        temperature=0.50,
+                        top_p=0.90,
+                        call_name=(
+                            "ai_story_architecture_pass"
+                            if mode == AI_STORY_MODE
+                            else "expand_story_architecture_pass"
+                        ),
+                        max_completion=900,
+                        json_mode=True,
+                        disable_thinking=False,
+                        response_schema=self._story_architecture_json_schema(),
+                    )
+                except Exception as exc:
+                    self._record_recovery(
+                        "story_architecture_fallback",
+                        str(exc),
+                    )
+                    story_blueprint = {}
+
+                writer_user = story_user
+                if story_blueprint:
+                    writer_user += self._story_writer_blueprint_instruction(story_blueprint)
 
                 story = self._chat_text(
                     story_system,
-                    story_user,
+                    writer_user,
                     minimum_completion=350,
                     temperature=temperature,
                     top_p=top_p,
@@ -409,8 +553,8 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    max_completion=1600,
-                    disable_thinking=True,
+                    max_completion=2200,
+                    disable_thinking=False,
                 )
 
                 self._validate_mode_output(
@@ -418,6 +562,7 @@ class QwenDirector(
                     user_input,
                     story,
                 )
+                generated_story = True
 
             except RuntimeError as first_error:
 
@@ -469,6 +614,15 @@ class QwenDirector(
                         user_input,
                         story,
                     )
+                    generated_story = True
+
+            if generated_story and mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+                story = self._enforce_story_quality(
+                    mode,
+                    user_input,
+                    story,
+                    source_character_names=source_character_names,
+                )
 
             story_plan = {
                 "story": story,
