@@ -255,16 +255,19 @@ def verify_sage_attention_patch_recipe() -> None:
 
     required_recipe = (
         '_apply_sage_sm75_source_corrections',
-        'legacy_warp = "constexpr int WARP_K_SM75 = 16;"',
-        'fixed_warp = "constexpr int WARP_K_SM75 = 64;"',
+        'legacy = "constexpr int WARP_K_SM75 = 16;"',
+        'fixed = "constexpr int WARP_K_SM75 = 64;"',
+        'legacy_count = source.count(legacy)',
+        'fixed_count = source.count(fixed)',
+        'marker_count = source.count("H3-T4-SM75-KERNEL-FIX")',
+        'legacy_count == 2 and fixed_count == 0 and marker_count == 0',
         'H3-T4-SM75-KERNEL-FIX',
         'H3-T4-SM75-PV-FRAGMENT-FIX',
         'SM75 PV renormalization correction',
         'SM75 final normalization correction',
         'SM75 staged-output fragment mapping correction',
         'SM75 direct-output fragment mapping correction',
-        'SM75 base WARP_K correction',
-        'SM75 smem-O WARP_K correction',
+        'SM75 WARP_K dual-declaration correction',
         'source.count(old)',
         'if count != 1:',
     )
