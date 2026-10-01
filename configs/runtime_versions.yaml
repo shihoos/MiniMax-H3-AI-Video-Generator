@@ -104,7 +104,6 @@ sage_attention:
   revision: 9f1c9a29be73abc3e92a56649bb24ce4278aea47
   version: 2.1.1-sm75.4
   directory: SageAttention-T4
-  patch_sha256: 901cac6fc2e7dd3e714c311bb7d7792651b053211daca43cd40e4d656529427c
   required: true
   smooth_k: true
   qk_quant_gran: per_warp
