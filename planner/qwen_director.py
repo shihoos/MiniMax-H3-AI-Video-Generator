@@ -170,6 +170,76 @@ class QwenDirector(
             "deterministic_recoveries": 0,
         }
 
+    @staticmethod
+    def _story_quality_is_pass(
+        review: dict,
+    ) -> bool:
+        """Accept only a fully valid narrative-quality review."""
+        if not isinstance(review, dict):
+            return False
+
+        if review.get("pass") is not True:
+            return False
+
+        try:
+            score = int(review.get("score", -1))
+        except (TypeError, ValueError):
+            return False
+
+        if score < 32:
+            return False
+
+        core_dimensions = (
+            "secondary_character_arc",
+            "character_conflict",
+            "causal_reversal",
+            "escalation_choice",
+            "dialogue",
+            "interiority",
+            "resolution",
+        )
+        try:
+            if any(int(review.get(name, -1)) < 4 for name in core_dimensions):
+                return False
+            if int(review.get("originality", -1)) < 3:
+                return False
+        except (TypeError, ValueError):
+            return False
+
+        return True
+
+    @staticmethod
+    def _story_quality_precheck(
+        mode: str,
+        story: str,
+    ) -> list[str]:
+        """Run conservative deterministic checks before/after the LLM quality gate.
+
+        This gate intentionally checks only malformed or obviously underdeveloped
+        narrative output. Narrative judgment remains with the structured Qwen
+        quality reviewer, so the deterministic precheck does not invent semantic
+        rules that could reject valid stories.
+        """
+        del mode
+
+        normalized = re.sub(
+            r"\s+",
+            " ",
+            str(story or "").strip(),
+        )
+        if not normalized:
+            return ["Story is empty."]
+
+        problems: list[str] = []
+
+        if normalized.startswith("```") or normalized.endswith("```"):
+            problems.append("Story contains code-fence markup instead of clean prose.")
+
+        if normalized.startswith("{") and normalized.endswith("}"):
+            problems.append("Story appears to be JSON rather than narrative prose.")
+
+        return list(dict.fromkeys(problems))[:12]
+
     def _enforce_story_quality(
         self,
         mode: str,
