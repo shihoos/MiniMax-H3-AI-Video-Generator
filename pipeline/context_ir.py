@@ -6,7 +6,6 @@ from typing import Any
 import hashlib
 import json
 import re
-from datetime import datetime, timezone
 
 
 class H3ContextIRCompiler:
@@ -123,16 +122,6 @@ class H3ContextIRCompiler:
         if suffix in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"}:
             return "Audio"
         return "Picture"
-
-    @classmethod
-    def _visual_role_for_path(cls, shot: dict[str, Any], path: str) -> dict[str, Any]:
-        key = cls._path_key(path)
-        for role in shot.get("reference_roles", []) or []:
-            if not isinstance(role, dict):
-                continue
-            if cls._path_key(role.get("path") or role.get("source")) == key:
-                return dict(role)
-        return {}
 
     @classmethod
     def _relationship_for(cls, media_type: str, role: str, explicit: Any = None) -> str:
@@ -286,10 +275,6 @@ class H3ContextIRCompiler:
                     })
 
         return refs
-
-    @classmethod
-    def _reference_map(cls, refs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        return {str(ref["label"]): ref for ref in refs}
 
     @classmethod
     def _speaker_map(cls, shot: dict[str, Any]) -> dict[str, str]:
