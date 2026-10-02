@@ -246,6 +246,93 @@ def test_explicit_adjudicated_negative_is_respected_when_other_characters_remain
     _assert(names == ["Lin Mei"], f"complete adjudicator negative was not respected: {names}")
 
 
+def test_expand_long_distance_relational_character_recovery():
+    """Regression for Expand Story discourse-distance recovery (e.g. `Eli ... his father`)."""
+    planner = _planner()
+    story = (
+        "Eli stepped cautiously through the rusted gates of the abandoned train station, "
+        "the air thick with dust and the scent of decay. The flickering light from his "
+        "flashlight cast long shadows on the cracked tiles, each step echoing in the "
+        "cavernous silence. He had come here for a reason—whispers of a sealed vault "
+        "buried beneath the station, a relic from the city's forgotten past. His fingers "
+        "brushed against the cold metal of a door marked with faded engravings. "
+        "The door was sealed, but not locked. A faint hum of power pulsed through the air "
+        "as Eli pressed his palm against the surface. A memory surfaced—his father, "
+        "standing over a similar case, his face pale and drawn."
+    )
+
+    descriptors = planner.detect_character_descriptors(story)
+    _assert(
+        descriptors == ["Eli"],
+        f"long Expand Story fixture polluted the deterministic named roster: {descriptors}",
+    )
+
+    hints = planner._extract_relational_character_hints(story, descriptors)
+    names = [item.get("name") for item in hints]
+    _assert(
+        names == ["Eli's father"],
+        f"long-distance possessive relation was not recovered: {hints}",
+    )
+
+    # Verify the hint reaches the bounded semantic adjudication contract rather than
+    # being merely detectable by the helper.
+    calls = []
+
+    def extractor(*_args):
+        calls.append("extract")
+        return {"candidates": [{
+            "name": "Eli",
+            "entity_type": "PERSON",
+            "is_character": True,
+            "aliases": [],
+            "identity_type": "named_character",
+            "relationship_to": "",
+            "relationship": "",
+        }]}
+
+    def adjudicator(_story, hints_payload, _semantic):
+        calls.append("adjudicate")
+        _assert(
+            "Eli's father" in hints_payload,
+            f"long-distance relational hint was not supplied to adjudication: {hints_payload}",
+        )
+        return {"candidates": [
+            {
+                "name": "Eli",
+                "entity_type": "PERSON",
+                "is_character": True,
+                "aliases": [],
+                "identity_type": "named_character",
+                "relationship_to": "",
+                "relationship": "",
+            },
+            {
+                "name": "Eli's father",
+                "entity_type": "CHARACTER",
+                "is_character": False,
+                "aliases": ["his father", "father", "man"],
+                "identity_type": "relational_character",
+                "relationship_to": "Eli",
+                "relationship": "father",
+            },
+        ]}
+
+    characters = planner.create_characters(
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=adjudicator,
+    )
+    names = [character.name for character in characters]
+    _assert(
+        "Eli" in names and "Eli's father" in names,
+        f"Expand Story relational character was lost during canonicalization: {names}",
+    )
+    _assert(
+        calls == ["extract", "adjudicate"],
+        f"long-distance relational recovery took an unexpected semantic path: {calls}",
+    )
+
+
 def test_relational_character_survives_generic_negative_and_resolves_dialogue():
     from planner.production_planner import ProductionPlanner
     from planner.qwen_director import QwenDirector
@@ -1015,6 +1102,7 @@ def main():
         test_semantic_partial_positive_is_adjudicated,
         test_semantic_negative_does_not_destroy_strong_deterministic_roster,
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
+        test_expand_long_distance_relational_character_recovery,
         test_relational_character_survives_generic_negative_and_resolves_dialogue,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
