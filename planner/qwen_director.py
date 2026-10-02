@@ -399,8 +399,8 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    max_completion=2200,
-                    disable_thinking=False,
+                    max_completion=1800,
+                    disable_thinking=True,
                 )
                 self._validate_mode_output(
                     mode,
@@ -443,8 +443,8 @@ class QwenDirector(
                             if mode == AI_STORY_MODE
                             else "expand_story_text_retry"
                         ),
-                        max_completion=2200,
-                        disable_thinking=False,
+                        max_completion=1800,
+                        disable_thinking=True,
                     )
                     self._validate_mode_output(
                         mode,
