@@ -303,6 +303,26 @@ DELIVERY_DEFAULT_FPS = int(delivery_cfg.get("fps", 24))
 if min(DELIVERY_DEFAULT_WIDTH, DELIVERY_DEFAULT_HEIGHT, DELIVERY_DEFAULT_FPS) <= 0:
     raise RuntimeError("Configured delivery width/height/fps must be positive.")
 
+# Storage behavior is runtime configuration, not documentation-only metadata.
+_storage_cfg = dict(RUNTIME.get("storage", {}) or {})
+for _storage_key, _storage_default in (
+    ("keep_worker_logs", True),
+    ("keep_concat_file", False),
+):
+    _storage_value = _storage_cfg.get(_storage_key, _storage_default)
+    if not isinstance(_storage_value, bool):
+        raise RuntimeError(
+            f"runtime_versions.yaml storage.{_storage_key} must be a YAML boolean."
+        )
+STORAGE_KEEP_WORKER_LOGS = _resolve_bool_env(
+    "H3_KEEP_WORKER_LOGS",
+    _storage_cfg.get("keep_worker_logs", True),
+)
+STORAGE_KEEP_CONCAT_FILE = _resolve_bool_env(
+    "H3_KEEP_CONCAT_FILE",
+    _storage_cfg.get("keep_concat_file", False),
+)
+
 # Explicit override is opt-in so a production run cannot silently switch to an
 # unrelated EAGLE-3 checkpoint while the repository is pinned to /kaggle/input/eagle-3.
 DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE = _resolve_bool_env(
