@@ -409,22 +409,6 @@ class QwenDirector(
                 )
                 generated_story = True
             except RuntimeError as first_error:
-                if mode == AI_STORY_MODE:
-                    retry_requirements = (
-                        "Create a fresh, complete story rewrite from the same premise and strongest established narrative direction. "
-                        "Re-evaluate the structure only where needed for coherence and completion. Use only as many recurring characters "
-                        "as the story genuinely needs; do not add, remove, rename, or force a character merely to satisfy a validator. "
-                        "Preserve any character that is already causally earned, and make every retained recurring character earn its place "
-                        "through meaningful action, relationship, opposition, assistance, or consequence. "
-                    )
-                else:
-                    retry_requirements = (
-                        "Create a fresh, complete story rewrite while preserving the source-grounded "
-                        "characters, chronology, and premise. The SOURCE CHARACTER ANCHORS are a hard "
-                        "cast whitelist for unsupported identities only; preserve any genuinely established "
-                        "new relational or recurring character instead of deleting a correct character. Do not "
-                        "invent a person merely to satisfy structure. Dialogue is optional in Expand Story. "
-                    )
                 error_text = str(first_error)
                 completion_repair = any(
                     marker in error_text
@@ -435,15 +419,6 @@ class QwenDirector(
                         "must contain at least one explicit quoted line",
                     )
                 )
-
-                dialogue_repair_clause = (
-                    " Include one short direct spoken line by an existing character in the repaired ending."
-                    if "must contain at least one explicit quoted line" in error_text
-                    else ""
-                )
-
-                paragraphs: list[str] = []
-                preserved_prefix = ""
                 if completion_repair and story.strip():
                     paragraphs = [
                         part.strip()
@@ -453,58 +428,62 @@ class QwenDirector(
                     if len(paragraphs) >= 2:
                         preserved_prefix = "\n\n".join(paragraphs[:-1])
                         current_final = paragraphs[-1]
-                        retry_user = (
-                            "REPAIR ONLY THE FINAL PARAGRAPH of the story below. Keep every earlier paragraph, "
-                            "character, relationship, event, object, and established fact unchanged. Do not add or "
-                            "remove a character. Replace only the final paragraph with a completed aftermath that "
-                            "shows the consequence of the protagonist's choice and closes the central story question. "
-                            "Do not introduce a new mystery, mission, threat, object, or future hook. End in completed "
-                            "past tense with terminal punctuation."
-                            + dialogue_repair_clause
-                            + " Return ONLY the replacement final paragraph.\n\n"
-                            "CURRENT FINAL PARAGRAPH:\n"
-                            + current_final
-                            + "\n\nFULL STORY CONTEXT:\n"
+                        repair_user = (
+                            "Repair only the final paragraph of the existing story. Preserve every earlier paragraph, "
+                            "character, relationship, event, and established fact. Close the central conflict with a concrete "
+                            "past-tense consequence. Do not add a character, mystery, mission, threat, or future hook. "
+                            + (
+                                "Include one short direct spoken line by an existing character."
+                                if "must contain at least one explicit quoted line" in error_text
+                                else ""
+                            )
+                            + " Return only the replacement final paragraph.\n\nFULL STORY:\n"
                             + str(story).strip()
                         )
+                        minimum_completion = 80
                     else:
-                        retry_user = (
-                            "Repair only the ending of the following story. Keep all existing characters, relationships, "
-                            "events, and established facts unchanged. Return the complete story with a closed, past-tense "
-                            "aftermath and no new character or future hook."
-                            + dialogue_repair_clause
-                            + "\n\n"
-                            + str(story).strip()
+                        preserved_prefix = ""
+                        current_final = ""
+                        repair_user = (
+                            "Finish the existing story without changing its characters, relationships, or established events. "
+                            "Return the complete story with a concrete past-tense consequence and no future hook."
+                            + (
+                                " Include one short direct spoken line by an existing character."
+                                if "must contain at least one explicit quoted line" in error_text
+                                else ""
+                            )
+                            + "\n\nSTORY:\n" + str(story).strip()
                         )
+                        minimum_completion = 120
                 else:
                     if mode == AI_STORY_MODE:
                         retry_requirements = (
-                            "Create a fresh, complete story rewrite from the same premise and strongest established narrative direction. "
-                            "Use only as many recurring characters as the story genuinely needs. Preserve any character that is causally "
-                            "earned, and do not introduce a person merely to satisfy structure. "
+                            "Rewrite the story only as needed to satisfy the failed contract. Preserve every causally earned "
+                            "character and do not add a person merely to satisfy validation. "
                         )
                     else:
                         retry_requirements = (
-                            "Create a fresh, complete story rewrite while preserving the source-grounded characters, chronology, and premise. "
-                            "SOURCE CHARACTER ANCHORS are a hard cast whitelist only for identities that are not otherwise genuinely established by the story; "
-                            "do not invent a persistent character merely to satisfy structure. "
+                            "Rewrite only as needed to complete the expansion. The SOURCE CHARACTER ANCHORS are a hard safety "
+                            "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
+                            "Do not invent a person merely to satisfy validation. "
                         )
-                    retry_user = (
+                    repair_user = (
                         story_user
                         + "\n\n"
                         + retry_requirements
-                        + "Prioritize the causal arc and resolution over extra detail. Return ONLY the finished story prose."
+                        + "Prioritize causal coherence and a finished resolution over extra detail. Return ONLY the finished story prose."
                     )
+                    preserved_prefix = ""
+                    current_final = ""
+                    minimum_completion = 350
 
                 try:
-                    # Completion failures are repaired locally at the ending so one bad terminal
-                    # sentence cannot trigger a second creative rewrite of the cast and plot.
                     retry_temperature = max(0.50, min(0.68, temperature - 0.08))
-                    retry_top_p = max(0.78, min(0.86, top_p - 0.06))
+                    retry_top_p = max(0.80, min(0.88, top_p - 0.04))
                     repaired = self._chat_text(
                         story_system,
-                        retry_user,
-                        minimum_completion=120 if completion_repair else 350,
+                        repair_user,
+                        minimum_completion=minimum_completion,
                         temperature=retry_temperature,
                         top_p=retry_top_p,
                         call_name=(
@@ -515,7 +494,7 @@ class QwenDirector(
                         max_completion=1800,
                         disable_thinking=True,
                     )
-                    if completion_repair and len(paragraphs) >= 2:
+                    if completion_repair and preserved_prefix:
                         story = preserved_prefix + "\n\n" + str(repaired).strip()
                     else:
                         story = repaired
@@ -1340,35 +1319,41 @@ class QwenDirector(
         generated_story: str,
         source_character_names: list[str] | None = None,
     ) -> None:
-        """Compatibility check for the existing integration test; production generation does not call it."""
-        if getattr(self, "_fallback_planner", None) is not None:
+        """Keep Expand Story relational identities grounded in the source cast."""
+        if hasattr(self, "_fallback_planner"):
             planner = self._planner()
         else:
             from planner.production_planner import ProductionPlanner
-            planner = ProductionPlanner(getattr(self, "project_root", Path(".")))
-        source_names = planner._canonicalize_character_descriptors(
-            [
-                *(source_character_names or []),
-                *planner.detect_character_descriptors(source_story),
-                *planner._explicit_source_character_names(source_story),
-            ]
-        )
+            planner = ProductionPlanner(".")
+
         allowed = {
             EntityResolver.normalize(str(name).strip())
-            for name in source_names
+            for name in (source_character_names or [])
             if str(name).strip()
         }
-        source_relations = planner._extract_relational_character_hints(
-            source_story,
-            source_names,
-        )
-        allowed.update(
-            EntityResolver.normalize(str(item.get("name", "")).strip())
-            for item in source_relations
-            if item.get("strong") and str(item.get("name", "")).strip()
-        )
+        if not allowed:
+            source_descriptors = planner._canonicalize_character_descriptors(
+                [
+                    *planner.detect_character_descriptors(source_story),
+                    *planner._explicit_source_character_names(source_story),
+                ]
+            )
+            allowed.update(
+                EntityResolver.normalize(str(name).strip())
+                for name in source_descriptors
+                if str(name).strip()
+            )
+            source_relations = planner._extract_relational_character_hints(
+                source_story,
+                source_descriptors,
+            )
+            allowed.update(
+                EntityResolver.normalize(str(item.get("name", "")).strip())
+                for item in source_relations
+                if item.get("strong") and str(item.get("name", "")).strip()
+            )
 
-        generated_names = planner._canonicalize_character_descriptors(
+        generated_descriptors = planner._canonicalize_character_descriptors(
             [
                 *planner.detect_character_descriptors(generated_story),
                 *planner._explicit_source_character_names(generated_story),
@@ -1376,29 +1361,23 @@ class QwenDirector(
         )
         generated_relations = planner._extract_relational_character_hints(
             generated_story,
-            generated_names,
+            generated_descriptors,
         )
-        extra = []
-        lowered_story = str(generated_story or "").lower()
-        for item in generated_relations:
-            if not item.get("strong"):
-                continue
-            canonical = str(item.get("name", "")).strip()
-            if not canonical:
-                continue
-            key = EntityResolver.normalize(canonical)
-            if key in allowed:
-                continue
-            surface_forms = [str(value).strip().lower() for value in (item.get("aliases", []) or []) if str(value).strip()]
-            occurrences = sum(lowered_story.count(surface) for surface in surface_forms)
-            if occurrences < 2:
-                extra.append(canonical)
-
-        if extra:
+        extra_relations = sorted(
+            {
+                str(item.get("name", "")).strip()
+                for item in generated_relations
+                if item.get("strong")
+                and str(item.get("name", "")).strip()
+                and EntityResolver.normalize(str(item.get("name", "")).strip()) not in allowed
+            }
+        )
+        if extra_relations:
             raise RuntimeError(
-                "Expand Story introduced insufficiently established relational character(s): "
-                + ", ".join(sorted(set(extra)))
+                "Expand Story introduced unanchored relational character(s): "
+                + ", ".join(extra_relations)
             )
+
 
     @staticmethod
     def _refresh_dialogue_summary(shot: dict) -> None:
