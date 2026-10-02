@@ -166,10 +166,6 @@ class ProductionRunner:
         )
 
     @staticmethod
-    def _plan_hash(production_plan: dict[str, Any]) -> str:
-        return ProductionCheckpoint.plan_digest(production_plan)
-
-    @staticmethod
     def _validate_checkpoint_plan(
         production_plan: dict[str, Any],
         checkpoint: dict | None,
