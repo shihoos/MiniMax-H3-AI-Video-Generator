@@ -1489,13 +1489,17 @@ class QwenDirector(
     ) -> None:
         """Make generated dialogue satisfy the exact H3 timing contract.
 
-        The Director owns creative shot structure, but H3 duration is a hard
-        production constraint. This pass therefore stays deterministic and
-        scene-local: it only repartitions existing dialogue events between
-        adjacent shots while preserving their exact text and scene order. If a
-        final event explicitly continues to the next shot, the event may also
-        be split at a whitespace boundary as a last resort. No dialogue is
-        truncated, paraphrased, or sent across a scene boundary.
+        Dialogue is a semantic contract, while H3 duration is a hard production
+        contract. This pass therefore searches only over existing dialogue events
+        and existing shot boundaries. It never invents, truncates, paraphrases, or
+        reorders spoken content, and it never creates or removes creative shots.
+
+        The search is scene-global rather than greedy pairwise: every candidate
+        repartition is validated against the exact downstream ``DialogueTimeline``
+        for the complete scene. Candidates are ordered by boundary movement so the
+        first successful solution is the smallest deterministic change to Qwen's
+        original editorial partition. Only when no intact-event repartition works
+        is an explicitly continuing final event eligible for a whitespace split.
         """
         if not shots:
             return
@@ -1518,53 +1522,221 @@ class QwenDirector(
             if len(scene_shots) < 2:
                 continue
 
-            # Work from the final ordered scene topology. Every repair is tested
-            # through the real DialogueTimeline on a deep copy before mutation.
-            for left_index in range(len(scene_shots) - 1):
-                right_index = left_index + 1
-                left = scene_shots[left_index]
-                right = scene_shots[right_index]
+            for item in scene_shots:
+                self._refresh_dialogue_summary(item)
 
-                left_events = [
+            fits, detail = self._dialogue_scene_fits_h3(scene_shots, characters)
+            if fits:
+                continue
+
+            original_events: list[dict] = []
+            original_boundaries: list[int] = []
+            running = 0
+            for shot in scene_shots[:-1]:
+                events = [
                     dict(event)
-                    for event in (left.get("dialogue_events", []) or [])
+                    for event in (shot.get("dialogue_events", []) or [])
                     if isinstance(event, dict)
                 ]
-                right_events = [
-                    dict(event)
-                    for event in (right.get("dialogue_events", []) or [])
-                    if isinstance(event, dict)
-                ]
+                original_events.extend(events)
+                running += len(events)
+                original_boundaries.append(running)
+            original_events.extend(
+                dict(event)
+                for event in (scene_shots[-1].get("dialogue_events", []) or [])
+                if isinstance(event, dict)
+            )
 
-                # Fast path: this adjacent pair already satisfies the exact
-                # downstream timing contract.
-                pair_copy = deepcopy(scene_shots)
-                for item in pair_copy:
+            if not original_events:
+                # The scheduler rejected the scene despite there being no dialogue
+                # events. That is not a repartition problem and must propagate.
+                raise RuntimeError(
+                    "Director dialogue feasibility failed for a dialogue-free scene: "
+                    f"scene={scene_id} detail={detail or 'unknown scheduler failure'}"
+                )
+
+            shot_count = len(scene_shots)
+            event_count = len(original_events)
+
+            # Enumerate all monotonic cuts through the original ordered event list.
+            # For the project's normal 2-shot scenes this is simply every possible
+            # cut. More generally this is an exact scene-global search over all
+            # event-to-shot partitions, with no duplicated timing model.
+            partition_candidates: list[tuple[int, tuple[int, ...]]] = []
+
+            def _enumerate_cuts(
+                boundary_index: int,
+                previous_cut: int,
+                cuts: list[int],
+            ) -> None:
+                if boundary_index == shot_count - 1:
+                    cost = sum(
+                        abs(cut - original)
+                        for cut, original in zip(cuts, original_boundaries)
+                    )
+                    partition_candidates.append((cost, tuple(cuts)))
+                    return
+                for cut in range(previous_cut, event_count + 1):
+                    cuts.append(cut)
+                    _enumerate_cuts(boundary_index + 1, cut, cuts)
+                    cuts.pop()
+
+            _enumerate_cuts(0, 0, [])
+            partition_candidates.sort(key=lambda item: (item[0], item[1]))
+
+            repaired = False
+            failure_detail = detail
+            original_counts = [
+                len(shot.get("dialogue_events", []) or [])
+                for shot in scene_shots
+            ]
+
+            for _, cuts in partition_candidates:
+                candidate_shots = deepcopy(scene_shots)
+                starts = [0, *cuts]
+                ends = [*cuts, event_count]
+
+                for index, (start, end) in enumerate(zip(starts, ends)):
+                    candidate_shots[index]["dialogue_events"] = deepcopy(
+                        original_events[start:end]
+                    )
+
+                for item in candidate_shots:
                     self._refresh_dialogue_summary(item)
-                fits, _ = self._dialogue_scene_fits_h3(pair_copy, characters)
-                if fits:
+
+                temp_scene = deepcopy(
+                    scene_lookup.get(scene_id, {"scene_id": scene_id})
+                )
+                self._normalize_dialogue_continuations(
+                    [temp_scene],
+                    candidate_shots,
+                )
+                for item in candidate_shots:
+                    self._refresh_dialogue_summary(item)
+
+                fits, candidate_detail = self._dialogue_scene_fits_h3(
+                    candidate_shots,
+                    characters,
+                )
+                if not fits:
+                    failure_detail = candidate_detail or failure_detail
                     continue
 
-                combined = left_events + right_events
-                original_boundary = len(left_events)
-                candidate_cuts: list[int] = []
-                for distance in range(1, len(combined)):
-                    for cut in (original_boundary - distance, original_boundary + distance):
-                        if 1 <= cut < len(combined) and cut not in candidate_cuts:
-                            candidate_cuts.append(cut)
+                for index, shot in enumerate(scene_shots):
+                    shot["dialogue_events"] = deepcopy(
+                        candidate_shots[index]["dialogue_events"]
+                    )
+                    self._refresh_dialogue_summary(shot)
 
-                repaired = False
-                failure_detail = ""
+                self._normalize_dialogue_continuations(
+                    [scene_lookup.get(scene_id, {"scene_id": scene_id})],
+                    scene_shots,
+                )
+                for item in scene_shots:
+                    self._refresh_dialogue_summary(item)
 
-                # Prefer the smallest change to the original shot partition.
-                for cut in candidate_cuts:
+                final_counts = [
+                    len(shot.get("dialogue_events", []) or [])
+                    for shot in scene_shots
+                ]
+                self._record_recovery(
+                    "dialogue_h3_repartition",
+                    f"scene={scene_id} original_counts={original_counts} "
+                    f"final_counts={final_counts} cuts={cuts}",
+                )
+                repaired = True
+                break
+
+            if repaired:
+                # Revalidate the final mutated scene using the exact downstream
+                # scheduler. This is an explicit invariant, not merely a property
+                # inferred from the candidate that happened to succeed.
+                final_fits, final_detail = self._dialogue_scene_fits_h3(
+                    scene_shots,
+                    characters,
+                )
+                if not final_fits:
+                    raise RuntimeError(
+                        "Director dialogue repair produced a scene that no longer "
+                        "satisfies the H3 timing contract: "
+                        f"scene={scene_id} detail={final_detail or failure_detail}"
+                    )
+                continue
+
+            # Last resort: split only an explicitly continuing event. Search all
+            # eligible continuation events in scene order and all whitespace cuts,
+            # while still requiring the COMPLETE scene to pass the real scheduler.
+            flattened_positions: list[tuple[int, int, dict]] = []
+            for shot_index, shot in enumerate(scene_shots):
+                for event_index, event in enumerate(
+                    shot.get("dialogue_events", []) or []
+                ):
+                    if isinstance(event, dict):
+                        flattened_positions.append((shot_index, event_index, event))
+
+            for source_shot_index, source_event_index, source_event in flattened_positions:
+                if not bool(source_event.get("continues_to_next_shot", False)):
+                    continue
+                source_text = str(source_event.get("text", "") or "")
+                if not source_text.strip():
+                    continue
+                if any(
+                    source_event.get(key) not in (None, "")
+                    for key in (
+                        "expected_duration_seconds",
+                        "duration_seconds",
+                        "expected_duration_ms",
+                    )
+                ):
+                    continue
+
+                split_positions = [
+                    index
+                    for index, char in enumerate(source_text)
+                    if char == " " and 0 < index < len(source_text) - 1
+                ]
+
+                for split_index in reversed(split_positions):
+                    first_text = source_text[:split_index]
+                    second_text = source_text[split_index + 1:]
+                    if not first_text.strip() or not second_text.strip():
+                        continue
+
+                    first_part = dict(source_event)
+                    second_part = dict(source_event)
+                    first_part["text"] = first_text
+                    second_part["continues_to_next_shot"] = True
+                    second_part["text"] = second_text
+                    second_part["continues_from_previous_shot"] = True
+                    second_part["continues_to_next_shot"] = False
+
                     candidate_shots = deepcopy(scene_shots)
-                    candidate_shots[left_index]["dialogue_events"] = deepcopy(combined[:cut])
-                    candidate_shots[right_index]["dialogue_events"] = deepcopy(combined[cut:])
+                    source_events = candidate_shots[source_shot_index].get(
+                        "dialogue_events", []
+                    ) or []
+                    candidate_shots[source_shot_index]["dialogue_events"] = (
+                        deepcopy(source_events[:source_event_index])
+                        + [first_part]
+                        + deepcopy(source_events[source_event_index + 1:])
+                    )
+
+                    # The split must cross an existing adjacent shot boundary. A
+                    # continuation event is therefore only eligible when its source
+                    # shot has a real next shot in the same scene.
+                    if source_shot_index + 1 >= shot_count:
+                        continue
+                    target_events = candidate_shots[source_shot_index + 1].get(
+                        "dialogue_events", []
+                    ) or []
+                    candidate_shots[source_shot_index + 1]["dialogue_events"] = (
+                        [second_part] + deepcopy(target_events)
+                    )
+
                     for item in candidate_shots:
                         self._refresh_dialogue_summary(item)
-
-                    temp_scene = deepcopy(scene_lookup.get(scene_id, {"scene_id": scene_id}))
+                    temp_scene = deepcopy(
+                        scene_lookup.get(scene_id, {"scene_id": scene_id})
+                    )
                     self._normalize_dialogue_continuations(
                         [temp_scene],
                         candidate_shots,
@@ -1572,117 +1744,54 @@ class QwenDirector(
                     for item in candidate_shots:
                         self._refresh_dialogue_summary(item)
 
-                    fits, detail = self._dialogue_scene_fits_h3(
+                    fits, candidate_detail = self._dialogue_scene_fits_h3(
                         candidate_shots,
                         characters,
                     )
                     if not fits:
-                        failure_detail = detail
+                        failure_detail = candidate_detail or failure_detail
                         continue
 
-                    left["dialogue_events"] = deepcopy(candidate_shots[left_index]["dialogue_events"])
-                    right["dialogue_events"] = deepcopy(candidate_shots[right_index]["dialogue_events"])
-                    self._refresh_dialogue_summary(left)
-                    self._refresh_dialogue_summary(right)
+                    for index, shot in enumerate(scene_shots):
+                        shot["dialogue_events"] = deepcopy(
+                            candidate_shots[index]["dialogue_events"]
+                        )
+                        self._refresh_dialogue_summary(shot)
                     self._normalize_dialogue_continuations(
                         [scene_lookup.get(scene_id, {"scene_id": scene_id})],
                         scene_shots,
                     )
                     for item in scene_shots:
                         self._refresh_dialogue_summary(item)
+
+                    final_fits, final_detail = self._dialogue_scene_fits_h3(
+                        scene_shots,
+                        characters,
+                    )
+                    if not final_fits:
+                        raise RuntimeError(
+                            "Director dialogue continuation split produced a scene "
+                            "that no longer satisfies the H3 timing contract: "
+                            f"scene={scene_id} detail={final_detail or failure_detail}"
+                        )
+
                     self._record_recovery(
-                        "dialogue_h3_repartition",
-                        f"scene={scene_id} shots={left.get('shot_id','')}->{right.get('shot_id','')} cut={cut}",
+                        "dialogue_h3_continuation_split",
+                        f"scene={scene_id} shot={scene_shots[source_shot_index].get('shot_id','')} "
+                        f"source_chars={len(source_text)} split_at={split_index}",
                     )
                     repaired = True
                     break
 
                 if repaired:
-                    continue
+                    break
 
-                # Last resort: if the final left-shot event explicitly continues
-                # into the next shot, split that exact line at a whitespace
-                # boundary. The concatenated spoken text remains byte-for-byte
-                # identical apart from the removed split space.
-                if left_events and bool(left_events[-1].get("continues_to_next_shot", False)):
-                    source_event = left_events[-1]
-                    source_text = str(source_event.get("text", "") or "")
-                    if not any(
-                        source_event.get(key) not in (None, "")
-                        for key in ("expected_duration_seconds", "duration_seconds", "expected_duration_ms")
-                    ):
-                        split_positions = [
-                            index
-                            for index, char in enumerate(source_text)
-                            if char == " " and index > 0 and index < len(source_text) - 1
-                        ]
-                        for split_index in reversed(split_positions):
-                            first_text = source_text[:split_index]
-                            second_text = source_text[split_index + 1:]
-                            if not first_text.strip() or not second_text.strip():
-                                continue
-
-                            first_part = dict(source_event)
-                            second_part = dict(source_event)
-                            first_part["text"] = first_text
-                            second_part["text"] = second_text
-                            first_part["continues_to_next_shot"] = True
-                            first_part["continues_from_previous_shot"] = bool(
-                                source_event.get("continues_from_previous_shot", False)
-                            )
-                            second_part["continues_from_previous_shot"] = True
-                            second_part["continues_to_next_shot"] = False
-
-                            candidate_shots = deepcopy(scene_shots)
-                            candidate_shots[left_index]["dialogue_events"] = (
-                                deepcopy(left_events[:-1]) + [first_part]
-                            )
-                            candidate_shots[right_index]["dialogue_events"] = (
-                                [second_part] + deepcopy(right_events)
-                            )
-                            for item in candidate_shots:
-                                self._refresh_dialogue_summary(item)
-
-                            temp_scene = deepcopy(scene_lookup.get(scene_id, {"scene_id": scene_id}))
-                            self._normalize_dialogue_continuations(
-                                [temp_scene],
-                                candidate_shots,
-                            )
-                            for item in candidate_shots:
-                                self._refresh_dialogue_summary(item)
-
-                            fits, detail = self._dialogue_scene_fits_h3(
-                                candidate_shots,
-                                characters,
-                            )
-                            if not fits:
-                                failure_detail = detail
-                                continue
-
-                            left["dialogue_events"] = deepcopy(candidate_shots[left_index]["dialogue_events"])
-                            right["dialogue_events"] = deepcopy(candidate_shots[right_index]["dialogue_events"])
-                            self._refresh_dialogue_summary(left)
-                            self._refresh_dialogue_summary(right)
-                            self._normalize_dialogue_continuations(
-                                [scene_lookup.get(scene_id, {"scene_id": scene_id})],
-                                scene_shots,
-                            )
-                            for item in scene_shots:
-                                self._refresh_dialogue_summary(item)
-                            self._record_recovery(
-                                "dialogue_h3_continuation_split",
-                                f"scene={scene_id} shot={left.get('shot_id','')} source_chars={len(source_text)} split_at={split_index}",
-                            )
-                            repaired = True
-                            break
-
-                if not repaired:
-                    raise RuntimeError(
-                        "Director dialogue cannot satisfy the H3 timing contract without "
-                        "dropping, truncating, or reordering spoken content: "
-                        f"scene={scene_id} shot_pair={left.get('shot_id','')}->{right.get('shot_id','')} "
-                        f"detail={failure_detail or 'no legal adjacent-shot repartition found'}"
-                    )
+            if not repaired:
+                raise RuntimeError(
+                    "Director dialogue cannot satisfy the H3 timing contract without "
+                    "dropping, truncating, or reordering spoken content: "
+                    f"scene={scene_id} detail={failure_detail or 'no legal scene-global repartition found'}"
+                )
 
     @staticmethod
     def _normalize_dialogue_continuations(
