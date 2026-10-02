@@ -1311,13 +1311,12 @@ class QwenDirectorSanitizeMixin:
             r"\bhad only begun\b",
             r"\bwould begin\b",
             r"\bwas about to\b",
-            r"\bwould have to\b",
+            r"\b(?:he|she|they|[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\s+(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
             r"\bquestions remained\b",
             r"\bwhat happened next\b",
             r"\bthe next chapter\b",
             r"\bready to discover\b",
             r"\bready to uncover\b",
-            r"\b(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
         )
 
         return any(
