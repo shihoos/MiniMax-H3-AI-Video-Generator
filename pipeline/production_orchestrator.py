@@ -1846,29 +1846,6 @@ class ProductionOrchestrator:
 
         return plan
 
-    def resume_latest_production_plan(
-        self,
-        mode: str,
-        user_input: str,
-    ) -> dict:
-
-        state = self._checkpoint_store().latest_resumable(
-            mode,
-            user_input,
-        )
-
-        if state is None:
-            raise RuntimeError(
-                "No resumable production checkpoint was found "
-                "for the supplied mode and story."
-            )
-
-        return self.resume_production_plan(
-            str(
-                state["session_id"]
-            )
-        )
-
     def unload_models(
         self,
     ):
