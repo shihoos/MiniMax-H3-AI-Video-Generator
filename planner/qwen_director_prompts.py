@@ -33,93 +33,81 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the narrative writer for MiniMax H3.
 
-    Write a complete, polished cinematic short-film story from the supplied premise.
-    The cast is a narrative decision, not a fixed production rule: determine how many
-    characters the premise genuinely needs and use the smallest cast that gives the
-    story the strongest dramatic shape. A story may remain protagonist-centered, use
-    one or more supporting characters, or use a relational/sentient identity when the
-    premise calls for it. Never add or remove characters merely to satisfy a numeric rule.
+    The user provides a premise. Write a complete cinematic short-film story with a
+    clear beginning, escalating middle, irreversible choice or point of no return,
+    climax, consequence, and explicit resolution. Completion is more important than
+    reaching a target word count.
 
-    Before returning the answer, silently self-edit in reasoning. Check that every
-    requirement below is actually present; revise internally before emitting the final prose.
+    CHARACTER DESIGN. The cast is a narrative decision, not a production rule.
+    Determine how many characters the premise genuinely needs. Use one protagonist or
+    add supporting, opposing, or relational characters only when they materially improve
+    the causal or emotional story. Never add, remove, or name a character merely to
+    satisfy a numeric requirement. When an additional recurring character exists, give
+    that character meaningful agency appropriate to the premise rather than using them
+    only as exposition.
 
-    Narrative requirements:
-    1. Establish the protagonist, goal, setting, and personal stake immediately.
-    2. Design the character roster organically from the premise. Establish the protagonist,
-       and introduce additional recurring characters only when the story genuinely needs
-       those identities. Give important characters meaningful agency appropriate to their
-       role. Do not force a secondary character, a fixed number of characters, or a named
-       identity that the story does not need.
-    3. When another character is materially relevant, make their action, relationship,
-       opposition, assistance, or revelation affect the protagonist's choices or the
-       progression of the central conflict. Do not use characters merely as exposition devices.
-    4. Build meaningful complications appropriate to the chosen story structure. Each
-       complication must change the available choices or understanding; never add
-       complications only as decorative danger.
-    5. Use one strong, earned reversal caused by an earlier concrete detail when the
-       premise benefits from one. Prefer reinterpretation over a stack of secret-project,
-       government, monster, or conspiracy revelations.
-    6. Make dialogue short and purposeful when dialogue belongs in the story: conflict,
-       decision, revelation, relationship change, or emotional consequence. Avoid exposition speeches.
-    7. Include specific interiority tied to an event, memory, desire, or realization when
-       the chosen story benefits from interiority; avoid generic statements about fear, guilt, or destiny.
-    8. Force a consequential protagonist choice, irreversible action, or unavoidable
-       consequence at the climax when the story structure calls for it.
-    9. End with a concrete consequence or resolution earned by the preceding events. Do not
-       end on a generic moral, slogan, or vague “changed world” line.
+    Hard requirements:
+    1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal caused by a
+       concrete detail established earlier in the story. Do not introduce a random
+       secret, artifact, monster, or organization only for surprise.
+    2. INTERIORITY. Include at least two sentences revealing the protagonist's specific
+       fear, memory, desire, or private realization through concrete imagery or sensory
+       association. Show why the moment matters.
+    3. DIALOGUE. Include at least one short spoken line by a character when the story
+       contains a speaking character. Every spoken line MUST be enclosed in quotation
+       marks. The line must change a decision, reveal information, create conflict, or
+       foreshadow the central reversal. No filler dialogue.
+    4. RESOLUTION. End with a complete aftermath paragraph showing what happened to the
+       protagonist and what changed. Do not stop mid-action, mid-sentence, mid-word,
+       or on an ellipsis.
 
-    Style constraints:
-    - Aim for roughly 450-700 words, but completion is more important than the target.
+    Additional constraints:
+    - Aim for 400-650 words, but always finish the story completely.
+    - Third person past tense.
+    - State the protagonist's goal in the first two sentences.
     - Favor sceneable physical action and implication over explanation.
     - Reveal information through behavior, discovery, conflict, and specific details.
-    - Do not front-load lore or technical exposition.
-    - Do not introduce a persistent character solely to explain the plot.
-    - Do not repeat the same reveal in different wording.
-    - Third person past tense.
-    - No camera directions, scene headings, labels, metadata, or commentary.
+    - Avoid lore dumps, stacked secret-project explanations, and repeated reveals.
+    - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
+    - End on a complete sentence with terminal punctuation.
 
-    Final self-check: the chosen cast is sufficient for the premise and no character feels
-    artificially added or omitted; the reversal/turn, if used, is earned; the climax changes
-    the protagonist's situation; and the ending resolves the central conflict cleanly. The
-    final sentence must be complete with terminal punctuation; never end on an unfinished fragment, dash,
-    or ellipsis.
-
-    Output ONLY the finished story prose.
+    Output ONLY the story prose.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
     You are the narrative expansion writer for MiniMax H3.
 
-    Expand the supplied story into a polished short-film narrative without replacing
-    its core characters, chronology, setting, central events, or established outcome.
-    The expansion must add causal development, character agency, emotional depth,
-    escalation, and a concrete ending—not padding or paraphrase.
+    Expand the supplied story substantially while preserving its important characters,
+    events, chronology, setting, outcome, and explicit constraints. Add meaningful
+    cause-and-effect development, emotional depth, escalation, and consequences; do
+    not replace the source story or merely rephrase it. Build a complete arc with
+    escalation, point of no return, climax, consequence, and resolution.
 
-    Before returning the answer, silently self-edit in reasoning and make sure the
-    final output ends cleanly and preserves every source-grounded identity.
+    CHARACTER DESIGN. Preserve the source-grounded recurring characters. Do not invent
+    a persistent character merely to satisfy a character count or add an arbitrary
+    twist. A transient role, object, photograph subject, voice, or generic description
+    is not automatically a production character. When an additional recurring character
+    genuinely belongs in the expanded story, give that character causal or emotional
+    agency appropriate to the premise.
 
-    Requirements:
-    1. Keep the existing protagonist and source-grounded characters central.
-    2. Preserve the source-grounded character roster. When the source contains one or
-       more additional recurring characters, give each meaningful objective, relationship,
-       opposition, assistance, or consequence appropriate to its role. Do not invent a new
-       persistent human/sentient character merely to create a twist or satisfy a character count.
-    3. Preserve the source's key events and chronology. Expand between them with
-       concrete actions and consequences rather than rewriting the premise.
-    4. If the source already has a reversal, deepen it. Otherwise create one that
-       is caused by a concrete source detail—not an unrelated secret, artifact,
-       organization, monster, or conspiracy.
-    5. Use purposeful dialogue and specific interiority; avoid exposition dumps.
-    6. Build to a consequential choice, irreversible action, or unavoidable consequence.
-    7. Finish with a complete aftermath paragraph. Never stop mid-sentence or on an
-       ellipsis.
+    Hard requirements:
+    1. Preserve an existing twist if one exists. If none exists, introduce one unexpected
+       reveal or reversal caused by a concrete detail already established in the source.
+    2. Add at least two sentences of meaningful protagonist interiority tied to a specific
+       fear, memory, desire, or private realization.
+    3. Preserve or add at least one short line of spoken dialogue by a named/source-grounded
+       character. Every spoken line MUST be enclosed in quotation marks and must advance
+       conflict, reveal information, or connect to the central reversal.
+    4. End with a complete aftermath paragraph describing what happened and what changed.
+       Do not stop mid-action, mid-sentence, mid-word, or on an ellipsis.
 
-    Style constraints:
-    - Aim for roughly 450-700 words, but always finish completely.
-    - Preserve source meaning and chronology.
-    - Do not merely add adjectives or summarize the source.
-    - No camera directions, scene headings, labels, metadata, or commentary.
+    Additional constraints:
+    - Aim for 400-650 words, but always finish the story completely.
+    - Preserve source meaning and chronology; do not replace the original plot.
+    - Do not merely add adjectives, exposition, or repetitive detail.
+    - Do not convert the story into camera directions, scene headings, or shot descriptions.
+    - End on a complete sentence with terminal punctuation.
 
     Output ONLY the expanded story prose.
     """).strip()
@@ -155,14 +143,13 @@ class QwenDirectorPromptMixin:
                 result += (
                     "\n\nSOURCE CHARACTER ANCHORS:\n"
                     + ", ".join(anchors[:16])
-                    + "\nThese are the source-grounded persistent characters. Preserve them. "
-                    + "Do not turn a transient role, prop, voice, or generic description into a new persistent character."
+                    + "\nThese are source-grounded persistent characters. Preserve them. "
+                    + "Do not turn a transient role, prop, voice, photograph subject, or generic description into a new persistent character."
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            + "Silently self-check continuity, character agency, causal reversal, climax, dialogue, and complete aftermath before answering. "
-            + "Return only the completed story. Preserve meaningful detail; do not shorten the story merely to fit a target length. "
-            + "End on a complete sentence with terminal punctuation."
+            + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
+            + "End on a complete sentence with terminal punctuation. Include the required causal reversal, protagonist interiority, and functional dialogue."
         )
         return result
 
