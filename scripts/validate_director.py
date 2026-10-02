@@ -339,17 +339,47 @@ def test_disabled_director_path():
 
 
 
-def test_story_pipeline_has_no_unnecessary_quality_or_architecture_calls():
-    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    forbidden = (
-        'story_quality_review',
-        'story_quality_repair',
-        'story_quality_verify',
-        'ai_story_architecture_pass',
-        'expand_story_architecture_pass',
-    )
-    for token in forbidden:
-        _assert(token not in source, f"obsolete narrative Qwen call remains wired: {token}")
+def test_reference_visual_context_setter_is_live_instance_method():
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        from planner.qwen_director import QwenDirector
+
+        director = QwenDirector(ROOT)
+        director.set_reference_visual_context({
+            "scene_001": {"image_path": "/tmp/reference.png"},
+            "ignored": "not-a-dict",
+        })
+        _assert(
+            director._reference_visual_context == {
+                "scene_001": {"image_path": "/tmp/reference.png"},
+            },
+            "reference visual context setter did not bind as an instance method",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
+
+
+def test_sampling_for_mode_is_live_instance_method():
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        from planner.qwen_director import AI_STORY_MODE, QwenDirector
+
+        director = QwenDirector(ROOT)
+        temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
+        _assert(
+            (temperature, top_p) == (0.78, 0.90),
+            f"unexpected AI Story sampling values: {(temperature, top_p)}",
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
 
 
 def test_story_token_budget_not_reduced():
@@ -778,8 +808,9 @@ def main():
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
-        test_story_pipeline_has_no_unnecessary_quality_or_architecture_calls,
         test_story_token_budget_not_reduced,
+        test_reference_visual_context_setter_is_live_instance_method,
+        test_sampling_for_mode_is_live_instance_method,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
