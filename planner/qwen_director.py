@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 import os
 import json
@@ -9,6 +11,7 @@ import re
 from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
 from pipeline.production_checkpoint import ProductionCheckpoint
+from pipeline.dialogue_timeline import DialogueTimeline
 
 from planner.config import (
     AI_STORY_MODE,
@@ -1311,6 +1314,20 @@ class QwenDirector(
             scenes,
             all_shots,
         )
+
+        # Enforce the same H3 dialogue feasibility contract used downstream by
+        # DialogueTimeline before the creative plan leaves the Director. This
+        # pass never rewrites spoken text or invents dialogue; it only performs
+        # deterministic, scene-local redistribution when two adjacent shots can
+        # legally carry the existing dialogue in a different partition. A final
+        # continuation-aware split is allowed only for an explicitly continuing
+        # final event, preserving the original spoken text exactly in order.
+        self._normalize_dialogue_h3_feasibility(
+            scenes,
+            all_shots,
+            characters,
+        )
+
         self._validate_dialogue_speaker_contract(
             all_shots,
             characters,
@@ -1410,6 +1427,244 @@ class QwenDirector(
             "plan": final_director_plan,
             "director_notes": director_notes,
         }
+
+    @staticmethod
+    def _refresh_dialogue_summary(shot: dict) -> None:
+        events = [
+            event
+            for event in (shot.get("dialogue_events", []) or [])
+            if isinstance(event, dict)
+        ]
+        shot["dialogue_events"] = events
+        shot["speaking_characters"] = list(dict.fromkeys(
+            str(event.get("speaker", "") or "").strip()
+            for event in events
+            if str(event.get("speaker", "") or "").strip()
+        ))
+        shot["speech_text"] = " ".join(
+            str(event.get("text", "") or "").strip()
+            for event in events
+            if str(event.get("text", "") or "").strip()
+        )
+
+    @staticmethod
+    def _dialogue_scene_fits_h3(
+        scene_shots: list[dict],
+        characters: list[dict],
+    ) -> tuple[bool, str]:
+        """Check dialogue feasibility using the exact downstream scheduler."""
+        trial_plan = {"shots": deepcopy(scene_shots)}
+        try:
+            with redirect_stdout(io.StringIO()):
+                DialogueTimeline(
+                    [dict(character) for character in characters if isinstance(character, dict)]
+                ).apply_to_plan(trial_plan)
+        except Exception as exc:
+            return False, str(exc)
+        return True, ""
+
+    def _normalize_dialogue_h3_feasibility(
+        self,
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Make generated dialogue satisfy the exact H3 timing contract.
+
+        The Director owns creative shot structure, but H3 duration is a hard
+        production constraint. This pass therefore stays deterministic and
+        scene-local: it only repartitions existing dialogue events between
+        adjacent shots while preserving their exact text and scene order. If a
+        final event explicitly continues to the next shot, the event may also
+        be split at a whitespace boundary as a last resort. No dialogue is
+        truncated, paraphrased, or sent across a scene boundary.
+        """
+        if not shots:
+            return
+
+        shots_by_scene: dict[str, list[dict]] = {}
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            scene_id = str(shot.get("scene_id", "") or "").strip()
+            if scene_id:
+                shots_by_scene.setdefault(scene_id, []).append(shot)
+
+        scene_lookup = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in scenes
+            if isinstance(scene, dict) and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        for scene_id, scene_shots in shots_by_scene.items():
+            if len(scene_shots) < 2:
+                continue
+
+            # Work from the final ordered scene topology. Every repair is tested
+            # through the real DialogueTimeline on a deep copy before mutation.
+            for left_index in range(len(scene_shots) - 1):
+                right_index = left_index + 1
+                left = scene_shots[left_index]
+                right = scene_shots[right_index]
+
+                left_events = [
+                    dict(event)
+                    for event in (left.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                ]
+                right_events = [
+                    dict(event)
+                    for event in (right.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                ]
+
+                # Fast path: this adjacent pair already satisfies the exact
+                # downstream timing contract.
+                pair_copy = deepcopy(scene_shots)
+                for item in pair_copy:
+                    self._refresh_dialogue_summary(item)
+                fits, _ = self._dialogue_scene_fits_h3(pair_copy, characters)
+                if fits:
+                    continue
+
+                combined = left_events + right_events
+                original_boundary = len(left_events)
+                candidate_cuts: list[int] = []
+                for distance in range(1, len(combined)):
+                    for cut in (original_boundary - distance, original_boundary + distance):
+                        if 1 <= cut < len(combined) and cut not in candidate_cuts:
+                            candidate_cuts.append(cut)
+
+                repaired = False
+                failure_detail = ""
+
+                # Prefer the smallest change to the original shot partition.
+                for cut in candidate_cuts:
+                    candidate_shots = deepcopy(scene_shots)
+                    candidate_shots[left_index]["dialogue_events"] = deepcopy(combined[:cut])
+                    candidate_shots[right_index]["dialogue_events"] = deepcopy(combined[cut:])
+                    for item in candidate_shots:
+                        self._refresh_dialogue_summary(item)
+
+                    temp_scene = deepcopy(scene_lookup.get(scene_id, {"scene_id": scene_id}))
+                    self._normalize_dialogue_continuations(
+                        [temp_scene],
+                        candidate_shots,
+                    )
+                    for item in candidate_shots:
+                        self._refresh_dialogue_summary(item)
+
+                    fits, detail = self._dialogue_scene_fits_h3(
+                        candidate_shots,
+                        characters,
+                    )
+                    if not fits:
+                        failure_detail = detail
+                        continue
+
+                    left["dialogue_events"] = deepcopy(candidate_shots[left_index]["dialogue_events"])
+                    right["dialogue_events"] = deepcopy(candidate_shots[right_index]["dialogue_events"])
+                    self._refresh_dialogue_summary(left)
+                    self._refresh_dialogue_summary(right)
+                    self._normalize_dialogue_continuations(
+                        [scene_lookup.get(scene_id, {"scene_id": scene_id})],
+                        scene_shots,
+                    )
+                    for item in scene_shots:
+                        self._refresh_dialogue_summary(item)
+                    self._record_recovery(
+                        "dialogue_h3_repartition",
+                        f"scene={scene_id} shots={left.get('shot_id','')}->{right.get('shot_id','')} cut={cut}",
+                    )
+                    repaired = True
+                    break
+
+                if repaired:
+                    continue
+
+                # Last resort: if the final left-shot event explicitly continues
+                # into the next shot, split that exact line at a whitespace
+                # boundary. The concatenated spoken text remains byte-for-byte
+                # identical apart from the removed split space.
+                if left_events and bool(left_events[-1].get("continues_to_next_shot", False)):
+                    source_event = left_events[-1]
+                    source_text = str(source_event.get("text", "") or "")
+                    if not any(
+                        source_event.get(key) not in (None, "")
+                        for key in ("expected_duration_seconds", "duration_seconds", "expected_duration_ms")
+                    ):
+                        split_positions = [
+                            index
+                            for index, char in enumerate(source_text)
+                            if char == " " and index > 0 and index < len(source_text) - 1
+                        ]
+                        for split_index in reversed(split_positions):
+                            first_text = source_text[:split_index]
+                            second_text = source_text[split_index + 1:]
+                            if not first_text.strip() or not second_text.strip():
+                                continue
+
+                            first_part = dict(source_event)
+                            second_part = dict(source_event)
+                            first_part["text"] = first_text
+                            second_part["text"] = second_text
+                            first_part["continues_to_next_shot"] = True
+                            first_part["continues_from_previous_shot"] = bool(
+                                source_event.get("continues_from_previous_shot", False)
+                            )
+                            second_part["continues_from_previous_shot"] = True
+                            second_part["continues_to_next_shot"] = False
+
+                            candidate_shots = deepcopy(scene_shots)
+                            candidate_shots[left_index]["dialogue_events"] = (
+                                deepcopy(left_events[:-1]) + [first_part]
+                            )
+                            candidate_shots[right_index]["dialogue_events"] = (
+                                [second_part] + deepcopy(right_events)
+                            )
+                            for item in candidate_shots:
+                                self._refresh_dialogue_summary(item)
+
+                            temp_scene = deepcopy(scene_lookup.get(scene_id, {"scene_id": scene_id}))
+                            self._normalize_dialogue_continuations(
+                                [temp_scene],
+                                candidate_shots,
+                            )
+                            for item in candidate_shots:
+                                self._refresh_dialogue_summary(item)
+
+                            fits, detail = self._dialogue_scene_fits_h3(
+                                candidate_shots,
+                                characters,
+                            )
+                            if not fits:
+                                failure_detail = detail
+                                continue
+
+                            left["dialogue_events"] = deepcopy(candidate_shots[left_index]["dialogue_events"])
+                            right["dialogue_events"] = deepcopy(candidate_shots[right_index]["dialogue_events"])
+                            self._refresh_dialogue_summary(left)
+                            self._refresh_dialogue_summary(right)
+                            self._normalize_dialogue_continuations(
+                                [scene_lookup.get(scene_id, {"scene_id": scene_id})],
+                                scene_shots,
+                            )
+                            for item in scene_shots:
+                                self._refresh_dialogue_summary(item)
+                            self._record_recovery(
+                                "dialogue_h3_continuation_split",
+                                f"scene={scene_id} shot={left.get('shot_id','')} source_chars={len(source_text)} split_at={split_index}",
+                            )
+                            repaired = True
+                            break
+
+                if not repaired:
+                    raise RuntimeError(
+                        "Director dialogue cannot satisfy the H3 timing contract without "
+                        "dropping, truncating, or reordering spoken content: "
+                        f"scene={scene_id} shot_pair={left.get('shot_id','')}->{right.get('shot_id','')} "
+                        f"detail={failure_detail or 'no legal adjacent-shot repartition found'}"
+                    )
 
     @staticmethod
     def _normalize_dialogue_continuations(
