@@ -44,6 +44,12 @@ class QwenDirectorPromptMixin:
     CAST
     - The cast is an organic narrative decision. Use only the recurring characters the premise
       genuinely needs; do not force a minimum or maximum.
+    - A person mentioned only as historical background, a dead/missing subject, a name on a
+      container/document/photograph, an off-screen incident victim, or a past project participant
+      is NOT a production character unless that person is physically present in the current story
+      and takes meaningful action.
+    - Do not promote interrogative/function words such as "Why", "When", "Where", or "How" into
+      character names.
     - When a recurring counterpart belongs in the premise, make that character an active causal or
       emotional counterpart with an immediate objective or belief that conflicts with the protagonist.
       Within the first half, that counterpart must TAKE AN ACTION that blocks, redirects, tests,
@@ -96,8 +102,13 @@ class QwenDirectorPromptMixin:
       should arrive through what characters do, discover, or risk.
     - Do not introduce a new unresolved object, person, threat, mission, or question in the final
       paragraph. The final paragraph must be aftermath, consequence, or emotional resolution.
+    - The final paragraph must describe a completed state or completed physical action in past tense.
+      Do not end with a future intention or modal plan such as "would find", "would face", "would continue",
+      "will discover", "could return", "might uncover", "was going to", or "would have to".
     - Do not end on phrases equivalent to "something had begun," "could never be undone," "more
-      remained," "the truth was still out there," or another future-hook formulation.
+      remained," "the truth was still out there," "walked into the unknown," or another future-hook
+      formulation. Do not make the final image an unexplained artifact/organism merely being alive,
+      waiting, escaping, or carried into an unknown future; the final image must show a settled consequence.
     - No camera directions, scene headings, shot descriptions, labels, JSON, analysis, or meta commentary.
     - End with a complete sentence with terminal punctuation.
 
@@ -117,8 +128,9 @@ class QwenDirectorPromptMixin:
     CHARACTER DESIGN
     - Preserve source-grounded recurring characters. Do not invent a persistent character merely
       to increase cast size or create a twist.
-    - A new recurring character is valid only when they add causal or emotional agency that changes
-      the protagonist's decisions or the central conflict.
+    - A new recurring character is valid when the expanded story genuinely establishes that identity
+      and gives it causal or emotional agency. Relational identities such as a missing parent may be
+      retained when the story makes that relationship materially important.
 
     EXPANSION SPINE
     1. Preserve the source's core premise and recognizable events.
@@ -134,18 +146,32 @@ class QwenDirectorPromptMixin:
     7. Show the aftermath and resolve the central question. The final 15-20% must be consequence,
        changed circumstance, and closure rather than another discovery.
 
+    COMPLETION BEAT CONTRACT
+    - Build the story around one protagonist goal and one dominant causal chain.
+    - Use a simple progression: goal/action -> discovery -> complication -> recontextualizing reveal
+      -> decisive choice -> completed consequence.
+    - The final beat must happen inside the story. Do not replace the consequence with a promise to
+      continue searching, uncovering, following, returning, or learning later.
+    - Prefer a concrete settled result (for example, something is sealed, destroyed, secured, recovered,
+      exposed, abandoned, or accepted) over an abstract ending about the future or "the truth."
+
     IMPORTANT EXPANSION RULES
     - Expand by causal development, not by stacking mysteries. Avoid chains such as "new vault ->
       mysterious box -> photograph -> tracker -> hidden voice -> unseen threat" unless every element
       is necessary to the same central reversal and the final story resolves it. Prefer one planted
       detail that becomes meaningful later over multiple new mystery carriers.
+    - Never promote a newly mentioned person into a recurring character. Historical, missing, dead,
+      off-screen, or archival people remain background references unless they are already in the source
+      character anchors.
     - Do not turn a photograph, recording, document, UI message, voice, prop, or generic role into a
-      persistent character unless the story genuinely establishes that identity.
-    - Dialogue must be direct speech in quotation marks and must advance conflict, reveal consequential
-      information, or change a decision.
+      persistent character unless the identity is already source-grounded.
+    - Dialogue is optional in Expand Story. If dialogue is used, it must be direct speech in quotation
+      marks and must advance conflict, reveal consequential information, or change a decision. Never
+      invent a second character merely to create dialogue.
     - Do not replace the source plot with a different plot merely to make it more dramatic.
     - Do not introduce a new unresolved mystery, threat, mission, or future objective in the final
-      paragraph. Never end on a cliffhanger or sequel hook.
+      paragraph. Never end on a cliffhanger or sequel hook. Do not finish by carrying an unexplained
+      artifact/organism away, saying it is alive or waiting, or sending the protagonist into "the unknown".
     - The final paragraph must show what happened because of the protagonist's choice and what changed.
     - No camera directions, scene headings, shot descriptions, labels, JSON, analysis, or meta commentary.
     - End with a complete sentence with terminal punctuation.
@@ -182,10 +208,12 @@ class QwenDirectorPromptMixin:
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS:\n"
+                    "\n\nSOURCE CHARACTER ANCHORS (STRICT CAST WHITELIST):\n"
                     + ", ".join(anchors[:16])
-                    + "\nThese are source-grounded persistent characters. Preserve them. "
-                    + "Do not turn a transient role, prop, voice, photograph subject, or generic description into a new persistent character."
+                    + "\nUse ONLY these canonical characters in the expanded story. "
+                    + "Do not create or promote any additional person into a recurring/persistent character. "
+                    + "People mentioned only as backstory, records, labels, photographs, missing/dead persons, "
+                    + "or unnamed relationships are not production characters unless they are already in this whitelist."
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
@@ -352,11 +380,13 @@ class QwenDirectorPromptMixin:
 
     Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
     weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
-    For every deterministic candidate that is textually grounded, explicitly classify it; do not silently omit
-    a supplied named or source-labeled character merely because the introduction uses a nameplate, badge, title,
-    dialogue attribution, or another narrative surface. Qwen may reject a candidate only when the story evidence
-    actually shows that it is not a character. Recover stable named, relational, and descriptive identities that
-    the deterministic scan may not have named yet.
+    Historical/background identities may still be characters when the story genuinely establishes them as a person
+    with a meaningful identity; do not promote a historical/background reference automatically. Interrogative/function
+    words such as "Why", "When", "Where", and "How" are never character names.
+    For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
+    them as an object label, interrogative word, or other non-identity surface. Do not promote a weak textual surface
+    into a canonical character merely because it is capitalized. Recover stable named, relational, and descriptive
+    identities that the deterministic scan may not have named yet.
     """).strip()
 
         user_payload = json.dumps(
@@ -381,7 +411,9 @@ class QwenDirectorPromptMixin:
             response_schema=self._character_extraction_json_schema(),
         )
     
-        if os.getenv("H3_DEBUG_CHARACTERS", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        # Raw character-extractor payloads are intentionally hidden from normal production logs.
+        # Use an explicit TRACE value only when low-level debugging is actually requested.
+        if os.getenv("H3_DEBUG_CHARACTERS", "0").strip().lower() == "trace":
             print("\n[CHARACTER QWEN RAW RESULT]")
             print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     
