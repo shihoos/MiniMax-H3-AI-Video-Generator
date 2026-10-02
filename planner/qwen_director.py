@@ -425,36 +425,51 @@ class QwenDirector(
                         for part in re.split(r"\n\s*\n", str(story).strip())
                         if part.strip()
                     ]
-                    if len(paragraphs) >= 2:
-                        preserved_prefix = "\n\n".join(paragraphs[:-1])
-                        current_final = paragraphs[-1]
-                        repair_user = (
-                            "Repair only the final paragraph of the existing story. Preserve every earlier paragraph, "
-                            "character, relationship, event, and established fact. Close the central conflict with a concrete "
-                            "past-tense consequence. Do not add a character, mystery, mission, threat, or future hook. "
-                            + (
-                                "Include one short direct spoken line by an existing character."
-                                if "must contain at least one explicit quoted line" in error_text
-                                else ""
-                            )
-                            + " Return only the replacement final paragraph.\n\nFULL STORY:\n"
-                            + str(story).strip()
+                    if paragraphs:
+                        final_paragraph = paragraphs[-1]
+                        sentence_matches = list(
+                            re.finditer(r"(?<=[.!?])\s+", final_paragraph)
                         )
-                        minimum_completion = 80
+                        if sentence_matches:
+                            split_at = sentence_matches[-1].end()
+                            preserved_final_body = final_paragraph[:split_at].strip()
+                        else:
+                            preserved_final_body = ""
+
+                        if preserved_final_body:
+                            preserved_prefix = "\n\n".join(paragraphs[:-1] + [preserved_final_body])
+                            repair_user = (
+                                "Replace only the final sentence of the existing story. Keep every earlier sentence, "
+                                "character, relationship, event, and established fact unchanged. Write one concrete "
+                                "past-tense consequence that closes the conflict. Do not introduce anything new. "
+                                "Do not use would, will, could, might, should, or a future intention. "
+                                "End with what happened, not what the protagonist plans to do next."
+                                + (
+                                    " Include one short direct spoken line by an existing character."
+                                    if "must contain at least one explicit quoted line" in error_text
+                                    else ""
+                                )
+                                + " Return only the replacement sentence.\n\nSTORY:\n"
+                                + str(story).strip()
+                            )
+                            minimum_completion = 24
+                        else:
+                            preserved_prefix = "\n\n".join(paragraphs[:-1])
+                            repair_user = (
+                                "Replace only the final paragraph of the existing story. Preserve every earlier paragraph, "
+                                "character, relationship, event, and established fact. Close the conflict with a concrete "
+                                "past-tense consequence. Do not introduce anything new or future-oriented. Return only "
+                                "the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
+                            )
+                            minimum_completion = 60
                     else:
                         preserved_prefix = ""
-                        current_final = ""
                         repair_user = (
-                            "Finish the existing story without changing its characters, relationships, or established events. "
-                            "Return the complete story with a concrete past-tense consequence and no future hook."
-                            + (
-                                " Include one short direct spoken line by an existing character."
-                                if "must contain at least one explicit quoted line" in error_text
-                                else ""
-                            )
+                            "Complete the existing story without changing its characters, relationships, or established events. "
+                            "End with a concrete past-tense consequence, not a future intention. Return only the finished story."
                             + "\n\nSTORY:\n" + str(story).strip()
                         )
-                        minimum_completion = 120
+                        minimum_completion = 80
                 else:
                     if mode == AI_STORY_MODE:
                         retry_requirements = (
@@ -478,8 +493,13 @@ class QwenDirector(
                     minimum_completion = 350
 
                 try:
-                    retry_temperature = max(0.50, min(0.68, temperature - 0.08))
-                    retry_top_p = max(0.80, min(0.88, top_p - 0.04))
+                    if completion_repair:
+                        # Completion repair is a constrained edit, not a new creative sample.
+                        retry_temperature = 0.20
+                        retry_top_p = 0.70
+                    else:
+                        retry_temperature = max(0.50, min(0.68, temperature - 0.08))
+                        retry_top_p = max(0.80, min(0.88, top_p - 0.04))
                     repaired = self._chat_text(
                         story_system,
                         repair_user,
