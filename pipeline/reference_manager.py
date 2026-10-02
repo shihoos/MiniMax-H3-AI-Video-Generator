@@ -116,45 +116,6 @@ class ReferenceManager:
                 path.name.lower(),
         )
 
-    def character_asset_names(
-        self,
-    ) -> list[str]:
-
-        names = set()
-
-        for path in self._files(
-            self.characters_dir,
-            IMAGE_EXTENSIONS,
-        ):
-            names.add(
-                path.stem
-            )
-
-        for path in self._files(
-            self.references_dir,
-            IMAGE_EXTENSIONS
-            | VIDEO_EXTENSIONS,
-        ):
-            names.add(
-                path.stem
-            )
-
-        if self.references_dir.is_dir():
-
-            for directory in (
-                self.references_dir.iterdir()
-            ):
-                if directory.is_dir():
-                    names.add(
-                        directory.name
-                    )
-
-        return sorted(
-            names,
-            key=lambda value:
-                self._key(value),
-        )
-
     def resolve_character(
         self,
         character_name,
