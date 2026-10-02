@@ -2561,7 +2561,9 @@ def install_sageattention_sm75(runtime: dict) -> None:
         child_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         child_env["H3_EXPECTED_SAGE_VERSION"] = expected_version
         child_env["H3_SAGE_ROOT"] = str(install_dir)
+        child_env["H3_SAGE_PHYSICAL_GPU_ID"] = str(gpu_id)
         probe = r'''import inspect
+import math
 import os
 from pathlib import Path
 import torch
@@ -2571,6 +2573,7 @@ from sageattention import sageattn
 
 expected = os.environ["H3_EXPECTED_SAGE_VERSION"]
 root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
+physical_gpu_id = os.environ["H3_SAGE_PHYSICAL_GPU_ID"]
 
 # Pinned 9f1c9a29... package export contract: __init__.py defines
 # SM75_CUDA_ENABLED and does not define SM75_ENABLED/FUSED_ENABLED.
@@ -2736,13 +2739,19 @@ def _verify_case(head_dim, smooth_k, qo_len=1024, kv_len=1024, num_heads=56, see
     ref_norm = float(torch.linalg.vector_norm(quant_reference.float()).item())
     err_norm = float(torch.linalg.vector_norm(diff).item())
     relative_l2 = err_norm / max(ref_norm, 1e-12)
-    cosine = float(
-        F.cosine_similarity(
-            out.float().reshape(1, -1),
-            quant_reference.float().reshape(1, -1),
-            dim=1,
-        ).item()
+    cosine_tensor = F.cosine_similarity(
+        out.float().reshape(1, -1),
+        quant_reference.float().reshape(1, -1),
+        dim=1,
     )
+    if not torch.isfinite(cosine_tensor).all().item():
+        raise RuntimeError("SageAttention SM75 cosine similarity is non-finite")
+    # Cosine similarity is mathematically bounded to [-1, 1], but the
+    # floating-point reduction can produce tiny round-off overshoots such as
+    # 1.00000012. Clamp only the reported/gated metric; do not alter outputs.
+    cosine = float(torch.clamp(cosine_tensor, -1.0, 1.0).item())
+    if not math.isfinite(cosine):
+        raise RuntimeError("SageAttention SM75 cosine similarity is non-finite after clamping")
     max_abs = float(diff.abs().max().item())
     mean_abs = float(diff.abs().mean().item())
 
@@ -2761,7 +2770,7 @@ def _verify_case(head_dim, smooth_k, qo_len=1024, kv_len=1024, num_heads=56, see
     fp16_mean_abs = float(fp16_diff.abs().mean().item())
 
     print(
-        f"[SAGE SM75 CASE] hd={head_dim} smooth_k={smooth_k} "
+        f"[SAGE SM75 CASE] gpu={physical_gpu_id} hd={head_dim} smooth_k={smooth_k} "
         f"shape={tuple(out.shape)} finite=PASS "
         f"kernel_relative_l2={relative_l2:.6g} "
         f"kernel_cosine={cosine:.8f} "
@@ -2774,7 +2783,7 @@ def _verify_case(head_dim, smooth_k, qo_len=1024, kv_len=1024, num_heads=56, see
     if relative_l2 > MAX_KERNEL_RELATIVE_L2 or cosine < MIN_KERNEL_COSINE:
         raise RuntimeError(
             "SageAttention SM75 kernel correctness gate failed: "
-            f"hd={head_dim}, smooth_k={smooth_k}, relative_l2={relative_l2:.6g}, "
+            f"gpu={physical_gpu_id}, hd={head_dim}, smooth_k={smooth_k}, relative_l2={relative_l2:.6g}, "
             f"cosine={cosine:.8f}, max_abs={max_abs:.6g}, mean_abs={mean_abs:.6g}; "
             f"required relative_l2<={MAX_KERNEL_RELATIVE_L2} and cosine>={MIN_KERNEL_COSINE}"
         )
