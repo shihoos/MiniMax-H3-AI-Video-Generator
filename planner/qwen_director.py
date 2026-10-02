@@ -171,174 +171,7 @@ class QwenDirector(
         }
 
     @staticmethod
-    def _story_quality_is_pass(
-        review: dict,
-    ) -> bool:
-        """Accept only a fully valid narrative-quality review."""
-        if not isinstance(review, dict):
-            return False
-
-        if review.get("pass") is not True:
-            return False
-
-        try:
-            score = int(review.get("score", -1))
-        except (TypeError, ValueError):
-            return False
-
-        if score < 32:
-            return False
-
-        core_dimensions = (
-            "secondary_character_arc",
-            "character_conflict",
-            "causal_reversal",
-            "escalation_choice",
-            "dialogue",
-            "interiority",
-            "resolution",
-        )
-        try:
-            if any(int(review.get(name, -1)) < 4 for name in core_dimensions):
-                return False
-            if int(review.get("originality", -1)) < 3:
-                return False
-        except (TypeError, ValueError):
-            return False
-
-        return True
-
     @staticmethod
-    def _story_quality_precheck(
-        story: str,
-    ) -> list[str]:
-        """Run conservative deterministic checks before/after the LLM quality gate.
-
-        Narrative judgment remains with the structured Qwen quality reviewer;
-        this deterministic gate only rejects clearly malformed output.
-        """
-        normalized = re.sub(
-            r"\s+",
-            " ",
-            str(story or "").strip(),
-        )
-        if not normalized:
-            return ["Story is empty."]
-
-        problems: list[str] = []
-
-        if normalized.startswith("```") or normalized.endswith("```"):
-            problems.append("Story contains code-fence markup instead of clean prose.")
-
-        if normalized.startswith("{") and normalized.endswith("}"):
-            problems.append("Story appears to be JSON rather than narrative prose.")
-
-        return list(dict.fromkeys(problems))[:12]
-
-    def _enforce_story_quality(
-        self,
-        mode: str,
-        user_input: str,
-        story: str,
-        source_character_names: list[str] | None = None,
-    ) -> str:
-        """Reject weak narrative drafts and perform one targeted editorial repair."""
-        deterministic_issues = self._story_quality_precheck(story)
-
-        try:
-            review = self._chat_json(
-                self._story_quality_review_system(mode),
-                self._story_quality_review_user(
-                    mode,
-                    story,
-                    source_character_names=source_character_names,
-                ),
-                minimum_completion=192,
-                temperature=0.10,
-                top_p=0.80,
-                call_name="story_quality_review",
-                max_completion=700,
-                json_mode=True,
-                disable_thinking=False,
-                response_schema=self._story_quality_json_schema(),
-            )
-        except Exception as exc:
-            raise RuntimeError(
-                "Story quality reviewer failed; refusing to accept an unreviewed narrative: "
-                + str(exc)
-            ) from exc
-
-        if self._story_quality_is_pass(review) and not deterministic_issues:
-            return story
-
-        problems = list(deterministic_issues)
-        if isinstance(review, dict):
-            problems.extend(
-                str(value).strip()
-                for value in (review.get("problems", []) or [])
-                if str(value).strip()
-            )
-        problems = list(dict.fromkeys(problems))[:12]
-
-        repair_review = dict(review) if isinstance(review, dict) else {}
-        repair_review["problems"] = problems
-
-        repaired = self._chat_text(
-            self._story_quality_repair_system(mode),
-            self._story_quality_repair_user(
-                mode,
-                story,
-                repair_review,
-                source_character_names=source_character_names,
-            ),
-            minimum_completion=350,
-            temperature=0.62,
-            top_p=0.88,
-            call_name="story_quality_repair",
-            max_completion=2200,
-            disable_thinking=False,
-        )
-
-        self._validate_mode_output(
-            mode,
-            user_input,
-            repaired,
-        )
-
-        repaired_issues = self._story_quality_precheck(repaired)
-        repaired_review = self._chat_json(
-            self._story_quality_review_system(mode),
-            self._story_quality_review_user(
-                mode,
-                repaired,
-                source_character_names=source_character_names,
-            ),
-            minimum_completion=192,
-            temperature=0.10,
-            top_p=0.80,
-            call_name="story_quality_verify",
-            max_completion=512,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._story_quality_json_schema(),
-        )
-
-        if not self._story_quality_is_pass(repaired_review) or repaired_issues:
-            details = list(repaired_issues)
-            if isinstance(repaired_review, dict):
-                details.extend(
-                    str(value).strip()
-                    for value in (repaired_review.get("problems", []) or [])
-                    if str(value).strip()
-                )
-            details = list(dict.fromkeys(details))[:10]
-            raise RuntimeError(
-                "Story quality gate could not produce an acceptable narrative: "
-                + "; ".join(details)
-            )
-
-        return repaired
-
     def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
         self._reference_visual_context = {
             str(key): dict(value)
@@ -557,42 +390,9 @@ class QwenDirector(
             )
 
             try:
-                story_blueprint = {}
-                try:
-                    story_blueprint = self._chat_json(
-                        self._story_architecture_system(mode),
-                        self._story_architecture_user(
-                            mode,
-                            user_input,
-                            source_character_names=source_character_names,
-                        ),
-                        minimum_completion=320,
-                        temperature=0.50,
-                        top_p=0.90,
-                        call_name=(
-                            "ai_story_architecture_pass"
-                            if mode == AI_STORY_MODE
-                            else "expand_story_architecture_pass"
-                        ),
-                        max_completion=900,
-                        json_mode=True,
-                        disable_thinking=False,
-                        response_schema=self._story_architecture_json_schema(),
-                    )
-                except Exception as exc:
-                    self._record_recovery(
-                        "story_architecture_fallback",
-                        str(exc),
-                    )
-                    story_blueprint = {}
-
-                writer_user = story_user
-                if story_blueprint:
-                    writer_user += self._story_writer_blueprint_instruction(story_blueprint)
-
                 story = self._chat_text(
                     story_system,
-                    writer_user,
+                    story_user,
                     minimum_completion=350,
                     temperature=temperature,
                     top_p=top_p,
@@ -604,73 +404,66 @@ class QwenDirector(
                     max_completion=2200,
                     disable_thinking=False,
                 )
-
                 self._validate_mode_output(
                     mode,
                     user_input,
                     story,
                 )
                 generated_story = True
-
             except RuntimeError as first_error:
-
-                if mode == EXPAND_USER_STORY_MODE:
-                    # Expansion failure must not trigger another expensive
-                    # Qwen call. The original user story is the deterministic
-                    # correctness fallback; downstream planning can continue.
-                    self._record_recovery(
-                        "expand_story_source_fallback",
-                        str(first_error),
-                    )
-                    story = self._normalize_story(
-                        user_input
-                    )
-                    self._validate_mode_output(
-                        PRESERVE_USER_STORY_MODE,
-                        user_input,
-                        story,
-                    )
-                else:
-                    failure_text = str(first_error)
-                    retry_user = (
-                        story_user
-                        + "\n\n"
-                        "REPAIR REQUIRED.\n"
-                        + f"Previous validation failure: {failure_text}\n"
-                        + "Write a complete, shorter story of about 350-450 words. "
-                        "Prioritize reaching the resolution and ending on a complete sentence over extra detail. "
-                        "Return ONLY the story prose. "
-                        "Do not output JSON or commentary."
-                    )
-
+                failure_text = str(first_error)
+                retry_user = (
+                    story_user
+                    + "\n\n"
+                    "SELF-CHECK FAILED. Rewrite the story once, completely.\n"
+                    + f"Previous validation failure: {failure_text}\n"
+                    + "Preserve the strongest established premise and characters. "
+                    + "Do not shorten the narrative to satisfy the validator. "
+                    + "Finish every causal beat, the climax, and the concrete aftermath. "
+                    + "Return ONLY the finished story prose on a complete final sentence."
+                )
+                try:
                     story = self._chat_text(
                         story_system,
                         retry_user,
                         minimum_completion=350,
-                        temperature=min(
-                            0.85,
-                            max(0.70, temperature + 0.10),
-                        ),
+                        temperature=min(0.85, max(0.70, temperature + 0.10)),
                         top_p=0.92,
-                        call_name="ai_story_text_retry",
-                        max_completion=1600,
-                        disable_thinking=True,
+                        call_name=(
+                            "ai_story_text_retry"
+                            if mode == AI_STORY_MODE
+                            else "expand_story_text_retry"
+                        ),
+                        max_completion=2200,
+                        disable_thinking=False,
                     )
-
                     self._validate_mode_output(
                         mode,
                         user_input,
                         story,
                     )
                     generated_story = True
+                except RuntimeError as retry_error:
+                    if mode == EXPAND_USER_STORY_MODE:
+                        # Last-resort semantic preservation. This is only reached
+                        # after two complete generation attempts fail deterministic
+                        # validation; never silently replace a valid expansion.
+                        self._record_recovery(
+                            "expand_story_source_fallback",
+                            str(retry_error),
+                        )
+                        story = self._normalize_story(user_input)
+                        self._validate_mode_output(
+                            PRESERVE_USER_STORY_MODE,
+                            user_input,
+                            story,
+                        )
+                    else:
+                        raise RuntimeError(
+                            "AI Story generation failed validation after the controlled retry: "
+                            + str(retry_error)
+                        ) from retry_error
 
-            if generated_story and mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-                story = self._enforce_story_quality(
-                    mode,
-                    user_input,
-                    story,
-                    source_character_names=source_character_names,
-                )
 
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
@@ -735,10 +528,47 @@ class QwenDirector(
             for item in resume_roster:
                 canonical_characters.append(Character.from_dict(deepcopy(item)))
         else:
+            # Named-only stories have a deterministic canonical roster already:
+            # every identity is strongly grounded, no relational/descriptive
+            # identity needs semantic adjudication, so avoid two redundant Qwen
+            # calls. Ambiguous/relational/descriptive stories still use the
+            # bounded semantic extraction + adjudication path.
+            deterministic_descriptors = planner._canonicalize_character_descriptors(
+                [
+                    *planner.detect_character_descriptors(canonical_source_story),
+                    *planner._explicit_source_character_names(canonical_source_story),
+                ]
+            )
+            title_tokens = {
+                "dr", "doctor", "prof", "professor", "mr", "mrs", "ms", "miss",
+                "captain", "commander", "detective", "agent",
+            }
+            deterministic_descriptors = [
+                name for name in deterministic_descriptors
+                if str(name).strip().lower().rstrip(".") not in title_tokens
+            ]
+            relational_hints = planner._extract_relational_character_hints(
+                canonical_source_story,
+                deterministic_descriptors,
+            )
+            has_descriptive_identity = any(
+                planner._descriptive_identity_is_grounded(
+                    canonical_source_story,
+                    name,
+                )
+                for name in deterministic_descriptors
+            )
+            named_only_deterministic = bool(deterministic_descriptors) and not relational_hints and not has_descriptive_identity and all(
+                planner._high_confidence_deterministic_character(
+                    canonical_source_story,
+                    name,
+                )
+                for name in deterministic_descriptors
+            )
             canonical_characters = planner.create_characters(
                 canonical_source_story,
-                qwen_character_extractor=self.extract_character_entities,
-                qwen_character_adjudicator=self.adjudicate_character_entities,
+                qwen_character_extractor=None if named_only_deterministic else self.extract_character_entities,
+                qwen_character_adjudicator=None if named_only_deterministic else self.adjudicate_character_entities,
             )
 
         character_payloads = []
