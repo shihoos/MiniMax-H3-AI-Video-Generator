@@ -786,6 +786,28 @@ def test_dialogue_h3_feasibility_propagates_non_timing_errors():
         qwen_director_module.DialogueTimeline = original
 
 
+def test_cinematic_compiler_missing_speaking_characters_stays_empty():
+    from planner.cinematic_compiler import CinematicCompiler
+
+    compiler = CinematicCompiler({"Eli"})
+    scene = {
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "description": "A station corridor.",
+    }
+    shot = {
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Eli"],
+        "dialogue_events": [],
+    }
+    compiled = compiler.compile_all([scene], [shot])
+    _assert(
+        compiled[0]["speaking_characters"] == [],
+        "Missing speaking_characters must not inherit every scene character.",
+    )
+
+
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
