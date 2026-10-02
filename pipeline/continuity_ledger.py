@@ -81,23 +81,6 @@ class ContinuityLedger:
         return result
 
     @staticmethod
-    def _character_lookup(characters: list[Character | dict]):
-        by_name: dict[str, Character | dict] = {}
-        by_id: dict[str, Character | dict] = {}
-        for item in characters:
-            if isinstance(item, Character):
-                by_name[item.name.strip().lower()] = item
-                by_id[item.character_id] = item
-            else:
-                name = str(item.get("name", "")).strip().lower()
-                cid = str(item.get("character_id", "")).strip()
-                if name:
-                    by_name[name] = item
-                if cid:
-                    by_id[cid] = item
-        return by_name, by_id
-
-    @staticmethod
     def _state_for_shot(shot: dict, prefix: str) -> dict[str, Any]:
         explicit = shot.get(prefix)
         if isinstance(explicit, dict) and explicit:
