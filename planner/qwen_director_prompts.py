@@ -126,11 +126,10 @@ class QwenDirectorPromptMixin:
     finish the narrative.
 
     CHARACTER DESIGN
-    - Preserve source-grounded recurring characters. Do not invent a persistent character merely
-      to increase cast size or create a twist.
-    - A new recurring character is valid when the expanded story genuinely establishes that identity
-      and gives it causal or emotional agency. Relational identities such as a missing parent may be
-      retained when the story makes that relationship materially important.
+    - Preserve source-grounded recurring characters. Do not invent a persistent character merely to
+      increase cast size, create dialogue, or satisfy structure.
+    - A new recurring character is valid when the expansion genuinely establishes that identity and gives
+      it meaningful causal or emotional agency. Do not promote a prop, record, photograph, voice, or generic role.
 
     EXPANSION SPINE
     1. Preserve the source's core premise and recognizable events.
@@ -160,11 +159,10 @@ class QwenDirectorPromptMixin:
       mysterious box -> photograph -> tracker -> hidden voice -> unseen threat" unless every element
       is necessary to the same central reversal and the final story resolves it. Prefer one planted
       detail that becomes meaningful later over multiple new mystery carriers.
-    - Never promote a newly mentioned person into a recurring character. Historical, missing, dead,
-      off-screen, or archival people remain background references unless they are already in the source
-      character anchors.
+    - A newly mentioned person is not automatically a recurring character. Keep the identity only when
+      the story genuinely establishes a persistent person with meaningful agency; otherwise keep it as background.
     - Do not turn a photograph, recording, document, UI message, voice, prop, or generic role into a
-      persistent character unless the identity is already source-grounded.
+      persistent character unless the story genuinely establishes that identity.
     - Dialogue is optional in Expand Story. If dialogue is used, it must be direct speech in quotation
       marks and must advance conflict, reveal consequential information, or change a decision. Never
       invent a second character merely to create dialogue.
@@ -208,17 +206,14 @@ class QwenDirectorPromptMixin:
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (STRICT CAST WHITELIST):\n"
+                    "\n\nSOURCE CHARACTER ANCHORS:\n"
                     + ", ".join(anchors[:16])
-                    + "\nUse ONLY these canonical characters in the expanded story. "
-                    + "Do not create or promote any additional person into a recurring/persistent character. "
-                    + "People mentioned only as backstory, records, labels, photographs, missing/dead persons, "
-                    + "or unnamed relationships are not production characters unless they are already in this whitelist."
+                    + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
             + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
-            + "End on a complete sentence with terminal punctuation. Include the required causal reversal, protagonist interiority, and functional dialogue."
+            + "End on a complete sentence with terminal punctuation. Include the required causal reversal and protagonist interiority. Use dialogue only when a grounded character can carry it."
         )
         return result
 
@@ -380,13 +375,14 @@ class QwenDirectorPromptMixin:
 
     Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
     weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
-    Historical/background identities may still be characters when the story genuinely establishes them as a person
-    with a meaningful identity; do not promote a historical/background reference automatically. Interrogative/function
-    words such as "Why", "When", "Where", and "How" are never character names.
+    A person mentioned only as a historical incident, dead/missing subject, past researcher, archival reference,
+    name on a container/document/photograph, or other backstory-only identity is NOT a production character
+    unless that person is physically present in the story and takes meaningful action.
+    Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
     For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
-    them as an object label, interrogative word, or other non-identity surface. Do not promote a weak textual surface
-    into a canonical character merely because it is capitalized. Recover stable named, relational, and descriptive
-    identities that the deterministic scan may not have named yet.
+    them as an object label, historical/backstory reference, interrogative word, or other non-present identity.
+    Do not promote a weak textual surface into a canonical character merely because it is capitalized.
+    Recover stable named, relational, and descriptive identities that the deterministic scan may not have named yet.
     """).strip()
 
         user_payload = json.dumps(
