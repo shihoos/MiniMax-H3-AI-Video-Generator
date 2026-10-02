@@ -1705,7 +1705,6 @@ class QwenDirector(
                     first_part = dict(source_event)
                     second_part = dict(source_event)
                     first_part["text"] = first_text
-                    second_part["continues_to_next_shot"] = True
                     second_part["text"] = second_text
                     second_part["continues_from_previous_shot"] = True
                     second_part["continues_to_next_shot"] = False
