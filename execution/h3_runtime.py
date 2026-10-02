@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline.vram_profile import VRAMProfile, resolve_vram_profile
-from planner.config import RUNTIME
+from planner.config import RUNTIME, STORAGE_KEEP_WORKER_LOGS
 
 
 class H3Runtime:
@@ -359,6 +359,13 @@ class H3Runtime:
                 handle.close()
             except Exception:
                 pass
+            if not STORAGE_KEEP_WORKER_LOGS:
+                try:
+                    log_path = getattr(handle, "name", "")
+                    if log_path:
+                        Path(log_path).unlink(missing_ok=True)
+                except (OSError, TypeError):
+                    pass
 
     @classmethod
     def stop_workers(cls, workers):
