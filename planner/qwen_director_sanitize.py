@@ -1298,6 +1298,10 @@ class QwenDirectorSanitizeMixin:
         hook_patterns = (
             r"\bset something in motion(?: that)?\b",
             r"\bcould never be undone\b",
+            r"\b(?:walked|stepped|headed|disappeared|went) into the unknown\b",
+            r"\b(?:was|were|is|are) waiting\b",
+            r"\b(?:awaited|awaiting)\b",
+            r"\bthe unknown\b",
             r"\bstill remained\b",
             r"\bmore remained\b",
             r"\bthe truth was still out there\b",
@@ -1313,6 +1317,7 @@ class QwenDirectorSanitizeMixin:
             r"\bthe next chapter\b",
             r"\bready to discover\b",
             r"\bready to uncover\b",
+            r"\b(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
         )
 
         return any(
@@ -1343,9 +1348,13 @@ class QwenDirectorSanitizeMixin:
         if mode not in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
             return
 
-        if not self._story_has_explicit_dialogue(result):
+        # AI Story is a free-form cinematic generation pass where direct dialogue is part of
+        # the narrative contract. Expand Story may legitimately be a one-character expansion,
+        # so requiring a second speaker or even spoken dialogue can itself cause the model to
+        # invent an unwanted character and trigger an avoidable retry.
+        if mode == AI_STORY_MODE and not self._story_has_explicit_dialogue(result):
             raise RuntimeError(
-                "Generated story must contain at least one explicit quoted line of direct dialogue."
+                "Generated AI story must contain at least one explicit quoted line of direct dialogue."
             )
 
         if self._story_has_open_ended_finale(result):
