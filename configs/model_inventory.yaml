@@ -82,4 +82,9 @@ policy:
   # multimodal H3 conditioning encoder.
   allow_additional_qwen_models: false
 
+  # Advisory only: the bootstrap intentionally has no canonical Kaggle dataset
+  # identity field for the upscaler source, so this policy cannot be enforced
+  # safely without inventing a dataset-path convention. Keep it as documentation,
+  # not as a false runtime guarantee.
   allow_separate_upscaler_dataset: false
+
