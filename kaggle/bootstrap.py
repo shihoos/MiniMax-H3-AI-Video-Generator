@@ -1,7 +1,6 @@
 from __future__ import annotations
 import hashlib
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -2124,60 +2123,6 @@ def install_nodes() -> None:
 # then applied in-place with fail-closed replacement counts. No external patch
 # artifact or checksum bookkeeping is required.
 def _apply_sage_sm75_source_corrections(source: str) -> str:
-    """Apply the locked SM75 corrections with indentation-tolerant contracts.
-
-    The pinned SageAttention source is still treated as an exact semantic contract:
-    every block must match exactly once.  Only leading whitespace is ignored when
-    locating a block, because upstream formatting changes must not invalidate a
-    kernel patch that is otherwise byte-for-byte identical.  Replacement preserves
-    the indentation of the matched source block, so the generated CUDA remains
-    structurally identical regardless of harmless indentation drift.
-    """
-    def replace_block(text: str, old: str, new: str, label: str) -> str:
-        old_lines = old.strip("\n").splitlines()
-        if not old_lines:
-            raise RuntimeError(f"SageAttention SM75 {label}: empty source contract")
-
-        # Match each line exactly except for leading spaces/tabs.  This fixes the
-        # recurring false-negative caused by a single first-line indentation drift.
-        pattern_lines = []
-        for line in old_lines:
-            if line.strip():
-                pattern_lines.append(r"^[ \t]*" + re.escape(line.lstrip()) + r"(?:\r?\n|$)")
-            else:
-                pattern_lines.append(r"^[ \t]*(?:\r?\n|$)")
-        pattern = re.compile("".join(pattern_lines), re.MULTILINE)
-        matches = list(pattern.finditer(text))
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"SageAttention SM75 {label}: expected exactly one source match, found {len(matches)}"
-            )
-
-        match = matches[0]
-        matched_text = match.group(0)
-        matched_lines = matched_text.splitlines()
-        source_first_indent = len(matched_lines[0]) - len(matched_lines[0].lstrip(" \t"))
-        old_first_indent = len(old_lines[0]) - len(old_lines[0].lstrip(" \t"))
-        indent_delta = source_first_indent - old_first_indent
-
-        new_lines = new.strip("\n").splitlines()
-        rendered = []
-        for line in new_lines:
-            if not line.strip():
-                rendered.append("")
-                continue
-            leading_len = len(line) - len(line.lstrip(" \t"))
-            if indent_delta >= 0:
-                leading = (" " * indent_delta) + line[:leading_len]
-            else:
-                remove = min(-indent_delta, leading_len)
-                leading = line[:leading_len][remove:]
-            rendered.append(leading + line.lstrip(" \t"))
-        replacement = "\n".join(rendered)
-        if matched_text.endswith("\n"):
-            replacement += "\n"
-        return text[:match.start()] + replacement + text[match.end():]
-
     old = r"""            // CRITICAL FIX: Renormalize RO AFTER computing both mq but BEFORE PV MMA
             // This ensures: O_new = exp(m_old - m_new) * O_old + P @ V
             // Each thread writes 2 output rows (2*(lane_id/4) and 2*(lane_id/4)+1).
@@ -2228,7 +2173,12 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
             // --- PV Computation (m16n8k8 FP16 MMA): RO += P × V ---
 """
-    source = replace_block(source, old, new, "PV renormalization correction")
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(
+            f"SageAttention SM75 PV renormalization correction: expected exactly one source match, found {count}"
+        )
+    source = source.replace(old, new, 1)
     print("[SAGE SM75 PATCH] SM75 PV renormalization correction: PASS")
 
     old = r"""    // --- Final Normalization ---
@@ -2276,7 +2226,12 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
     // --- Output ---
 """
-    source = replace_block(source, old, new, "final normalization correction")
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(
+            f"SageAttention SM75 final normalization correction: expected exactly one source match, found {count}"
+        )
+    source = source.replace(old, new, 1)
     print("[SAGE SM75 PATCH] SM75 final normalization correction: PASS")
 
     old = r"""        // For m16n8k8, each thread covers a 2×2 block of the 16×8 output.
@@ -2294,7 +2249,12 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         uint32_t thread_col1 = thread_col0 + 1;
         uint32_t smem_row_base = o_start_row_warp;
 """
-    source = replace_block(source, old, new, "staged-output fragment mapping correction")
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(
+            f"SageAttention SM75 staged-output fragment mapping correction: expected exactly one source match, found {count}"
+        )
+    source = source.replace(old, new, 1)
     print("[SAGE SM75 PATCH] SM75 staged-output fragment mapping correction: PASS")
 
     old = r"""        // Path B: Direct scattered write using the 2×2 per-thread mapping
@@ -2351,41 +2311,31 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         }
     }
 """
-    source = replace_block(source, old, new, "direct-output fragment mapping correction")
+    count = source.count(old)
+    if count != 1:
+        raise RuntimeError(
+            f"SageAttention SM75 direct-output fragment mapping correction: expected exactly one source match, found {count}"
+        )
+    source = source.replace(old, new, 1)
     print("[SAGE SM75 PATCH] SM75 direct-output fragment mapping correction: PASS")
 
-    old = r"""              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              constexpr int WARP_K_SM75 = 16;
-
-"""
-    new = r"""              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
-              constexpr int WARP_K_SM75 = 64;
-"""
-    source = replace_block(source, old, new, "base WARP_K correction")
-    print("[SAGE SM75 PATCH] SM75 base WARP_K correction: PASS")
-
-    old = r"""            using DTypeOut = half;
-              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              constexpr int WARP_K_SM75 = 16;
-                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
-"""
-    new = r"""            using DTypeOut = half;
-              constexpr int CTA_Q_SM75 = 32;
-              constexpr int CTA_K_SM75 = 64;
-              constexpr int WARP_Q_SM75 = 16;
-              // H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile to eliminate cross-K-warp softmax/output races.
-              constexpr int WARP_K_SM75 = 64;
-                constexpr MaskMode mask_mode = IS_CAUSAL ? MaskMode::kCausal : MaskMode::kNone;
-"""
-    source = replace_block(source, old, new, "smem-O WARP_K correction")
-    print("[SAGE SM75 PATCH] SM75 smem-O WARP_K correction: PASS")
+    legacy = "constexpr int WARP_K_SM75 = 16;"
+    fixed = "constexpr int WARP_K_SM75 = 64;"
+    patch_marker = (
+        "// H3-T4-SM75-KERNEL-FIX: pair each Q warp with the full CTA_K tile "
+        "to eliminate cross-K-warp softmax/output races.\n"
+    )
+    legacy_count = source.count(legacy)
+    fixed_count = source.count(fixed)
+    marker_count = source.count("H3-T4-SM75-KERNEL-FIX")
+    if not (legacy_count == 2 and fixed_count == 0 and marker_count == 0):
+        raise RuntimeError(
+            "SageAttention SM75 WARP_K source contract changed: expected exactly "
+            "two unmodified WARP_K_SM75=16 declarations before applying the fix "
+            f"(legacy={legacy_count}, fixed={fixed_count}, markers={marker_count})"
+        )
+    source = source.replace(legacy, patch_marker + fixed)
+    print("[SAGE SM75 PATCH] SM75 WARP_K dual-declaration correction: PASS")
 
     return source
 
