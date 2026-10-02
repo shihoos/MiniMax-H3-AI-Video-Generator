@@ -4,7 +4,6 @@ from pathlib import Path
 import json
 import hashlib
 import os
-import shutil
 from contextlib import contextmanager
 from typing import Any
 
