@@ -299,27 +299,6 @@ class ComfyClient:
             )
             return False
 
-    def get_object_info(
-        self,
-    ):
-
-        result = self._request(
-            "GET",
-            "/object_info",
-            retry=True,
-        )
-
-        if not isinstance(
-            result,
-            dict,
-        ):
-
-            raise RuntimeError(
-                "Invalid /object_info response."
-            )
-
-        return result
-
     def convert_workflow(
         self,
         workflow,
@@ -696,72 +675,3 @@ class ComfyClient:
             ".webm",
         }
 
-    @classmethod
-    def find_video_outputs(
-        cls,
-        history,
-    ):
-
-        results = []
-
-        outputs = history.get(
-            "outputs",
-            {},
-        )
-
-        if not isinstance(
-            outputs,
-            dict,
-        ):
-            return results
-
-        for node_output in outputs.values():
-
-            if not isinstance(
-                node_output,
-                dict,
-            ):
-                continue
-
-            for items in node_output.values():
-
-                if not isinstance(
-                    items,
-                    list,
-                ):
-                    continue
-
-                for item in items:
-
-                    if not isinstance(
-                        item,
-                        dict,
-                    ):
-                        continue
-
-                    filename = item.get(
-                        "filename"
-                    )
-
-                    if (
-                        filename
-                        and cls._is_video(
-                            filename
-                        )
-                    ):
-
-                        results.append(
-                            {
-                                "filename": filename,
-                                "subfolder": item.get(
-                                    "subfolder",
-                                    "",
-                                ),
-                                "type": item.get(
-                                    "type",
-                                    "output",
-                                ),
-                            }
-                        )
-
-        return results
