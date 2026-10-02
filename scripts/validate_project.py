@@ -680,7 +680,7 @@ def validate_h3_builder_behavior() -> None:
 
 def validate_short_story_planner_contract() -> None:
     """Exercise the deterministic planner's minimum four-unit behavior without loading Qwen."""
-    from planner.production_planner import ProductionPlanner, StoryUnit
+    from planner.production_planner import ProductionPlanner
     planner = ProductionPlanner(ROOT)
     for text in ("John enters the room.", "John enters the room and sees a light."):
         units = planner._split_story(text)
@@ -1805,6 +1805,15 @@ def validate_media_contracts() -> None:
     print("PASS media contract validator")
 
 
+def check_parallel_safe_contract() -> None:
+    orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
+    example = (ROOT / "examples/production_config.json").read_text(encoding="utf-8")
+    if "parallel_safe" in orchestrator:
+        raise RuntimeError("ProductionOrchestrator must not emit unused parallel_safe scheduler metadata.")
+    if '"parallel_safe"' in example:
+        raise RuntimeError("Example production config must not expose unused parallel_safe metadata.")
+
+
 def main() -> None:
 
     validate_files()
@@ -1838,6 +1847,7 @@ def main() -> None:
     validate_ffprobe_stream_duration_semantics()
     validate_production_orchestrator_contract()
     validate_runtime_config_alignment()
+    check_parallel_safe_contract()
 
     
     print(
