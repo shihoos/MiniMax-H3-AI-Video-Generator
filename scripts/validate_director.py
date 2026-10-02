@@ -29,12 +29,26 @@ def test_deterministic_character_regressions():
 
 
 def test_story_prompt_restores_successful_compact_narrative_contract():
-    source = Path(ROOT, "planner", "qwen_director_prompts.py").read_text(encoding="utf-8")
+    source = Path(ROOT, "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("The user provides a premise." in source, "AI story prompt must use the proven premise framing")
+    _assert("Write a complete cinematic short-film story with a clear beginning" in source, "AI story prompt must use the proven compact narrative contract")
+    _assert("SUBVERT THE OBVIOUS" in source, "AI story prompt must require one earned reversal")
+    _assert("Include at least one short line of spoken dialogue by a named" in source, "AI story prompt must require named-character dialogue")
+    _assert("End with a complete aftermath paragraph showing what happened" in source, "AI story prompt must require an explicit aftermath")
     _assert("Aim for 400-650 words" in source, "AI/Expand story target must remain 400-650 words")
-    _assert("The cast is a narrative decision" in source, "story prompt must keep flexible Qwen-determined cast selection")
-    _assert("Never add, remove, or name a character" in source, "story prompt must not impose a character count")
-    _assert("End on a complete sentence with terminal punctuation" in source, "story prompt final-sentence contract is missing")
+    _assert("One protagonist whose goal is stated in the first two sentences" in source, "AI story opening contract is missing")
     _assert("Prioritize finishing the full narrative" in source, "story user prompt must prioritize completion over padding")
+    _assert("The cast is a narrative decision, not a production rule." in source, "cast selection must remain flexible")
+    _assert("Do not force a minimum or maximum cast" in source, "cast size must remain flexible")
+    _assert("active causal or emotional counterpart" in source, "recurring supporting characters must be causally active")
+    _assert("first major action must be caused by that goal" in source, "opening must be goal-driven")
+    _assert("meaningful resistance, opposition, or consequence" in source, "protagonist must face meaningful early resistance")
+    _assert("Before the midpoint, create at least one meaningful interaction" in source, "story must contain an early interactive beat")
+    _assert("PAYOFF DETAIL" in source, "story must plant and pay off a concrete detail")
+    _assert("one dominant causal reversal" in source, "story must avoid stacked unrelated twists")
+    _assert("final image or behavior that echoes an earlier detail" in source, "resolution should echo an earlier planted detail")
+    _assert("Use one protagonist or" not in source, "single-protagonist bias must remain absent")
+    _assert("when the story contains a speaking character" not in source, "dialogue requirement must not be weakened")
     _assert("final character must end" not in source.lower(), "obsolete final-character wording remains")
 
 
@@ -447,7 +461,9 @@ def test_sampling_for_mode_is_live_instance_method():
 
 def test_story_token_budget_not_reduced():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    _assert('max_completion=2200' in source, "story generation budget must remain 2200")
+    _assert(source.count('max_completion=1800') >= 2, "story generation budget must be 1800 for primary pass and retry")
+    _assert(source.count('disable_thinking=True') >= 2, "story generation must keep the proven no-think mode")
+    _assert('max_completion=2200' not in source, "old 2200 story budget must not regress back in")
     _assert('expand_story_text_retry' in source, "Expand Story controlled retry must remain available")
 
 def test_named_only_roster_skips_semantic_character_calls_safely():
