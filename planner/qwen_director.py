@@ -1459,8 +1459,26 @@ class QwenDirector(
                 DialogueTimeline(
                     [dict(character) for character in characters if isinstance(character, dict)]
                 ).apply_to_plan(trial_plan)
-        except Exception as exc:
-            return False, str(exc)
+        except ValueError as exc:
+            detail = str(exc)
+            # Treat only scheduler errors that specifically mean the dialogue
+            # cannot fit the H3 timing contract as a failed feasibility trial.
+            # Other ValueErrors (empty dialogue, invalid speaker binding,
+            # continuation mismatch, overlap, etc.) are real source/contract
+            # defects and must propagate instead of being misclassified as a
+            # candidate partition that simply does not fit.
+            feasibility_markers = (
+                "maximum H3 runtime",
+                "maximum schedulable H3 runtime",
+                "maximum legal duration",
+                "H3-effective shot boundary",
+                "dialogue does not fit shot duration",
+                "dialogue timing exceeds",
+                "dialogue exceeds H3-effective shot duration",
+            )
+            if any(marker in detail for marker in feasibility_markers):
+                return False, detail
+            raise
         return True, ""
 
     def _normalize_dialogue_h3_feasibility(
