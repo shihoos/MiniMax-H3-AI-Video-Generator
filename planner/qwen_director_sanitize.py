@@ -1271,6 +1271,63 @@ class QwenDirectorSanitizeMixin:
         return coverage, missing
 
     @staticmethod
+    def _story_has_explicit_dialogue(text: str) -> bool:
+        value = str(text or "")
+        return bool(
+            re.search(
+                r'"[^"\n]+"|“[^”\n]+”|‘[^’\n]+’|(?<!\w)\'[^\'\n]+\'(?!\w)',
+                value,
+                flags=re.UNICODE,
+            )
+        )
+
+    @staticmethod
+    def _story_has_open_ended_finale(text: str) -> bool:
+        value = str(text or "").strip()
+        if not value:
+            return True
+
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", value)
+            if sentence.strip()
+        ]
+        final_sentence = sentences[-1].lower() if sentences else value.lower()
+        final_paragraph = value.split("\n\n")[-1].strip().lower()
+
+        hook_patterns = (
+            r"\bset something in motion(?: that)?\b",
+            r"\bcould never be undone\b",
+            r"\bstill remained\b",
+            r"\bmore remained\b",
+            r"\bthe truth was still out there\b",
+            r"\bsomething (?:was|awaited|was waiting)\b",
+            r"\bwas only the beginning\b",
+            r"\bthe beginning of\b",
+            r"\bhad only begun\b",
+            r"\bwould begin\b",
+            r"\bwas about to\b",
+            r"\bwould have to\b",
+            r"\bquestions remained\b",
+            r"\bwhat happened next\b",
+            r"\bthe next chapter\b",
+            r"\bready to discover\b",
+            r"\bready to uncover\b",
+        )
+
+        return any(
+            re.search(pattern, final_sentence, flags=re.IGNORECASE)
+            or re.search(pattern, final_paragraph, flags=re.IGNORECASE)
+            for pattern in hook_patterns
+        )
+
+    @staticmethod
+    def _final_paragraph_word_count(text: str) -> int:
+        value = str(text or "").strip()
+        paragraph = value.split("\n\n")[-1].strip()
+        return len(re.findall(r"\b[\w'’-]+\b", paragraph))
+
+    @staticmethod
     def _ends_cleanly(text: str) -> bool:
         value = str(text or "").strip()
         if not value:
@@ -1280,6 +1337,26 @@ class QwenDirectorSanitizeMixin:
         # This is syntax normalization only; it does not forgive an actually
         # unfinished final clause.
         return bool(re.search(r"[.!?][\"'\u2019\u201d\u00bb\u203a\)\]\}]*$", value))
+
+    def _validate_story_completion_contract(self, mode: str, result: str) -> None:
+        """Reject obvious incomplete endings before the bounded story retry."""
+        if mode not in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
+            return
+
+        if not self._story_has_explicit_dialogue(result):
+            raise RuntimeError(
+                "Generated story must contain at least one explicit quoted line of direct dialogue."
+            )
+
+        if self._story_has_open_ended_finale(result):
+            raise RuntimeError(
+                "Generated story ends on an unresolved future hook rather than a completed consequence."
+            )
+
+        if self._final_paragraph_word_count(result) < 25:
+            raise RuntimeError(
+                "Generated story has an underdeveloped final aftermath paragraph."
+            )
 
     def _validate_mode_output(
         self,
@@ -1362,6 +1439,8 @@ class QwenDirectorSanitizeMixin:
                     "Story text does not end in a complete sentence "
                     "(the model stopped generating before finishing)."
                 )
+
+            self._validate_story_completion_contract(mode, result)
 
             return
 
@@ -1454,6 +1533,8 @@ class QwenDirectorSanitizeMixin:
                     "Story text does not end in a complete sentence "
                     "(the model stopped generating before finishing)."
                 )
+
+            self._validate_story_completion_contract(mode, result)
 
             return
 
