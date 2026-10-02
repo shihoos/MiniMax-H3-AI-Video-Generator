@@ -17,6 +17,7 @@ from planner.config import (
     H3_ASSEMBLY_CRF,
     H3_ASSEMBLY_PRESET,
     H3_ASSEMBLY_VIDEO_CODEC,
+    STORAGE_KEEP_CONCAT_FILE,
 )
 
 
@@ -317,5 +318,6 @@ class AssemblyManager:
             os.replace(temp_output, destination)
             return destination
         finally:
-            concat_file.unlink(missing_ok=True)
+            if not STORAGE_KEEP_CONCAT_FILE:
+                concat_file.unlink(missing_ok=True)
             temp_output.unlink(missing_ok=True)
