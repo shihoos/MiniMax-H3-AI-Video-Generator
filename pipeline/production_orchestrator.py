@@ -1657,18 +1657,14 @@ class ProductionOrchestrator:
             )
         )
 
-        self._rebind_shots(
-            plan,
-            characters,
-        )
-
         # Snapshot the already-verified Director dialogue before any deterministic
         # timing/continuity pass. Those downstream passes may change timestamps but
         # must never silently remove or rewrite explicit spoken text.
         dialogue_contract = self._snapshot_dialogue_contract(plan)
 
         # Deterministic production-enforcement passes. Qwen remains the
-        # creative source, while timing and continuity are finalized here.
+        # creative source, while canonical shot rebinding, timing, and continuity
+        # are finalized here.
         plan["production_id"] = production_id
         plan = self._enforce_production_contracts(plan, characters)
         self._assert_dialogue_contract_preserved(dialogue_contract, plan)
@@ -1764,9 +1760,6 @@ class ProductionOrchestrator:
                 UPSCALE_HEIGHT,
             )
         )
-
-        ProductionTimeline(plan).build()
-        ProductionTimeline.validate(plan)
 
         try:
             diagnostics_path = (
