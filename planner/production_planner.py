@@ -215,6 +215,8 @@ class ProductionPlanner:
         "Elsewhere",
         "Outside",
         "Inside",
+        "Below",
+        "Above",
         "Nearby",
         "Slowly",
         "Quietly",
@@ -328,11 +330,19 @@ class ProductionPlanner:
     # Capitalized words that are pronouns or sentence-starting
     # function words rather than character names, so the
     # subject-verb heuristic below must never treat them as names.
+    NARRATIVE_NUMBER_WORDS = {
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+        "eighteen", "nineteen", "twenty", "first", "second", "third", "fourth", "fifth",
+        "sixth", "seventh", "eighth", "ninth", "tenth",
+    }
+
     NARRATIVE_SUBJECT_EXCLUSIONS = {
         "He", "She", "It", "They", "We", "You", "I",
         "His", "Her", "Its", "Their", "Our", "Your",
         "This", "That", "These", "Those",
         "There", "Here", "All", "Who", "What", "Which",
+        "Someone", "Somebody", "Everyone", "Everybody", "Nobody", "Noone",
         "Monday", "Tuesday", "Wednesday", "Thursday",
         "Friday", "Saturday", "Sunday",
         "January", "February", "March", "April", "May", "June",
@@ -370,6 +380,19 @@ class ProductionPlanner:
         "alliance", "coalition", "federation", "union", "guild",
         "brigade", "battalion", "squadron", "fleet", "regiment",
     }
+
+    # Prefixes that structurally identify a multi-token span as a project,
+    # protocol, system, access state, or other non-person entity rather than
+    # a human/sentient character name. These are deterministic safety guards;
+    # explicit named-character evidence bypasses them.
+    NON_PERSON_PREFIX_WORDS = {
+        "protocol", "project", "class", "operation", "phase", "program",
+        "system", "network", "initiative", "experiment", "sequence",
+        "procedure", "authorization", "access", "containment", "category",
+        "sector", "level", "file", "message", "warning", "terminal",
+        "station", "facility", "mission", "module", "unit", "version",
+    }
+
 
 
     TIME_WORDS = {
@@ -850,12 +873,12 @@ class ProductionPlanner:
             r"[A-Z][A-Za-z0-9'_-]+){0,2})"
         )
         patterns = (
-            rf"\b(?:named|called)\s+(?:{title})?{proper}\b",
+            rf"\b(?i:named|called)\s+(?:{title})?{proper}\b",
             rf"\b(?:nameplate|name tag|badge|plaque)\b"
             rf"[^:;.!?]{{0,90}}[:\-]\s*(?:{title})?{proper}\b",
         )
         for pattern in patterns:
-            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            for match in re.finditer(pattern, text):
                 value = str(match.group(1) or "").strip()
                 if not value:
                     continue
@@ -974,6 +997,77 @@ class ProductionPlanner:
             r"works|work|returns|return|waits|wait)\b))"
         )
 
+        def has_non_person_prefix_context(
+            candidate: str,
+            match: re.Match,
+            source: str,
+        ) -> bool:
+            """Reject a weak candidate only when its surrounding clause clearly frames it as non-person.
+
+            Prefix words such as ``Protocol`` or ``Project`` are useful safety cues,
+            but they are not globally forbidden: a sentient identity can legitimately
+            be named ``Unit Seven`` or ``Project Orion``. The deterministic detector
+            therefore uses these prefixes only when the local syntax also identifies
+            the surface as a non-person entity.
+            """
+            tokens = [
+                token.strip(" ,.;:!?()[]{}\\\"'")
+                for token in str(candidate or "").split()
+            ]
+            if len(tokens) < 2:
+                return False
+            prefix = tokens[0].lower().rstrip(".,:;!?\"'")
+            if prefix not in self.NON_PERSON_PREFIX_WORDS:
+                return False
+
+            if source == "object_reference":
+                # Object-reference evidence is weak. A deterministic candidate
+                # beginning with an explicit project/protocol/system prefix should
+                # not become canonical solely because another verb introduced it.
+                return True
+
+            if not match.lastindex or match.lastindex < 2:
+                return False
+            verb = str(match.group(2) or "").strip().lower()
+            if verb not in self.AUXILIARY_SUBJECT_VERBS:
+                return False
+
+            after = story[match.end(2):sentence_bounds(match.start(1), match.end(1))[1]]
+            lowered_after = after.lower()
+
+            # Copular predicates that explicitly identify a protocol/project/system
+            # state or type are strong non-person context.
+            if re.search(
+                r"\b(?:a|an|the)\s+(?:[^,;.!?]{0,40}\b(?:sequence|protocol|project|system|program|operation|procedure|experiment|network|facility|module|message|warning|terminal|mission|station)\b)",
+                lowered_after,
+            ):
+                return True
+            if re.search(
+                r"\b(?:active|inactive|enabled|disabled|armed|disarmed|operational|offline|online|stable|unstable|failing|failed|triggered|sealed|locked|unlocked|corrupted|expired)\b",
+                lowered_after,
+            ):
+                return True
+            return False
+
+        def has_non_name_lowercase_token(candidate: str) -> bool:
+            """Reject mixed-case noun phrases such as ``Unauthorized access``."""
+            tokens = [
+                token.strip(" ,.;:!?()[]{}\\\"'")
+                for token in str(candidate or "").split()
+            ]
+            if len(tokens) < 2:
+                return False
+            allowed_particles = {
+                "de", "da", "del", "della", "di", "du", "la", "le",
+                "van", "von", "der", "den", "bin", "ibn",
+            }
+            for token in tokens[1:]:
+                if token.lower() in allowed_particles:
+                    continue
+                if not token or not token[0].isupper():
+                    return True
+            return False
+
         def add_evidence(
             raw_name: str,
             source: str,
@@ -1007,6 +1101,19 @@ class ProductionPlanner:
                 return
 
             if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+                return
+
+            if (
+                len(name.split()) == 1
+                and name.lower() in self.NARRATIVE_NUMBER_WORDS
+                and source != "explicit"
+            ):
+                return
+
+            if (
+                source in {"subject_verb", "morphology"}
+                and has_non_name_lowercase_token(name)
+            ):
                 return
 
             if (
@@ -1255,6 +1362,9 @@ class ProductionPlanner:
                 if has_intervening_lowercase_token(match):
                     return False
 
+                if has_non_person_prefix_context(candidate, match, source):
+                    return False
+
                 if candidate_has_definite_non_person_frame(match):
                     return False
 
@@ -1311,6 +1421,9 @@ class ProductionPlanner:
                     return False
 
                 if has_intervening_lowercase_token(match):
+                    return False
+
+                if has_non_person_prefix_context(candidate, match, source):
                     return False
 
                 if candidate_has_definite_non_person_frame(match):
@@ -1466,7 +1579,7 @@ class ProductionPlanner:
             r")?"
             r"([A-Z][A-Za-z0-9'_-]+"
             r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})\s+"
-            r"([a-z]+(?:ed|ing|s))\b"
+            r"([a-z]+(?:ed|ing))\b"
         )
 
         for match in subject_morphology_pattern.finditer(
@@ -1601,6 +1714,9 @@ class ProductionPlanner:
             if has_non_person_semantic_head(candidate):
                 continue
 
+            if has_non_person_prefix_context(candidate, match, "object_reference"):
+                continue
+
             add_evidence(
                 candidate,
                 "object_reference",
@@ -1646,6 +1762,16 @@ class ProductionPlanner:
             flags=re.IGNORECASE,
         )
         for match in descriptive_pattern.finditer(detection_story):
+            candidate_window_before = detection_story[max(0, match.start() - 60):match.start()]
+            raw_candidate = str(match.group(0) or "").strip().lower()
+            if any(token in raw_candidate.split() for token in ("photograph", "photo", "picture", "portrait", "image")):
+                continue
+            if re.search(
+                r"\b(?:photograph|photo|picture|portrait|image)\s+of\s*$",
+                candidate_window_before,
+                flags=re.IGNORECASE,
+            ):
+                continue
             qualifier_tokens = match.group(3).strip().split()
             trimmed = []
             for token in qualifier_tokens:
@@ -2182,6 +2308,22 @@ class ProductionPlanner:
                 "Elena Kovalenko was waiting outside.",
                 {"Elena Kovalenko"},
             ),
+            (
+                "Someone called her instead. Dr. Kess entered the vault. Protocol Epsilon was active. Unauthorized access detected. Below, the air was cold.",
+                {"Kess"},
+            ),
+            (
+                "Eli emerged at dawn. A photograph of a child with his sister's eyes lay inside the crate.",
+                {"Eli"},
+            ),
+            (
+                "Unit Seven entered the chamber. Mara watched from the doorway.",
+                {"Unit Seven", "Mara"},
+            ),
+            (
+                "Father John waited by the door.",
+                {"Father John"},
+            ),
         )
 
     @staticmethod
@@ -2210,6 +2352,39 @@ class ProductionPlanner:
         # Possessive mentions such as "Sara's notebook" normalize to the same
         # token, so they are intentionally covered by the normalization above.
         return False
+
+    @classmethod
+    def _semantic_named_surface_is_safe(cls, name: str) -> bool:
+        """Reject obvious non-name noun phrases while leaving cast choice to Qwen.
+
+        This is a structural safety boundary, not a character-count rule. Named
+        characters remain model-selected when their source surface looks like an
+        actual proper name; role/descriptive identities use their dedicated paths.
+        """
+        value = str(name or "").strip()
+        if not value:
+            return False
+        tokens = [token.strip(" ,.;:!?()[]{}\\\"'") for token in value.split()]
+        if not tokens:
+            return False
+        lowered = [token.lower().rstrip(".,:;!?\"'") for token in tokens]
+        if lowered[0] in cls.NARRATIVE_NUMBER_WORDS:
+            return False
+        if lowered[0] in cls.COMMON_PROPER_WORDS or tokens[0] in cls.NARRATIVE_SUBJECT_EXCLUSIONS:
+            return False
+        if any(token in {"photo", "photograph", "picture", "portrait", "image"} for token in lowered):
+            return False
+        if len(tokens) >= 2:
+            allowed_particles = {
+                "de", "da", "del", "della", "di", "du", "la", "le",
+                "van", "von", "der", "den", "bin", "ibn",
+            }
+            for token in tokens[1:]:
+                if token.lower() in allowed_particles:
+                    continue
+                if not token or not token[0].isupper():
+                    return False
+        return True
 
     @classmethod
     def _high_confidence_deterministic_character(
@@ -2460,11 +2635,25 @@ class ProductionPlanner:
         # A descriptive identity must contain a qualifier beyond the bare role.
         if len(core.split()) == 1:
             return False
+        if any(token in {"photo", "photograph", "picture", "portrait", "image"} for token in core.split()):
+            return False
         story_norm = re.sub(r"[^a-z0-9]+", " ", str(story or "").lower()).strip()
         name_norm = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
         if name_norm in story_norm.split():
             return False
-        return bool(re.search(r"\b" + re.escape(name_norm) + r"\b", story_norm))
+        if not re.search(r"\b" + re.escape(name_norm) + r"\b", story_norm):
+            return False
+        # A descriptive human noun embedded in a photograph/picture/portrait
+        # reference is a visual subject, not automatically a recurring character.
+        for match in re.finditer(r"\b" + re.escape(name_norm) + r"\b", story_norm):
+            before = story_norm[max(0, match.start() - 48):match.start()]
+            after = story_norm[match.end():match.end() + 48]
+            if re.search(r"\b(?:photograph|photo|picture|portrait|image)\s+of\s+(?:a|an|the)\s*$", before):
+                continue
+            if re.search(r"\bin\s+(?:the|a|an)\s+(?:photograph|photo|picture|portrait|image)\b", after):
+                continue
+            return True
+        return False
 
     @classmethod
     def _hard_named_source_evidence(cls, story: str, name: str) -> bool:
@@ -2650,6 +2839,7 @@ class ProductionPlanner:
             if (
                 entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}
                 or not name
+                or not cls._semantic_named_surface_is_safe(name)
                 or name.lower() in cls.GENERIC_PERSON_LABELS
                 or name.lower() in cls.RELATIONSHIP_TERMS
                 or not any(cls._story_has_character_name(story, surface) for surface in [name, *aliases])
@@ -2761,6 +2951,8 @@ class ProductionPlanner:
                 continue
             lowered = name.lower()
             if lowered in cls.GENERIC_PERSON_LABELS or lowered in cls.RELATIONSHIP_TERMS:
+                continue
+            if not cls._semantic_named_surface_is_safe(name):
                 continue
 
             aliases = [
@@ -2892,6 +3084,7 @@ class ProductionPlanner:
                     valid_named = (
                         entity_type in {"PERSON", "CHARACTER", "SENTIENT"}
                         and bool(name)
+                        and self._semantic_named_surface_is_safe(name)
                         and name.lower() not in self.GENERIC_PERSON_LABELS
                         and name.lower() not in self.RELATIONSHIP_TERMS
                         and any(self._story_has_character_name(story, surface) for surface in [name, *aliases] if surface)
