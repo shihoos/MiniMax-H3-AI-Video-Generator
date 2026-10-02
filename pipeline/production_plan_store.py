@@ -136,23 +136,3 @@ class ProductionPlanStore:
         cls.atomic_save_unlocked(path, plan)
         return plan
 
-    @classmethod
-    def reconcile_job_state(cls, path: Path | str, job: dict[str, Any]) -> dict[str, Any]:
-        target = Path(path).resolve()
-        with cls.lock(target):
-            result = {}
-            if job.get("result_json"):
-                try:
-                    parsed = json.loads(job["result_json"])
-                    if isinstance(parsed, dict):
-                        result = parsed
-                except Exception:
-                    result = {}
-            return cls.set_job_state_unlocked(
-                target,
-                job_id=str(job.get("job_id", "")),
-                status=str(job.get("status", "unknown")),
-                error=str(job.get("error", "") or ""),
-                result=result,
-            )
-
