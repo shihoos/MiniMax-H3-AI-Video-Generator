@@ -595,6 +595,35 @@ def test_dialogue_h3_feasibility_rebalances_generated_shots():
     )
 
 
+def test_dialogue_h3_feasibility_propagates_non_timing_errors():
+    import planner.qwen_director as qwen_director_module
+    from planner.qwen_director import QwenDirector
+
+    class DefectTimeline:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def apply_to_plan(self, _plan):
+            raise ValueError("continued dialogue must use the previous shot's speaker.")
+
+    original = qwen_director_module.DialogueTimeline
+    qwen_director_module.DialogueTimeline = DefectTimeline
+    try:
+        try:
+            QwenDirector._dialogue_scene_fits_h3([], [])
+        except ValueError as exc:
+            _assert(
+                "continued dialogue must use the previous shot's speaker" in str(exc),
+                "non-H3 scheduler errors must propagate from feasibility probes",
+            )
+        else:
+            raise AssertionError(
+                "non-H3 scheduler ValueError was swallowed by the feasibility probe"
+            )
+    finally:
+        qwen_director_module.DialogueTimeline = original
+
+
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
@@ -624,6 +653,7 @@ def main():
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
         test_dialogue_h3_feasibility_rebalances_generated_shots,
+        test_dialogue_h3_feasibility_propagates_non_timing_errors,
         test_source_contracts,
     ]
     for test in tests:
