@@ -100,7 +100,6 @@ class ProductionCheckpoint:
             "job_id",
             "job_status",
             "job_error",
-            "production_manifest_path",
             "context_ir_capture_root",
             "h3_effective_prompt",
             "h3_context_ir",
