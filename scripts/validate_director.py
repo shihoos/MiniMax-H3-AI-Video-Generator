@@ -512,6 +512,89 @@ def test_downstream_production_preserves_dialogue_multiset():
     else:
         raise AssertionError("downstream dialogue deletion was not detected")
 
+def test_dialogue_h3_feasibility_rebalances_generated_shots():
+    from copy import deepcopy
+    from planner.qwen_director import QwenDirector
+    from pipeline.dialogue_timeline import DialogueTimeline
+
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        director = QwenDirector(ROOT)
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
+
+    characters = [{"name": "Eli", "character_id": "eli"}]
+
+    def event(text, *, continues_from=False, continues_to=False):
+        return {
+            "speaker": "Eli",
+            "text": text,
+            "continues_from_previous_shot": continues_from,
+            "continues_to_next_shot": continues_to,
+        }
+
+    shots = [
+        {
+            "shot_id": "scene_005_shot_001",
+            "scene_id": "scene_005",
+            "duration_seconds": 13.667,
+            "characters": ["Eli"],
+            "dialogue_events": [
+                event("one two three four five six seven eight nine ten"),
+                event("one two three four five six seven eight nine ten"),
+                event("one two three four five six seven eight nine ten"),
+                event("one two three four five six seven", continues_to=True),
+            ],
+        },
+        {
+            "shot_id": "scene_005_shot_002",
+            "scene_id": "scene_005",
+            "duration_seconds": 5.2,
+            "characters": ["Eli"],
+            "dialogue_events": [
+                event("the sentence continues here", continues_from=True),
+            ],
+        },
+    ]
+    scenes = [{"scene_id": "scene_005", "characters": ["Eli"]}]
+
+    source_text = [
+        event_data["text"]
+        for shot in shots
+        for event_data in shot["dialogue_events"]
+    ]
+
+    try:
+        DialogueTimeline(characters).apply_to_plan({"shots": deepcopy(shots)})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("regression fixture unexpectedly fit before Director H3 rebalancing")
+
+    director._normalize_dialogue_h3_feasibility(scenes, shots, characters)
+
+    final_text = [
+        event_data["text"]
+        for shot in shots
+        for event_data in shot["dialogue_events"]
+    ]
+    _assert(final_text == source_text, "H3 dialogue rebalancing changed spoken text or order")
+
+    try:
+        DialogueTimeline(characters).apply_to_plan({"shots": deepcopy(shots)})
+    except Exception as exc:
+        raise AssertionError(f"rebalanced dialogue still violates H3 scheduling: {exc}") from exc
+
+    _assert(
+        len(shots[0]["dialogue_events"]) < 4 or len(shots[1]["dialogue_events"]) > 1,
+        "H3 rebalancing did not redistribute the overfull shot",
+    )
+
+
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
@@ -540,6 +623,7 @@ def main():
         test_unresolved_explicit_dialogue_fails_closed,
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
+        test_dialogue_h3_feasibility_rebalances_generated_shots,
         test_source_contracts,
     ]
     for test in tests:
