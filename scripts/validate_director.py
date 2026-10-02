@@ -13,6 +13,14 @@ def _assert(condition, message):
         raise AssertionError(message)
 
 
+def _has_normalized(source, phrase):
+    """Check prompt contracts without depending on source line wrapping."""
+    import re
+    normalized_source = re.sub(r"\s+", " ", source)
+    normalized_phrase = re.sub(r"\s+", " ", phrase)
+    return normalized_phrase in normalized_source
+
+
 def _planner():
     from planner.production_planner import ProductionPlanner
     return ProductionPlanner(ROOT)
@@ -31,12 +39,12 @@ def test_deterministic_character_regressions():
 def test_story_prompt_restores_successful_compact_narrative_contract():
     source = Path(ROOT, "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
     _assert("The user provides a premise." in source, "AI story prompt must use the proven premise framing")
-    _assert("Write a complete cinematic short-film story with a clear beginning" in source, "AI story prompt must use the proven compact narrative contract")
+    _assert(_has_normalized(source, "Write a complete cinematic short-film story with a clear beginning"), "AI story prompt must use the proven compact narrative contract")
     _assert("SUBVERT THE OBVIOUS" in source, "AI story prompt must require one earned reversal")
     _assert("Include at least one short line of spoken dialogue by a named" in source, "AI story prompt must require named-character dialogue")
-    _assert("End with a complete aftermath paragraph showing what happened" in source, "AI story prompt must require an explicit aftermath")
+    _assert(_has_normalized(source, "End with a complete aftermath paragraph showing what happened to the protagonist and what changed."), "AI story prompt must require an explicit aftermath")
     _assert("Aim for 400-650 words" in source, "AI/Expand story target must remain 400-650 words")
-    _assert("One protagonist whose goal is stated in the first two sentences" in source, "AI story opening contract is missing")
+    _assert(_has_normalized(source, "State the protagonist's concrete goal in the first two sentences."), "AI story opening contract is missing")
     _assert("Prioritize finishing the full narrative" in source, "story user prompt must prioritize completion over padding")
     _assert("The cast is a narrative decision, not a production rule." in source, "cast selection must remain flexible")
     _assert("Do not force a minimum or maximum cast" in source, "cast size must remain flexible")
@@ -45,13 +53,13 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
     _assert("meaningful resistance, opposition, or consequence" in source, "protagonist must face meaningful early resistance")
     _assert("When the premise naturally" in source and "supports another recurring character" in source, "early interaction should prefer a supported recurring character")
     _assert("change the protagonist's choice, belief, goal, or relationship" in source, "supporting-character interaction must change the protagonist meaningfully")
-    _assert("Before the midpoint, create at least one meaningful interaction" in source, "story must contain an early interactive beat")
+    _assert(_has_normalized(source, "Before the midpoint, create at least one meaningful interaction"), "story must contain an early interactive beat")
     _assert("PERSONAL CAUSALITY" in source, "story should support protagonist-linked central conflict when the premise allows")
-    _assert("prior choice, relationship, mistake, promise, desire, or responsibility" in source, "personal causality mechanism is missing")
-    _assert("Do not manufacture backstory or a" in source and "personal connection when the premise does not support one" in source, "personal causality must remain premise-grounded")
+    _assert(_has_normalized(source, "prior choice, relationship, mistake, promise, desire, or responsibility"), "personal causality mechanism is missing")
+    _assert(_has_normalized(source, "Do not manufacture backstory or a personal connection when the premise does not support one"), "personal causality must remain premise-grounded")
     _assert("PAYOFF DETAIL" in source, "story must plant and pay off a concrete detail")
     _assert("one dominant causal reversal" in source, "story must avoid stacked unrelated twists")
-    _assert("final image or behavior that echoes an earlier detail" in source, "resolution should echo an earlier planted detail")
+    _assert(_has_normalized(source, "final image or behavior that echoes an earlier detail"), "resolution should echo an earlier planted detail")
     _assert("Use one protagonist or" not in source, "single-protagonist bias must remain absent")
     _assert("when the story contains a speaking character" not in source, "dialogue requirement must not be weakened")
     _assert("final character must end" not in source.lower(), "obsolete final-character wording remains")
