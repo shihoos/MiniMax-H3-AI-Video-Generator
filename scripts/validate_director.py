@@ -595,6 +595,74 @@ def test_dialogue_h3_feasibility_rebalances_generated_shots():
     )
 
 
+def test_dialogue_h3_feasibility_searches_the_whole_scene():
+    import planner.qwen_director as qwen_director_module
+    from planner.qwen_director import QwenDirector
+
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        director = QwenDirector(ROOT)
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
+
+    characters = [{"name": "Eli", "character_id": "eli"}]
+
+    def event(number):
+        return {
+            "speaker": "Eli",
+            "text": f"line {number}",
+            "continues_from_previous_shot": False,
+            "continues_to_next_shot": False,
+        }
+
+    shots = [
+        {
+            "shot_id": "scene_global_shot_001",
+            "scene_id": "scene_global",
+            "characters": ["Eli"],
+            "dialogue_events": [event(1), event(2), event(3), event(4)],
+        },
+        {
+            "shot_id": "scene_global_shot_002",
+            "scene_id": "scene_global",
+            "characters": ["Eli"],
+            "dialogue_events": [],
+        },
+        {
+            "shot_id": "scene_global_shot_003",
+            "scene_id": "scene_global",
+            "characters": ["Eli"],
+            "dialogue_events": [],
+        },
+    ]
+    scenes = [{"scene_id": "scene_global", "characters": ["Eli"]}]
+
+    original_fit = QwenDirector._dialogue_scene_fits_h3
+
+    def fake_fit(scene_shots, _characters):
+        counts = tuple(len(shot.get("dialogue_events", []) or []) for shot in scene_shots)
+        # Force the only legal scene-global arrangement to be [2, 1, 1].
+        if counts == (2, 1, 1):
+            return True, ""
+        return False, "synthetic H3 timing overflow"
+
+    qwen_director_module.QwenDirector._dialogue_scene_fits_h3 = staticmethod(fake_fit)
+    try:
+        director._normalize_dialogue_h3_feasibility(scenes, shots, characters)
+    finally:
+        qwen_director_module.QwenDirector._dialogue_scene_fits_h3 = staticmethod(original_fit)
+
+    counts = [len(shot.get("dialogue_events", []) or []) for shot in shots]
+    _assert(
+        counts == [2, 1, 1],
+        f"scene-global feasibility search selected the wrong partition: {counts}",
+    )
+
+
 def test_dialogue_h3_feasibility_propagates_non_timing_errors():
     import planner.qwen_director as qwen_director_module
     from planner.qwen_director import QwenDirector
@@ -653,6 +721,7 @@ def main():
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
         test_dialogue_h3_feasibility_rebalances_generated_shots,
+        test_dialogue_h3_feasibility_searches_the_whole_scene,
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
         test_source_contracts,
     ]
