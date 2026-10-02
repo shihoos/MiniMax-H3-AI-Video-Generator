@@ -170,8 +170,6 @@ class QwenDirector(
             "deterministic_recoveries": 0,
         }
 
-    @staticmethod
-    @staticmethod
     def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
         self._reference_visual_context = {
             str(key): dict(value)
