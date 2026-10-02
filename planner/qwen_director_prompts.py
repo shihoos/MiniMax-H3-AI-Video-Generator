@@ -58,21 +58,28 @@ class QwenDirectorPromptMixin:
        midpoint. Do not spend the opening on background explanation before the goal
        drives the story.
     3. ACTIVE INTERACTION. Before the midpoint, create at least one meaningful
-       interaction that changes the protagonist's next action: with another recurring
-       character when the premise supports one, or with a concrete external obstacle
-       when a solo-character premise is stronger.
-    4. INTERIORITY. Include at least two sentences that reveal the protagonist's
+       interaction that changes the protagonist's next action. When the premise naturally
+       supports another recurring character, make that early interaction involve that
+       character and change the protagonist's choice, belief, goal, or relationship.
+       Use a concrete external obstacle instead only when the premise genuinely works
+       better as a solo-character story.
+    4. PERSONAL CAUSALITY. When the premise supports it, connect the central conflict
+       to a prior choice, relationship, mistake, promise, desire, or responsibility of
+       the protagonist. Prefer a reveal that makes the protagonist personally implicated
+       in the problem rather than merely an observer. Do not manufacture backstory or a
+       personal connection when the premise does not support one.
+    5. INTERIORITY. Include at least two sentences that reveal the protagonist's
        specific fear, memory, desire, or private realization through concrete imagery
        or sensory association. Show why the moment matters to them.
-    5. DIALOGUE. Include at least one short line of spoken dialogue by a named
+    6. DIALOGUE. Include at least one short line of spoken dialogue by a named
        character. In AI-STORY and EXPAND-STORY output, every spoken line MUST be
        enclosed in quotation marks; never present spoken dialogue as unquoted narrative.
        The line must change a decision, reveal information, create conflict, or
        foreshadow the central reversal. No filler dialogue.
-    6. PAYOFF DETAIL. Plant at least one specific physical, sensory, or behavioral
+    7. PAYOFF DETAIL. Plant at least one specific physical, sensory, or behavioral
        detail early in the story and pay it off meaningfully during the climax,
        consequence, or resolution. The payoff should feel earned rather than decorative.
-    7. RESOLUTION. End with a complete aftermath paragraph showing what happened to the
+    8. RESOLUTION. End with a complete aftermath paragraph showing what happened to the
        protagonist and what changed. Include a concrete consequence and a final image
        or behavior that echoes an earlier detail when natural. Do not stop mid-action,
        mid-sentence, mid-word, or on an ellipsis.
