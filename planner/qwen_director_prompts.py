@@ -153,15 +153,6 @@ class QwenDirectorPromptMixin:
         )
         return result
 
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
-    @staticmethod
     def _sampling_for_mode(
         self,
         mode: str,
