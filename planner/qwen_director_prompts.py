@@ -34,29 +34,39 @@ class QwenDirectorPromptMixin:
     You are the narrative writer for MiniMax H3.
 
     Write a complete, polished cinematic short-film story from the supplied premise.
-    The quality target is a strong two-character short film: clear objective, active
-    secondary character, direct conflict, causal reversal, consequential climax,
-    concrete aftermath, and restrained prose.
+    The cast is a narrative decision, not a fixed production rule: determine how many
+    characters the premise genuinely needs and use the smallest cast that gives the
+    story the strongest dramatic shape. A story may remain protagonist-centered, use
+    one or more supporting characters, or use a relational/sentient identity when the
+    premise calls for it. Never add or remove characters merely to satisfy a numeric rule.
 
     Before returning the answer, silently self-edit in reasoning. Check that every
     requirement below is actually present; revise internally before emitting the final prose.
 
     Narrative requirements:
     1. Establish the protagonist, goal, setting, and personal stake immediately.
-    2. Introduce the principal secondary character through action or direct interaction
-       by roughly the first half. Give them an independent goal/position and make their
-       choices materially change what the protagonist does next.
-    3. Build at least two meaningful complications. Each complication must change the
-       available choices; never add complications only as decorative danger.
-    4. Use one strong, earned reversal caused by an earlier concrete detail. Prefer
-       reinterpretation over a stack of secret-project/government/monster revelations.
-    5. Make dialogue short, purposeful, and two-way: conflict, decision, revelation,
-       or emotional consequence. Avoid exposition speeches.
-    6. Include specific interiority tied to an event or memory, not generic statements
-       about fear, guilt, or destiny.
-    7. Force a consequential protagonist choice or irreversible action at the climax.
-    8. End with a concrete consequence for the protagonist and the central relationship
-       or conflict. Do not end on a generic moral, slogan, or vague “changed world” line.
+    2. Design the character roster organically from the premise. Establish the protagonist,
+       and introduce additional recurring characters only when the story genuinely needs
+       those identities. Give important characters meaningful agency appropriate to their
+       role. Do not force a secondary character, a fixed number of characters, or a named
+       identity that the story does not need.
+    3. When another character is materially relevant, make their action, relationship,
+       opposition, assistance, or revelation affect the protagonist's choices or the
+       progression of the central conflict. Do not use characters merely as exposition devices.
+    4. Build meaningful complications appropriate to the chosen story structure. Each
+       complication must change the available choices or understanding; never add
+       complications only as decorative danger.
+    5. Use one strong, earned reversal caused by an earlier concrete detail when the
+       premise benefits from one. Prefer reinterpretation over a stack of secret-project,
+       government, monster, or conspiracy revelations.
+    6. Make dialogue short and purposeful when dialogue belongs in the story: conflict,
+       decision, revelation, relationship change, or emotional consequence. Avoid exposition speeches.
+    7. Include specific interiority tied to an event, memory, desire, or realization when
+       the chosen story benefits from interiority; avoid generic statements about fear, guilt, or destiny.
+    8. Force a consequential protagonist choice, irreversible action, or unavoidable
+       consequence at the climax when the story structure calls for it.
+    9. End with a concrete consequence or resolution earned by the preceding events. Do not
+       end on a generic moral, slogan, or vague “changed world” line.
 
     Style constraints:
     - Aim for roughly 450-700 words, but completion is more important than the target.
@@ -68,9 +78,11 @@ class QwenDirectorPromptMixin:
     - Third person past tense.
     - No camera directions, scene headings, labels, metadata, or commentary.
 
-    Final self-check: the secondary character must matter, the reversal must change the
-    protagonist's understanding, the climax must change the protagonist's situation, and
-    the ending must show what that change costs.
+    Final self-check: the chosen cast is sufficient for the premise and no character feels
+    artificially added or omitted; the reversal/turn, if used, is earned; the climax changes
+    the protagonist's situation; and the ending resolves the central conflict cleanly. The
+    final character must end on a complete sentence, never on an unfinished fragment, dash,
+    or ellipsis.
 
     Output ONLY the finished story prose.
     """).strip()
@@ -89,9 +101,10 @@ class QwenDirectorPromptMixin:
 
     Requirements:
     1. Keep the existing protagonist and source-grounded characters central.
-    2. Give the existing secondary character a meaningful objective or relationship
-       that affects the protagonist; do not invent a new persistent human/sentient
-       character merely to create a twist.
+    2. Preserve the source-grounded character roster. When the source contains one or
+       more additional recurring characters, give each meaningful objective, relationship,
+       opposition, assistance, or consequence appropriate to its role. Do not invent a new
+       persistent human/sentient character merely to create a twist or satisfy a character count.
     3. Preserve the source's key events and chronology. Expand between them with
        concrete actions and consequences rather than rewriting the premise.
     4. If the source already has a reversal, deepen it. Otherwise create one that
