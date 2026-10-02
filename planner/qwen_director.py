@@ -409,16 +409,30 @@ class QwenDirector(
                 )
                 generated_story = True
             except RuntimeError as first_error:
-                failure_text = str(first_error)
+                if mode == AI_STORY_MODE:
+                    retry_requirements = (
+                        "Create a fresh, complete story rewrite. This is the final controlled retry. "
+                        "Re-evaluate the narrative structure and character roster from the premise itself. "
+                        "Use only as many recurring characters as the story genuinely needs; do not add, "
+                        "remove, rename, or force a character merely to satisfy a validator. Preserve the "
+                        "strongest premise, causal development, climax, and resolution, and make every "
+                        "recurring character earn their place through meaningful action, relationship, "
+                        "opposition, assistance, or consequence. "
+                    )
+                else:
+                    retry_requirements = (
+                        "Create a fresh, complete story rewrite while preserving the source-grounded "
+                        "characters, chronology, and premise. Do not invent a new persistent character "
+                        "merely to satisfy a validator. "
+                    )
                 retry_user = (
                     story_user
                     + "\n\n"
-                    "SELF-CHECK FAILED. Rewrite the story once, completely.\n"
-                    + f"Previous validation failure: {failure_text}\n"
-                    + "Preserve the strongest established premise and characters. "
-                    + "Do not shorten the narrative to satisfy the validator. "
-                    + "Finish every causal beat, the climax, and the concrete aftermath. "
-                    + "Return ONLY the finished story prose on a complete final sentence."
+                    + retry_requirements
+                    + "Do not shorten the narrative merely to satisfy validation. Finish every causal "
+                    + "beat, the climax, and the concrete aftermath. The final character must be a "
+                    + "complete sentence with terminal punctuation; do not end on a fragment, dash, "
+                    + "ellipsis, or unfinished quotation. Return ONLY the finished story prose."
                 )
                 try:
                     story = self._chat_text(
