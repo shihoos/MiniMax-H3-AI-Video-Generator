@@ -1,5 +1,4 @@
 from __future__ import annotations
-import hashlib
 import os
 import shutil
 import subprocess
@@ -378,6 +377,11 @@ def apply_embedded_h3_runtime_overlay() -> None:
 
 def verify_inventory() -> None:
     manifest = load_yaml(MODEL_MANIFEST)
+    policy = dict(manifest.get("policy", {}) or {})
+    exact_inventory = policy.get("exact_inventory") is True
+    allow_extra = policy.get("allow_extra_production_models") is True
+    allow_q4 = policy.get("allow_q4_models") is True
+    allow_additional_qwen = policy.get("allow_additional_qwen_models") is True
     expected = {
         (model["directory"], model["filename"].lower())
         for model in manifest["models"].values()
@@ -401,8 +405,37 @@ def verify_inventory() -> None:
     unexpected = actual - expected
     if missing:
         raise RuntimeError("Missing H3 models:\n" + "\n".join(f"{d}/{f}" for d, f in sorted(missing)))
-    if unexpected:
+    if unexpected and (exact_inventory or not allow_extra):
         raise RuntimeError("Unexpected H3 production models:\n" + "\n".join(f"{d}/{f}" for d, f in sorted(unexpected)))
+    if not allow_q4:
+        q4 = [
+            (directory, filename)
+            for directory, filename in actual
+            if filename.endswith((".gguf", ".gguf2")) or "q4" in filename
+        ]
+        if q4:
+            raise RuntimeError(
+                "Q4/GGUF production models are forbidden by model_inventory.yaml policy:\n"
+                + "\n".join(f"{d}/{f}" for d, f in sorted(q4))
+            )
+    if not allow_additional_qwen:
+        expected_qwen = {
+            filename
+            for directory, filename in expected
+            if directory == "text_encoders" and "qwen" in filename
+        }
+        unexpected_qwen = {
+            (directory, filename)
+            for directory, filename in actual
+            if directory == "text_encoders"
+            and "qwen" in filename
+            and filename not in expected_qwen
+        }
+        if unexpected_qwen:
+            raise RuntimeError(
+                "Additional Qwen production models are forbidden by model_inventory.yaml policy:\n"
+                + "\n".join(f"{d}/{f}" for d, f in sorted(unexpected_qwen))
+            )
 
 
 def verify_runtime_files(runtime: dict) -> None:
@@ -670,6 +703,12 @@ def install_director_runtime(
     runtime: dict,
 ) -> None:
     """Install isolated vLLM + EAGLE-3 Director runtime without mutating H3 Torch."""
+    inventory = load_yaml(MODEL_MANIFEST)
+    inventory_policy = dict(inventory.get("policy", {}) or {})
+    if inventory_policy.get("allow_director_qwen") is not True:
+        raise RuntimeError(
+            "model_inventory.yaml policy.allow_director_qwen must be true for the locked Director runtime."
+        )
     director = runtime.get("director", {}) or {}
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("runtime_versions.yaml director.backend must be 'vllm'.")
@@ -2032,6 +2071,8 @@ print("[H3 OPT] fresh-process runtime capability check passed; no H3 model gener
             + (verification.stdout or "")
             + (verification.stderr or "")
         )
+
+
 def _ordered_custom_nodes(manifest: dict) -> list[dict]:
     """Return custom nodes in deterministic dependency order.
 
@@ -2100,11 +2141,39 @@ def install_nodes() -> None:
     manifest = load_yaml(
         NODE_MANIFEST
     )
+    policy = dict(manifest.get("policy", {}) or {})
+    if policy.get("clone_at_runtime") is not True:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.clone_at_runtime must be true for the locked Kaggle bootstrap."
+        )
+    if policy.get("pin_revisions") is not True:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.pin_revisions must be true for the locked Kaggle bootstrap."
+        )
+    if policy.get("vendor_source_code") is not False:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.vendor_source_code must be false for the locked bootstrap."
+        )
+    if policy.get("third_party_models") is not False:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.third_party_models must be false for the locked bootstrap."
+        )
     CUSTOM.mkdir(
         parents=True,
         exist_ok=True,
     )
     for node in _ordered_custom_nodes(manifest):
+        name = str(node.get("name", "") or "").strip()
+        repository = str(node.get("repository", "") or "").strip()
+        revision = str(node.get("revision", "") or "").strip()
+        if not repository or not revision:
+            raise RuntimeError(
+                f"Custom-node {name!r} must declare repository and pinned revision."
+            )
+        if len(revision) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in revision):
+            raise RuntimeError(
+                f"Custom-node {name!r} revision must be a full 40-character SHA: {revision!r}"
+            )
         destination = (
             CUSTOM
             / node[
@@ -2169,7 +2238,6 @@ def install_nodes() -> None:
 # Project-owned SageAttention SM75 correction recipe.
 # This is intentionally embedded here so the bootstrap is self-contained:
 # no external patch file is required at runtime.
-# Project-owned SageAttention SM75 correction recipe.
 # The pinned upstream checkout is reset first; these exact source contracts are
 # then applied in-place with fail-closed replacement counts. No external patch
 # artifact or checksum bookkeeping is required.
@@ -2798,6 +2866,8 @@ def _warn_if_torch_already_imported() -> None:
     print("GPU-dependent validation/work must run in a FRESH subprocess after bootstrap.")
     print("Do NOT import or reload torch directly in this same kernel after reinstall.")
     print("=" * 80)
+
+
 def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
@@ -2816,12 +2886,8 @@ def main():
         "[DIRECTOR MODEL]",
         director_model,
     )
-    install_base_requirements()
     install_comfyui(runtime)
     install_director_runtime(
-        runtime
-    )
-    install_storyboard_runtime(
         runtime
     )
     # Custom-node requirements are installed before the project PyTorch lock.
@@ -2831,6 +2897,13 @@ def main():
     # Kaggle kernel imported Torch before bootstrap.
     install_nodes()
     remove_legacy_context_ir_node()
+    # Re-assert the repository's control-plane pins after every ComfyUI/custom-node
+    # dependency installer has run. This prevents a third-party requirement from
+    # silently changing transformers/tokenizers/gradio/other shared dependencies.
+    install_base_requirements()
+    install_storyboard_runtime(
+        runtime
+    )
     install_pytorch_runtime(runtime)
     install_and_verify_pillow_runtime(runtime)
     install_sageattention_sm75(runtime)
