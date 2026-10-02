@@ -28,6 +28,69 @@ def test_deterministic_character_regressions():
     _assert("Eli" in single, f"one-word deterministic character was lost: {single}")
 
 
+def test_story_prompt_restores_successful_compact_narrative_contract():
+    source = Path(ROOT, "planner", "qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("Aim for 400-650 words" in source, "AI/Expand story target must remain 400-650 words")
+    _assert("The cast is a narrative decision" in source, "story prompt must keep flexible Qwen-determined cast selection")
+    _assert("Never add, remove, or name a character" in source, "story prompt must not impose a character count")
+    _assert("End on a complete sentence with terminal punctuation" in source, "story prompt final-sentence contract is missing")
+    _assert("Prioritize finishing the full narrative" in source, "story user prompt must prioritize completion over padding")
+    _assert("final character must end" not in source.lower(), "obsolete final-character wording remains")
+
+
+def test_expand_source_fallback_removed():
+    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    _assert("expand_story_source_fallback" not in source, "Expand Story must not silently fall back to preserve-story mode")
+    _assert("Expand Story generation failed validation after the controlled retry" in source, "Expand retry must fail closed after its bounded retry")
+
+
+def test_story_wiring_redundancy_removed():
+    compiler = Path(ROOT, "planner", "cinematic_compiler.py").read_text(encoding="utf-8")
+    _assert('if not shot.get("speaking_characters")' in compiler, "absent/empty speaking_characters must compile to []")
+    orchestrator = Path(ROOT, "pipeline", "production_orchestrator.py").read_text(encoding="utf-8")
+    _assert(orchestrator.count("        self._rebind_shots(") == 1, "production plan should have one canonical _rebind_shots() call")
+    _assert(orchestrator.count("ProductionTimeline(plan).build()") == 1, "production plan should have one canonical timeline build")
+
+
+def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
+    from planner.production_planner import ProductionPlanner
+    planner = ProductionPlanner(ROOT)
+    ai_story = (
+        "Elara Voss clawed through the snowdrifts. Dr. Kess's final transmission had warned her. Dr. Kess entered the vault. "
+        "Below, the air was thick with ozone. A voice announced, \"Unauthorized access detected. Initiation of Protocol Epsilon.\" "
+        "Elara sprinted to the terminal."
+    )
+    ai_names = planner.detect_character_descriptors(ai_story)
+    _assert(set(ai_names) == {"Elara Voss", "Kess"}, f"AI Story prose poisoned the deterministic roster: {ai_names}")
+
+    expand_story = (
+        "Eli reached the vault. His sister's voice warned him. His father had vanished years ago. "
+        "A photograph of a child with his sister's eyes lay inside the crate. Eli sprinted to the exit."
+    )
+    expand_names = planner.detect_character_descriptors(expand_story)
+    _assert(expand_names == ["Eli"], f"Expand Story visual/relational prose poisoned the deterministic roster: {expand_names}")
+    relations = planner._extract_relational_character_hints(expand_story, expand_names)
+    _assert(
+        [item["name"] for item in relations] == ["Eli's sister", "Eli's father"],
+        f"Expand Story relational identities were not grounded correctly: {relations}",
+    )
+
+
+def test_semantic_named_surface_safety_boundary():
+    from planner.production_planner import ProductionPlanner
+    _assert(ProductionPlanner._semantic_named_surface_is_safe("Elara Voss"), "valid proper name was rejected")
+    for value in ("child with his sister's eyes", "father was", "her instead"):
+        _assert(
+            not ProductionPlanner._semantic_named_surface_is_safe(value),
+            f"non-name semantic surface was accepted: {value!r}",
+        )
+    protocol_context = "Protocol Epsilon was a self-destruct sequence. Unauthorized access detected."
+    _assert(
+        "Protocol Epsilon" not in ProductionPlanner(".").detect_character_descriptors(protocol_context),
+        "contextually explicit protocol entity leaked into the deterministic roster",
+    )
+
+
 def test_semantic_empty_fallback():
     planner = _planner()
     story = "Elias Kade entered the vault and Lin Mei followed him. Elias looked at Lin."
@@ -786,28 +849,6 @@ def test_dialogue_h3_feasibility_propagates_non_timing_errors():
         qwen_director_module.DialogueTimeline = original
 
 
-def test_cinematic_compiler_missing_speaking_characters_stays_empty():
-    from planner.cinematic_compiler import CinematicCompiler
-
-    compiler = CinematicCompiler({"Eli"})
-    scene = {
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "description": "A station corridor.",
-    }
-    shot = {
-        "shot_id": "scene_001_shot_001",
-        "scene_id": "scene_001",
-        "characters": ["Eli"],
-        "dialogue_events": [],
-    }
-    compiled = compiler.compile_all([scene], [shot])
-    _assert(
-        compiled[0]["speaking_characters"] == [],
-        "Missing speaking_characters must not inherit every scene character.",
-    )
-
-
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
@@ -821,6 +862,11 @@ def test_source_contracts():
 def main():
     tests = [
         test_deterministic_character_regressions,
+        test_story_prompt_restores_successful_compact_narrative_contract,
+        test_expand_source_fallback_removed,
+        test_story_wiring_redundancy_removed,
+        test_semantic_named_surface_safety_boundary,
+        test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
         test_semantic_empty_fallback,
         test_semantic_partial_positive_is_adjudicated,
         test_semantic_negative_does_not_destroy_strong_deterministic_roster,
