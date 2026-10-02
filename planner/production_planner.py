@@ -342,7 +342,9 @@ class ProductionPlanner:
         "His", "Her", "Its", "Their", "Our", "Your",
         "This", "That", "These", "Those",
         "There", "Here", "All", "Who", "What", "Which",
+        "Why", "Where", "How", "Whom", "Whose", "Whether",
         "Someone", "Somebody", "Everyone", "Everybody", "Nobody", "Noone",
+        "Anyone", "Anybody", "Anything", "Something", "Nothing",
         "Monday", "Tuesday", "Wednesday", "Thursday",
         "Friday", "Saturday", "Sunday",
         "January", "February", "March", "April", "May", "June",
@@ -1082,11 +1084,12 @@ class ProductionPlanner:
                 return
 
             name_tokens = name.split()
+            common_proper_lower = {str(value).lower() for value in self.COMMON_PROPER_WORDS}
+            narrative_exclusions_lower = {str(value).lower() for value in self.NARRATIVE_SUBJECT_EXCLUSIONS}
 
             while (
                 len(name_tokens) > 1
-                and name_tokens[0]
-                in self.COMMON_PROPER_WORDS
+                and name_tokens[0].lower() in common_proper_lower
             ):
                 name_tokens.pop(0)
 
@@ -1097,10 +1100,10 @@ class ProductionPlanner:
             if not name:
                 return
 
-            if name in self.COMMON_PROPER_WORDS:
+            if name.lower() in common_proper_lower:
                 return
 
-            if name in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+            if name.lower() in narrative_exclusions_lower:
                 return
 
             if (
@@ -1163,7 +1166,7 @@ class ProductionPlanner:
             for group in (1, 2):
                 candidate = match.group(group).strip()
                 candidate_tokens = candidate.split()
-                if candidate_tokens and candidate_tokens[0] in self.COMMON_PROPER_WORDS:
+                if candidate_tokens and candidate_tokens[0].lower() in {str(value).lower() for value in self.COMMON_PROPER_WORDS}:
                     continue
                 add_evidence(candidate, "coordinated", 100)
 
@@ -1329,17 +1332,17 @@ class ProductionPlanner:
             # ----------------------------------------------------
             candidate_tokens = candidate.split()
 
+            common_proper_lower = {str(value).lower() for value in self.COMMON_PROPER_WORDS}
+            narrative_exclusions_lower = {str(value).lower() for value in self.NARRATIVE_SUBJECT_EXCLUSIONS}
             if (
                 len(candidate_tokens) == 1
-                and candidate_tokens[0]
-                in self.COMMON_PROPER_WORDS
+                and candidate_tokens[0].lower() in common_proper_lower
             ):
                 return False
 
             if (
                 len(candidate_tokens) == 1
-                and candidate_tokens[0]
-                in self.NARRATIVE_SUBJECT_EXCLUSIONS
+                and candidate_tokens[0].lower() in narrative_exclusions_lower
             ):
                 return False
 
@@ -1684,9 +1687,9 @@ class ProductionPlanner:
 
         for match in object_name_pattern.finditer(story):
             candidate = match.group(1).strip()
-            if candidate in self.COMMON_PROPER_WORDS:
+            if candidate.lower() in {str(value).lower() for value in self.COMMON_PROPER_WORDS}:
                 continue
-            if candidate in self.NARRATIVE_SUBJECT_EXCLUSIONS:
+            if candidate.lower() in {str(value).lower() for value in self.NARRATIVE_SUBJECT_EXCLUSIONS}:
                 continue
             previous_text = story[:match.start(1)].rstrip(" ,;:!?\"'()[]{}")
             previous_tokens = previous_text.split()
@@ -1876,6 +1879,12 @@ class ProductionPlanner:
                 name.lower() in self.GENERIC_PERSON_LABELS
                 and "explicit" not in sources
             ):
+                continue
+
+            # Sentence-leading function words and interrogatives are prose, not character identities.
+            if name.lower() in {str(v).lower() for v in self.NARRATIVE_SUBJECT_EXCLUSIONS}:
+                continue
+            if name.lower() in {str(v).lower() for v in self.COMMON_PROPER_WORDS}:
                 continue
 
             # Explicit identity is authoritative.
@@ -2370,7 +2379,9 @@ class ProductionPlanner:
         lowered = [token.lower().rstrip(".,:;!?\"'") for token in tokens]
         if lowered[0] in cls.NARRATIVE_NUMBER_WORDS:
             return False
-        if lowered[0] in cls.COMMON_PROPER_WORDS or tokens[0] in cls.NARRATIVE_SUBJECT_EXCLUSIONS:
+        common_proper_lower = {str(value).lower() for value in cls.COMMON_PROPER_WORDS}
+        narrative_exclusions_lower = {str(value).lower() for value in cls.NARRATIVE_SUBJECT_EXCLUSIONS}
+        if lowered[0] in common_proper_lower or lowered[0] in narrative_exclusions_lower:
             return False
         if any(token in {"photo", "photograph", "picture", "portrait", "image"} for token in lowered):
             return False
