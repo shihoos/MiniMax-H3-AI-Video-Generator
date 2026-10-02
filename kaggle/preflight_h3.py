@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import yaml
@@ -139,150 +137,6 @@ def load_json(
 
 
 # ============================================================
-# NVIDIA CUDA NATIVE LIBRARIES
-# ============================================================
-
-def _site_packages() -> list[Path]:
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import site; "
-                "print('\\n'.join(site.getsitepackages()))"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-    return [
-        Path(
-            line.strip()
-        )
-        for line
-        in result.stdout.splitlines()
-        if line.strip()
-    ]
-
-
-def _find_cuda_libraries() -> tuple[
-    Path,
-    Path,
-]:
-
-    cudart_candidates = []
-    cublas_candidates = []
-
-    for site_root in _site_packages():
-
-        nvidia_root = (
-            site_root
-            / "nvidia"
-        )
-
-        if not nvidia_root.is_dir():
-            continue
-
-        for path in nvidia_root.rglob(
-            "libcudart.so.13*"
-        ):
-
-            if path.is_file():
-                cudart_candidates.append(
-                    path
-                )
-
-        for path in nvidia_root.rglob(
-            "libcublas.so.13*"
-        ):
-
-            if path.is_file():
-                cublas_candidates.append(
-                    path
-                )
-
-    if not cudart_candidates:
-        raise RuntimeError(
-            "libcudart.so.13 was not found in the "
-            "installed NVIDIA Python packages."
-        )
-
-    if not cublas_candidates:
-        raise RuntimeError(
-            "libcublas.so.13 was not found in the "
-            "installed NVIDIA Python packages."
-        )
-
-    return (
-        cudart_candidates[0],
-        cublas_candidates[0],
-    )
-
-
-def _prepare_cuda_environment() -> tuple[
-    Path,
-    Path,
-]:
-
-    cudart, cublas = (
-        _find_cuda_libraries()
-    )
-
-    library_dirs = [
-        str(
-            cudart.parent
-        ),
-        str(
-            cublas.parent
-        ),
-    ]
-
-    existing = os.environ.get(
-        "LD_LIBRARY_PATH",
-        "",
-    )
-
-    if existing:
-        library_dirs.append(
-            existing
-        )
-
-    os.environ[
-        "LD_LIBRARY_PATH"
-    ] = ":".join(
-        library_dirs
-    )
-
-    try:
-        ctypes.CDLL(
-            str(cudart),
-            mode=ctypes.RTLD_GLOBAL,
-        )
-
-        ctypes.CDLL(
-            str(cublas),
-            mode=ctypes.RTLD_GLOBAL,
-        )
-
-    except OSError as exc:
-
-        raise RuntimeError(
-            "Unable to load NVIDIA CUDA native libraries.\n"
-            f"CUDA runtime: {cudart}\n"
-            f"cuBLAS: {cublas}\n"
-            f"Error: {exc}"
-        ) from exc
-
-    return (
-        cudart,
-        cublas,
-    )
-
-
-# ============================================================
 # DIRECTOR
 # ============================================================
 
@@ -384,6 +238,7 @@ def find_director_speculator() -> Path:
         "Complete Eagle-3 checkpoint was not found at /kaggle/input/eagle-3. "
         "Attach the Kaggle dataset named 'eagle-3'."
     )
+
 
 
 def check_director() -> None:
