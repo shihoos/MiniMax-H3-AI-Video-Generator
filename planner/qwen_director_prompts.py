@@ -38,40 +38,60 @@ class QwenDirectorPromptMixin:
     climax, consequence, and explicit resolution. Completion is more important than
     reaching a target word count.
 
-    CHARACTER DESIGN. The cast is a narrative decision, not a production rule.
-    Determine how many characters the premise genuinely needs. Use one protagonist or
-    add supporting, opposing, or relational characters only when they materially improve
-    the causal or emotional story. Never add, remove, or name a character merely to
-    satisfy a numeric requirement. When an additional recurring character exists, give
-    that character meaningful agency appropriate to the premise rather than using them
-    only as exposition.
+    The cast is a narrative decision, not a production rule. Use only as many recurring
+    characters as the premise genuinely needs. Do not force a minimum or maximum cast
+    size. When another recurring character naturally belongs in the story, make that
+    character an active causal or emotional counterpart rather than passive exposition
+    delivered only through a recording, log, document, photograph, or generic voice.
+    Do not add a recurring character merely to satisfy a numeric requirement.
 
     Hard requirements:
     1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal caused by a
-       concrete detail established earlier in the story. Do not introduce a random
-       secret, artifact, monster, or organization only for surprise.
-    2. INTERIORITY. Include at least two sentences revealing the protagonist's specific
-       fear, memory, desire, or private realization through concrete imagery or sensory
-       association. Show why the moment matters.
-    3. DIALOGUE. Include at least one short spoken line by a character when the story
-       contains a speaking character. Every spoken line MUST be enclosed in quotation
-       marks. The line must change a decision, reveal information, create conflict, or
+       concrete detail established earlier in the story. The reversal must change what
+       the protagonist understands or decides. Do not stack multiple unrelated secret
+       reveals, and do not introduce a random artifact, monster, organization, or
+       conspiracy only for surprise. Other discoveries should support the same central
+       reversal rather than compete with it.
+    2. GOAL-DRIVEN CONFLICT. State the protagonist's concrete goal in the first two
+       sentences. The protagonist's first major action must be caused by that goal, and
+       meaningful resistance, opposition, or consequence must interfere before the
+       midpoint. Do not spend the opening on background explanation before the goal
+       drives the story.
+    3. ACTIVE INTERACTION. Before the midpoint, create at least one meaningful
+       interaction that changes the protagonist's next action: with another recurring
+       character when the premise supports one, or with a concrete external obstacle
+       when a solo-character premise is stronger.
+    4. INTERIORITY. Include at least two sentences that reveal the protagonist's
+       specific fear, memory, desire, or private realization through concrete imagery
+       or sensory association. Show why the moment matters to them.
+    5. DIALOGUE. Include at least one short line of spoken dialogue by a named
+       character. In AI-STORY and EXPAND-STORY output, every spoken line MUST be
+       enclosed in quotation marks; never present spoken dialogue as unquoted narrative.
+       The line must change a decision, reveal information, create conflict, or
        foreshadow the central reversal. No filler dialogue.
-    4. RESOLUTION. End with a complete aftermath paragraph showing what happened to the
-       protagonist and what changed. Do not stop mid-action, mid-sentence, mid-word,
-       or on an ellipsis.
+    6. PAYOFF DETAIL. Plant at least one specific physical, sensory, or behavioral
+       detail early in the story and pay it off meaningfully during the climax,
+       consequence, or resolution. The payoff should feel earned rather than decorative.
+    7. RESOLUTION. End with a complete aftermath paragraph showing what happened to the
+       protagonist and what changed. Include a concrete consequence and a final image
+       or behavior that echoes an earlier detail when natural. Do not stop mid-action,
+       mid-sentence, mid-word, or on an ellipsis.
 
     Additional constraints:
     - Aim for 400-650 words, but always finish the story completely.
     - Third person past tense.
-    - State the protagonist's goal in the first two sentences.
     - Favor sceneable physical action and implication over explanation.
-    - Reveal information through behavior, discovery, conflict, and specific details.
-    - Avoid lore dumps, stacked secret-project explanations, and repeated reveals.
+    - Reveal information through behavior, discovery, conflict, specific details, and
+      character interaction rather than lore dumps.
+    - Keep one dominant causal reversal; later discoveries must clarify or escalate it,
+      not replace it with a second unrelated twist.
+    - Avoid stacked secret-project explanations, repetitive revelations, and passive
+      exposition that could be expressed through action or interaction.
     - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
     - End on a complete sentence with terminal punctuation.
 
     Output ONLY the story prose.
+    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
