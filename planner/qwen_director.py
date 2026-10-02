@@ -1116,11 +1116,15 @@ class QwenDirector(
         )
 
         # Canonicalize continuation flags before semantic speaker filtering.
+        # The pass is alias-aware, so a valid continuation may survive when Qwen
+        # uses a safe alias (for example, a first-name form) for the same canonical
+        # character. Speaker changes are never allowed to inherit continuation.
         # A second final pass is performed after filtering below because dialogue
         # normalization may remove boundary events.
         self._normalize_dialogue_continuations(
             scenes,
             all_shots,
+            characters,
         )
 
         # Canonicalize and semantically filter dialogue BEFORE compilation so
@@ -1141,6 +1145,7 @@ class QwenDirector(
         self._normalize_dialogue_continuations(
             scenes,
             all_shots,
+            characters,
         )
 
         # Enforce the same H3 dialogue feasibility contract used downstream by
@@ -1438,6 +1443,7 @@ class QwenDirector(
                 self._normalize_dialogue_continuations(
                     [temp_scene],
                     candidate_shots,
+                    characters,
                 )
                 for item in candidate_shots:
                     self._refresh_dialogue_summary(item)
@@ -1459,6 +1465,7 @@ class QwenDirector(
                 self._normalize_dialogue_continuations(
                     [scene_lookup.get(scene_id, {"scene_id": scene_id})],
                     scene_shots,
+                    characters,
                 )
                 for item in scene_shots:
                     self._refresh_dialogue_summary(item)
@@ -1567,6 +1574,7 @@ class QwenDirector(
                     self._normalize_dialogue_continuations(
                         [temp_scene],
                         candidate_shots,
+                        characters,
                     )
                     for item in candidate_shots:
                         self._refresh_dialogue_summary(item)
@@ -1587,6 +1595,7 @@ class QwenDirector(
                     self._normalize_dialogue_continuations(
                         [scene_lookup.get(scene_id, {"scene_id": scene_id})],
                         scene_shots,
+                        characters,
                     )
                     for item in scene_shots:
                         self._refresh_dialogue_summary(item)
@@ -1620,18 +1629,28 @@ class QwenDirector(
                     f"scene={scene_id} detail={failure_detail or 'no legal scene-global repartition found'}"
                 )
 
-    @staticmethod
     def _normalize_dialogue_continuations(
+        self,
         scenes: list[dict],
         shots: list[dict],
+        characters: list[dict] | None = None,
     ) -> None:
-        """Canonicalize final dialogue continuation flags after all filtering.
+        """Canonicalize dialogue continuation flags against canonical speakers.
 
-        Speaker/entity normalization can remove dialogue events. This pass runs
-        after that filtering, so continuation metadata always reflects the final
-        surviving first/last events at each shot boundary. Continuation is never
-        allowed across scene boundaries or from the first shot of a scene.
+        Speaker/entity normalization can remove or canonicalize dialogue events.
+        This pass therefore runs both before and after semantic speaker filtering.
+        A continuation edge is valid only when the final speaker of the previous
+        shot and the first speaker of the current shot resolve to the same
+        canonical character. A speaker change always starts a new dialogue turn.
         """
+        alias_map = EntityResolver.build_character_alias_map(characters or [])
+
+        def _speaker_key(event: dict) -> str:
+            raw = str(
+                event.get("speaker", event.get("speaker_name", "")) or ""
+            ).strip()
+            normalized = EntityResolver.normalize(raw)
+            return alias_map.get(normalized, normalized)
         shots_by_scene_order: dict[str, list[dict]] = {}
         for shot in shots:
             if not isinstance(shot, dict):
@@ -1678,7 +1697,21 @@ class QwenDirector(
                     current_flag = bool(
                         events[0].get("continues_from_previous_shot", False)
                     )
-                    continuation = previous_flag or current_flag
+                    continuation_requested = previous_flag or current_flag
+                    same_speaker = (
+                        bool(_speaker_key(previous_events[-1]))
+                        and bool(_speaker_key(events[0]))
+                        and _speaker_key(previous_events[-1]) == _speaker_key(events[0])
+                    )
+                    continuation = continuation_requested and same_speaker
+                    if continuation_requested and not same_speaker:
+                        self._record_recovery(
+                            "dialogue_continuation_speaker_boundary_reset",
+                            (
+                                f"previous={_speaker_key(previous_events[-1])!r} "
+                                f"current={_speaker_key(events[0])!r}"
+                            ),
+                        )
                     previous_events[-1]["continues_to_next_shot"] = continuation
                     events[0]["continues_from_previous_shot"] = continuation
 
