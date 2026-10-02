@@ -1295,33 +1295,29 @@ class QwenDirectorSanitizeMixin:
         final_sentence = sentences[-1].lower() if sentences else value.lower()
         final_paragraph = value.split("\n\n")[-1].strip().lower()
 
+        # Only the terminal sentence determines whether the story itself ends on
+        # a future hook. Earlier sentences may legitimately mention plans,
+        # uncertainty, or threats that are resolved by the final sentence.
+        # Looking through the whole final paragraph caused false positives and
+        # unnecessary story rewrites.
         hook_patterns = (
-            r"\bset something in motion(?: that)?\b",
-            r"\bcould never be undone\b",
-            r"\b(?:walked|stepped|headed|disappeared|went) into the unknown\b",
-            r"\b(?:was|were|is|are) waiting\b",
-            r"\b(?:awaited|awaiting)\b",
-            r"\bthe unknown\b",
-            r"\bstill remained\b",
-            r"\bmore remained\b",
-            r"\bthe truth was still out there\b",
-            r"\bsomething (?:was|awaited|was waiting)\b",
+            r"\b(?:he|she|they|[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\s+(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
+            r"\bwould begin\b",
+            r"\bwas about to\b",
             r"\bwas only the beginning\b",
             r"\bthe beginning of\b",
             r"\bhad only begun\b",
-            r"\bwould begin\b",
-            r"\bwas about to\b",
-            r"\b(?:he|she|they|[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\s+(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
             r"\bquestions remained\b",
             r"\bwhat happened next\b",
             r"\bthe next chapter\b",
             r"\bready to discover\b",
             r"\bready to uncover\b",
+            r"\b(?:walked|stepped|headed|disappeared|went) into the unknown\b",
+            r"\bset something in motion that could never be undone\b",
         )
 
         return any(
             re.search(pattern, final_sentence, flags=re.IGNORECASE)
-            or re.search(pattern, final_paragraph, flags=re.IGNORECASE)
             for pattern in hook_patterns
         )
 
