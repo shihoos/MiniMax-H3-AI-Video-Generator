@@ -21,7 +21,7 @@ from planner.config import (
 )
 
 
-SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE only; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.\n- Relational canonical identities are valid when supplied (for example, "Eli\'s father"). Use the exact canonical identity, not a bare role.\n- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.\n- Preserve spoken text exactly; never paraphrase, summarize, or invent dialogue.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- Treat H3 shot duration as a hard production constraint: target no more than about 10 seconds of spoken dialogue per shot, with enough headroom for timing margins.\n- Prefer a small number of short dialogue events per shot. If dialogue continues across shots, keep the current-shot portion short enough to fit legally and use continues_to_next_shot/continues_from_previous_shot to carry the same speaker across the boundary.\n- Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
+SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE only; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.\n- Relational canonical identities are valid when supplied (for example, "Eli\'s father"). Use the exact canonical identity, not a bare role.\n- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.\n- Preserve spoken text exactly; never paraphrase, summarize, or invent dialogue.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- Treat H3 shot duration as a hard production constraint: target roughly 4–6 seconds of spoken dialogue per shot when natural, leaving timing headroom.\n- When dialogue is present, set duration_seconds from the actual spoken duration plus a small legal margin; do not blindly emit the default short duration. Keep dialogue shots typically around 6–8.5 seconds when required, and never exceed the legal H3 maximum.\n- Prefer one concise dialogue event per shot; use two only when the exchange genuinely needs both sides. Keep each spoken event short when the source permits, but never paraphrase or delete source dialogue.\n- If a source utterance is longer, split its exact contiguous text across adjacent shots with continues_to_next_shot/continues_from_previous_shot rather than forcing an overlong single shot.\n- Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
 
 class QwenDirectorPromptMixin:
     def _story_text_system(
@@ -33,88 +33,82 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the narrative writer for MiniMax H3.
 
-    The user provides a premise.
+    Write a complete, polished cinematic short-film story from the supplied premise.
+    The quality target is a strong two-character short film: clear objective, active
+    secondary character, direct conflict, causal reversal, consequential climax,
+    concrete aftermath, and restrained prose.
 
-    Write a complete cinematic short-film story with a clear beginning,
-    escalating middle, irreversible choice or point of no return, climax,
-    consequence, and explicit resolution. Completion is more important than
-    reaching a target word count.
+    Before returning the answer, silently self-edit in reasoning. Check that every
+    requirement below is actually present; revise internally before emitting the final prose.
 
-    Hard requirements:
-    1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal that
-       is caused by a concrete detail established earlier in the story. Do not
-       rely on a familiar default twist or introduce a random secret, artifact,
-       monster, or organization only for surprise.
-    2. INTERIORITY. Include at least two sentences that reveal the protagonist's
-       specific fear, memory, desire, or private realization through concrete
-       imagery or sensory association. Show why the moment matters to them.
-    3. DIALOGUE. Include several short lines of spoken dialogue between the
-       protagonist and the principal secondary character. Dialogue must change
-       a decision, reveal information, create conflict, or force a response.
-       No filler dialogue.
-    4. SECONDARY CHARACTER ARC. Introduce the principal secondary character,
-       antagonist, or relationship counterpart through an actual character action
-       or direct interaction by roughly the first half of the story. Do NOT first
-       introduce that character as a nameplate, recorded message, disembodied voice,
-       screen label, logbook entry, or other exposition device and reveal them later.
-       Give the secondary character a concrete goal or position that conflicts with
-       or complicates the protagonist's objective. Make their action or revelation
-       materially change the protagonist's next decision.
-    5. ESCALATION AND CHOICE. The story must build through at least two meaningful
-       complications before the climax, then force the protagonist to make a
-       consequential choice rather than merely observe the final reveal.
-    6. RESOLUTION. End with a concrete aftermath showing consequences for the
-       protagonist and the central relationship or conflict. Avoid generic moral
-       endings such as “he was now a guardian of something greater” unless the
-       story has earned that exact transformation through a specific event.
+    Narrative requirements:
+    1. Establish the protagonist, goal, setting, and personal stake immediately.
+    2. Introduce the principal secondary character through action or direct interaction
+       by roughly the first half. Give them an independent goal/position and make their
+       choices materially change what the protagonist does next.
+    3. Build at least two meaningful complications. Each complication must change the
+       available choices; never add complications only as decorative danger.
+    4. Use one strong, earned reversal caused by an earlier concrete detail. Prefer
+       reinterpretation over a stack of secret-project/government/monster revelations.
+    5. Make dialogue short, purposeful, and two-way: conflict, decision, revelation,
+       or emotional consequence. Avoid exposition speeches.
+    6. Include specific interiority tied to an event or memory, not generic statements
+       about fear, guilt, or destiny.
+    7. Force a consequential protagonist choice or irreversible action at the climax.
+    8. End with a concrete consequence for the protagonist and the central relationship
+       or conflict. Do not end on a generic moral, slogan, or vague “changed world” line.
 
-    Additional constraints:
-    - Aim for 400-650 words, but always finish the story completely.
+    Style constraints:
+    - Aim for roughly 450-700 words, but completion is more important than the target.
+    - Favor sceneable physical action and implication over explanation.
+    - Reveal information through behavior, discovery, conflict, and specific details.
+    - Do not front-load lore or technical exposition.
+    - Do not introduce a persistent character solely to explain the plot.
+    - Do not repeat the same reveal in different wording.
     - Third person past tense.
-    - One protagonist whose goal is stated in the first two sentences.
-    - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
+    - No camera directions, scene headings, labels, metadata, or commentary.
 
-    Output ONLY the story prose.
-    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
+    Final self-check: the secondary character must matter, the reversal must change the
+    protagonist's understanding, the climax must change the protagonist's situation, and
+    the ending must show what that change costs.
+
+    Output ONLY the finished story prose.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
     You are the narrative expansion writer for MiniMax H3.
 
-    Expand the supplied story substantially while preserving its important characters,
-    events, chronology, setting, outcome, and explicit constraints. Add meaningful
-    new narrative material, cause-and-effect development, emotional depth, escalation,
-    and consequences rather than merely rephrasing or lightly lengthening the source.
-    Build a complete arc with escalation, point of no return, climax, consequence,
-    and resolution.
+    Expand the supplied story into a polished short-film narrative without replacing
+    its core characters, chronology, setting, central events, or established outcome.
+    The expansion must add causal development, character agency, emotional depth,
+    escalation, and a concrete ending—not padding or paraphrase.
 
-    Hard requirements for the expansion:
-    1. Preserve an existing twist if one exists. If none exists, introduce one
-       unexpected reveal or reversal that is caused by a concrete detail already
-       established in the source; do not add a random secret, artifact, monster,
-       organization, or new persistent character solely for surprise.
-       Do not introduce a new named or persistent unnamed human/sentient character
-       unless that identity is already grounded by the supplied source story.
-       Prefer the source's existing characters, relationships, and implications
-       when creating the reversal.
-    2. Add at least two sentences of meaningful interiority for the protagonist,
-       tied to a specific fear, memory, desire, or private realization.
-    3. Preserve or add at least one short line of spoken dialogue by a named
-       character. The line must advance conflict, reveal information, or connect
-       to the central reversal. In EXPAND-STORY output, every spoken line MUST be
-       enclosed in quotation marks; never present spoken dialogue as unquoted narrative.
-    4. End with a complete resolution paragraph describing the aftermath and what
-       changed. Do not stop mid-action, mid-sentence, mid-word, or on an ellipsis.
+    Before returning the answer, silently self-edit in reasoning and make sure the
+    final output ends cleanly and preserves every source-grounded identity.
 
-    Additional constraints:
-    - Aim for 400-650 words, but always finish the story completely.
-    - Preserve source meaning and chronology; Do not replace the original plot.
-    - Do not merely add adjectives.
-    - Do not convert the story into camera directions, scene headings, or shot descriptions.
+    Requirements:
+    1. Keep the existing protagonist and source-grounded characters central.
+    2. Give the existing secondary character a meaningful objective or relationship
+       that affects the protagonist; do not invent a new persistent human/sentient
+       character merely to create a twist.
+    3. Preserve the source's key events and chronology. Expand between them with
+       concrete actions and consequences rather than rewriting the premise.
+    4. If the source already has a reversal, deepen it. Otherwise create one that
+       is caused by a concrete source detail—not an unrelated secret, artifact,
+       organization, monster, or conspiracy.
+    5. Use purposeful dialogue and specific interiority; avoid exposition dumps.
+    6. Build to a consequential choice, irreversible action, or unavoidable consequence.
+    7. Finish with a complete aftermath paragraph. Never stop mid-sentence or on an
+       ellipsis.
+
+    Style constraints:
+    - Aim for roughly 450-700 words, but always finish completely.
+    - Preserve source meaning and chronology.
+    - Do not merely add adjectives or summarize the source.
+    - No camera directions, scene headings, labels, metadata, or commentary.
 
     Output ONLY the expanded story prose.
-    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
     """).strip()
 
         raise ValueError(
@@ -153,268 +147,21 @@ class QwenDirectorPromptMixin:
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
-            + "End on a complete sentence with terminal punctuation. Include the required causal reversal, protagonist interiority, and functional dialogue."
+            + "Silently self-check continuity, character agency, causal reversal, climax, dialogue, and complete aftermath before answering. "
+            + "Return only the completed story. Preserve meaningful detail; do not shorten the story merely to fit a target length. "
+            + "End on a complete sentence with terminal punctuation."
         )
         return result
 
     @staticmethod
-    def _story_architecture_json_schema() -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "protagonist": {"type": "string"},
-                "protagonist_goal": {"type": "string"},
-                "secondary_character": {"type": "string"},
-                "secondary_goal": {"type": "string"},
-                "relationship_tension": {"type": "string"},
-                "inciting_incident": {"type": "string"},
-                "early_character_action": {"type": "string"},
-                "escalation_beats": {
-                    "type": "array",
-                    "minItems": 3,
-                    "maxItems": 5,
-                    "items": {"type": "string"},
-                },
-                "midpoint_reversal": {"type": "string"},
-                "climax_choice": {"type": "string"},
-                "ending_consequence": {"type": "string"},
-                "cliche_traps_to_avoid": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 6,
-                    "items": {"type": "string"},
-                },
-            },
-            "required": [
-                "protagonist",
-                "protagonist_goal",
-                "secondary_character",
-                "secondary_goal",
-                "relationship_tension",
-                "inciting_incident",
-                "early_character_action",
-                "escalation_beats",
-                "midpoint_reversal",
-                "climax_choice",
-                "ending_consequence",
-                "cliche_traps_to_avoid",
-            ],
-            "additionalProperties": False,
-        }
-
     @staticmethod
-    def _story_architecture_system(mode: str) -> str:
-        if mode == AI_STORY_MODE:
-            return textwrap.dedent("""
-    You are the story architect for MiniMax H3.
-
-    Before the prose writer drafts the story, design a compact causal architecture for a high-quality
-    cinematic short film. The target quality is the successful two-character pattern used by the Director:
-    a named protagonist with a concrete objective, a principal secondary character with an independent
-    goal or position, direct two-way conflict, escalating complications, a reversal rooted in an earlier
-    concrete detail, a costly climax choice, and a concrete aftermath.
-
-    The secondary character must be a real dramatic participant. Do not make them a late nameplate,
-    recording, disembodied voice, screen message, or exposition device. Avoid generic endings such as
-    “guardian of something greater,” “the world had changed,” “some secrets were meant to stay buried,”
-    or other vague moral transformations unless the premise specifically earns them.
-
-    Every beat must causally alter the next decision. Avoid random monsters, secret organizations, destiny
-    prophecies, or twists introduced only for surprise.
-    """).strip()
-
-        return textwrap.dedent("""
-    You are the story architect for MiniMax H3 Expand Story mode.
-
-    Preserve the source story's core characters, events, chronology, setting, and outcome. Plan an expansion
-    that deepens the existing character relationship and causal chain rather than replacing the story.
-    Keep the persistent character set stable and do not invent a new persistent human/sentient identity merely
-    to create a twist. Build meaningful escalation, a grounded reversal, a consequential climax choice, and
-    concrete aftermath.
-    """).strip()
-
     @staticmethod
-    def _story_architecture_user(
-        mode: str,
-        story: str,
-        source_character_names: list[str] | None = None,
-    ) -> str:
-        payload = {
-            "mode": mode,
-            "source_story": str(story or "").strip(),
-        }
-        if source_character_names:
-            payload["source_character_anchors"] = list(dict.fromkeys(
-                str(value).strip()
-                for value in source_character_names
-                if str(value).strip()
-            ))[:16]
-        return (
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-            + "\nReturn JSON only. Do not write the story prose yet."
-        )
-
     @staticmethod
-    def _story_writer_blueprint_instruction(blueprint: dict) -> str:
-        return (
-            "\n\nSTORY ARCHITECTURE BLUEPRINT:\n"
-            + json.dumps(blueprint, ensure_ascii=False, indent=2)
-            + "\n\nUse the blueprint as the causal skeleton, not as prose to copy. "
-            + "Write one continuous finished story. Every major beat must change what the protagonist can do next. "
-            + "The secondary character must act, pursue their own objective, and materially change the protagonist's decision. "
-            + "The reversal must reinterpret an earlier concrete detail. The climax must force a real choice and the ending "
-            + "must show concrete consequences."
-        )
-
     @staticmethod
-    def _story_quality_json_schema() -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "pass": {"type": "boolean"},
-                "score": {"type": "integer", "minimum": 0, "maximum": 40},
-                "secondary_character_arc": {"type": "integer", "minimum": 0, "maximum": 5},
-                "character_conflict": {"type": "integer", "minimum": 0, "maximum": 5},
-                "causal_reversal": {"type": "integer", "minimum": 0, "maximum": 5},
-                "escalation_choice": {"type": "integer", "minimum": 0, "maximum": 5},
-                "dialogue": {"type": "integer", "minimum": 0, "maximum": 5},
-                "interiority": {"type": "integer", "minimum": 0, "maximum": 5},
-                "resolution": {"type": "integer", "minimum": 0, "maximum": 5},
-                "originality": {"type": "integer", "minimum": 0, "maximum": 5},
-                "problems": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "maxItems": 8,
-                },
-            },
-            "required": [
-                "pass",
-                "score",
-                "secondary_character_arc",
-                "character_conflict",
-                "causal_reversal",
-                "escalation_choice",
-                "dialogue",
-                "interiority",
-                "resolution",
-                "originality",
-                "problems",
-            ],
-            "additionalProperties": False,
-        }
-
     @staticmethod
-    def _story_quality_review_system(mode: str) -> str:
-        return textwrap.dedent(f"""
-    You are the strict narrative-quality gate for MiniMax H3 {mode}.
-
-    Judge the supplied completed story as a short-film narrative, not as a list of
-    style requirements. A story passes only when it is genuinely character-driven,
-    causally coherent, dramatically escalating, and complete.
-
-    QUALITY TARGET:
-    - The protagonist has a concrete objective and a personal stake.
-    - A principal secondary character is a real dramatic participant, not a late
-      nameplate/voice/screen reveal. That character has a distinct position,
-      motivation, or relationship to the protagonist and materially changes the plot.
-    - Their interaction creates conflict or competing goals, not just exposition.
-    - The reversal grows from earlier concrete details rather than arriving as a
-      random monster/secret/device.
-    - The climax contains a consequential choice.
-    - Dialogue exposes conflict, information, or a decision; it is not filler.
-    - Interiority is specific and tied to events.
-    - The ending shows concrete consequences instead of a generic moral statement.
-    - The story should feel at least as dramatically developed as a strong two-character
-      short-film example: active secondary character, meaningful two-way dialogue,
-      causal reveal, escalating stakes, and earned consequences.
-
-    HARD FAIL CONDITIONS:
-    - the secondary character first appears only through a nameplate, recording,
-      disembodied voice, screen label, or exposition;
-    - the protagonist simply learns a secret without having to make a consequential
-      choice because of it;
-    - the second character is mostly an information dispenser;
-    - the final paragraph becomes a generic “guardian / greater purpose / changed man”
-      moral without concrete consequences;
-    - the story is substantially weaker than its own central character conflict.
-
-    Score each dimension 0-5. Pass requires every core dimension to be at least 4,
-    originality at least 3, and total score at least 32/40.
-
-    Return JSON only.
-    """).strip()
-
     @staticmethod
-    def _story_quality_review_user(
-        mode: str,
-        story: str,
-        source_character_names: list[str] | None = None,
-    ) -> str:
-        anchors = ""
-        if source_character_names:
-            values = [str(v).strip() for v in source_character_names if str(v).strip()]
-            if values:
-                anchors = "\nSOURCE CHARACTER ANCHORS:\n" + ", ".join(values[:16])
-        return (
-            "STORY:\n"
-            + str(story).strip()
-            + anchors
-            + "\n\nReturn the strict JSON quality assessment."
-        )
-
     @staticmethod
-    def _story_quality_repair_system(mode: str) -> str:
-        return textwrap.dedent(f"""
-    You are the senior narrative editor for MiniMax H3 {mode}.
-
-    Repair the supplied story into a stronger short-film narrative without throwing
-    away its premise, core events, setting, or established characters.
-
-    The repaired story MUST:
-    - keep the protagonist's objective and personal stake;
-    - introduce the principal secondary character through action/direct interaction,
-      never first through a nameplate, recording, disembodied voice, screen label,
-      or exposition-only reveal;
-    - make the secondary character an active participant with a distinct position or
-      goal that conflicts with or complicates the protagonist;
-    - include several purposeful exchanges between them;
-    - build at least two complications into an earned climax;
-    - force a consequential protagonist choice;
-    - make the central reversal causally emerge from earlier details;
-    - retain concrete, specific interiority;
-    - finish with concrete aftermath and consequences, not a generic moral;
-    - preserve source characters/chronology/outcome in EXPAND-STORY mode;
-    - never invent a new persistent character in EXPAND-STORY merely to create a twist.
-
-    Preserve strong material from the supplied draft. Repair weak material rather than
-    replacing the entire story with unrelated plot.
-
-    Output ONLY the repaired story prose.
-    """).strip()
-
     @staticmethod
-    def _story_quality_repair_user(
-        mode: str,
-        story: str,
-        review: dict,
-        source_character_names: list[str] | None = None,
-    ) -> str:
-        anchors = ""
-        if source_character_names:
-            values = [str(v).strip() for v in source_character_names if str(v).strip()]
-            if values:
-                anchors = "\nSOURCE CHARACTER ANCHORS: " + ", ".join(values[:16])
-        problems = review.get("problems", []) if isinstance(review, dict) else []
-        return (
-            "CURRENT STORY:\n"
-            + str(story).strip()
-            + anchors
-            + "\n\nQUALITY FAILURES TO REPAIR:\n"
-            + "\n".join(f"- {str(p).strip()}" for p in problems if str(p).strip())
-            + "\n\nReturn only the fully repaired story."
-        )
-
     def _sampling_for_mode(
         self,
         mode: str,
