@@ -906,14 +906,7 @@ class CinematicCompiler:
             "speaking_characters":
                 (
                     []
-                    if (
-                        "speaking_characters" in shot
-                        and isinstance(
-                            shot.get("speaking_characters"),
-                            list,
-                        )
-                        and not shot.get("speaking_characters")
-                    )
+                    if not shot.get("speaking_characters")
                     else self._canonical_characters(
                         shot.get(
                             "speaking_characters",
