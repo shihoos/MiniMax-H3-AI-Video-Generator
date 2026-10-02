@@ -1663,8 +1663,7 @@ class ProductionOrchestrator:
         dialogue_contract = self._snapshot_dialogue_contract(plan)
 
         # Deterministic production-enforcement passes. Qwen remains the
-        # creative source, while canonical shot rebinding, timing, and continuity
-        # are finalized here.
+        # creative source, while timing and continuity are finalized here.
         plan["production_id"] = production_id
         plan = self._enforce_production_contracts(plan, characters)
         self._assert_dialogue_contract_preserved(dialogue_contract, plan)
