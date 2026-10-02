@@ -38,31 +38,39 @@ def test_deterministic_character_regressions():
 
 def test_story_prompt_restores_successful_compact_narrative_contract():
     source = Path(ROOT, "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    _assert("The user provides a premise." in source, "AI story prompt must use the proven premise framing")
-    _assert(_has_normalized(source, "Write a complete cinematic short-film story with a clear beginning"), "AI story prompt must use the proven compact narrative contract")
-    _assert("SUBVERT THE OBVIOUS" in source, "AI story prompt must require one earned reversal")
+    _assert("The user provides a premise." in source, "AI story prompt must use premise framing")
+    _assert(_has_normalized(source, "clear beginning, escalating middle, irreversible choice or point of no return, climax, consequence, and explicit resolution"), "AI story prompt must require a complete causal arc")
+    _assert("SUBVERT THE OBVIOUS" in source, "AI story prompt must require an earned reframing reversal")
     _assert("Include at least one short line of spoken dialogue by a named" in source, "AI story prompt must require named-character dialogue")
     _assert(_has_normalized(source, "End with a complete aftermath paragraph showing what happened to the protagonist and what changed."), "AI story prompt must require an explicit aftermath")
     _assert("Aim for 400-650 words" in source, "AI/Expand story target must remain 400-650 words")
     _assert(_has_normalized(source, "State the protagonist's concrete goal in the first two sentences."), "AI story opening contract is missing")
     _assert("Prioritize finishing the full narrative" in source, "story user prompt must prioritize completion over padding")
-    _assert("The cast is a narrative decision, not a production rule." in source, "cast selection must remain flexible")
-    _assert("Do not force a minimum or maximum cast" in source, "cast size must remain flexible")
-    _assert("active causal or emotional counterpart" in source, "recurring supporting characters must be causally active")
-    _assert("first major action must be caused by that goal" in source, "opening must be goal-driven")
-    _assert("meaningful resistance, opposition, or consequence" in source, "protagonist must face meaningful early resistance")
-    _assert("When the premise naturally" in source and "supports another recurring character" in source, "early interaction should prefer a supported recurring character")
-    _assert("change the protagonist's choice, belief, goal, or relationship" in source, "supporting-character interaction must change the protagonist meaningfully")
-    _assert(_has_normalized(source, "Before the midpoint, create at least one meaningful interaction"), "story must contain an early interactive beat")
-    _assert("PERSONAL CAUSALITY" in source, "story should support protagonist-linked central conflict when the premise allows")
-    _assert(_has_normalized(source, "prior choice, relationship, mistake, promise, desire, or responsibility"), "personal causality mechanism is missing")
-    _assert(_has_normalized(source, "Do not manufacture backstory or a personal connection when the premise does not support one"), "personal causality must remain premise-grounded")
-    _assert("PAYOFF DETAIL" in source, "story must plant and pay off a concrete detail")
-    _assert("one dominant causal reversal" in source, "story must avoid stacked unrelated twists")
-    _assert(_has_normalized(source, "final image or behavior that echoes an earlier detail"), "resolution should echo an earlier planted detail")
-    _assert("Use one protagonist or" not in source, "single-protagonist bias must remain absent")
-    _assert("when the story contains a speaking character" not in source, "dialogue requirement must not be weakened")
+    _assert("organic narrative decision" in source, "cast selection must remain flexible")
+    _assert("do not force a minimum or maximum" in source.lower(), "cast size must remain flexible")
+    _assert("active causal or" in source and "emotional counterpart" in source, "recurring supporting characters must be causally active")
+    _assert("must TAKE AN ACTION" in source, "supporting counterpart must act rather than only explain")
+    _assert("second \"it was actually X\" twist" in source, "story prompt must forbid stacked second reversals")
+    _assert(_has_normalized(source, "first major action must pursue that goal"), "opening must be goal-driven")
+    _assert(_has_normalized(source, "meaningful resistance or consequence"), "protagonist must face meaningful early resistance")
+    _assert(_has_normalized(source, "By the midpoint, the protagonist's plan, belief, or relationship must materially change"), "story prompt must require a midpoint state change")
+    _assert("immediate objective or belief that conflicts with the protagonist" in source, "supporting character must have independent pressure")
+    _assert("materially alter" in source.lower() and "what the protagonist" in source.lower(), "supporting-character interaction must change the protagonist meaningfully")
+    _assert("PERSONAL STAKE" in source, "story should support protagonist-linked central conflict when the premise allows")
+    _assert(_has_normalized(source, "prior choice, relationship, memory, promise, fear, desire, or responsibility"), "personal causality mechanism is missing")
+    _assert("do not manufacture backstory" in source.lower(), "personal causality must remain premise-grounded")
+    _assert("PLANTED DETAIL" in source, "story must plant and pay off a concrete detail")
+    _assert("reinterprets an earlier detail or belief" in source, "story must require a reframing reveal")
+    _assert("one dominant causal chain" in source, "story must avoid stacked unrelated twists")
+    _assert("Do not introduce a new unresolved" in source, "story must protect the final paragraph from open hooks")
+    _assert("Expand by causal development, not by stacking mysteries" in source, "expand prompt must avoid mystery stacking")
+    _assert("one major new element" in source, "expand prompt must cap new mystery-bearing elements")
+    _assert("source_dialogue" in source, "shot prompt must receive an explicit source-dialogue whitelist")
+    _assert("If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT" in source, "character extraction must keep identity type and entity type consistent")
+    _assert("Reject pronouns, contractions, sentence fragments" in source, "character extraction must reject prose fragments as identities")
     _assert("final character must end" not in source.lower(), "obsolete final-character wording remains")
+    for leaked_name in ("Eli's father", "Sara's sister", "Mira's commander", "Eli", "Lin Mei"):
+        _assert(leaked_name not in source, f"prompt must not seed a hard-coded character name: {leaked_name}")
 
 
 def test_expand_source_fallback_removed():
@@ -635,6 +643,14 @@ def test_shot_prompt_requires_same_speaker_continuation_rule():
         "Never set `continues_to_next_shot=true` when the next shot begins with a different speaker." in source,
         "shot prompt must forbid cross-speaker continuation",
     )
+    _assert(
+        "source_dialogue` whitelist" in source,
+        "shot prompt must identify the exact source-dialogue whitelist",
+    )
+    _assert(
+        "must never invent a new line from narrative prose" in source,
+        "shot prompt must forbid narrative-to-dialogue invention",
+    )
 
 
 def test_dialogue_continuation_requires_same_canonical_speaker():
@@ -913,6 +929,71 @@ def test_dialogue_h3_feasibility_propagates_non_timing_errors():
         qwen_director_module.DialogueTimeline = original
 
 
+
+def test_story_completion_contracts():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    source = "Eli enters the abandoned station and finds a sealed vault."
+    open_story = (
+        'Eli found the sealed vault. "I should have left it closed," he whispered. '
+        'He escaped after the station shook. He knew he had set something in motion that could never be undone.'
+    )
+    try:
+        director._validate_mode_output("expand_user_story", source, open_story)
+    except RuntimeError as exc:
+        _assert("unresolved future hook" in str(exc), f"wrong completion failure: {exc}")
+    else:
+        raise AssertionError("open-ended story ending was not rejected")
+
+    closed_story = (
+        'Eli found the sealed vault. "I should have left it closed," he whispered. '
+        'He shut the system down before dawn. The station was secured again, and Eli sealed the journal away. '
+        'He finally stopped searching for the answers his father had taken to his grave.'
+    )
+    director._validate_mode_output("expand_user_story", source, closed_story)
+
+
+def test_dialogue_source_occurrence_budget():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    director._qwen_telemetry = {"deterministic_recoveries": 0}
+    characters = [{"name": "Eli", "identity_type": "named_character", "semantic_aliases": []}]
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"]}]
+
+    def run(story, texts):
+        shots = []
+        for index, text in enumerate(texts, start=1):
+            shots.append({
+                "shot_id": f"scene_001_shot_{index:03d}",
+                "scene_id": "scene_001",
+                "characters": ["Eli"],
+                "dialogue_events": [{
+                    "speaker": "Eli",
+                    "text": text,
+                    "continues_from_previous_shot": False,
+                    "continues_to_next_shot": False,
+                }],
+            })
+        director._normalize_dialogue_speakers(story, scenes, shots, characters)
+        return shots
+
+    duplicate = run('Eli said, "Stay here."', ["Stay here.", "Stay here."])
+    _assert(len(duplicate[0]["dialogue_events"]) == 1, "first source line was lost")
+    _assert(not duplicate[1]["dialogue_events"], "same source line was duplicated")
+
+    split = run('Eli said, "We need to leave before dawn."', ["We need to leave", "before dawn."])
+    _assert(all(len(shot["dialogue_events"]) == 1 for shot in split), "split source dialogue was lost")
+
+    repeated = run(
+        'Eli said, "Stay here." Later he said, "Stay here."',
+        ["Stay here.", "Stay here."],
+    )
+    _assert(all(len(shot["dialogue_events"]) == 1 for shot in repeated), "distinct repeated source lines were collapsed")
+
+
 def test_source_contracts():
     from pathlib import Path
     orchestrator = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
@@ -952,6 +1033,8 @@ def main():
         test_dialogue_h3_feasibility_rebalances_generated_shots,
         test_dialogue_h3_feasibility_searches_the_whole_scene,
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
+        test_story_completion_contracts,
+        test_dialogue_source_occurrence_budget,
         test_source_contracts,
     ]
     for test in tests:
