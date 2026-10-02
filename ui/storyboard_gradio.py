@@ -32,7 +32,6 @@ from pipeline.retake_manager import RetakeManager
 from ui.shot_view_model import shot_choices, render_shot_card
 from planner.config import (
     RUNTIME,
-    GRADIO_SHARE_ENV,
     STORYBOARD_HOST,
     STORYBOARD_PORT,
     storyboard_share_enabled,
