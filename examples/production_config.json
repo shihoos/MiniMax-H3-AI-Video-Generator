@@ -3,7 +3,6 @@
   "workflow_mode": "auto",
   "profile": "turbo",
   "upscale_enabled": true,
-  "parallel_safe": false,
   "story": "A lone traveler crosses a storm-damaged coastal city and discovers a signal beneath the ruins.",
   "approval": {
     "status": "draft",
