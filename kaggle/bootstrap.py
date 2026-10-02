@@ -2032,6 +2032,70 @@ print("[H3 OPT] fresh-process runtime capability check passed; no H3 model gener
             + (verification.stdout or "")
             + (verification.stderr or "")
         )
+def _ordered_custom_nodes(manifest: dict) -> list[dict]:
+    """Return custom nodes in deterministic dependency order.
+
+    The manifest's ``depends_on`` declarations are part of the runtime contract.
+    Install order must not rely on the incidental YAML ordering of the current
+    file, so perform a stable topological sort and fail closed on unknown or
+    cyclic dependencies.
+    """
+    custom_nodes = manifest.get("custom_nodes", {}) or {}
+    nodes = list(custom_nodes.get("required", []) or []) + list(
+        custom_nodes.get("supporting", []) or []
+    )
+    by_name: dict[str, dict] = {}
+    order_index: dict[str, int] = {}
+    for index, node in enumerate(nodes):
+        name = str(node.get("name", "") or "").strip()
+        if not name:
+            raise RuntimeError("Custom-node manifest contains a node with no name.")
+        if name in by_name:
+            raise RuntimeError(f"Custom-node manifest contains duplicate node: {name}")
+        by_name[name] = node
+        order_index[name] = index
+
+    indegree = {name: 0 for name in by_name}
+    dependents: dict[str, list[str]] = {name: [] for name in by_name}
+    for name, node in by_name.items():
+        dependencies = [
+            str(value).strip()
+            for value in (node.get("depends_on", []) or [])
+            if str(value).strip()
+        ]
+        for dependency in dependencies:
+            if dependency not in by_name:
+                raise RuntimeError(
+                    f"Custom-node {name!r} depends on unknown node {dependency!r}."
+                )
+            indegree[name] += 1
+            dependents[dependency].append(name)
+
+    ready = sorted(
+        [name for name, degree in indegree.items() if degree == 0],
+        key=order_index.__getitem__,
+    )
+    ordered: list[dict] = []
+    while ready:
+        name = ready.pop(0)
+        ordered.append(by_name[name])
+        for dependent in sorted(dependents[name], key=order_index.__getitem__):
+            indegree[dependent] -= 1
+            if indegree[dependent] == 0:
+                ready.append(dependent)
+                ready.sort(key=order_index.__getitem__)
+
+    if len(ordered) != len(by_name):
+        cyclic = sorted(
+            [name for name, degree in indegree.items() if degree > 0],
+            key=order_index.__getitem__,
+        )
+        raise RuntimeError(
+            "Custom-node dependency cycle detected: " + ", ".join(cyclic)
+        )
+    return ordered
+
+
 def install_nodes() -> None:
     manifest = load_yaml(
         NODE_MANIFEST
@@ -2040,80 +2104,67 @@ def install_nodes() -> None:
         parents=True,
         exist_ok=True,
     )
-    groups = (
-        manifest[
-            "custom_nodes"
-        ][
-            "required"
-        ],
-        manifest[
-            "custom_nodes"
-        ][
-            "supporting"
-        ],
-    )
-    for group in groups:
-        for node in group:
-            destination = (
-                CUSTOM
-                / node[
-                    "name"
-                ]
-            )
-            if not destination.exists():
-                run(
-                    "git",
-                    "clone",
-                    node[
-                        "repository"
-                    ],
-                    destination,
-                )
+    for node in _ordered_custom_nodes(manifest):
+        destination = (
+            CUSTOM
+            / node[
+                "name"
+            ]
+        )
+        if not destination.exists():
             run(
                 "git",
-                "-C",
-                destination,
-                "fetch",
-                "--all",
-                "--tags",
-                "--prune",
-            )
-            if node["name"] == "H3-Optimizations":
-                run("git", "-C", destination, "reset", "--hard")
-            run(
-                "git",
-                "-C",
-                destination,
-                "checkout",
-                "--detach",
+                "clone",
                 node[
-                    "revision"
+                    "repository"
                 ],
+                destination,
             )
-            requirements = destination / "requirements.txt"
-            if requirements.is_file():
-                run(
-                    sys.executable,
-                    "-m",
-                    "pip",
-                    "install",
-                    "-q",
-                    "--disable-pip-version-check",
-                    "-r",
-                    requirements,
-                )
-                print(
-                    "[NODE DEPS]",
-                    node[
-                        "name"
-                    ],
-                )
+        run(
+            "git",
+            "-C",
+            destination,
+            "fetch",
+            "--all",
+            "--tags",
+            "--prune",
+        )
+        if node["name"] == "H3-Optimizations":
+            run("git", "-C", destination, "reset", "--hard")
+        run(
+            "git",
+            "-C",
+            destination,
+            "checkout",
+            "--detach",
+            node[
+                "revision"
+            ],
+        )
+        requirements = destination / "requirements.txt"
+        if requirements.is_file():
+            run(
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-q",
+                "--disable-pip-version-check",
+                "-r",
+                requirements,
+            )
             print(
-                "[NODE]",
+                "[NODE DEPS]",
                 node[
                     "name"
                 ],
             )
+        print(
+            "[NODE]",
+            node[
+                "name"
+            ],
+        )
 
 # Project-owned SageAttention SM75 correction recipe.
 # This is intentionally embedded here so the bootstrap is self-contained:
@@ -2767,15 +2818,20 @@ def main():
     )
     install_base_requirements()
     install_comfyui(runtime)
-    install_pytorch_runtime(runtime)
     install_director_runtime(
         runtime
     )
     install_storyboard_runtime(
         runtime
     )
+    # Custom-node requirements are installed before the project PyTorch lock.
+    # This makes the lock authoritative even when a node declares a transitive
+    # Torch/CUDA dependency. The verification inside install_pytorch_runtime()
+    # runs in a fresh child interpreter, so it remains valid even when the live
+    # Kaggle kernel imported Torch before bootstrap.
     install_nodes()
     remove_legacy_context_ir_node()
+    install_pytorch_runtime(runtime)
     install_and_verify_pillow_runtime(runtime)
     install_sageattention_sm75(runtime)
     prepare_locked_h3_optimization_source(runtime)
