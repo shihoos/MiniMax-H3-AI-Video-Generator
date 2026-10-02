@@ -511,8 +511,13 @@ class DialogueTimeline:
 
             if boundary:
                 # A scene-boundary shot starts a new dialogue segment.
+                # _raw_events() returns defensive copies, so persist the
+                # reconciled event list back to the shot before schedule_shot()
+                # reads it again. Otherwise a stale continuation flag can be
+                # resurrected at the scene boundary.
                 if requested:
                     requested[0]["continues_from_previous_shot"] = False
+                    shot["dialogue_events"] = requested
                 current_continues_from = False
                 continuation_by_scene[scene_id] = False
                 previous = None
