@@ -1,9 +1,7 @@
 from pathlib import Path
-import json
 import os
 import sys
 import tempfile
-from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -512,6 +510,37 @@ def test_downstream_production_preserves_dialogue_multiset():
     else:
         raise AssertionError("downstream dialogue deletion was not detected")
 
+def test_dialogue_scene_boundary_clears_stale_continuation():
+    from pipeline.dialogue_timeline import DialogueTimeline
+
+    characters = [{"name": "Eli", "character_id": "eli"}]
+    plan = {
+        "shots": [
+            {
+                "shot_id": "scene_001_shot_001",
+                "scene_id": "scene_001",
+                "is_scene_boundary": True,
+                "duration_seconds": 4.0,
+                "characters": ["Eli"],
+                "dialogue_events": [
+                    {
+                        "speaker": "Eli",
+                        "text": "A fresh scene begins here.",
+                        "continues_from_previous_shot": True,
+                        "continues_to_next_shot": False,
+                    }
+                ],
+            }
+        ]
+    }
+    DialogueTimeline(characters).apply_to_plan(plan)
+    event = plan["shots"][0]["dialogue_events"][0]
+    _assert(
+        event["continues_from_previous_shot"] is False,
+        "scene-boundary normalization did not persist the cleared continuation flag",
+    )
+
+
 def test_dialogue_h3_feasibility_rebalances_generated_shots():
     from copy import deepcopy
     from planner.qwen_director import QwenDirector
@@ -720,6 +749,7 @@ def main():
         test_unresolved_explicit_dialogue_fails_closed,
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
+        test_dialogue_scene_boundary_clears_stale_continuation,
         test_dialogue_h3_feasibility_rebalances_generated_shots,
         test_dialogue_h3_feasibility_searches_the_whole_scene,
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
