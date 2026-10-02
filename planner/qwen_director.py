@@ -411,13 +411,11 @@ class QwenDirector(
             except RuntimeError as first_error:
                 if mode == AI_STORY_MODE:
                     retry_requirements = (
-                        "Create a fresh, complete story rewrite. This is the final controlled retry. "
-                        "Re-evaluate the narrative structure and character roster from the premise itself. "
-                        "Use only as many recurring characters as the story genuinely needs; do not add, "
-                        "remove, rename, or force a character merely to satisfy a validator. Preserve the "
-                        "strongest premise, causal development, climax, and resolution, and make every "
-                        "recurring character earn their place through meaningful action, relationship, "
-                        "opposition, assistance, or consequence. "
+                        "Create a fresh, complete story rewrite from the same premise and strongest established narrative direction. "
+                        "Re-evaluate the structure only where needed for coherence and completion. Use only as many recurring characters "
+                        "as the story genuinely needs; do not add, remove, rename, or force a character merely to satisfy a validator. "
+                        "Preserve any character that is already causally earned, and make every retained recurring character earn its place "
+                        "through meaningful action, relationship, opposition, assistance, or consequence. "
                     )
                 else:
                     retry_requirements = (
@@ -429,9 +427,8 @@ class QwenDirector(
                     story_user
                     + "\n\n"
                     + retry_requirements
-                    + "Do not shorten the narrative merely to satisfy validation. Finish every causal "
-                    + "beat, the climax, and the concrete aftermath. The final sentence must be complete with "
-                    + "terminal punctuation; do not end on a fragment, dash, "
+                    + "Prioritize finishing the full narrative, including the resolution, over adding extra detail. Do not truncate a causal beat "
+                    + "or the climax merely to satisfy validation. The final sentence must be complete with terminal punctuation; do not end on a fragment, dash, "
                     + "ellipsis, or unfinished quotation. Return ONLY the finished story prose."
                 )
                 try:
@@ -456,25 +453,14 @@ class QwenDirector(
                     )
                     generated_story = True
                 except RuntimeError as retry_error:
-                    if mode == EXPAND_USER_STORY_MODE:
-                        # Last-resort semantic preservation. This is only reached
-                        # after two complete generation attempts fail deterministic
-                        # validation; never silently replace a valid expansion.
-                        self._record_recovery(
-                            "expand_story_source_fallback",
-                            str(retry_error),
-                        )
-                        story = self._normalize_story(user_input)
-                        self._validate_mode_output(
-                            PRESERVE_USER_STORY_MODE,
-                            user_input,
-                            story,
-                        )
-                    else:
-                        raise RuntimeError(
+                    raise RuntimeError(
+                        (
                             "AI Story generation failed validation after the controlled retry: "
-                            + str(retry_error)
-                        ) from retry_error
+                            if mode == AI_STORY_MODE
+                            else "Expand Story generation failed validation after the controlled retry: "
+                        )
+                        + str(retry_error)
+                    ) from retry_error
 
 
         # ----------------------------------------------------
