@@ -430,8 +430,8 @@ class QwenDirector(
                     + "\n\n"
                     + retry_requirements
                     + "Do not shorten the narrative merely to satisfy validation. Finish every causal "
-                    + "beat, the climax, and the concrete aftermath. The final character must be a "
-                    + "complete sentence with terminal punctuation; do not end on a fragment, dash, "
+                    + "beat, the climax, and the concrete aftermath. The final sentence must be complete with "
+                    + "terminal punctuation; do not end on a fragment, dash, "
                     + "ellipsis, or unfinished quotation. Return ONLY the finished story prose."
                 )
                 try:
