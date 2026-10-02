@@ -30,7 +30,6 @@ from pipeline.runtime_diagnostics import RuntimeDiagnostics
 from pipeline.h3_scene_continuity import (
     H3SceneContinuity,
 )
-from pipeline.continuity_ledger import ContinuityLedger
 from pipeline.production_checkpoint import (
     ProductionCheckpoint,
 )
@@ -42,12 +41,9 @@ from planner.config import (
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
     H3_MAX_REFERENCE_IMAGES,
-    H3_AUTO_RETAKE,
     H3_QA_ENABLED,
     H3_VLM_ENABLED,
     H3_VLM_VISUAL_QA,
-    H3_MAX_AUTO_RETAKES_PER_SHOT,
-    H3_SELECTIVE_RETAKE,
     PROFILE_BASE,
     PROFILE_TURBO,
     PROFILE_UPSCALE,
@@ -251,7 +247,6 @@ class ProductionRunner:
         scene_id: str,
     ):
 
-        from execution.metrics import MetricsRecorder
         metrics_path = self.project_root / "data" / "production" / str(self.production_id) / "metrics.jsonl"
         policy = ExecutionPolicy.from_runtime(
             mode="production",
