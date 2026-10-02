@@ -173,6 +173,10 @@ class ProductionPlanner:
         "hero", "heroine", "explorer", "detective", "scientist",
         "soldier", "warrior", "king", "queen", "robot", "android",
         "pilot", "doctor", "guard", "officer", "stranger",
+        # Bare honorifics/titles are lexical prefixes, never standalone
+        # canonical identities (e.g. ``Dr. Elena Voss`` must not create ``Dr``).
+        "dr", "prof", "professor", "mr", "mrs", "ms", "miss",
+        "captain", "commander", "agent",
     }
 
     # A descriptive character is a recurring person who has no stable proper
