@@ -26,7 +26,6 @@ from planner.config import (
     H3_FRAMES_PER_SHOT,
     H3_HEIGHT,
     H3_MAX_REFERENCE_AUDIO,
-    H3_MAX_REFERENCE_FILES,
     H3_MAX_REFERENCE_IMAGES,
     H3_MAX_REFERENCE_VIDEOS,
     H3_STEPS,
@@ -1739,37 +1738,6 @@ class ProductionOrchestrator:
                 )
             self._refresh_shot_prompt(shot)
 
-        scene_characters = {}
-
-        for shot in plan.get(
-            "shots",
-            [],
-        ):
-
-            scene_characters.setdefault(
-                shot["scene_id"],
-                set(),
-            ).update(
-                str(name).lower()
-                for name in (
-                    shot.get(
-                        "characters",
-                        [],
-                    )
-                    or []
-                )
-            )
-
-        seen_characters = {}
-        shared = False
-
-        for scene_id, names in scene_characters.items():
-            for name in names:
-                if name in seen_characters:
-                    shared = True
-                seen_characters[name] = scene_id
-
-        plan["parallel_safe"] = not shared
         ProductionTimeline(plan).build()
         ProductionTimeline.validate(plan)
 
