@@ -81,7 +81,7 @@ class QwenDirectorPromptMixin:
     Final self-check: the chosen cast is sufficient for the premise and no character feels
     artificially added or omitted; the reversal/turn, if used, is earned; the climax changes
     the protagonist's situation; and the ending resolves the central conflict cleanly. The
-    final character must end on a complete sentence, never on an unfinished fragment, dash,
+    final sentence must be complete with terminal punctuation; never end on an unfinished fragment, dash,
     or ellipsis.
 
     Output ONLY the finished story prose.
