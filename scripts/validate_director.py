@@ -338,6 +338,41 @@ def test_disabled_director_path():
             os.environ["H3_DIRECTOR_ENABLED"] = previous
 
 
+
+def test_story_pipeline_has_no_unnecessary_quality_or_architecture_calls():
+    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    forbidden = (
+        'story_quality_review',
+        'story_quality_repair',
+        'story_quality_verify',
+        'ai_story_architecture_pass',
+        'expand_story_architecture_pass',
+    )
+    for token in forbidden:
+        _assert(token not in source, f"obsolete narrative Qwen call remains wired: {token}")
+
+
+def test_story_token_budget_not_reduced():
+    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    _assert('max_completion=2200' in source, "story generation budget must remain 2200")
+    _assert('expand_story_text_retry' in source, "Expand Story controlled retry must remain available")
+
+def test_named_only_roster_skips_semantic_character_calls_safely():
+    from planner.production_planner import ProductionPlanner
+
+    planner = ProductionPlanner(ROOT)
+    story = (
+        "Elias Kade entered the Arctic station. "
+        "Dr. Lin Mei stood in the doorway and warned him about the vault."
+    )
+    characters = planner.create_characters(
+        story,
+        qwen_character_extractor=None,
+        qwen_character_adjudicator=None,
+    )
+    names = [character.name for character in characters]
+    _assert(names == ["Elias Kade", "Lin Mei"], f"bare honorific leaked into roster: {names}")
+
 def test_context_ir_capture_root():
     from pipeline.context_ir import H3ContextIRCompiler
     with tempfile.TemporaryDirectory() as tmp:
@@ -743,6 +778,9 @@ def main():
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
+        test_story_pipeline_has_no_unnecessary_quality_or_architecture_calls,
+        test_story_token_budget_not_reduced,
+        test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
         test_job_state_clears_stale_completion,
