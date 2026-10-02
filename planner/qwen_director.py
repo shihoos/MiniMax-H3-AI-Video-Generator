@@ -428,8 +428,9 @@ class QwenDirector(
                     + "\n\n"
                     + retry_requirements
                     + "Prioritize finishing the full narrative, including the resolution, over adding extra detail. Do not truncate a causal beat "
-                    + "or the climax merely to satisfy validation. The final sentence must be complete with terminal punctuation; do not end on a fragment, dash, "
-                    + "ellipsis, or unfinished quotation. Return ONLY the finished story prose."
+                    + "or the climax merely to satisfy validation. Resolve the central question and show concrete aftermath. Do not end on a new "
+                    + "unresolved mystery, threat, mission, or future hook. The final sentence must be complete with terminal punctuation; do not end "
+                    + "on a fragment, dash, ellipsis, or unfinished quotation. Return ONLY the finished story prose."
                 )
                 try:
                     story = self._chat_text(
@@ -1736,34 +1737,30 @@ class QwenDirector(
 
     @staticmethod
     def _normalize_dialogue_text(value: str) -> str:
-        return re.sub(
-            r"\s+",
-            " ",
-            str(value or "").strip().strip('"“”‘’'),
-        ).lower()
+        return (
+            re.sub(
+                r"\s+",
+                " ",
+                str(value or "").strip().strip('"“”‘’'),
+            )
+            .replace("’", "'")
+            .replace("‘", "'")
+            .replace("—", "-")
+            .replace("–", "-")
+            .lower()
+        )
 
     @classmethod
-    def _extract_story_spoken_texts(cls, story: str) -> dict[str, set[str]]:
-        """Extract spoken-text anchors and preserve explicit source speaker labels.
+    def _extract_story_spoken_segments(cls, story: str) -> list[dict]:
+        """Extract ordered source-speech segments with exact occurrence boundaries.
 
-        Quoted speech contributes an anchor with no explicit source speaker. Simple
-        script labels such as ``Eli: Hello`` or ``Eli — Hello`` contribute the same
-        normalized anchor plus the normalized source speaker label. Multiple source
-        labels for the same text are preserved so repeated dialogue never gets
-        silently assigned to one speaker. Screen/UI text inside quotes is excluded.
+        Each quoted/scripted utterance is a finite source-text budget. The Director may
+        split one utterance across adjacent shots, but it must not duplicate an utterance
+        or turn narrative prose into speech.
         """
         text = str(story or "")
-        anchors: dict[str, set[str]] = {}
-
-        def _add_anchor(spoken: str, source_speaker: str | None = None) -> None:
-            normalized = cls._normalize_dialogue_text(spoken)
-            if not normalized:
-                return
-            speakers = anchors.setdefault(normalized, set())
-            if source_speaker:
-                normalized_speaker = EntityResolver.normalize(source_speaker)
-                if normalized_speaker:
-                    speakers.add(normalized_speaker)
+        segments: list[dict] = []
+        quote_spans: list[tuple[int, int]] = []
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
@@ -1776,32 +1773,78 @@ class QwenDirector(
             r"\b(?:message|text|label|caption)\b.{0,80}\b(?:on|over|across|inside|appeared|displayed|flashed|read|shows|shown)\b.{0,40}\b(?:screen|monitor|display|terminal)\b",
             flags=re.IGNORECASE | re.DOTALL,
         )
+
         for match in quote_pattern.finditer(text):
             value = next((part for part in match.groups() if part), "")
-            if not value.strip():
+            normalized = cls._normalize_dialogue_text(value)
+            if not normalized:
                 continue
+
             prefix_window = text[max(0, match.start() - 180):match.start()]
             prefix = re.split(r"[.!?][\"”’]?\s+", prefix_window)[-1]
             suffix_window = text[match.end():match.end() + 100]
             suffix = re.split(r"[.!?]\s+", suffix_window, maxsplit=1)[0]
             suffix_context = re.sub(r"^[,;:\s]+", "", suffix)
+
             if screen_context.search(prefix) or re.search(
                 r"^(?:is|was|were|appears|appeared|appearing|shows|showed|display|displayed|displays|displaying|reads|read|flashed|flashes|shown|showing)\b.{0,80}\b(?:on|in|across|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b",
                 suffix_context,
                 flags=re.IGNORECASE | re.DOTALL,
             ):
                 continue
-            _add_anchor(value)
+
+            segments.append({
+                "text": normalized,
+                "source_speakers": set(),
+                "start": match.start(),
+                "end": match.end(),
+            })
+            quote_spans.append((match.start(), match.end()))
 
         label_pattern = re.compile(
             r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
         )
+
         for match in label_pattern.finditer(text):
+            if any(
+                start <= match.start() < end
+                or start < match.end() <= end
+                for start, end in quote_spans
+            ):
+                continue
+
             speaker = match.group(1).strip()
             spoken = match.group(2).strip()
-            if speaker and spoken:
-                _add_anchor(spoken, speaker)
+            normalized = cls._normalize_dialogue_text(spoken)
+            if not speaker or not normalized:
+                continue
 
+            segments.append({
+                "text": normalized,
+                "source_speakers": {EntityResolver.normalize(speaker)},
+                "start": match.start(),
+                "end": match.end(),
+            })
+
+        segments.sort(key=lambda item: (item["start"], item["end"]))
+        for segment in segments:
+            segment.pop("start", None)
+            segment.pop("end", None)
+        return segments
+
+    @classmethod
+    def _extract_story_spoken_texts(cls, story: str) -> dict[str, set[str]]:
+        """Return source dialogue anchors for compatibility with existing callers."""
+        anchors: dict[str, set[str]] = {}
+        for segment in cls._extract_story_spoken_segments(story):
+            anchor = str(segment.get("text", "") or "").strip()
+            if not anchor:
+                continue
+            anchors.setdefault(anchor, set()).update(
+                str(value).strip()
+                for value in (segment.get("source_speakers", set()) or set())
+                if str(value).strip()
+            )
         return anchors
 
     def _normalize_dialogue_speakers(
@@ -1829,7 +1872,47 @@ class QwenDirector(
 
         canonical_by_norm = {name.lower(): name for name in allowed_names}
         aliases = EntityResolver.build_character_alias_map(characters)
-        spoken_anchors = self._extract_story_spoken_texts(story)
+        spoken_segments = self._extract_story_spoken_segments(story)
+        segment_progress = [0 for _ in spoken_segments]
+
+        def _consume_source_dialogue(normalized_text: str):
+            if not normalized_text:
+                return None
+
+            def _match_key(value: str) -> str:
+                return re.sub(r"[.,!?;:]+$", "", str(value or "").strip())
+
+            candidate_key = _match_key(normalized_text)
+            if not candidate_key:
+                return None
+
+            # Prefer the earliest source utterance whose remaining text can carry
+            # this exact contiguous event. This gives each source occurrence a
+            # finite budget and supports safe splitting of long utterances while
+            # tolerating a terminal-punctuation difference from Qwen.
+            for index, segment in enumerate(spoken_segments):
+                source_text = str(segment.get("text", "") or "")
+                progress = segment_progress[index]
+                remaining = source_text[progress:]
+                if not remaining:
+                    continue
+
+                remaining_key = _match_key(remaining)
+                if candidate_key == remaining_key:
+                    segment_progress[index] = min(
+                        len(source_text),
+                        progress + len(normalized_text),
+                    )
+                    return set(segment.get("source_speakers", set()) or set())
+
+                if remaining_key.startswith(candidate_key):
+                    segment_progress[index] = min(
+                        len(source_text),
+                        progress + len(normalized_text),
+                    )
+                    return set(segment.get("source_speakers", set()) or set())
+
+            return None
 
         def _resolve(value: str) -> str | None:
             normalized = EntityResolver.normalize(value)
@@ -1883,20 +1966,14 @@ class QwenDirector(
                 # a quoted line split into multiple valid events while still
                 # rejecting whole narrative/action sentences.
                 normalized_text = self._normalize_dialogue_text(text)
-                if not spoken_anchors:
+                if not spoken_segments:
                     continue
 
-                matched_source_speakers: set[str] = set()
-                matched_any = False
-                for anchor, source_speakers in spoken_anchors.items():
-                    if (
-                        normalized_text == anchor
-                        or normalized_text in anchor
-                        or anchor in normalized_text
-                    ):
-                        matched_any = True
-                        matched_source_speakers.update(source_speakers)
-                if not matched_any:
+                matched_source_speakers = _consume_source_dialogue(normalized_text)
+                if matched_source_speakers is None:
+                    # Qwen sometimes emits a narrative sentence or repeats a source
+                    # line in multiple shots. Neither is valid audio. Drop it before
+                    # any timing/compilation stage can treat it as speech.
                     continue
 
                 canonical = _resolve(speaker)
