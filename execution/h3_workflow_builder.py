@@ -3,7 +3,6 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
 
 from planner.config import (
     H3_AUDIO_VAE,
@@ -14,7 +13,6 @@ from planner.config import (
     H3_MAX_REFERENCE_IMAGES,
     H3_MAX_REFERENCE_VIDEOS,
     H3_REF2VA_MODEL,
-    H3_REF_IMAGE_SIZE,
     H3_TEXT_ENCODER,
     H3_TURBO_LORA,
     H3_VIDEO_VAE,
