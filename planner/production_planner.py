@@ -2596,8 +2596,17 @@ class ProductionPlanner:
                     flags=re.IGNORECASE,
                 ):
                     continue
+                # Keep the discourse-owner window bounded, but allow a
+                # character to be separated from a possessive relation by
+                # several narrative sentences. Expand Story commonly plants
+                # a relationship in memory/action beats before returning to
+                # the protagonist (for example, ``Eli ... his father``).
+                # The previous 10-word cap silently dropped those grounded
+                # relational identities and could collapse a real two-person
+                # story into a one-character roster.
                 between = prefix[occ_end:]
-                if len(between.split()) > 10:
+                between_words = len(between.split())
+                if between_words > 60:
                     continue
                 candidates.append((occurrence.start(), canonical))
         candidates.sort(key=lambda item: item[0], reverse=True)
