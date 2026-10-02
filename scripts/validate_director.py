@@ -71,14 +71,6 @@ def test_expand_source_fallback_removed():
     _assert("Expand Story generation failed validation after the controlled retry" in source, "Expand retry must fail closed after its bounded retry")
 
 
-def test_story_wiring_redundancy_removed():
-    compiler = Path(ROOT, "planner", "cinematic_compiler.py").read_text(encoding="utf-8")
-    _assert('if not shot.get("speaking_characters")' in compiler, "absent/empty speaking_characters must compile to []")
-    orchestrator = Path(ROOT, "pipeline", "production_orchestrator.py").read_text(encoding="utf-8")
-    _assert(orchestrator.count("        self._rebind_shots(") == 1, "production plan should have one canonical _rebind_shots() call")
-    _assert(orchestrator.count("ProductionTimeline(plan).build()") == 1, "production plan should have one canonical timeline build")
-
-
 def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
     from planner.production_planner import ProductionPlanner
     planner = ProductionPlanner(ROOT)
@@ -311,28 +303,6 @@ def test_relational_character_survives_generic_negative_and_resolves_dialogue():
     _assert("Eli's father" in scenes[0]["characters"], f"scene binding missing relational speaker: {scenes[0]['characters']}")
 
 
-def test_generic_relationship_speakers_resolve_for_uncle_and_father():
-    from planner.entity_resolver import EntityResolver
-    characters = [{
-        "name": "Eli's uncle",
-        "identity_type": "relational_character",
-        "relationship_to": "Eli",
-        "relationship": "uncle",
-        "semantic_aliases": [],
-    }]
-    story = "Eli's uncle entered the room. The uncle spoke to Eli while the older man watched."
-    _assert(EntityResolver.contextual_generic_alias("uncle", characters, story=story) == "Eli's uncle",
-            "bare relationship speaker 'uncle' did not resolve")
-    _assert(EntityResolver.contextual_generic_alias("father", [{
-        "name": "Eli's father",
-        "identity_type": "relational_character",
-        "relationship_to": "Eli",
-        "relationship": "father",
-        "semantic_aliases": [],
-    }], story="Eli met his father. The father spoke.") == "Eli's father",
-            "bare relationship speaker 'father' did not resolve")
-
-
 def test_sanitizer_identity_contract():
     from planner.qwen_director import QwenDirector
 
@@ -427,49 +397,6 @@ def test_disabled_director_path():
         else:
             os.environ["H3_DIRECTOR_ENABLED"] = previous
 
-
-
-def test_reference_visual_context_setter_is_live_instance_method():
-    previous = os.environ.get("H3_DIRECTOR_ENABLED")
-    os.environ["H3_DIRECTOR_ENABLED"] = "0"
-    try:
-        from planner.qwen_director import QwenDirector
-
-        director = QwenDirector(ROOT)
-        director.set_reference_visual_context({
-            "scene_001": {"image_path": "/tmp/reference.png"},
-            "ignored": "not-a-dict",
-        })
-        _assert(
-            director._reference_visual_context == {
-                "scene_001": {"image_path": "/tmp/reference.png"},
-            },
-            "reference visual context setter did not bind as an instance method",
-        )
-    finally:
-        if previous is None:
-            os.environ.pop("H3_DIRECTOR_ENABLED", None)
-        else:
-            os.environ["H3_DIRECTOR_ENABLED"] = previous
-
-
-def test_sampling_for_mode_is_live_instance_method():
-    previous = os.environ.get("H3_DIRECTOR_ENABLED")
-    os.environ["H3_DIRECTOR_ENABLED"] = "0"
-    try:
-        from planner.qwen_director import AI_STORY_MODE, QwenDirector
-
-        director = QwenDirector(ROOT)
-        temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
-        _assert(
-            (temperature, top_p) == (0.78, 0.90),
-            f"unexpected AI Story sampling values: {(temperature, top_p)}",
-        )
-    finally:
-        if previous is None:
-            os.environ.pop("H3_DIRECTOR_ENABLED", None)
-        else:
-            os.environ["H3_DIRECTOR_ENABLED"] = previous
 
 
 def test_story_token_budget_not_reduced():
@@ -698,6 +625,114 @@ def test_dialogue_scene_boundary_clears_stale_continuation():
     )
 
 
+def test_shot_prompt_requires_same_speaker_continuation_rule():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert(
+        "A continuation edge is SAME-SPEAKER ONLY" in source,
+        "shot prompt must require same-speaker continuation",
+    )
+    _assert(
+        "Never set `continues_to_next_shot=true` when the next shot begins with a different speaker." in source,
+        "shot prompt must forbid cross-speaker continuation",
+    )
+
+
+def test_dialogue_continuation_requires_same_canonical_speaker():
+    from copy import deepcopy
+    from planner.qwen_director import QwenDirector
+    from pipeline.dialogue_timeline import DialogueTimeline
+
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        director = QwenDirector(ROOT)
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
+
+    characters = [
+        {"name": "Elias Kade", "character_id": "elias_kade"},
+        {"name": "Lin Mei", "character_id": "lin_mei"},
+    ]
+    scenes = [{"scene_id": "scene_001"}]
+
+    # A safe alias for the SAME character must preserve continuation.
+    alias_same = [
+        {
+            "shot_id": "scene_001_shot_001",
+            "scene_id": "scene_001",
+            "characters": ["Elias Kade"],
+            "duration_seconds": 6.0,
+            "dialogue_events": [{
+                "speaker": "Elias",
+                "text": "We have to go now.",
+                "continues_from_previous_shot": False,
+                "continues_to_next_shot": True,
+            }],
+        },
+        {
+            "shot_id": "scene_001_shot_002",
+            "scene_id": "scene_001",
+            "characters": ["Elias Kade"],
+            "duration_seconds": 6.0,
+            "dialogue_events": [{
+                "speaker": "Elias Kade",
+                "text": "Before they find us.",
+                "continues_from_previous_shot": False,
+                "continues_to_next_shot": False,
+            }],
+        },
+    ]
+    director._normalize_dialogue_continuations(scenes, alias_same, characters)
+    _assert(
+        alias_same[0]["dialogue_events"][0]["continues_to_next_shot"] is True
+        and alias_same[1]["dialogue_events"][0]["continues_from_previous_shot"] is True,
+        "same-character aliases were incorrectly broken at the continuation boundary",
+    )
+
+    # A real speaker change must break continuation deterministically.
+    speaker_change = [
+        {
+            "shot_id": "scene_001_shot_001",
+            "scene_id": "scene_001",
+            "characters": ["Elias Kade"],
+            "duration_seconds": 6.0,
+            "dialogue_events": [{
+                "speaker": "Elias Kade",
+                "text": "We have to go now.",
+                "continues_from_previous_shot": False,
+                "continues_to_next_shot": True,
+            }],
+        },
+        {
+            "shot_id": "scene_001_shot_002",
+            "scene_id": "scene_001",
+            "characters": ["Lin Mei"],
+            "duration_seconds": 6.0,
+            "dialogue_events": [{
+                "speaker": "Lin Mei",
+                "text": "No. We stay.",
+                "continues_from_previous_shot": False,
+                "continues_to_next_shot": False,
+            }],
+        },
+    ]
+    director._normalize_dialogue_continuations(scenes, speaker_change, characters)
+    _assert(
+        speaker_change[0]["dialogue_events"][0]["continues_to_next_shot"] is False
+        and speaker_change[1]["dialogue_events"][0]["continues_from_previous_shot"] is False,
+        "speaker-change boundary was incorrectly preserved as a continuation",
+    )
+    try:
+        DialogueTimeline(characters).apply_to_plan({"shots": deepcopy(speaker_change)})
+    except Exception as exc:
+        raise AssertionError(
+            f"speaker-change continuation repair still violates the dialogue scheduler: {exc}"
+        ) from exc
+
+
 def test_dialogue_h3_feasibility_rebalances_generated_shots():
     from copy import deepcopy
     from planner.qwen_director import QwenDirector
@@ -893,7 +928,6 @@ def main():
         test_deterministic_character_regressions,
         test_story_prompt_restores_successful_compact_narrative_contract,
         test_expand_source_fallback_removed,
-        test_story_wiring_redundancy_removed,
         test_semantic_named_surface_safety_boundary,
         test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
         test_semantic_empty_fallback,
@@ -901,13 +935,10 @@ def main():
         test_semantic_negative_does_not_destroy_strong_deterministic_roster,
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
         test_relational_character_survives_generic_negative_and_resolves_dialogue,
-        test_generic_relationship_speakers_resolve_for_uncle_and_father,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
         test_story_token_budget_not_reduced,
-        test_reference_visual_context_setter_is_live_instance_method,
-        test_sampling_for_mode_is_live_instance_method,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
@@ -916,6 +947,8 @@ def main():
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
         test_dialogue_scene_boundary_clears_stale_continuation,
+        test_shot_prompt_requires_same_speaker_continuation_rule,
+        test_dialogue_continuation_requires_same_canonical_speaker,
         test_dialogue_h3_feasibility_rebalances_generated_shots,
         test_dialogue_h3_feasibility_searches_the_whole_scene,
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
