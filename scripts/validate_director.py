@@ -43,14 +43,24 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
     for label, text in (("AI story", ai), ("Expand story", expand)):
         _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
         _assert("420 to 560 words" in text, f"{label} prompt must state its word target")
-        _assert("ONE first name" in text, f"{label} prompt must force one stable first name per character")
+        _assert("stable canonical name" in text, f"{label} prompt must require stable character identity")
         for beat in ("SETUP", "CATALYST", "COMPLICATION", "REVERSAL", "CHOICE", "AFTERMATH"):
             _assert(beat in text, f"{label} prompt is missing the {beat} beat")
+        _assert(
+            "materially affect the choice" in text or "materially affects the final choice" in text,
+            f"{label} prompt must link the planted detail to the choice",
+        )
+        _assert(
+            "personal stake" in text and "matter to the final choice" in text,
+            f"{label} prompt must connect personal stake to the choice",
+        )
         _assert("never quoted as speech" in text, f"{label} prompt must keep machine voices out of dialogue")
         _assert("no would/will/could/might" in text, f"{label} prompt must require a completed final action")
         _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
-    _assert("2 to 4 short lines" in ai, "AI story prompt must require spoken dialogue")
-    _assert("Keep every event, character name" in expand, "Expand prompt must preserve source events and names")
+    _assert("1 to 3 short lines" in ai, "AI story prompt must keep dialogue compact")
+    _assert("Preserve source character names exactly" in expand, "Expand prompt must preserve source names")
+    _assert("relational character" in expand and "Do not invent unrelated people" in expand, "Expand prompt must allow only source-grounded relational additions")
+    _assert("Begin with concrete physical action" in ai, "AI story prompt must prioritize immediate filmable action")
     _assert("source_dialogue" in source, "shot prompt must receive an explicit source-dialogue whitelist")
     _assert("If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT" in source, "character extraction must keep identity type and entity type consistent")
     _assert("Reject pronouns, contractions, sentence fragments" in source, "character extraction must reject prose fragments as identities")
@@ -1052,24 +1062,110 @@ def test_story_completion_contracts():
     from planner.qwen_director import QwenDirector
 
     director = QwenDirector.__new__(QwenDirector)
-    source = "Eli enters the abandoned station and finds a sealed vault."
-    open_story = (
-        'Eli found the sealed vault. "I should have left it closed," he whispered. '
-        'He escaped after the station shook. He knew he had set something in motion that could never be undone.'
-    )
+    sentence = "Eli crossed the abandoned station with measured steps, checked the sealed vault, and listened to the cooling machinery."
+    body = " ".join([sentence] * 4)
+    paragraphs = [body for _ in range(6)]
+    paragraphs[0] = 'Eli entered the abandoned station and found a sealed vault. "I should have left it closed," he whispered. ' + body
+    open_story = "\n\n".join(paragraphs[:-1] + [
+        body + " Eli escaped after the station shook. He knew he had set something in motion that could never be undone."
+    ])
     try:
-        director._validate_mode_output("expand_user_story", source, open_story)
+        director._validate_story_completion_contract("expand_user_story", open_story)
     except RuntimeError as exc:
         _assert("unresolved future hook" in str(exc), f"wrong completion failure: {exc}")
     else:
         raise AssertionError("open-ended story ending was not rejected")
 
-    closed_story = (
-        'Eli found the sealed vault. "I should have left it closed," he whispered. '
-        'He shut the system down before dawn. The station was secured again, and Eli sealed the journal away. '
-        'He finally stopped searching for the answers his father had taken to his grave.'
+    closed_paragraphs = [body for _ in range(6)]
+    closed_paragraphs[0] = 'Eli entered the abandoned station and found a sealed vault. "I should have left it closed," he whispered. ' + body
+    closed_paragraphs[-1] = (
+        "Eli shut the system down before dawn, sealed the journal away, and secured the station again. "
+        "He finally stopped searching for the answers his father had taken to his grave. " + body
     )
-    director._validate_mode_output("expand_user_story", source, closed_story)
+    closed_story = "\n\n".join(closed_paragraphs)
+    director._validate_story_completion_contract("expand_user_story", closed_story)
+
+
+def test_story_normalization_preserves_scene_paragraphs():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    normalized = director._normalize_story(
+        " First  paragraph.\n\n Second paragraph.\n\n\nThird   paragraph. "
+    )
+    _assert(
+        normalized == "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
+        f"story normalization did not preserve paragraph topology: {normalized!r}",
+    )
+
+
+def test_six_story_paragraphs_become_six_production_units():
+    from planner.production_planner import ProductionPlanner
+
+    planner = ProductionPlanner(ROOT)
+    story = "\n\n".join(
+        f"Paragraph {index} establishes a complete narrative beat in one physical setting."
+        for index in range(1, 7)
+    )
+    units = planner._split_story(story)
+    _assert(len(units) == 6, f"six story paragraphs became {len(units)} units")
+    _assert(
+        [unit.text for unit in units] == story.split("\n\n"),
+        "production units changed six-paragraph story order/content",
+    )
+
+
+def test_four_to_six_scene_functions_are_structural():
+    from planner.qwen_director_scene import QwenDirectorSceneMixin
+
+    expected = {
+        4: ["setup", "catalyst", "climax", "finale"],
+        5: ["setup", "catalyst", "development", "climax", "finale"],
+        6: ["setup", "catalyst", "development", "midpoint", "climax", "finale"],
+    }
+    for count, target in expected.items():
+        scenes = [{"description": "generic prose with no structural keywords"} for _ in range(count)]
+        actual = [
+            scene["scene_function"]
+            for scene in QwenDirectorSceneMixin._annotate_scene_functions(scenes)
+        ]
+        _assert(actual == target, f"{count}-scene structural function mapping drifted: {actual}")
+
+
+def test_story_completion_contract_rejects_wrong_structure_and_word_budget():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    sentence = "Eli moved through the station and checked the sealed vault before dawn."
+    short_body = " ".join([sentence] * 8)
+    five_paragraph_story = "\n\n".join([short_body] * 5)
+    try:
+        director._validate_story_completion_contract("expand_user_story", five_paragraph_story)
+    except RuntimeError as exc:
+        _assert("exactly six paragraphs" in str(exc), f"wrong structural error: {exc}")
+    else:
+        raise AssertionError("five-paragraph story passed the six-paragraph contract")
+
+    six_paragraph_short_story = "\n\n".join([short_body] * 6)
+    try:
+        director._validate_story_completion_contract("expand_user_story", six_paragraph_short_story)
+    except RuntimeError as exc:
+        _assert("420 to 560 words" in str(exc), f"wrong word-budget error: {exc}")
+    else:
+        raise AssertionError("under-length story passed the word-budget contract")
+
+
+def test_text_generation_length_reason_is_fail_closed():
+    source = Path(ROOT, "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
+    _assert('if finish_reason == "length":' in source, "text length finish reason is not handled")
+    _assert("completion limit" in source, "length failure does not identify the completion limit")
+
+
+def test_critic_roster_is_bidirectional_and_patch_consumer_remains_wired():
+    director_source = Path(ROOT, "planner/qwen_director.py").read_text(encoding="utf-8")
+    orchestrator_source = Path(ROOT, "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
+    _assert("enforce the roster in both directions" in director_source, "critic roster check is not bidirectional")
+    _assert('critique.get("shot_patches", [])' in orchestrator_source, "critic patch consumer was removed despite being wired")
 
 
 def test_dialogue_source_occurrence_budget():
@@ -1170,6 +1266,12 @@ def main():
         test_dialogue_h3_feasibility_searches_the_whole_scene,
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
         test_story_completion_contracts,
+        test_story_normalization_preserves_scene_paragraphs,
+        test_six_story_paragraphs_become_six_production_units,
+        test_four_to_six_scene_functions_are_structural,
+        test_story_completion_contract_rejects_wrong_structure_and_word_budget,
+        test_text_generation_length_reason_is_fail_closed,
+        test_critic_roster_is_bidirectional_and_patch_consumer_remains_wired,
         test_dialogue_source_occurrence_budget,
         test_source_contracts,
         test_sentence_initial_common_words_never_skip_semantic_roster,
