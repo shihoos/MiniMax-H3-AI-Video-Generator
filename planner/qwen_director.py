@@ -491,7 +491,43 @@ class QwenDirector(
                             )
 
                 if not generated_story:
-                    if story_contract_repair and story.strip():
+                    if expand_cast_repair and story.strip():
+                        # Expand Story can fail multiple contracts at once (for example,
+                        # word count plus an invented relational character). When that
+                        # happens, the cast-grounding defect must take precedence over the
+                        # generic length repair so the single allowed retry fixes BOTH
+                        # defects in one controlled edit rather than preserving the
+                        # unanchored identity.
+                        bad_cast_detail = error_text.partition(
+                            "Expand Story introduced unanchored character(s):"
+                        )[2].strip()
+                        if not bad_cast_detail:
+                            bad_cast_detail = error_text.partition(
+                                "Expand Story introduced unanchored relational character(s):"
+                            )[2].strip()
+                        repair_user = (
+                            "Perform a SURGICAL CAST + CONTRACT EDIT of the existing Expand Story. "
+                            "Preserve the source-grounded plot, causal chain, setting, established characters, "
+                            "relationships, reversal, choice, consequence, dialogue, paragraph structure, and ending. "
+                            "The generated expansion contains an identity that is NOT grounded in the source: "
+                            + bad_cast_detail
+                            + ". Remove or replace ONLY that invented identity. If it is expressed as a relational noun "
+                            "such as 'brother', 'sister', 'husband', 'wife', 'father', 'mother', 'friend', or similar, "
+                            "do not turn that relation into a production character; rewrite the sentence generically "
+                            "while preserving its story meaning. Do not introduce another person to replace it. "
+                            "Use ONLY characters explicitly established by the SOURCE STORY. A relational noun in the "
+                            "source is not permission to invent or name a person unless that person is explicitly established. "
+                            "At the same time, fix the other failed contract: keep exactly six paragraphs and 420 to 560 words. "
+                            "Add or remove only concrete physical action, visible reaction, sensory detail, or causal connective "
+                            "tissue already supported by the source; do not add a new plot thread, object, mystery, reveal, "
+                            "future hook, or character. Return the COMPLETE revised story only.\n\nSOURCE STORY:\n"
+                            + str(user_input).strip()
+                            + "\n\nCURRENT EXPANSION:\n"
+                            + str(story).strip()
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 520
+                    elif story_contract_repair and story.strip():
                         # A word/paragraph failure is a format defect, not permission
                         # to rewrite the narrative. Keep the generated causal chain,
                         # identities, events, reversal, choice, dialogue, and ending
