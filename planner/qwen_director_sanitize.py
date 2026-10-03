@@ -16,6 +16,71 @@ from planner.config import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Written-text vs. spoken-text discrimination
+# ---------------------------------------------------------------------------
+# Quoted strings in a story are not always speech: signs, tags, labels, screens,
+# notes and project IDs are routinely quoted ("*"Vault Access"*"). Treating those
+# as dialogue produces fake lip-sync/TTS events (a character "speaking" a warning
+# tag) and also lets a story satisfy the "has dialogue" contract without any
+# real spoken line. This helper is the single authority for that decision.
+_WRITTEN_NOUNS = (
+    "tag|label|sign|signage|placard|plaque|inscription|engraving|stencil|sticker|poster|banner|"
+    "note|memo|letter|page|screen|monitor|display|terminal|readout|caption|nameplate|keypad|"
+    "panel|logbook|journal|diary|file|folder|marker|canister|crate|door|wall|casing|id|stamp|"
+    "stamped|etched|engraved|printed|scrawled|scribbled|painted|stenciled|lettering|text|words"
+)
+_WRITTEN_PREFIX_RE = re.compile(
+    rf"\b(?:{_WRITTEN_NOUNS})\b[^.!?\n]{{0,60}}$|"
+    r"\b(?:read|reads|reading|spelled|spelling|printed|etched|engraved|scrawled|stamped|labeled|labelled|"
+    r"flashed|flashing|blinked|blinking|glowed|glowing|displayed|displaying)\b[^.!?\n]{0,25}$",
+    flags=re.IGNORECASE,
+)
+_SPEECH_VERB_RE = (
+    r"said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|called|calls|"
+    r"muttered|mutters|murmured|murmurs|warned|warns|snapped|snaps|answered|answers|cried|cries|"
+    r"yelled|yells|demanded|demands|breathed|added|adds|continued|insisted|insists|pleaded|pleads|"
+    r"growled|growls|hissed|hisses|gasped|gasps|stammered|stammers|announced|announces|ordered|orders|"
+    r"told|tells|began|begins|spoke|speaks|offered|offers|admitted|admits|confessed|confesses"
+)
+
+
+def is_written_text_quote(text: str, start: int, end: int) -> bool:
+    """Return True when text[start:end] (a quoted span) is written/UI text, not speech.
+
+    A quote is speech when a speech-tag verb sits next to it ("...," he said / Mara said, "...")
+    or when it is a plain quoted utterance not introduced by a written-text cue. A quote is written
+    text when it is wrapped in markdown emphasis, or is introduced/followed by a sign/tag/screen cue and
+    carries no speech tag.
+    """
+    source = str(text or "")
+    before_char = source[start - 1] if start > 0 else ""
+    after_char = source[end] if end < len(source) else ""
+    if before_char in {"*", "_"} or after_char in {"*", "_"}:
+        return True
+
+    prefix_window = source[max(0, start - 120):start]
+    prefix = re.split(r"[.!?][\"\u201d\u2019]?\s+", prefix_window)[-1]
+    suffix = source[end:end + 80]
+    suffix_clause = re.split(r"[.!?]\s+", suffix, maxsplit=1)[0]
+
+    has_speech_tag = bool(
+        re.match(rf"^\s*[,;]?\s*(?:\u2014|-)?\s*(?:[A-Z][\w'\u2019.-]*(?:\s+[A-Z][\w'\u2019.-]*){{0,2}}|he|she|they|I|we)\s+(?:{_SPEECH_VERB_RE})\b", suffix_clause)
+        or re.match(rf"^\s*[,;]?\s*(?:{_SPEECH_VERB_RE})\s+[A-Z]", suffix_clause)
+        or re.search(rf"(?:[A-Z][\w'\u2019.-]*|he|she|they)\s+(?:{_SPEECH_VERB_RE})(?:\s+[a-z]+ly)?\s*[,:]?\s*$", prefix)
+    )
+    if has_speech_tag:
+        return False
+
+    # Quote that is a short Title-Case/ALL-CAPS label with no sentence punctuation inside a written cue.
+    if _WRITTEN_PREFIX_RE.search(prefix):
+        return True
+    inner = source[start + 1:end - 1].strip()
+    if inner and inner.upper() == inner and len(inner.split()) <= 8 and re.search(r"[A-Z]", inner):
+        return True
+    return False
+
+
 class QwenDirectorSanitizeMixin:
     def _valid_character_name(
         self,
@@ -1162,6 +1227,12 @@ class QwenDirectorSanitizeMixin:
         if not value:
             return ""
 
+        # Story text is plain prose. Qwen sometimes wraps sign/label text in markdown
+        # emphasis (*"..."*) or adds bold headings; those markers would otherwise leak
+        # into scene descriptions, prompts, and the dialogue extractor.
+        value = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", value)
+        value = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"\1", value)
+
         paragraphs = []
         for paragraph in re.split(r"\n\s*\n+", value):
             normalized = re.sub(r"[ \t\n]+", " ", paragraph).strip()
@@ -1315,14 +1386,23 @@ class QwenDirectorSanitizeMixin:
 
     @staticmethod
     def _story_has_explicit_dialogue(text: str) -> bool:
+        """True only when the story contains at least one SPOKEN quoted line.
+
+        Quoted signs, tags, screens and IDs do not count as dialogue.
+        """
         value = str(text or "")
-        return bool(
-            re.search(
-                r'"[^"\n]+"|“[^”\n]+”|‘[^’\n]+’|(?<!\w)\'[^\'\n]+\'(?!\w)',
-                value,
-                flags=re.UNICODE,
-            )
+        pattern = re.compile(
+            r'"([^"\n]+)"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
         )
+        for match in pattern.finditer(value):
+            inner = next((g for g in match.groups() if g), "")
+            if len(re.findall(r"[A-Za-z]", inner)) < 2:
+                continue
+            if is_written_text_quote(value, match.start(), match.end()):
+                continue
+            return True
+        return False
 
     @staticmethod
     def _story_has_open_ended_finale(text: str) -> bool:
