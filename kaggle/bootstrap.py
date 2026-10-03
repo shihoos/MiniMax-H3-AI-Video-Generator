@@ -24,6 +24,22 @@ elif Path("/kaggle/input").is_dir():
     KAGGLE_INPUT = Path("/kaggle/input").resolve()
 else:
     KAGGLE_INPUT = (ROOT / "input").resolve()
+_KAGGLE_FILE_INDEX: dict[str, list[Path]] | None = None
+
+
+def _get_kaggle_input_index() -> dict[str, list[Path]]:
+    global _KAGGLE_FILE_INDEX
+    if _KAGGLE_FILE_INDEX is not None:
+        return _KAGGLE_FILE_INDEX
+    index: dict[str, list[Path]] = {}
+    if KAGGLE_INPUT.is_dir():
+        for path in KAGGLE_INPUT.rglob("*"):
+            if path.is_file():
+                index.setdefault(path.name.lower(), []).append(path)
+    _KAGGLE_FILE_INDEX = index
+    return index
+
+
 MODEL_MANIFEST = (
     ROOT
     / "configs"
@@ -289,18 +305,13 @@ def _save_bootstrap_cache(runtime: dict) -> None:
         state = _bootstrap_cache_inputs(runtime)
         state.update({
             "valid": True,
-            "system_package_fingerprint": _python_package_fingerprint(Path(sys.executable)),
             "system_pytorch_ok": _probe_system_pytorch(runtime),
             "pillow_version": str(runtime["storyboard"]["pillow_version"]).strip(),
             "qwen_env": str(Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()),
-            "qwen_package_fingerprint": None,
             "repo_state": {},
             "sage_state": {},
             "saved_at": time.time(),
         })
-        qwen_python = Path(state["qwen_env"]) / "bin" / "python"
-        if qwen_python.is_file():
-            state["qwen_package_fingerprint"] = _python_package_fingerprint(qwen_python)
         repo_state = {}
         if COMFY.is_dir() and (COMFY / ".git").is_dir():
             repo_state["ComfyUI"] = {
@@ -393,18 +404,8 @@ def load_yaml(
 def find_kaggle_file(
     filename: str,
 ) -> Path:
-    matches = []
-    for path in KAGGLE_INPUT.rglob(
-        "*"
-    ):
-        if (
-            path.is_file()
-            and path.name.lower()
-            == filename.lower()
-        ):
-            matches.append(
-                path
-            )
+    index = _get_kaggle_input_index()
+    matches = index.get(filename.lower(), [])
     if not matches:
         raise FileNotFoundError(
             "Required Kaggle asset not found: "
