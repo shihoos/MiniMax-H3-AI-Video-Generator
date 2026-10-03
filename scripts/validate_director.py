@@ -500,20 +500,24 @@ def test_disabled_director_path():
 
 def test_story_token_budget_contract():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # Primary creative pass stays on the established thinking-enabled configuration.
+    # The primary story pass is a single visible-prose generation. Hidden reasoning must not
+    # consume the minimum-token floor that exists to protect the 420-560 word story contract.
     _assert(
-        "max_completion=3200,\n                    disable_thinking=False" in source,
-        "primary story pass must use the 3200-token thinking-enabled contract",
+        "minimum_completion=700," in source,
+        "primary story pass must reserve a 700-token completion budget",
+    )
+    _assert(
+        "minimum_output_tokens=700," in source,
+        "primary story pass must enforce a 700-token minimum output floor",
+    )
+    _assert(
+        "max_completion=3200,\n                    disable_thinking=True" in source,
+        "primary story pass must use the 3200-token visible-prose contract",
     )
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
-    _assert(
-        "minimum_output_tokens=1250" in source,
-        "primary story pass must enforce a 1250-token minimum output floor",
-    )
     _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
     _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
     _assert("max_completion=1800" not in source, "obsolete story retry completion budget remains")
-
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
     from planner.qwen_director import QwenDirector
