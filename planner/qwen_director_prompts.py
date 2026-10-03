@@ -39,34 +39,45 @@ class QwenDirectorPromptMixin:
       Each paragraph is one scene in one place and will become one video scene.
 
     CAST
-    - 1 to 3 characters, all physically present and acting on screen. Introduce the protagonist in
-      the first sentence and every other character by the end of paragraph 2.
-    - Give each character ONE first name and use exactly that name every time (first name only,
-      never a surname, title, or nickname). Never name machines, objects, or places as if they were people.
+    - 1 to 3 recurring characters, all physically present and causally relevant on screen. Introduce the
+      protagonist in the first sentence and every other recurring character by the end of paragraph 2.
+    - Give each named character ONE stable canonical name and use exactly that name every time. Full names
+      are allowed; never alternate between a full name and a different nickname or title. Never hard-code
+      names from these instructions. Machines, objects, places, and recordings are not characters.
     - Someone who is only remembered, missing, recorded, or named on a document is not a character.
 
     STRUCTURE (one paragraph each)
-    1. SETUP: the protagonist's concrete goal in the first two sentences, a specific place, and one
-       planted physical detail (an object, sound, habit, or injury) that will matter later.
-    2. CATALYST: the protagonist acts toward the goal and meets resistance. A second character, if any,
-       takes an action here that blocks, helps, tests, or threatens.
-    3. COMPLICATION: the plan fails or costs something. Show a personal stake through an action or
-       object, not through backstory.
-    4. REVERSAL: something the protagonist sees or does changes the meaning of the planted detail.
+    1. SETUP: establish a specific place, start with the protagonist's concrete goal in the first two
+       sentences, and plant one physical detail (object, sound, habit, or injury) that will matter later.
+    2. CATALYST: the protagonist acts toward the goal and meets resistance. A counterpart, if present,
+       has an immediate objective or belief that conflicts with the protagonist and TAKES AN ACTION here
+       that blocks, redirects, tests, or threatens; do not make the counterpart an exposition device.
+    3. COMPLICATION: the plan fails, tightens, or costs something. Make the personal stake concrete
+       through an action, relationship, object, or brief memory rather than a backstory dump. The stake
+       must matter to the final choice.
+    4. REVERSAL: new information or an observed consequence changes what the protagonist believes and
+       recontextualizes the planted detail. The reversal should be one dominant change, not a stack of
+       unrelated mysteries.
     5. CHOICE: the protagonist makes a hard choice with a visible cost, carried out by physical action.
-    6. AFTERMATH: what the choice changed, ending on a settled image in one place. Nothing new appears
-       in this paragraph.
+       The planted detail must materially affect the choice or the consequence of that choice.
+    6. AFTERMATH: show the concrete consequence caused by the choice and the resulting emotional shift,
+       ending on a settled image in one place. Nothing new appears in this paragraph.
 
     DIALOGUE
-    - 2 to 4 short lines in double quotation marks, spoken aloud by characters who are present, each
-      tagged with the speaker's first name, as in: "..." <Name> said. Each line must create conflict, force a
-      decision, or change what someone believes.
+    - 1 to 3 short lines in double quotation marks, spoken aloud by characters who are present, each
+      tagged with the speaker's stable name, as in: "..." <Name> said. Prefer concise lines; each line must
+      create conflict, force a decision, or change what someone believes.
     - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
 
     STYLE
-    - Show physical action, objects, and reactions. At most one explanatory sentence about setting,
-      technology, or history in the whole story.
-    - One causal chain and one twist. Everything introduced must be resolved by the end.
+    - Begin with concrete physical action, sensory detail, and a specific environment; make the visual
+      situation immediately filmable rather than opening on abstract explanation.
+    - Show physical action, objects, reactions, and relationship behavior. At most one explanatory sentence
+      about setting, technology, or history in the whole story.
+    - One dominant causal chain and one meaningful reversal. Avoid stacked clues, secret objects, repeated
+      reveals, or a new mystery introduced only to keep the ending open. Everything important introduced
+      must drive the reversal/choice or be resolved by the end.
+    - Reserve the final paragraph for consequence and resolution, not new plot information.
     - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
     - Output only the story prose: no title, headings, labels, camera directions, or commentary.
     """).strip()
@@ -81,38 +92,48 @@ class QwenDirectorPromptMixin:
       Each paragraph is one scene in one place and will become one video scene.
 
     FIDELITY
-    - Keep every event, character name, setting, and outcome of the source, in the source's order.
+    - Keep every event, character identity, setting, and outcome of the source, in the source's order.
       Add only the cause, resistance, and consequence the structure below needs.
-    - Do not replace the plot. Add at most one new character, and only if the source implies a second
-      person is needed; otherwise keep the cast as in the source.
+    - Do not replace the plot. Keep source characters; an additional relational character is allowed only
+      when the source explicitly establishes that relationship or identity (for example, a father or sister)
+      and the expansion makes that person causally active and physically present. Do not invent unrelated people.
 
     CAST
-    - Source characters keep their source names exactly.
-    - 1 to 3 characters, all physically present and acting on screen. Introduce the protagonist in
-      the first sentence and every other character by the end of paragraph 2.
-    - Give each character ONE first name and use exactly that name every time (first name only,
-      never a surname, title, or nickname). Never name machines, objects, or places as if they were people.
-    - Someone who is only remembered, missing, recorded, or named on a document is not a character.
+    - Preserve source character names exactly. Never shorten, rename, or replace a source identity.
+    - Keep the active on-screen cast as small as source fidelity allows. Introduce the protagonist in the
+      first sentence and every other recurring active character by the end of paragraph 2.
+    - Any newly introduced non-source character gets ONE stable canonical name and keeps it consistently.
+    - Someone who is only remembered, missing, recorded, or named on a document is not an active character
+      unless the source explicitly turns that identity into a physically present causal participant.
 
     STRUCTURE (one paragraph each)
-    1. SETUP: the source's opening situation, the protagonist's concrete goal, and one planted
-       physical detail that will matter later.
-    2. CATALYST: the source's key discovery or arrival, met by resistance.
-    3. COMPLICATION: the plan fails or costs something, shown through action.
-    4. REVERSAL: something seen or done changes the meaning of the planted detail.
-    5. CHOICE: the protagonist makes a hard choice with a visible cost, by physical action.
-    6. AFTERMATH: what the choice changed, ending on a settled image. Nothing new appears here.
+    1. SETUP: preserve the source's opening situation, give the protagonist a concrete immediate goal, and
+       plant or preserve one physical detail that will matter later.
+    2. CATALYST: preserve the source's key discovery or arrival and make the resistance physically active.
+       A counterpart, if present, should take an action rather than merely explain the backstory.
+    3. COMPLICATION: the plan fails, tightens, or costs something. Make the personal stake concrete through
+       an action, relationship, object, or brief memory; it must matter to the final choice.
+    4. REVERSAL: something seen or done changes what the protagonist believes and recontextualizes the planted
+       detail. Preserve the source's causal meaning instead of adding unrelated mystery layers.
+    5. CHOICE: the protagonist makes a hard choice with a visible cost, by physical action. The planted detail
+       should materially affect the choice or the consequence when the source supports one.
+    6. AFTERMATH: show the concrete consequence caused by the choice and the resulting emotional shift, ending
+       on a settled image. Nothing new appears here.
 
     DIALOGUE
-    - Dialogue is optional. If used, 1 to 4 short lines in double quotation marks, spoken aloud by characters who are present, each
-      tagged with the speaker's first name, as in: "..." <Name> said. Each line must create conflict, force a
-      decision, or change what someone believes.
+    - Dialogue is optional. If used, 1 to 3 short lines in double quotation marks, spoken aloud by characters who
+      are present, each tagged with that character's exact source/stable name. Preserve source dialogue meaning
+      and wording; do not invent unnecessary speeches. Each line should create conflict, force a decision, or
+      change what someone believes.
     - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
 
     STYLE
-    - Show physical action, objects, and reactions. At most one explanatory sentence about setting,
-      technology, or history in the whole story.
-    - One causal chain and one twist. Everything introduced must be resolved by the end.
+    - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and
+      meaningful relationship behavior. Avoid lore dumps or explanatory backstory.
+    - One dominant causal chain and one meaningful reversal. Avoid stacked clues, secret objects, repeated reveals,
+      or a new mystery introduced only to keep the ending open. Everything important introduced must drive the
+      reversal/choice or be resolved by the end.
+    - Reserve the final paragraph for consequence and resolution, not new plot information.
     - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
     - Output only the story prose: no title, headings, labels, camera directions, or commentary.
     """).strip()
@@ -152,11 +173,13 @@ class QwenDirectorPromptMixin:
                 )
         result += (
             "\n\nPLAN FIRST (inside your thinking, under 250 words, never in the output): "
-            "choose each character's single first name; the goal; the planted detail; what the reversal "
-            "changes about it; the choice and its cost; the final settled image; and which character "
-            "speaks each quoted line. Check that nothing appears for the first time in paragraph six."
+            "choose each character's stable canonical name (preserving source names in Expand Story); the goal; "
+            "the planted detail; the counterpart's conflicting objective; the personal stake; the reversal; "
+            "the forced choice and its cost; the final consequence/image; and which character speaks each quoted line. "
+            "Verify that the planted detail returns at the reversal and materially affects the final choice or its consequence. "
+            "Check that nothing appears for the first time in paragraph six."
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            "Return only the story: six paragraphs, 420 to 560 words, one first name per character, "
+            "Return only the story: six paragraphs, 420 to 560 words, stable canonical character names, "
             "and a final sentence that is a completed past-tense action."
         )
         return result
