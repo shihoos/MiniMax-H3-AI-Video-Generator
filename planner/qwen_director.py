@@ -401,9 +401,9 @@ class QwenDirector(
                     ),
                     # Thinking is ON for the one creative pass that decides the
                     # whole film. The plan is capped to ~250 words by the prompt;
-                    # 3200 tokens covers plan + ~800-token story with headroom.
-                    # If the plan is ever truncated, the empty-response error
-                    # below falls through to the existing no-think retry.
+                    # 3200 tokens covers the plan plus the six-paragraph story with headroom.
+                    # finish_reason=length is treated as an incomplete text response by
+                    # _chat_text, so the existing bounded no-think retry handles it.
                     max_completion=3200,
                     disable_thinking=False,
                 )
@@ -2384,8 +2384,9 @@ class QwenDirector(
     can point to.
 
     CHECKS
-    1. ROSTER: every name in a scene or shot `characters` list must appear in `roster`. Report any
-       name that is not a person in the story.
+    1. ROSTER: enforce the roster in both directions. Every name in a scene or shot `characters` list
+       must appear in `roster`, and every roster entry must correspond to an actual active person/character
+       established by the story (not merely a remembered, missing, recorded, document-only, machine, or object entity).
     2. FIDELITY: each shot `action` and `visual_prompt` must depict events that happen in the story
        for that scene. Report invented events, objects, or people.
     3. MATCH: `visual_prompt` must describe the same moment as `action`. Report contradictions.
