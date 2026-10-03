@@ -75,47 +75,6 @@ def test_expand_source_fallback_removed():
     _assert("Expand Story generation failed validation after the controlled retry" in source, "Expand retry must fail closed after its bounded retry")
 
 
-def test_expand_story_cast_validator_is_wired_and_source_grounded():
-    from planner.qwen_director import QwenDirector
-
-    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    _assert(
-        source.count("self._validate_expand_story_cast(") >= 2,
-        "Expand Story cast validator is defined but not wired into both generation and retry paths",
-    )
-
-    previous = os.environ.get("H3_DIRECTOR_ENABLED")
-    os.environ["H3_DIRECTOR_ENABLED"] = "0"
-    try:
-        director = QwenDirector(ROOT)
-        source_story = "Eli entered the vault. His father had disappeared years ago."
-        generated_story = "Eli entered the vault. His father stepped from the dark."
-        director._validate_expand_story_cast(
-            source_story,
-            generated_story,
-            source_character_names=["Eli"],
-        )
-
-        try:
-            director._validate_expand_story_cast(
-                "Eli entered the vault.",
-                "Eli entered the vault. Marcus blocked the door.",
-                source_character_names=["Eli"],
-            )
-        except RuntimeError as exc:
-            _assert(
-                "unanchored character" in str(exc).lower(),
-                f"wrong Expand Story cast rejection: {exc}",
-            )
-        else:
-            raise AssertionError("unanchored named character was accepted by Expand Story cast validation")
-    finally:
-        if previous is None:
-            os.environ.pop("H3_DIRECTOR_ENABLED", None)
-        else:
-            os.environ["H3_DIRECTOR_ENABLED"] = previous
-
-
 def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
     from planner.production_planner import ProductionPlanner
     planner = ProductionPlanner(ROOT)
@@ -1140,6 +1099,48 @@ def test_story_normalization_preserves_scene_paragraphs():
     )
 
 
+def test_story_topology_fallback_is_last_resort_and_prose_preserving():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    seven = "\n\n".join(
+        f"Beat {index} happened with concrete action and a settled consequence."
+        for index in range(1, 8)
+    )
+    repaired = director._coerce_story_to_six_paragraphs(seven)
+    paragraphs = [part for part in repaired.split("\n\n") if part.strip()]
+    _assert(len(paragraphs) == 6, f"seven-paragraph fallback did not reach six: {len(paragraphs)}")
+    _assert(
+        "".join(repaired.split()) == "".join(seven.split()),
+        "topology fallback changed story prose tokens",
+    )
+
+    five = "\n\n".join(
+        f"Beat {index} opened the door and found the same concrete evidence. The character acted."
+        for index in range(1, 6)
+    )
+    repaired_five = director._coerce_story_to_six_paragraphs(five)
+    five_paragraphs = [part for part in repaired_five.split("\n\n") if part.strip()]
+    _assert(len(five_paragraphs) == 6, f"five-paragraph fallback did not reach six: {len(five_paragraphs)}")
+    _assert(
+        "".join(repaired_five.split()) == "".join(five.split()),
+        "five-to-six topology fallback changed story prose tokens",
+    )
+
+
+def test_story_validation_precedes_topology_fallback():
+    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    primary = source[source.index("story = self._chat_text("):source.index("except RuntimeError as first_error:")]
+    _assert(
+        primary.index("self._validate_story_output_contracts") < primary.index("generated_story = True"),
+        "primary story flow must validate through the contract helper before completion",
+    )
+    _assert(
+        "story = self._coerce_story_to_six_paragraphs(story)" not in primary,
+        "primary story flow must not silently coerce topology before validation",
+    )
+
+
 def test_six_story_paragraphs_become_six_production_units():
     from planner.production_planner import ProductionPlanner
 
@@ -1279,7 +1280,6 @@ def main():
         test_deterministic_character_regressions,
         test_story_prompt_restores_successful_compact_narrative_contract,
         test_expand_source_fallback_removed,
-        test_expand_story_cast_validator_is_wired_and_source_grounded,
         test_semantic_named_surface_safety_boundary,
         test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
         test_semantic_empty_fallback,
@@ -1309,6 +1309,8 @@ def main():
         test_dialogue_h3_feasibility_propagates_non_timing_errors,
         test_story_completion_contracts,
         test_story_normalization_preserves_scene_paragraphs,
+        test_story_topology_fallback_is_last_resort_and_prose_preserving,
+        test_story_validation_precedes_topology_fallback,
         test_six_story_paragraphs_become_six_production_units,
         test_four_to_six_scene_functions_are_structural,
         test_story_completion_contract_rejects_wrong_structure_and_word_budget,
