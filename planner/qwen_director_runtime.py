@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import faulthandler
 import sys
 import gc
@@ -8,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from functools import wraps
 from pathlib import Path
@@ -44,6 +46,49 @@ NO_THINK_SUFFIX = "\n/no_think"
 # Pin the Director sampling stream at the request layer as well as the server layer.
 # This removes run-to-run RNG-state drift while preserving the existing temperature/top-p profile.
 DIRECTOR_VLLM_SEED = int(os.getenv("H3_DIRECTOR_VLLM_SEED", "0"))
+
+# Keep one Director server alive for the whole Python/Kaggle session.
+# The orchestrator intentionally calls director.unload() after each operation;
+# treating that as a hard vLLM shutdown causes a multi-minute cold start for
+# every subsequent Director mode.  The shared process/session below separates
+# request-client lifetime from GPU model lifetime.
+_SHARED_VLLM_LOCK = threading.RLock()
+_SHARED_VLLM_PROCESS: subprocess.Popen | None = None
+_SHARED_VLLM_LOG_HANDLE = None
+_SHARED_VLLM_LOG_PATH: Path | None = None
+_SHARED_VLLM_MODEL_NAME: str | None = None
+_SHARED_VLLM_MODEL_PATH: str | None = None
+_SHARED_VLLM_TOKENIZER = None
+_SHARED_VLLM_OWNER = False
+
+
+def _shutdown_shared_vllm_at_exit() -> None:
+    global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_TOKENIZER, _SHARED_VLLM_OWNER
+    process = _SHARED_VLLM_PROCESS
+    _SHARED_VLLM_PROCESS = None
+    if process is not None:
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        except Exception:
+            pass
+    handle = _SHARED_VLLM_LOG_HANDLE
+    _SHARED_VLLM_LOG_HANDLE = None
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+    _SHARED_VLLM_TOKENIZER = None
+    _SHARED_VLLM_OWNER = False
+
+
+atexit.register(_shutdown_shared_vllm_at_exit)
 
 
 def _with_faulthandler_watchdog(func):
@@ -650,27 +695,99 @@ class QwenDirectorRuntimeMixin:
         self,
     ) -> None:
 
+        global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
+        global _SHARED_VLLM_MODEL_NAME, _SHARED_VLLM_MODEL_PATH, _SHARED_VLLM_TOKENIZER
+        global _SHARED_VLLM_OWNER
+
         if not self.available:
             return
 
         if self._vllm_session is not None:
             return
 
-        if os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }:
+        with _SHARED_VLLM_LOCK:
             session = requests.Session()
+            model_name = self._vllm_model_name()
+
+            # Reuse an already-running compatible Director server. This is the
+            # critical lifecycle fix: production_orchestrator.unload() closes
+            # its HTTP client after each operation, but the GPU-backed vLLM
+            # process stays resident for the whole Python/Kaggle session.
+            # A new QwenDirector instance therefore does not trigger another
+            # multi-minute model load/compile cycle.
             try:
-                self._wait_for_vllm(session, None)
-            except Exception:
-                session.close()
-                raise
-            self._vllm_session = session
-        else:
-            session = requests.Session()
+                reuse_timeout = float(
+                    os.getenv("H3_DIRECTOR_VLLM_REUSE_TIMEOUT", "8")
+                )
+            except (TypeError, ValueError):
+                reuse_timeout = 8.0
+            reuse_timeout = max(1.0, reuse_timeout)
+
+            health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
+            models_url = self._vllm_base_url() + "/models"
+            reuse_deadline = time.monotonic() + reuse_timeout
+            last_error = ""
+            while time.monotonic() < reuse_deadline:
+                try:
+                    health = session.get(health_url, timeout=1.5)
+                    if health.status_code == 200:
+                        models = session.get(models_url, timeout=1.5)
+                        if models.status_code == 200:
+                            data = models.json().get("data", [])
+                            if data and model_name in {
+                                str(item.get("id", "")) for item in data
+                            }:
+                                self._vllm_session = session
+                                self._vllm_process = _SHARED_VLLM_PROCESS
+                                self._vllm_log_handle = None
+                                self._vllm_log_path = _SHARED_VLLM_LOG_PATH
+                                if _SHARED_VLLM_TOKENIZER is None:
+                                    from transformers import AutoTokenizer
+                                    _SHARED_VLLM_TOKENIZER = AutoTokenizer.from_pretrained(
+                                        str(self._model_path),
+                                        local_files_only=True,
+                                        trust_remote_code=True,
+                                        use_fast=True,
+                                    )
+                                self._tokenizer = _SHARED_VLLM_TOKENIZER
+                                print(
+                                    "[QWEN] vLLM Director reused",
+                                    f"model={model_name}",
+                                    f"pid={_SHARED_VLLM_PROCESS.pid if _SHARED_VLLM_PROCESS is not None else 'external'}",
+                                    flush=True,
+                                )
+                                return
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                time.sleep(0.5)
+
+            if os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "").strip().lower() in {
+                "1", "true", "yes", "on"
+            }:
+                try:
+                    self._wait_for_vllm(session, None)
+                except Exception:
+                    session.close()
+                    raise
+                self._vllm_session = session
+                if _SHARED_VLLM_TOKENIZER is None:
+                    from transformers import AutoTokenizer
+                    _SHARED_VLLM_TOKENIZER = AutoTokenizer.from_pretrained(
+                        str(self._model_path),
+                        local_files_only=True,
+                        trust_remote_code=True,
+                        use_fast=True,
+                    )
+                self._tokenizer = _SHARED_VLLM_TOKENIZER
+                print(
+                    "[QWEN] vLLM Director attached to external server",
+                    f"model={model_name}",
+                    flush=True,
+                )
+                return
+
             host = DIRECTOR_VLLM_HOST
             port = DIRECTOR_VLLM_PORT
-            model_name = self._vllm_model_name()
             log_path = Path(
                 os.getenv(
                     "H3_DIRECTOR_VLLM_LOG",
@@ -682,6 +799,8 @@ class QwenDirectorRuntimeMixin:
 
             vllm_python = DIRECTOR_VLLM_ENV_DIR / "bin" / "python"
             if not vllm_python.is_file():
+                log_handle.close()
+                session.close()
                 raise RuntimeError(
                     "Qwen Director vLLM environment is missing: "
                     f"{vllm_python}. Run kaggle/bootstrap.py first."
@@ -689,6 +808,8 @@ class QwenDirectorRuntimeMixin:
 
             speculator_model = self._find_speculator_model()
             if DIRECTOR_VLLM_SPECULATIVE_TOKENS <= 0:
+                log_handle.close()
+                session.close()
                 raise RuntimeError(
                     "Director speculative_tokens must be positive in runtime configuration."
                 )
@@ -728,6 +849,21 @@ class QwenDirectorRuntimeMixin:
                 "--trust-remote-code",
             ]
 
+            safetensors_strategy = os.getenv(
+                "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
+                "prefetch",
+            ).strip().lower()
+            if safetensors_strategy in {"eager", "lazy", "prefetch", "torchao"}:
+                command.extend([
+                    "--safetensors-load-strategy",
+                    safetensors_strategy,
+                ])
+            elif safetensors_strategy not in {"", "none", "default"}:
+                raise RuntimeError(
+                    "Unsupported H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY: "
+                    f"{safetensors_strategy!r}"
+                )
+
             try:
                 process = subprocess.Popen(
                     command,
@@ -735,6 +871,13 @@ class QwenDirectorRuntimeMixin:
                     stderr=subprocess.STDOUT,
                     start_new_session=True,
                 )
+                _SHARED_VLLM_PROCESS = process
+                _SHARED_VLLM_LOG_HANDLE = log_handle
+                _SHARED_VLLM_LOG_PATH = log_path
+                _SHARED_VLLM_MODEL_NAME = model_name
+                _SHARED_VLLM_MODEL_PATH = str(self._model_path)
+                _SHARED_VLLM_OWNER = True
+
                 self._vllm_process = process
                 self._vllm_log_handle = log_handle
                 self._vllm_log_path = log_path
@@ -745,21 +888,15 @@ class QwenDirectorRuntimeMixin:
                     process,
                 )
 
-                try:
+                if _SHARED_VLLM_TOKENIZER is None:
                     from transformers import AutoTokenizer
-                    self._tokenizer = AutoTokenizer.from_pretrained(
+                    _SHARED_VLLM_TOKENIZER = AutoTokenizer.from_pretrained(
                         str(self._model_path),
                         local_files_only=True,
                         trust_remote_code=True,
                         use_fast=True,
                     )
-                except Exception as exc:
-                    self._shutdown_vllm()
-                    raise RuntimeError(
-                        "Qwen3-14B-AWQ tokenizer initialization failed."
-                    ) from exc
-
-                self._vllm_session = session
+                self._tokenizer = _SHARED_VLLM_TOKENIZER
 
                 print(
                     "[QWEN] vLLM Director ready",
@@ -771,47 +908,72 @@ class QwenDirectorRuntimeMixin:
                 )
 
             except Exception as exc:
+                if _SHARED_VLLM_PROCESS is process:
+                    _SHARED_VLLM_PROCESS = None
+                    _SHARED_VLLM_OWNER = False
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        process.wait(timeout=15)
+                except Exception:
+                    try:
+                        process.kill()
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
                 try:
                     log_handle.close()
                 except Exception:
                     pass
-                if self._vllm_process is not None:
-                    try:
-                        self._shutdown_vllm()
-                    except Exception:
-                        pass
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                self._vllm_process = None
+                self._vllm_log_handle = None
+                self._vllm_session = None
                 raise RuntimeError(
                     "Failed to initialize Qwen3-14B-AWQ vLLM director. "
                     f"Model: {self._model_path}\nError: {exc}"
                 ) from exc
 
     def _shutdown_vllm(self) -> None:
-        process = getattr(self, "_vllm_process", None)
-        if process is not None:
-            try:
-                if process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=15)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
-            except Exception:
-                pass
-        self._vllm_process = None
+        # Kept as an explicit emergency shutdown hook for startup failures and
+        # process exit. Normal Director unload must not terminate the shared
+        # GPU-backed server.
+        global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_OWNER
+        with _SHARED_VLLM_LOCK:
+            process = _SHARED_VLLM_PROCESS
+            _SHARED_VLLM_PROCESS = None
+            _SHARED_VLLM_OWNER = False
 
-        log_handle = getattr(self, "_vllm_log_handle", None)
-        if log_handle is not None:
-            try:
-                log_handle.close()
-            except Exception:
-                pass
-        self._vllm_log_handle = None
+            if process is not None:
+                try:
+                    if process.poll() is None:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=15)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                except Exception:
+                    pass
+
+            log_handle = _SHARED_VLLM_LOG_HANDLE
+            _SHARED_VLLM_LOG_HANDLE = None
+            if log_handle is not None:
+                try:
+                    log_handle.close()
+                except Exception:
+                    pass
 
     def unload(
         self,
     ) -> None:
 
+        # The orchestrator calls unload() after every Director operation.
+        # Closing only this instance's HTTP client avoids the historical cold
+        # start while leaving the model, CUDA graphs, and compilation cache warm.
         session = self._vllm_session
         self._vllm_session = None
 
@@ -821,23 +983,28 @@ class QwenDirectorRuntimeMixin:
             except Exception:
                 pass
 
-        self._shutdown_vllm()
-
         tokenizer = getattr(self, "_tokenizer", None)
         self._tokenizer = None
         if tokenizer is not None:
-            del tokenizer
+            # Keep the shared tokenizer alive; it is small and avoids redundant
+            # local checkpoint reads for every newly-created Director instance.
+            if tokenizer is not _SHARED_VLLM_TOKENIZER:
+                del tokenizer
+
+        self._vllm_process = _SHARED_VLLM_PROCESS
+        self._vllm_log_handle = None
+        self._vllm_log_path = _SHARED_VLLM_LOG_PATH
 
         gc.collect()
 
         try:
             import torch
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                try:
-                    torch.cuda.ipc_collect()
-                except Exception:
-                    pass
+                # Do not empty the CUDA cache here: that would evict warm vLLM
+                # allocations and defeat the persistent-server optimization.
+                pass
+        except Exception:
+            pass
         except Exception:
             pass
 
