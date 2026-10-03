@@ -56,8 +56,6 @@ _SHARED_VLLM_LOCK = threading.RLock()
 _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
 _SHARED_VLLM_LOG_HANDLE = None
 _SHARED_VLLM_LOG_PATH: Path | None = None
-_SHARED_VLLM_MODEL_NAME: str | None = None
-_SHARED_VLLM_MODEL_PATH: str | None = None
 _SHARED_VLLM_TOKENIZER = None
 
 
@@ -694,7 +692,7 @@ class QwenDirectorRuntimeMixin:
     ) -> None:
 
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
-        global _SHARED_VLLM_MODEL_NAME, _SHARED_VLLM_MODEL_PATH, _SHARED_VLLM_TOKENIZER
+        global _SHARED_VLLM_TOKENIZER
         
         if not self.available:
             return
@@ -791,7 +789,11 @@ class QwenDirectorRuntimeMixin:
                     str(self.project_root / "qwen3_vllm_server.log"),
                 )
             )
-            log_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                session.close()
+                raise
 
             # If a previously shared child died unexpectedly, retire its stale
             # log handle before replacing the shared process/handle pair.
@@ -806,20 +808,20 @@ class QwenDirectorRuntimeMixin:
                     except Exception:
                         pass
 
-            log_handle = log_path.open("ab")
-
             vllm_python = DIRECTOR_VLLM_ENV_DIR / "bin" / "python"
             if not vllm_python.is_file():
-                log_handle.close()
                 session.close()
                 raise RuntimeError(
                     "Qwen Director vLLM environment is missing: "
                     f"{vllm_python}. Run kaggle/bootstrap.py first."
                 )
 
-            speculator_model = self._find_speculator_model()
+            try:
+                speculator_model = self._find_speculator_model()
+            except Exception:
+                session.close()
+                raise
             if DIRECTOR_VLLM_SPECULATIVE_TOKENS <= 0:
-                log_handle.close()
                 session.close()
                 raise RuntimeError(
                     "Director speculative_tokens must be positive in runtime configuration."
@@ -832,7 +834,6 @@ class QwenDirectorRuntimeMixin:
             if eagle_enforce_eager_value not in {
                 "0", "1", "false", "true", "no", "yes", "off", "on"
             }:
-                log_handle.close()
                 session.close()
                 raise RuntimeError(
                     "H3_DIRECTOR_VLLM_EAGLE_ENFORCE_EAGER must be a boolean environment value."
@@ -889,6 +890,7 @@ class QwenDirectorRuntimeMixin:
                     safetensors_strategy,
                 ])
             elif safetensors_strategy not in {"", "none", "default"}:
+                session.close()
                 raise RuntimeError(
                     "Unsupported H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY: "
                     f"{safetensors_strategy!r}"
@@ -900,6 +902,7 @@ class QwenDirectorRuntimeMixin:
             ).strip()
             if kv_cache_memory_bytes:
                 if not kv_cache_memory_bytes.isdigit() or int(kv_cache_memory_bytes) <= 0:
+                    session.close()
                     raise RuntimeError(
                         "H3_DIRECTOR_VLLM_KV_CACHE_MEMORY_BYTES must be a positive integer byte count."
                     )
@@ -920,14 +923,17 @@ class QwenDirectorRuntimeMixin:
                         if value.strip()
                     ]
                 except ValueError as exc:
+                    session.close()
                     raise RuntimeError(
                         "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must be a comma-separated list of positive integers."
                     ) from exc
                 if not capture_sizes or any(value <= 0 for value in capture_sizes):
+                    session.close()
                     raise RuntimeError(
                         "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must contain positive integers."
                     )
                 if len(set(capture_sizes)) != len(capture_sizes):
+                    session.close()
                     raise RuntimeError(
                         "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must not contain duplicates."
                     )
@@ -947,7 +953,11 @@ class QwenDirectorRuntimeMixin:
             ).strip()
             if cache_root:
                 cache_path = Path(cache_root).expanduser()
-                cache_path.mkdir(parents=True, exist_ok=True)
+                try:
+                    cache_path.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    session.close()
+                    raise
                 child_env["VLLM_CACHE_ROOT"] = str(cache_path)
 
             startup_plan_value = os.getenv(
@@ -956,6 +966,7 @@ class QwenDirectorRuntimeMixin:
             ).strip().lower()
             if startup_plan_value:
                 if startup_plan_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+                    session.close()
                     raise RuntimeError(
                         "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN must be a boolean environment value."
                     )
@@ -964,6 +975,12 @@ class QwenDirectorRuntimeMixin:
                     if startup_plan_value in {"1", "true", "yes", "on"}
                     else "0"
                 )
+
+            try:
+                log_handle = log_path.open("ab")
+            except Exception:
+                session.close()
+                raise
 
             process = None
             try:
@@ -977,8 +994,6 @@ class QwenDirectorRuntimeMixin:
                 _SHARED_VLLM_PROCESS = process
                 _SHARED_VLLM_LOG_HANDLE = log_handle
                 _SHARED_VLLM_LOG_PATH = log_path
-                _SHARED_VLLM_MODEL_NAME = model_name
-                _SHARED_VLLM_MODEL_PATH = str(self._model_path)
 
                 self._vllm_process = process
                 self._vllm_log_handle = log_handle
@@ -1014,8 +1029,6 @@ class QwenDirectorRuntimeMixin:
                     _SHARED_VLLM_PROCESS = None
                     _SHARED_VLLM_LOG_HANDLE = None
                     _SHARED_VLLM_LOG_PATH = None
-                    _SHARED_VLLM_MODEL_NAME = None
-                    _SHARED_VLLM_MODEL_PATH = None
                 if process is not None:
                     try:
                         if process.poll() is None:
