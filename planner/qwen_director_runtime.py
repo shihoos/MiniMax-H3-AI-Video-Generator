@@ -141,7 +141,7 @@ class QwenDirectorRuntimeMixin:
 
     @staticmethod
     def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
-        """Stage NFS-mounted Kaggle models to local NVMe scratch safely and atomically."""
+        """Stage NFS-mounted Kaggle models to local NVMe scratch, publishing only after validation."""
         stage_enabled = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "1").strip().lower() in {
             "1", "true", "yes", "on"
         }
