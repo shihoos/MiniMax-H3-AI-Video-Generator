@@ -32,7 +32,7 @@ from planner.qwen_director_prompts import (
     QwenDirectorPromptMixin,
 )
 from planner.qwen_director_scene import QwenDirectorSceneMixin
-from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin, is_written_text_quote
 
 
 class QwenDirector(
@@ -398,14 +398,16 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    # Keep thinking enabled for the single creative story pass.
-                    # This pass must solve multiple coupled constraints (goal, resistance,
-                    # reversal, choice, consequence, cast, dialogue, and six-scene topology).
-                    # 3200 tokens provide reasoning + final-story headroom; the existing
-                    # single bounded no-think retry remains the only creative recovery path.
-                    max_completion=3200,
-                    disable_thinking=False,
+                    # Thinking is DISABLED for the story pass. Trace evidence: the <think>
+                    # block spent ~480 tokens on a plan that the final prose then ignored
+                    # (plan: "note from Kline"; story: biometric canister, contradictory
+                    # position/ending). The prompt now makes the model write a short structured
+                    # PLAN + position LEDGER in the visible output, which _extract_story_body()
+                    # strips before validation. 2600 tokens = ~250 plan + ~900 story + headroom.
+                    max_completion=2600,
+                    disable_thinking=True,
                 )
+                story = self._extract_story_body(story)
                 story = self._validate_story_output_contracts(
                     mode,
                     user_input,
@@ -724,9 +726,10 @@ class QwenDirector(
                                 if mode == AI_STORY_MODE
                                 else "expand_story_text_retry"
                             ),
-                            max_completion=1800,
+                            max_completion=2200,
                             disable_thinking=True,
                         )
+                        repaired = self._extract_story_body(repaired)
                         if completion_repair and preserved_prefix:
                             story = preserved_prefix + "\n\n" + str(repaired).strip()
                         else:
@@ -1439,6 +1442,15 @@ class QwenDirector(
 
         all_shots = repaired_shots
 
+        # Scene-level coherence: one paragraph == one scene in one place under one
+        # lighting setup. Qwen is free to vary framing, lens and movement between the
+        # shots of a scene, but not to teleport the location or flip the light source.
+        self._enforce_scene_coherence(
+            scenes,
+            all_shots,
+            characters,
+        )
+
         # No Qwen-shot failure is fatal here: the deterministic compiler
         # completes production fields while preserving every valid creative
         # shot Qwen produced.
@@ -1790,6 +1802,96 @@ class QwenDirector(
             )
         return result
 
+
+    @staticmethod
+    def _enforce_scene_coherence(
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Deterministic, prose-preserving scene continuity repair.
+
+        - Every shot in a scene shares ONE physical location. The scene location wins when
+          supplied; otherwise the first shot's location becomes the scene location.
+        - Every shot in a scene shares the first shot's lighting + color temperature
+          (framing, lens and movement are the only things that should vary inside a scene).
+        - Shot character bindings use the canonical roster spelling, not a lower-cased key.
+        """
+        canonical_by_norm = {
+            str(c.get("name", "")).strip().lower(): str(c.get("name", "")).strip()
+            for c in (characters or [])
+            if isinstance(c, dict) and str(c.get("name", "")).strip()
+        }
+        scene_by_id = {
+            str(sc.get("scene_id", "") or "").strip(): sc
+            for sc in (scenes or [])
+            if isinstance(sc, dict)
+        }
+        by_scene: dict[str, list[dict]] = {}
+        for shot in shots or []:
+            if isinstance(shot, dict):
+                by_scene.setdefault(str(shot.get("scene_id", "") or "").strip(), []).append(shot)
+
+        def _usable_location(value: str) -> bool:
+            words = str(value or "").strip().split()
+            return 0 < len(words) <= 6
+
+        for scene_id, group in by_scene.items():
+            scene = scene_by_id.get(scene_id)
+            first = group[0]
+            location = str((scene or {}).get("location", "") or "").strip()
+            if not _usable_location(location):
+                location = ""
+                for shot in group:
+                    candidate = str(shot.get("location", "") or "").strip()
+                    if _usable_location(candidate):
+                        location = candidate
+                        break
+            lighting = str(first.get("lighting", "") or "").strip()
+            color = str(first.get("color_temperature", "") or "").strip()
+
+            # Vocabulary-leak guard: "practical neon" / "warm tungsten" / "soft overcast" are
+            # spelling-guide terms the model copies as if they were a menu. Replace them only when the
+            # scene text gives no physical source for that light.
+            # Source of truth is the STORY text of the scene, not the shot text (the shot is what
+            # may have hallucinated the light in the first place).
+            scene_text = " ".join(
+                [str((scene or {}).get("description", "") or ""), str((scene or {}).get("scene_objective", "") or "")]
+                + [str(v) for v in ((scene or {}).get("key_props", []) or [])]
+            ).lower()
+            indoor = bool(re.search(r"\b(inside|indoor|corridor|chamber|vault|room|lab|hall|stairwell|tunnel|bunker|cabin)\b", f"{location} {scene_text}".lower()))
+            lowered_light = lighting.lower()
+            if "neon" in lowered_light and not re.search(r"\b(neon|sign|billboard|arcade)\b", scene_text):
+                lighting = "mixed practical/ambient"
+            elif "tungsten" in lowered_light and not re.search(r"\b(lamp|bulb|tungsten|candle|lantern|fixture|filament)\b", scene_text):
+                lighting = "mixed practical/ambient"
+            elif "overcast" in lowered_light and indoor:
+                lighting = "mixed practical/ambient"
+
+            if scene is not None and location and not str(scene.get("location", "") or "").strip():
+                scene["location"] = location
+
+            for shot in group:
+                if location:
+                    shot["location"] = location
+                if lighting:
+                    shot["lighting"] = lighting
+                if color:
+                    shot["color_temperature"] = color
+                for key in ("continuity_start_state", "continuity_end_state"):
+                    state = shot.get(key)
+                    if isinstance(state, dict):
+                        if location:
+                            state["location"] = location
+                        if lighting:
+                            state["lighting"] = lighting
+                names = shot.get("characters")
+                if isinstance(names, list):
+                    shot["characters"] = list(dict.fromkeys(
+                        canonical_by_norm.get(str(n).strip().lower(), str(n).strip())
+                        for n in names
+                        if str(n).strip()
+                    ))
 
     @staticmethod
     def _refresh_dialogue_summary(shot: dict) -> None:
@@ -2275,8 +2377,8 @@ class QwenDirector(
                     event["continues_to_next_shot"] = False
 
     @staticmethod
-    def _normalize_dialogue_text(value: str) -> str:
-        return (
+    def _normalize_dialogue_text(value: str, keep_case: bool = False) -> str:
+        cleaned = (
             re.sub(
                 r"\s+",
                 " ",
@@ -2286,8 +2388,8 @@ class QwenDirector(
             .replace("‘", "'")
             .replace("—", "-")
             .replace("–", "-")
-            .lower()
         )
+        return cleaned if keep_case else cleaned.lower()
 
     _SPEECH_TAG_VERBS = (
         "said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
@@ -2354,8 +2456,17 @@ class QwenDirector(
 
         for match in quote_pattern.finditer(text):
             value = next((part for part in match.groups() if part), "")
-            normalized = cls._normalize_dialogue_text(value)
-            if not normalized:
+            # Signs, tags, screens, IDs and markdown-emphasised text are written
+            # text, not speech: never let them become audio events.
+            if is_written_text_quote(text, match.start(), match.end()):
+                continue
+            display = cls._normalize_dialogue_text(value, keep_case=True)
+            _ends_open = display.rstrip().endswith((",", ";", ":"))
+            display = display.rstrip(",;: ").strip()
+            if _ends_open and display:
+                display += "."
+            normalized = display.lower()
+            if not normalized or len(re.findall(r"[A-Za-z]", normalized)) < 2:
                 continue
 
             prefix_window = text[max(0, match.start() - 180):match.start()]
@@ -2373,6 +2484,7 @@ class QwenDirector(
 
             segments.append({
                 "text": normalized,
+                "display": display,
                 "source_speakers": set(),
                 "tag_speakers": cls._speech_tag_speakers(
                     text[max(0, match.start() - 90):match.start()],
@@ -2397,12 +2509,14 @@ class QwenDirector(
 
             speaker = match.group(1).strip()
             spoken = match.group(2).strip()
-            normalized = cls._normalize_dialogue_text(spoken)
+            display = cls._normalize_dialogue_text(spoken, keep_case=True).rstrip(",;: ").strip()
+            normalized = display.lower()
             if not speaker or not normalized:
                 continue
 
             segments.append({
                 "text": normalized,
+                "display": display,
                 "source_speakers": {EntityResolver.normalize(speaker)},
                 "start": match.start(),
                 "end": match.end(),
@@ -2458,9 +2572,11 @@ class QwenDirector(
         segment_progress = [0 for _ in spoken_segments]
 
         last_tag_speakers: set[str] = set()
+        last_display: list[str] = [""]
 
         def _consume_source_dialogue(normalized_text: str):
             last_tag_speakers.clear()
+            last_display[0] = ""
             if not normalized_text:
                 return None
 
@@ -2488,6 +2604,9 @@ class QwenDirector(
                         len(source_text),
                         progress + len(normalized_text),
                     )
+                    display_text = str(segment.get("display", "") or "")
+                    if len(display_text) == len(source_text):
+                        last_display[0] = display_text[progress:segment_progress[index]].strip()
                     last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
@@ -2496,6 +2615,9 @@ class QwenDirector(
                         len(source_text),
                         progress + len(normalized_text),
                     )
+                    display_text = str(segment.get("display", "") or "")
+                    if len(display_text) == len(source_text):
+                        last_display[0] = display_text[progress:segment_progress[index]].strip()
                     last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
@@ -2672,6 +2794,10 @@ class QwenDirector(
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
+                # Dialogue text must be the exact source span (original casing and
+                # punctuation), never a lower-cased matching key.
+                if last_display[0]:
+                    repaired["text"] = last_display[0]
                 repaired_events.append(repaired)
 
             shot["dialogue_events"] = repaired_events
@@ -2771,6 +2897,71 @@ class QwenDirector(
         )
 
     @_with_faulthandler_watchdog
+    def _reconcile_critique(self, critique: dict, plan: dict) -> dict:
+        """Make the critic's verdict self-consistent and add deterministic checks the 14B critic misses.
+
+        Trace evidence: the critic returned score 10 for a plan with a sign spoken as dialogue and
+        contradictory lighting, and score 1 / status "review" with ZERO findings elsewhere. An
+        unexplained score is not actionable, so the verdict is derived from findings that can be pointed to.
+        """
+        if not isinstance(critique, dict):
+            return critique
+        findings = [str(f).strip() for f in (critique.get("findings") or []) if str(f).strip()]
+        shot_findings = [
+            f for f in (critique.get("shot_findings") or [])
+            if isinstance(f, dict) and str(f.get("finding", "")).strip()
+        ]
+
+        shots = [s for s in (plan.get("shots") or []) if isinstance(s, dict)]
+        by_scene: dict[str, list[dict]] = {}
+        for shot in shots:
+            by_scene.setdefault(str(shot.get("scene_id", "") or ""), []).append(shot)
+        seen_dialogue: dict[str, str] = {}
+        for shot in shots:
+            sid = str(shot.get("shot_id", "") or "")
+            for event in shot.get("dialogue_events") or []:
+                if not isinstance(event, dict):
+                    continue
+                key = self._normalize_dialogue_text(event.get("text", ""))
+                if key and key in seen_dialogue and not event.get("continues_from_previous_shot"):
+                    shot_findings.append({"shot_id": sid, "severity": "warning",
+                                          "finding": f"Dialogue line repeats {seen_dialogue[key]}."})
+                elif key:
+                    seen_dialogue[key] = sid
+        for scene_id, group in by_scene.items():
+            lights = {str(s.get("lighting", "") or "").strip().lower() for s in group}
+            lights.discard("")
+            if len(lights) > 1:
+                shot_findings.append({"shot_id": str(group[0].get("shot_id", "") or scene_id), "severity": "warning",
+                                      "finding": f"Scene {scene_id} changes lighting between shots."})
+            places = {str(s.get("location", "") or "").strip().lower() for s in group}
+            places.discard("")
+            if len(places) > 1:
+                shot_findings.append({"shot_id": str(group[0].get("shot_id", "") or scene_id), "severity": "warning",
+                                      "finding": f"Scene {scene_id} changes location between shots."})
+            pairs = [(str(s.get("camera_shot", "")).strip().lower(), str(s.get("camera_movement", "")).strip().lower()) for s in group]
+            if len(pairs) > 1 and len(set(pairs)) == 1:
+                shot_findings.append({"shot_id": str(group[0].get("shot_id", "") or scene_id), "severity": "warning",
+                                      "finding": f"Scene {scene_id} repeats the same framing and movement."})
+
+        critique["shot_findings"] = shot_findings
+        has_findings = bool(findings or shot_findings)
+        try:
+            score = float(critique.get("overall_score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        if not has_findings:
+            # No pointable defect: the verdict must be a pass regardless of the model's number.
+            critique["status"] = "pass"
+            critique["overall_score"] = 10 if score < 8 else score
+            if score < 8:
+                critique["critic_score_discarded"] = score
+        else:
+            critique["status"] = "review"
+            ceiling = max(2.0, 10.0 - 1.5 * len(shot_findings) - len(findings))
+            critique["overall_score"] = round(min(score or ceiling, ceiling), 1)
+        return critique
+
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
         """Run an optional read-only cinematic critique.
 
@@ -2919,6 +3110,7 @@ class QwenDirector(
                 disable_thinking=True,
                 response_schema=schema,
             )
+            result = self._reconcile_critique(result, plan)
             return result
         finally:
             self._print_qwen_summary("FINAL")
