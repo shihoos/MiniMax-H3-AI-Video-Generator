@@ -56,6 +56,8 @@ _SHARED_VLLM_LOCK = threading.RLock()
 _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
 _SHARED_VLLM_LOG_HANDLE = None
 _SHARED_VLLM_LOG_PATH: Path | None = None
+_SHARED_VLLM_MODEL_NAME: str | None = None
+_SHARED_VLLM_MODEL_PATH: str | None = None
 _SHARED_VLLM_TOKENIZER = None
 
 
@@ -692,7 +694,7 @@ class QwenDirectorRuntimeMixin:
     ) -> None:
 
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
-        global _SHARED_VLLM_TOKENIZER
+        global _SHARED_VLLM_MODEL_NAME, _SHARED_VLLM_MODEL_PATH, _SHARED_VLLM_TOKENIZER
         
         if not self.available:
             return
@@ -823,10 +825,29 @@ class QwenDirectorRuntimeMixin:
                     "Director speculative_tokens must be positive in runtime configuration."
                 )
 
+            eagle_enforce_eager_value = os.getenv(
+                "H3_DIRECTOR_VLLM_EAGLE_ENFORCE_EAGER",
+                "1",
+            ).strip().lower()
+            if eagle_enforce_eager_value not in {
+                "0", "1", "false", "true", "no", "yes", "off", "on"
+            }:
+                log_handle.close()
+                session.close()
+                raise RuntimeError(
+                    "H3_DIRECTOR_VLLM_EAGLE_ENFORCE_EAGER must be a boolean environment value."
+                )
+            eagle_enforce_eager = eagle_enforce_eager_value in {
+                "1", "true", "yes", "on"
+            }
+
             speculative_config = json.dumps({
                 "model": str(speculator_model),
                 "method": DIRECTOR_VLLM_SPECULATIVE_METHOD,
                 "num_speculative_tokens": DIRECTOR_VLLM_SPECULATIVE_TOKENS,
+                # Keep the main Qwen target compiled/graph-optimized while avoiding
+                # a second compile/capture path for the Eagle draft model.
+                "enforce_eager": eagle_enforce_eager,
             }, separators=(",", ":"))
 
             command = [
@@ -873,17 +894,91 @@ class QwenDirectorRuntimeMixin:
                     f"{safetensors_strategy!r}"
                 )
 
+            kv_cache_memory_bytes = os.getenv(
+                "H3_DIRECTOR_VLLM_KV_CACHE_MEMORY_BYTES",
+                "",
+            ).strip()
+            if kv_cache_memory_bytes:
+                if not kv_cache_memory_bytes.isdigit() or int(kv_cache_memory_bytes) <= 0:
+                    raise RuntimeError(
+                        "H3_DIRECTOR_VLLM_KV_CACHE_MEMORY_BYTES must be a positive integer byte count."
+                    )
+                command.extend([
+                    "--kv-cache-memory-bytes",
+                    kv_cache_memory_bytes,
+                ])
+
+            cudagraph_capture_sizes = os.getenv(
+                "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES",
+                "",
+            ).strip()
+            if cudagraph_capture_sizes:
+                try:
+                    capture_sizes = [
+                        int(value.strip())
+                        for value in cudagraph_capture_sizes.split(",")
+                        if value.strip()
+                    ]
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must be a comma-separated list of positive integers."
+                    ) from exc
+                if not capture_sizes or any(value <= 0 for value in capture_sizes):
+                    raise RuntimeError(
+                        "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must contain positive integers."
+                    )
+                if len(set(capture_sizes)) != len(capture_sizes):
+                    raise RuntimeError(
+                        "H3_DIRECTOR_VLLM_CUDAGRAPH_CAPTURE_SIZES must not contain duplicates."
+                    )
+                capture_sizes = sorted(capture_sizes)
+                command.extend([
+                    "--compilation-config",
+                    json.dumps(
+                        {"cudagraph_capture_sizes": capture_sizes},
+                        separators=(",", ":"),
+                    ),
+                ])
+
+            child_env = os.environ.copy()
+            cache_root = os.getenv(
+                "H3_DIRECTOR_VLLM_CACHE_ROOT",
+                "",
+            ).strip()
+            if cache_root:
+                cache_path = Path(cache_root).expanduser()
+                cache_path.mkdir(parents=True, exist_ok=True)
+                child_env["VLLM_CACHE_ROOT"] = str(cache_path)
+
+            startup_plan_value = os.getenv(
+                "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN",
+                "1" if cache_root else "",
+            ).strip().lower()
+            if startup_plan_value:
+                if startup_plan_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+                    raise RuntimeError(
+                        "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN must be a boolean environment value."
+                    )
+                child_env["VLLM_ENABLE_STARTUP_PLAN"] = (
+                    "1"
+                    if startup_plan_value in {"1", "true", "yes", "on"}
+                    else "0"
+                )
+
             process = None
             try:
                 process = subprocess.Popen(
                     command,
                     stdout=log_handle,
                     stderr=subprocess.STDOUT,
+                    env=child_env,
                     start_new_session=True,
                 )
                 _SHARED_VLLM_PROCESS = process
                 _SHARED_VLLM_LOG_HANDLE = log_handle
                 _SHARED_VLLM_LOG_PATH = log_path
+                _SHARED_VLLM_MODEL_NAME = model_name
+                _SHARED_VLLM_MODEL_PATH = str(self._model_path)
 
                 self._vllm_process = process
                 self._vllm_log_handle = log_handle
@@ -919,6 +1014,8 @@ class QwenDirectorRuntimeMixin:
                     _SHARED_VLLM_PROCESS = None
                     _SHARED_VLLM_LOG_HANDLE = None
                     _SHARED_VLLM_LOG_PATH = None
+                    _SHARED_VLLM_MODEL_NAME = None
+                    _SHARED_VLLM_MODEL_PATH = None
                 if process is not None:
                     try:
                         if process.poll() is None:
