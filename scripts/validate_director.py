@@ -46,6 +46,7 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
     for label, text in (("AI story", ai), ("Expand story", expand)):
         _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
         _assert(("420 to 560 words" in text) or ("420-560" in text), f"{label} prompt must state its word target")
+        _assert("HARD length contract" in text, f"{label} prompt must make the word budget operationally hard")
         _assert("stable" in text.lower() and "canonical" in text.lower() and "name" in text.lower(), f"{label} prompt must require stable canonical character identity")
         for concept in ("goal", "resistance", "reversal", "choice", "consequence"):
             _assert(concept in text.lower(), f"{label} prompt is missing the core {concept} concept")
@@ -77,7 +78,9 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
 def test_expand_source_fallback_removed():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
     _assert("expand_story_source_fallback" not in source, "Expand Story must not silently fall back to preserve-story mode")
-    _assert("Expand Story generation failed validation after the controlled retry" in source, "Expand retry must fail closed after its bounded retry")
+    _assert("Expand Story generation failed validation:" in source, "Expand Story must fail closed after the primary pass")
+    _assert("ai_story_text_retry" not in source, "AI Story must not make a creative retry call")
+    _assert("expand_story_text_retry" not in source, "Expand Story must not make a creative retry call")
 
 
 def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
@@ -503,9 +506,13 @@ def test_story_token_budget_contract():
         "primary story pass must use the 3200-token thinking-enabled contract",
     )
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
-    # The one controlled retry remains bounded and no-think; do not add another creative retry.
-    _assert(source.count("max_completion=1800") >= 1, "bounded story retry must remain 1800")
-    _assert("expand_story_text_retry" in source, "Expand Story controlled retry must remain available")
+    _assert(
+        "minimum_output_tokens=1250" in source,
+        "primary story pass must enforce a 1250-token minimum output floor",
+    )
+    _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
+    _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
+    _assert("max_completion=1800" not in source, "obsolete story retry completion budget remains")
 
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
