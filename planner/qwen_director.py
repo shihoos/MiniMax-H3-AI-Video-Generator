@@ -398,16 +398,13 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    # Thinking is DISABLED for the story pass. Trace evidence: the <think>
-                    # block spent ~480 tokens on a plan that the final prose then ignored
-                    # (plan: "note from Kline"; story: biometric canister, contradictory
-                    # position/ending). The prompt now makes the model write a short structured
-                    # PLAN + position LEDGER in the visible output, which _extract_story_body()
-                    # strips before validation. 2600 tokens = ~250 plan + ~900 story + headroom.
-                    max_completion=2600,
-                    disable_thinking=True,
+                    # Keep the primary creative story pass on the established thinking-enabled
+                    # configuration. The prompt itself is compact enough to avoid turning reasoning
+                    # into a checklist, while the runtime strips any explicit <think> wrapper before
+                    # the story reaches validation.
+                    max_completion=3200,
+                    disable_thinking=False,
                 )
-                story = self._extract_story_body(story)
                 story = self._validate_story_output_contracts(
                     mode,
                     user_input,
@@ -726,10 +723,9 @@ class QwenDirector(
                                 if mode == AI_STORY_MODE
                                 else "expand_story_text_retry"
                             ),
-                            max_completion=2200,
+                            max_completion=1800,
                             disable_thinking=True,
                         )
-                        repaired = self._extract_story_body(repaired)
                         if completion_repair and preserved_prefix:
                             story = preserved_prefix + "\n\n" + str(repaired).strip()
                         else:
@@ -1832,41 +1828,74 @@ class QwenDirector(
             if isinstance(shot, dict):
                 by_scene.setdefault(str(shot.get("scene_id", "") or "").strip(), []).append(shot)
 
+        _INVALID_LOCATION_RE = re.compile(
+            r"\b(?:ladder|mug|cup|key|keypad|door|screen|monitor|display|terminal|panel|hands?|face|eyes?|fingers?|body|floor|ceiling|wall|crate|canister|drive|document|photo|photograph)\b",
+            flags=re.IGNORECASE,
+        )
+        _PLACE_HINT_RE = re.compile(
+            r"\b(?:station|facility|vault|chamber|room|corridor|hall|lab|laboratory|platform|deck|stairwell|stairs|"
+            r"tunnel|bunker|cabin|warehouse|hangar|garage|office|rooftop|roof|street|road|forest|shore|bridge|"
+            r"ship|boat|vehicle|aircraft|airfield|yard|courtyard|kitchen|bedroom|basement|attic|archive|"
+            r"observatory|tower|camp|compound|campus|lobby|foyer|entrance|exit|interior|exterior)\b",
+            flags=re.IGNORECASE,
+        )
+
         def _usable_location(value: str) -> bool:
-            words = str(value or "").strip().split()
-            return 0 < len(words) <= 6
+            text = str(value or "").strip()
+            if not text or len(text.split()) > 8:
+                return False
+            if re.match(r"^(?:on|in|inside|at|near|behind|beside|through|under|over)\b", text, flags=re.IGNORECASE):
+                return False
+            if _INVALID_LOCATION_RE.search(text) and not _PLACE_HINT_RE.search(text):
+                return False
+            return bool(_PLACE_HINT_RE.search(text)) or len(text.split()) >= 2
+
+        def _pick_location(candidates: list[str]) -> str:
+            valid = [str(c).strip() for c in candidates if _usable_location(str(c))]
+            if not valid:
+                return ""
+            ranked = sorted(
+                valid,
+                key=lambda value: (
+                    1 if _PLACE_HINT_RE.search(value) else 0,
+                    -sum(1 for token in value.lower().split() if token in {"ladder", "mug", "door", "screen", "keypad"}),
+                    -len(value.split()),
+                ),
+                reverse=True,
+            )
+            return ranked[0]
 
         for scene_id, group in by_scene.items():
             scene = scene_by_id.get(scene_id)
             first = group[0]
-            location = str((scene or {}).get("location", "") or "").strip()
-            if not _usable_location(location):
-                location = ""
-                for shot in group:
-                    candidate = str(shot.get("location", "") or "").strip()
-                    if _usable_location(candidate):
-                        location = candidate
-                        break
-            lighting = str(first.get("lighting", "") or "").strip()
-            color = str(first.get("color_temperature", "") or "").strip()
+            scene_location = str((scene or {}).get("location", "") or "").strip()
+            location = scene_location if _usable_location(scene_location) else ""
+            if not location:
+                location = _pick_location([str(shot.get("location", "") or "").strip() for shot in group])
 
-            # Vocabulary-leak guard: "practical neon" / "warm tungsten" / "soft overcast" are
-            # spelling-guide terms the model copies as if they were a menu. Replace them only when the
-            # scene text gives no physical source for that light.
-            # Source of truth is the STORY text of the scene, not the shot text (the shot is what
-            # may have hallucinated the light in the first place).
             scene_text = " ".join(
                 [str((scene or {}).get("description", "") or ""), str((scene or {}).get("scene_objective", "") or "")]
                 + [str(v) for v in ((scene or {}).get("key_props", []) or [])]
             ).lower()
-            indoor = bool(re.search(r"\b(inside|indoor|corridor|chamber|vault|room|lab|hall|stairwell|tunnel|bunker|cabin)\b", f"{location} {scene_text}".lower()))
-            lowered_light = lighting.lower()
-            if "neon" in lowered_light and not re.search(r"\b(neon|sign|billboard|arcade)\b", scene_text):
-                lighting = "mixed practical/ambient"
-            elif "tungsten" in lowered_light and not re.search(r"\b(lamp|bulb|tungsten|candle|lantern|fixture|filament)\b", scene_text):
-                lighting = "mixed practical/ambient"
-            elif "overcast" in lowered_light and indoor:
-                lighting = "mixed practical/ambient"
+            indoor = bool(re.search(r"\b(inside|indoor|corridor|chamber|vault|room|lab|hall|stairwell|tunnel|bunker|cabin|basement|archive)\b", f"{location} {scene_text}", flags=re.IGNORECASE))
+
+            lighting_candidates = [str(shot.get("lighting", "") or "").strip() for shot in group]
+            color_candidates = [str(shot.get("color_temperature", "") or "").strip() for shot in group]
+
+            def _lighting_ok(value: str) -> bool:
+                lowered = value.lower()
+                if not lowered:
+                    return False
+                if "neon" in lowered and not re.search(r"\b(neon|sign|billboard|arcade)\b", scene_text):
+                    return False
+                if "tungsten" in lowered and not re.search(r"\b(lamp|bulb|tungsten|candle|lantern|fixture|filament)\b", scene_text):
+                    return False
+                if "overcast" in lowered and indoor:
+                    return False
+                return True
+
+            lighting = next((v for v in lighting_candidates if _lighting_ok(v)), "mixed practical/ambient")
+            color = next((v for v in color_candidates if v), "")
 
             if scene is not None and location and not str(scene.get("location", "") or "").strip():
                 scene["location"] = location
@@ -2951,14 +2980,19 @@ class QwenDirector(
         except (TypeError, ValueError):
             score = 0.0
         if not has_findings:
-            # No pointable defect: the verdict must be a pass regardless of the model's number.
-            critique["status"] = "pass"
-            critique["overall_score"] = 10 if score < 8 else score
-            if score < 8:
-                critique["critic_score_discarded"] = score
+            # Never manufacture a score. An unexplained low critic score is itself an actionable
+            # defect in the critic output, so surface that inconsistency without rewriting the score.
+            if 0.0 < score < 8.0:
+                findings.append(
+                    f"Critic returned a low overall score ({score:g}) without an actionable finding."
+                )
+                critique["findings"] = findings
+                critique["status"] = "review"
+            else:
+                critique["status"] = "pass"
         else:
             critique["status"] = "review"
-            ceiling = max(2.0, 10.0 - 1.5 * len(shot_findings) - len(findings))
+            ceiling = max(1.0, 10.0 - 1.5 * len(shot_findings) - len(findings))
             critique["overall_score"] = round(min(score or ceiling, ceiling), 1)
         return critique
 
