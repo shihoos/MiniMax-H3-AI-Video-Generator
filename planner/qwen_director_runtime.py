@@ -881,9 +881,12 @@ class QwenDirectorRuntimeMixin:
                 "--trust-remote-code",
             ]
 
+            # Leave the strategy unset by default and let vLLM 0.30 select its
+            # documented NFS-aware behavior. Explicit overrides remain supported
+            # through H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY.
             safetensors_strategy = os.getenv(
                 "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
-                "lazy",
+                "",
             ).strip().lower()
             if safetensors_strategy in {"eager", "lazy", "prefetch", "torchao"}:
                 command.extend([
@@ -948,17 +951,13 @@ class QwenDirectorRuntimeMixin:
                 ])
 
             child_env = os.environ.copy()
+            # Do not redirect vLLM's compile cache into /kaggle/working by default.
+            # The previous known-good runs used vLLM's normal /root/.cache/vllm
+            # location, which keeps generated artifacts out of the saved notebook
+            # output while still allowing reuse for repeated boots in the same
+            # running Kaggle session. A caller can still override this explicitly.
             configured_cache_root = os.getenv("H3_DIRECTOR_VLLM_CACHE_ROOT", "").strip()
-            if configured_cache_root:
-                cache_root = configured_cache_root
-            elif Path("/kaggle/working").is_dir():
-                # Keep the vLLM cache on Kaggle's working volume by default so
-                # restarts within the same notebook/session do not fall back to
-                # /root/.cache/vllm. Cross-session persistence still requires
-                # preserving this directory as a Kaggle output/dataset.
-                cache_root = "/kaggle/working/vllm_cache"
-            else:
-                cache_root = ""
+            cache_root = configured_cache_root or ""
 
             cache_path = None
             if cache_root:
@@ -972,7 +971,7 @@ class QwenDirectorRuntimeMixin:
 
             startup_plan_value = os.getenv(
                 "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN",
-                "1" if cache_path is not None else "",
+                "0",
             ).strip().lower()
             if startup_plan_value:
                 if startup_plan_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
@@ -1001,7 +1000,7 @@ class QwenDirectorRuntimeMixin:
 
             print(
                 "[QWEN] vLLM startup config",
-                f"cache_root={cache_path or 'default'}",
+                f"cache_root={cache_path or 'default(/root/.cache/vllm)'}",
                 f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
                 f"eagle_enforce_eager={eagle_enforce_eager}",
                 f"cudagraph_capture_sizes={capture_sizes if cudagraph_capture_sizes else 'auto'}",
