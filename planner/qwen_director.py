@@ -390,8 +390,11 @@ class QwenDirector(
                 story = self._chat_text(
                     story_system,
                     story_user,
-                    minimum_completion=1250,
-                    minimum_output_tokens=1250,
+                    # Story length is a visible-prose contract. Disable Qwen's hidden reasoning
+                    # stream so the minimum-token floor applies to the actual story instead of
+                    # being consumed by reasoning tokens.
+                    minimum_completion=700,
+                    minimum_output_tokens=700,
                     temperature=temperature,
                     top_p=top_p,
                     call_name=(
@@ -399,12 +402,8 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    # Keep the primary creative story pass on the established thinking-enabled
-                    # configuration. The prompt itself is compact enough to avoid turning reasoning
-                    # into a checklist, while the runtime strips any explicit <think> wrapper before
-                    # the story reaches validation.
-                    max_completion=3200,
-                    disable_thinking=False,
+                    max_completion=2200,
+                    disable_thinking=True,
                 )
                 story = self._validate_story_output_contracts(
                     mode,
