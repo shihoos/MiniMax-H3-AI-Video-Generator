@@ -206,16 +206,9 @@ class QwenDirectorPromptMixin:
 
     The user provides a premise. Write a complete cinematic short-film story with a clear beginning,
     escalating middle, irreversible choice or point of no return, climax, consequence, and explicit
-    resolution. Completion is more important than reaching a target word count, and causal integrity
-    matters more than mechanically satisfying every instruction as a separate beat.
-
-    THINKING
-    - Use your internal reasoning before drafting. Briefly test the strongest plausible causal
-      interpretation(s) of the premise and choose the one that creates the most meaning from facts
-      already present in the premise.
-    - Prefer existing places, actions, relationships, or evidence over newly invented lore, objects,
-      organizations, or threats.
-    - Do not expose the alternatives or the reasoning in the answer.
+    resolution. The narrative, causal integrity, and hard length contract are equally mandatory; never
+    trade the required story length for a compressed ending. Prefer existing places, actions,
+    relationships, or evidence over newly invented lore, objects, organizations, or threats.
 
     FORMAT
     - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
@@ -279,6 +272,8 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
     story into one complete, filmable short story while preserving what the source actually establishes.
+    The source fidelity, causal integrity, and hard length contract are equally mandatory; never trade
+    the required story length for a compressed ending.
 
     FORMAT
     - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
