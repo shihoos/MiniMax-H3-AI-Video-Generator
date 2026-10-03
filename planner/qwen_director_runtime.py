@@ -59,11 +59,10 @@ _SHARED_VLLM_LOG_PATH: Path | None = None
 _SHARED_VLLM_MODEL_NAME: str | None = None
 _SHARED_VLLM_MODEL_PATH: str | None = None
 _SHARED_VLLM_TOKENIZER = None
-_SHARED_VLLM_OWNER = False
 
 
 def _shutdown_shared_vllm_at_exit() -> None:
-    global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_TOKENIZER, _SHARED_VLLM_OWNER
+    global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_TOKENIZER
     process = _SHARED_VLLM_PROCESS
     _SHARED_VLLM_PROCESS = None
     if process is not None:
@@ -85,7 +84,6 @@ def _shutdown_shared_vllm_at_exit() -> None:
         except Exception:
             pass
     _SHARED_VLLM_TOKENIZER = None
-    _SHARED_VLLM_OWNER = False
 
 
 atexit.register(_shutdown_shared_vllm_at_exit)
@@ -697,8 +695,7 @@ class QwenDirectorRuntimeMixin:
 
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
         global _SHARED_VLLM_MODEL_NAME, _SHARED_VLLM_MODEL_PATH, _SHARED_VLLM_TOKENIZER
-        global _SHARED_VLLM_OWNER
-
+        
         if not self.available:
             return
 
@@ -795,6 +792,20 @@ class QwenDirectorRuntimeMixin:
                 )
             )
             log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # If a previously shared child died unexpectedly, retire its stale
+            # log handle before replacing the shared process/handle pair.
+            stale_process = _SHARED_VLLM_PROCESS
+            if stale_process is not None and stale_process.poll() is not None:
+                _SHARED_VLLM_PROCESS = None
+                stale_handle = _SHARED_VLLM_LOG_HANDLE
+                _SHARED_VLLM_LOG_HANDLE = None
+                if stale_handle is not None:
+                    try:
+                        stale_handle.close()
+                    except Exception:
+                        pass
+
             log_handle = log_path.open("ab")
 
             vllm_python = DIRECTOR_VLLM_ENV_DIR / "bin" / "python"
@@ -851,7 +862,7 @@ class QwenDirectorRuntimeMixin:
 
             safetensors_strategy = os.getenv(
                 "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
-                "prefetch",
+                "lazy",
             ).strip().lower()
             if safetensors_strategy in {"eager", "lazy", "prefetch", "torchao"}:
                 command.extend([
@@ -864,6 +875,7 @@ class QwenDirectorRuntimeMixin:
                     f"{safetensors_strategy!r}"
                 )
 
+            process = None
             try:
                 process = subprocess.Popen(
                     command,
@@ -876,7 +888,6 @@ class QwenDirectorRuntimeMixin:
                 _SHARED_VLLM_LOG_PATH = log_path
                 _SHARED_VLLM_MODEL_NAME = model_name
                 _SHARED_VLLM_MODEL_PATH = str(self._model_path)
-                _SHARED_VLLM_OWNER = True
 
                 self._vllm_process = process
                 self._vllm_log_handle = log_handle
@@ -910,17 +921,21 @@ class QwenDirectorRuntimeMixin:
             except Exception as exc:
                 if _SHARED_VLLM_PROCESS is process:
                     _SHARED_VLLM_PROCESS = None
-                    _SHARED_VLLM_OWNER = False
-                try:
-                    if process.poll() is None:
-                        process.terminate()
-                        process.wait(timeout=15)
-                except Exception:
+                    _SHARED_VLLM_LOG_HANDLE = None
+                    _SHARED_VLLM_LOG_PATH = None
+                    _SHARED_VLLM_MODEL_NAME = None
+                    _SHARED_VLLM_MODEL_PATH = None
+                if process is not None:
                     try:
-                        process.kill()
-                        process.wait(timeout=5)
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=15)
                     except Exception:
-                        pass
+                        try:
+                            process.kill()
+                            process.wait(timeout=5)
+                        except Exception:
+                            pass
                 try:
                     log_handle.close()
                 except Exception:
@@ -941,11 +956,10 @@ class QwenDirectorRuntimeMixin:
         # Kept as an explicit emergency shutdown hook for startup failures and
         # process exit. Normal Director unload must not terminate the shared
         # GPU-backed server.
-        global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_OWNER
+        global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE
         with _SHARED_VLLM_LOCK:
             process = _SHARED_VLLM_PROCESS
             _SHARED_VLLM_PROCESS = None
-            _SHARED_VLLM_OWNER = False
 
             if process is not None:
                 try:
@@ -1003,8 +1017,6 @@ class QwenDirectorRuntimeMixin:
                 # Do not empty the CUDA cache here: that would evict warm vLLM
                 # allocations and defeat the persistent-server optimization.
                 pass
-        except Exception:
-            pass
         except Exception:
             pass
 
