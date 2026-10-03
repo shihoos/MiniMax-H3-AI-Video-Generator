@@ -1158,13 +1158,17 @@ class QwenDirectorSanitizeMixin:
         text: str,
     ) -> str:
 
-        return re.sub(
-            r"\s+",
-            " ",
-            str(
-                text or ""
-            ).strip(),
-        )
+        value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not value:
+            return ""
+
+        paragraphs = []
+        for paragraph in re.split(r"\n\s*\n+", value):
+            normalized = re.sub(r"[ \t\n]+", " ", paragraph).strip()
+            if normalized:
+                paragraphs.append(normalized)
+
+        return "\n\n".join(paragraphs)
 
     @staticmethod
     def _meaningful_tokens(
@@ -1293,8 +1297,6 @@ class QwenDirectorSanitizeMixin:
             if sentence.strip()
         ]
         final_sentence = sentences[-1].lower() if sentences else value.lower()
-        final_paragraph = value.split("\n\n")[-1].strip().lower()
-
         # Only the terminal sentence determines whether the story itself ends on
         # a future hook. Earlier sentences may legitimately mention plans,
         # uncertainty, or threats that are resolved by the final sentence.
@@ -1339,14 +1341,31 @@ class QwenDirectorSanitizeMixin:
         return bool(re.search(r"[.!?][\"'\u2019\u201d\u00bb\u203a\)\]\}]*$", value))
 
     def _validate_story_completion_contract(self, mode: str, result: str) -> None:
-        """Reject obvious incomplete endings before the bounded story retry."""
+        """Reject incomplete or structurally invalid stories before the bounded retry."""
         if mode not in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
             return
 
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n+", str(result or "").strip())
+            if part.strip()
+        ]
+        if len(paragraphs) != 6:
+            raise RuntimeError(
+                f"Generated story must contain exactly six paragraphs (found {len(paragraphs)})."
+            )
+
+        word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
+        if not 420 <= word_count <= 560:
+            raise RuntimeError(
+                "Generated story must contain 420 to 560 words "
+                f"(found {word_count})."
+            )
+
         # AI Story is a free-form cinematic generation pass where direct dialogue is part of
         # the narrative contract. Expand Story may legitimately be a one-character expansion,
-        # so requiring a second speaker or even spoken dialogue can itself cause the model to
-        # invent an unwanted character and trigger an avoidable retry.
+        # so requiring spoken dialogue can itself cause the model to invent an unwanted character
+        # and trigger an avoidable retry.
         if mode == AI_STORY_MODE and not self._story_has_explicit_dialogue(result):
             raise RuntimeError(
                 "Generated AI story must contain at least one explicit quoted line of direct dialogue."
