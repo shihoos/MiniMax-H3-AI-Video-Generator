@@ -2310,13 +2310,26 @@ class QwenDirector(
         The critic may identify problems but never mutates the canonical plan.
         """
         system_prompt = """
-    You are a conservative cinematic production critic.
-    Review the supplied production plan for narrative, shot-design, continuity,
-    reference-binding, and dialogue/action risks. Return a conservative critique.
-    When a fix is warranted, provide a minimal patch for an existing shot using
-    only the explicitly allowed creative fields in the schema. Never change scene
-    identity, shot identity, characters, reference bindings, timing, or continuity
-    state. Do not invent facts that are not present in the plan.
+    You audit a film production plan against its story. Check each item and report only defects you
+    can point to.
+
+    CHECKS
+    1. ROSTER: every name in a scene or shot `characters` list must appear in `roster`. Report any
+       name that is not a person in the story.
+    2. FIDELITY: each shot `action` and `visual_prompt` must depict events that happen in the story
+       for that scene. Report invented events, objects, or people.
+    3. MATCH: `visual_prompt` must describe the same moment as `action`. Report contradictions.
+    4. CONTINUITY: lighting, location, and who is present must not change between consecutive shots
+       of one scene without a story reason.
+    5. FRAMING: shots of one scene must not repeat the same camera_shot and camera_movement.
+
+    OUTPUT RULES
+    - overall_score is 1 (unusable) to 10 (no defects).
+    - status is "review" if there is at least one finding, otherwise "pass".
+    - Every finding names a shot_id or scene_id and says what is wrong in under 25 words.
+    - Add a shot_patch only for a defect in checks 2, 3, or 5, rewriting only that field in the same
+      style and length. Never change ids, characters, timing, or continuity. If no concrete defect
+      exists, return empty arrays.
     """.strip()
         def _slim_shot(shot: dict) -> dict:
             return {
@@ -2327,6 +2340,7 @@ class QwenDirector(
                 "lens_and_depth_of_field": str(shot.get("lens_and_depth_of_field", "") or ""),
                 "lighting": str(shot.get("lighting", "") or ""),
                 "mood": str(shot.get("mood", "") or ""),
+                "characters": shot.get("characters", []) or [],
                 "visual_prompt": str(shot.get("visual_prompt", "") or "")[:400],
                 "action": str(shot.get("action", "") or "")[:300],
                 "dialogue_events": [
@@ -2355,6 +2369,11 @@ class QwenDirector(
                 str(plan.get("story", user_input) or ""),
                 DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
             ),
+            "roster": [
+                str(c.get("name", "") or "").strip()
+                for c in (plan.get("characters", []) or [])
+                if isinstance(c, dict) and str(c.get("name", "") or "").strip()
+            ],
             "visual_language": plan.get("visual_language", {}) or {},
             "scenes": [
                 _slim_scene(scene)
