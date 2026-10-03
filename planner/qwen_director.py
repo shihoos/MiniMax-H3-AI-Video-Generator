@@ -398,11 +398,11 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    # Thinking is ON for the one creative pass that decides the
-                    # whole film. The plan is capped to ~250 words by the prompt;
-                    # 3200 tokens covers the plan plus the six-paragraph story with headroom.
-                    # finish_reason=length is treated as an incomplete text response by
-                    # _chat_text, so the existing bounded no-think retry handles it.
+                    # Keep thinking enabled for the single creative story pass.
+                    # This pass must solve multiple coupled constraints (goal, resistance,
+                    # reversal, choice, consequence, cast, dialogue, and six-scene topology).
+                    # 3200 tokens provide reasoning + final-story headroom; the existing
+                    # single bounded no-think retry remains the only creative recovery path.
                     max_completion=3200,
                     disable_thinking=False,
                 )
