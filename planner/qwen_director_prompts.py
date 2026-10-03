@@ -218,9 +218,11 @@ class QwenDirectorPromptMixin:
     - Do not expose the alternatives or the reasoning in the answer.
 
     FORMAT
-    - Third-person past tense. Aim for about 480 words; the returned story must land within 420-560
-      words and contain exactly six paragraphs separated by blank lines.
-    - Paragraphs are scene-sized beats; do not pad to equal lengths.
+    - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
+      with an absolute allowed range of 420-560 words, and exactly six paragraphs separated by blank lines.
+    - Keep each paragraph roughly 70-90 words. Do not stop early with a compressed beat; when a paragraph is short,
+      develop only concrete action, sensory detail, visible reaction, or causal transition already grounded in the premise.
+    - Before ending, silently check that the complete story is still at least 420 words. Never emit a shorter draft.
 
     CAST
     - Character count is an organic narrative decision. Do not force a minimum or maximum cast. Use one stable canonical name per character.
@@ -279,9 +281,11 @@ class QwenDirectorPromptMixin:
     story into one complete, filmable short story while preserving what the source actually establishes.
 
     FORMAT
-    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
-      words per paragraph and about 450-520 words total without padding.
+    - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
+      with an absolute allowed range of 420-560 words, and exactly six paragraphs separated by blank lines.
+      Each paragraph is one scene in one place and will become one video scene. Keep each paragraph roughly 70-90 words.
+      Do not stop early; when a paragraph is short, add only concrete action, sensory detail, visible reaction, or causal
+      connective tissue grounded in the source until the complete story reaches the required length without padding.
 
     FIDELITY AND CAST
     - Preserve every established event, character identity, setting, relationship, and outcome in source order.
