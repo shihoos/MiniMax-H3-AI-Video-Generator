@@ -75,6 +75,47 @@ def test_expand_source_fallback_removed():
     _assert("Expand Story generation failed validation after the controlled retry" in source, "Expand retry must fail closed after its bounded retry")
 
 
+def test_expand_story_cast_validator_is_wired_and_source_grounded():
+    from planner.qwen_director import QwenDirector
+
+    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    _assert(
+        source.count("self._validate_expand_story_cast(") >= 2,
+        "Expand Story cast validator is defined but not wired into both generation and retry paths",
+    )
+
+    previous = os.environ.get("H3_DIRECTOR_ENABLED")
+    os.environ["H3_DIRECTOR_ENABLED"] = "0"
+    try:
+        director = QwenDirector(ROOT)
+        source_story = "Eli entered the vault. His father had disappeared years ago."
+        generated_story = "Eli entered the vault. His father stepped from the dark."
+        director._validate_expand_story_cast(
+            source_story,
+            generated_story,
+            source_character_names=["Eli"],
+        )
+
+        try:
+            director._validate_expand_story_cast(
+                "Eli entered the vault.",
+                "Eli entered the vault. Marcus blocked the door.",
+                source_character_names=["Eli"],
+            )
+        except RuntimeError as exc:
+            _assert(
+                "unanchored character" in str(exc).lower(),
+                f"wrong Expand Story cast rejection: {exc}",
+            )
+        else:
+            raise AssertionError("unanchored named character was accepted by Expand Story cast validation")
+    finally:
+        if previous is None:
+            os.environ.pop("H3_DIRECTOR_ENABLED", None)
+        else:
+            os.environ["H3_DIRECTOR_ENABLED"] = previous
+
+
 def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
     from planner.production_planner import ProductionPlanner
     planner = ProductionPlanner(ROOT)
@@ -1238,6 +1279,7 @@ def main():
         test_deterministic_character_regressions,
         test_story_prompt_restores_successful_compact_narrative_contract,
         test_expand_source_fallback_removed,
+        test_expand_story_cast_validator_is_wired_and_source_grounded,
         test_semantic_named_surface_safety_boundary,
         test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
         test_semantic_empty_fallback,
