@@ -525,6 +525,21 @@ class ProductionPlanner:
         if not paragraphs:
             paragraphs = [story]
 
+        # AI Story / Expand Story deliberately emit six scene-sized paragraphs.
+        # Preserve those paragraph boundaries as production topology instead of
+        # re-splitting them into sentence beats. This is deterministic and source-safe.
+        if 4 <= len(paragraphs) <= 6:
+            return [
+                StoryUnit(
+                    order=index,
+                    text=paragraph,
+                )
+                for index, paragraph in enumerate(
+                    paragraphs,
+                    start=1,
+                )
+            ]
+
         units: list[str] = []
 
         for paragraph in paragraphs:
