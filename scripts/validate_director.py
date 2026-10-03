@@ -38,33 +38,19 @@ def test_deterministic_character_regressions():
 
 def test_story_prompt_restores_successful_compact_narrative_contract():
     source = Path(ROOT, "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    _assert("The user provides a premise." in source, "AI story prompt must use premise framing")
-    _assert(_has_normalized(source, "clear beginning, escalating middle, irreversible choice or point of no return, climax, consequence, and explicit resolution"), "AI story prompt must require a complete causal arc")
-    _assert("SUBVERT THE OBVIOUS" in source, "AI story prompt must require an earned reframing reversal")
-    _assert("Include at least one short line of spoken dialogue by a named" in source, "AI story prompt must require named-character dialogue")
-    _assert(_has_normalized(source, "End with a complete aftermath paragraph showing what happened to the protagonist and what changed."), "AI story prompt must require an explicit aftermath")
-    _assert("Aim for 400-650 words" in source, "AI/Expand story target must remain 400-650 words")
-    _assert(_has_normalized(source, "State the protagonist's concrete goal in the first two sentences."), "AI story opening contract is missing")
-    _assert("Prioritize finishing the full narrative" in source, "story user prompt must prioritize completion over padding")
-    _assert("organic narrative decision" in source, "cast selection must remain flexible")
-    _assert("do not force a minimum or maximum" in source.lower(), "cast size must remain flexible")
-    _assert("active causal or" in source and "emotional counterpart" in source, "recurring supporting characters must be causally active")
-    _assert("must TAKE AN ACTION" in source, "supporting counterpart must act rather than only explain")
-    _assert("second \"it was actually X\" twist" in source, "story prompt must forbid stacked second reversals")
-    _assert(_has_normalized(source, "first major action must pursue that goal"), "opening must be goal-driven")
-    _assert(_has_normalized(source, "meaningful resistance or consequence"), "protagonist must face meaningful early resistance")
-    _assert(_has_normalized(source, "By the midpoint, the protagonist's plan, belief, or relationship must materially change"), "story prompt must require a midpoint state change")
-    _assert("immediate objective or belief that conflicts with the protagonist" in source, "supporting character must have independent pressure")
-    _assert("materially alter" in source.lower() and "what the protagonist" in source.lower(), "supporting-character interaction must change the protagonist meaningfully")
-    _assert("PERSONAL STAKE" in source, "story should support protagonist-linked central conflict when the premise allows")
-    _assert(_has_normalized(source, "prior choice, relationship, memory, promise, fear, desire, or responsibility"), "personal causality mechanism is missing")
-    _assert("do not manufacture backstory" in source.lower(), "personal causality must remain premise-grounded")
-    _assert("PLANTED DETAIL" in source, "story must plant and pay off a concrete detail")
-    _assert("reinterprets an earlier detail or belief" in source, "story must require a reframing reveal")
-    _assert("one dominant causal chain" in source, "story must avoid stacked unrelated twists")
-    _assert("Do not introduce a new unresolved" in source, "story must protect the final paragraph from open hooks")
-    _assert("Expand by causal development, not by stacking mysteries" in source, "expand prompt must avoid mystery stacking")
-    _assert("one major new element" in source, "expand prompt must cap new mystery-bearing elements")
+    ai = source[source.index("You are the narrative writer for MiniMax H3"):source.index("You are the narrative expansion writer")]
+    expand = source[source.index("You are the narrative expansion writer"):source.index("Preserve Story does not use a story-text pass.")]
+    for label, text in (("AI story", ai), ("Expand story", expand)):
+        _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
+        _assert("420 to 560 words" in text, f"{label} prompt must state its word target")
+        _assert("ONE first name" in text, f"{label} prompt must force one stable first name per character")
+        for beat in ("SETUP", "CATALYST", "COMPLICATION", "REVERSAL", "CHOICE", "AFTERMATH"):
+            _assert(beat in text, f"{label} prompt is missing the {beat} beat")
+        _assert("never quoted as speech" in text, f"{label} prompt must keep machine voices out of dialogue")
+        _assert("no would/will/could/might" in text, f"{label} prompt must require a completed final action")
+        _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
+    _assert("2 to 4 short lines" in ai, "AI story prompt must require spoken dialogue")
+    _assert("Keep every event, character name" in expand, "Expand prompt must preserve source events and names")
     _assert("source_dialogue" in source, "shot prompt must receive an explicit source-dialogue whitelist")
     _assert("If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT" in source, "character extraction must keep identity type and entity type consistent")
     _assert("Reject pronouns, contractions, sentence fragments" in source, "character extraction must reject prose fragments as identities")
@@ -1091,6 +1077,21 @@ def test_source_contracts():
     _assert(runner.find('require_context_ir_results=True') > runner.find('production_plan["final_video"]'), "strict final manifest must be written after assembly")
 
 
+def test_sentence_initial_common_words_never_skip_semantic_roster():
+    from planner.production_planner import ProductionPlanner
+
+    story = (
+        'Elias trudged on. Dust swirled in the light. '
+        '\u201cAccess granted,\u201d the terminal said. Anika Marlowe stared at Elias and waited.'
+    )
+    for word in ("Dust", "Access"):
+        assert not ProductionPlanner._high_confidence_deterministic_character(story, word), word
+    assert ProductionPlanner._high_confidence_deterministic_character(story, "Elias")
+    assert ProductionPlanner._high_confidence_deterministic_character(
+        "Eli, a scientist, enters the station.", "Eli"
+    )
+
+
 def main():
     tests = [
         test_deterministic_character_regressions,
@@ -1124,6 +1125,7 @@ def main():
         test_story_completion_contracts,
         test_dialogue_source_occurrence_budget,
         test_source_contracts,
+        test_sentence_initial_common_words_never_skip_semantic_roster,
     ]
     for test in tests:
         test()
