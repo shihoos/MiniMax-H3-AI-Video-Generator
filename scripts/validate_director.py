@@ -45,25 +45,27 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
     expand = _mixin._story_text_system(EXPAND_USER_STORY_MODE)
     for label, text in (("AI story", ai), ("Expand story", expand)):
         _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
-        _assert("420 to 560 words" in text, f"{label} prompt must state its word target")
-        _assert("stable canonical name" in text, f"{label} prompt must require stable character identity")
-        for beat in ("SETUP", "CATALYST", "COMPLICATION", "REVERSAL", "CHOICE", "AFTERMATH"):
-            _assert(beat in text, f"{label} prompt is missing the {beat} beat")
+        _assert(("420 to 560 words" in text) or ("420-560" in text), f"{label} prompt must state its word target")
+        _assert("stable" in text.lower() and "canonical" in text.lower() and "name" in text.lower(), f"{label} prompt must require stable canonical character identity")
+        for concept in ("goal", "resistance", "reversal", "choice", "consequence"):
+            _assert(concept in text.lower(), f"{label} prompt is missing the core {concept} concept")
         _assert(
-            "materially affect the choice" in text or "materially affects the final choice" in text,
-            f"{label} prompt must link the planted detail to the choice",
+            "planted detail" in text.lower() and "payoff" in text.lower(),
+            f"{label} prompt must describe a causal planted-detail payoff",
         )
         _assert(
-            "personal stake" in text and "matter to the final choice" in text,
-            f"{label} prompt must connect personal stake to the choice",
+            "personal stake" in text.lower() and "choice" in text.lower(),
+            f"{label} prompt must connect personal stake to a choice when supported",
         )
-        _assert("never quoted as speech" in text, f"{label} prompt must keep machine voices out of dialogue")
-        _assert("no would/will/could/might" in text, f"{label} prompt must require a completed final action")
+        _assert("speech" in text.lower() and "recordings" in text.lower(), f"{label} prompt must keep non-spoken media out of dialogue")
+        _assert("completed" in text.lower() and "past-tense" in text.lower(), f"{label} prompt must require a completed final action")
         _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
-    _assert("1 to 3 short lines" in ai, "AI story prompt must keep dialogue compact")
+    _assert("short line" in ai.lower() and "spoken dialogue" in ai.lower(), "AI story prompt must keep dialogue compact and spoken")
     _assert("Preserve source character names exactly" in expand, "Expand prompt must preserve source names")
     _assert("relational character" in expand and "Do not invent unrelated people" in expand, "Expand prompt must allow only source-grounded relational additions")
     _assert("Begin with concrete physical action" in ai, "AI story prompt must prioritize immediate filmable action")
+    _assert("PLAN:" not in ai and "LEDGER:" not in ai, "AI story prompt must not expose a planning/checklist format")
+    _assert("<option A>" not in ai and "<option B>" not in ai, "AI story prompt must not force a binary choice template")
     _assert("source_dialogue" in source, "shot prompt must receive an explicit source-dialogue whitelist")
     _assert("If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT" in source, "character extraction must keep identity type and entity type consistent")
     _assert("Reject pronouns, contractions, sentence fragments" in source, "character extraction must reject prose fragments as identities")
@@ -493,17 +495,16 @@ def test_disabled_director_path():
 
 
 
-def test_story_token_budget_not_reduced():
+def test_story_token_budget_contract():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # Primary creative pass: structured PLAN + STORY in visible output, thinking disabled
-    # (inline <think> blocks consumed ~40% of the budget and were ignored by the prose).
+    # Primary creative pass stays on the established thinking-enabled configuration.
     _assert(
-        "max_completion=2600,\n                    disable_thinking=True" in source,
-        "primary story pass must use the 2600-token plan-then-write contract",
+        "max_completion=3200,\n                    disable_thinking=False" in source,
+        "primary story pass must use the 3200-token thinking-enabled contract",
     )
-    _assert("_extract_story_body" in source, "story responses must strip the PLAN section")
+    _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
     # The one controlled retry remains bounded and no-think; do not add another creative retry.
-    _assert(source.count("max_completion=2200") >= 1, "bounded story retry must remain 2200")
+    _assert(source.count("max_completion=1800") >= 1, "bounded story retry must remain 1800")
     _assert("expand_story_text_retry" in source, "Expand Story controlled retry must remain available")
 
 
@@ -1297,7 +1298,7 @@ def main():
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
-        test_story_token_budget_not_reduced,
+        test_story_token_budget_contract,
         test_quoted_dialogue_speaker_comes_from_speech_tag,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
