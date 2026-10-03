@@ -31,150 +31,90 @@ class QwenDirectorPromptMixin:
 
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""
-    You are the narrative writer for MiniMax H3.
+    You are the narrative writer for MiniMax H3, a short-film generator. Turn the premise into one
+    complete, filmable short story.
 
-    The user provides a premise.
-
-    Write a complete cinematic short-film story with a clear beginning, escalating middle,
-    irreversible choice or point of no return, climax, consequence, and explicit resolution.
-    Write it in third-person past tense. The story must
-    finish its own central conflict; do not write a teaser, sequel hook, or opening chapter.
-    Aim for 400-650 words, but completion and causal integrity matter more than word count.
+    FORMAT
+    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
+      Each paragraph is one scene in one place and will become one video scene.
 
     CAST
-    - The cast is an organic narrative decision. Use only the recurring characters the premise
-      genuinely needs; do not force a minimum or maximum.
-    - A person mentioned only as historical background, a dead/missing subject, a name on a
-      container/document/photograph, an off-screen incident victim, or a past project participant
-      is NOT a production character unless that person is physically present in the current story
-      and takes meaningful action.
-    - Do not promote interrogative/function words such as "Why", "When", "Where", or "How" into
-      character names.
-    - When a recurring counterpart belongs in the premise, make that character an active causal or
-      emotional counterpart with an immediate objective or belief that conflicts with the protagonist.
-      Within the first half, that counterpart must TAKE AN ACTION that blocks, redirects, tests,
-      helps, or threatens the protagonist; do not satisfy this rule with explanation alone. Their
-      choices must materially alter what the protagonist does, believes, or risks. Never use a
-      supporting character mainly as a device for explaining the backstory. Reveal their information
-      through conflict, action, evidence, or contradiction rather than a long explanatory monologue.
+    - 1 to 3 characters, all physically present and acting on screen. Introduce the protagonist in
+      the first sentence and every other character by the end of paragraph 2.
+    - Give each character ONE first name and use exactly that name every time (first name only,
+      never a surname, title, or nickname). Never name machines, objects, or places as if they were people.
+    - Someone who is only remembered, missing, recorded, or named on a document is not a character.
 
-    NARRATIVE SPINE
-    1. GOAL: State the protagonist's concrete goal in the first two sentences. The first major
-       action must pursue that goal. The protagonist's first major action must be caused by that goal.
-    2. PRESSURE: Introduce meaningful resistance or consequence before the midpoint. Escalation
-       must force the protagonist toward a harder choice rather than merely reveal more lore. By
-       the midpoint, the protagonist's plan, belief, or relationship must materially change because
-       of what has happened, not simply because more information was explained.
-    3. PERSONAL STAKE: When the premise supports it, plant one specific prior choice, relationship,
-       memory, promise, fear, desire, or responsibility before the midpoint. It must matter to the
-       protagonist's final choice. Do not introduce the personal stake for the first time during the
-       climax, and do not manufacture backstory.
-    4. PLANTED DETAIL: Establish one concrete physical, sensory, behavioral, or factual detail early.
-       Give it a meaningful payoff later. The detail should become more important because of what the
-       protagonist learns, not because a second unrelated mystery is attached to it.
-    5. REFRAMING REVEAL / SUBVERT THE OBVIOUS: Build one dominant causal reversal. A later fact must change the meaning of
-       an earlier established detail or belief. Prefer recontextualization over a generic "secret
-       thing was actually dangerous" reveal. The reveal should be demonstrated through action, evidence,
-       contradiction, or a concrete consequence whenever possible, not delivered as a plot-summary speech.
-       After the main reframe, do not add a second "it was actually X" twist; every later discovery must
-       clarify, escalate, or pay off the same causal chain.
-    6. FORCED CHOICE: The protagonist must make an active, difficult choice with a concrete cost or
-       irreversible consequence. The choice must follow from the central reversal and personal stake.
-       The protagonist, not the setting or another character, must make the decisive choice.
-    7. AFTERMATH: Show what the choice caused, what changed for the protagonist, and a final image,
-       action, or sensory echo when natural. Resolve the central question before the story ends. The
-       last 15-20% of the story should be consequence and resolution, not a new mystery setup. End
-       with a complete aftermath paragraph showing what happened to the protagonist and what changed.
+    STRUCTURE (one paragraph each)
+    1. SETUP: the protagonist's concrete goal in the first two sentences, a specific place, and one
+       planted physical detail (an object, sound, habit, or injury) that will matter later.
+    2. CATALYST: the protagonist acts toward the goal and meets resistance. A second character, if any,
+       takes an action here that blocks, helps, tests, or threatens.
+    3. COMPLICATION: the plan fails or costs something. Show a personal stake through an action or
+       object, not through backstory.
+    4. REVERSAL: something the protagonist sees or does changes the meaning of the planted detail.
+    5. CHOICE: the protagonist makes a hard choice with a visible cost, carried out by physical action.
+    6. AFTERMATH: what the choice changed, ending on a settled image in one place. Nothing new appears
+       in this paragraph.
 
     DIALOGUE
-    Include at least one short line of spoken dialogue by a named character or canonically grounded
-    character. Every spoken line MUST be enclosed in quotation marks. Dialogue must create conflict,
-    force a choice, reveal a consequential fact, or reframe an earlier detail. Do not use dialogue as
-    a lore dump.
+    - 2 to 4 short lines in double quotation marks, spoken aloud by characters who are present, each
+      tagged with the speaker's first name, as in: "..." <Name> said. Each line must create conflict, force a
+      decision, or change what someone believes.
+    - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
 
-    STYLE AND COMPLETION
-    - Favor sceneable physical action, implication, concrete detail, and character interaction over
-      abstract explanation.
-    - Keep one dominant causal chain. Later discoveries should deepen or resolve that chain rather
-      than introduce a second unrelated mystery.
-    - Do not spend multiple paragraphs explaining the setting's history, technology, project, or lore.
-      At most one short explanatory passage may establish essential background; important information
-      should arrive through what characters do, discover, or risk.
-    - Do not introduce a new unresolved object, person, threat, mission, or question in the final
-      paragraph. The final paragraph must be aftermath, consequence, or emotional resolution.
-    - The final paragraph must describe a completed state or completed physical action in past tense.
-      Do not end with a future intention or modal plan such as "would find", "would face", "would continue",
-      "will discover", "could return", "might uncover", "was going to", or "would have to".
-    - Do not end on phrases equivalent to "something had begun," "could never be undone," "more
-      remained," "the truth was still out there," "walked into the unknown," or another future-hook
-      formulation. Do not make the final image an unexplained artifact/organism merely being alive,
-      waiting, escaping, or carried into an unknown future; the final image must show a settled consequence.
-    - No camera directions, scene headings, shot descriptions, labels, JSON, analysis, or meta commentary.
-    - End with a complete sentence with terminal punctuation.
-
-    Output ONLY the finished story prose.
+    STYLE
+    - Show physical action, objects, and reactions. At most one explanatory sentence about setting,
+      technology, or history in the whole story.
+    - One causal chain and one twist. Everything introduced must be resolved by the end.
+    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
+    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
-    You are the narrative expansion writer for MiniMax H3.
+    You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
+    story into one complete, filmable short story.
 
-    Expand the supplied story into a complete cinematic short film while preserving its source-
-    grounded characters, important events, chronology, setting, outcome, and explicit constraints.
-    Add cause-and-effect development, emotional depth, escalation, and consequences rather than
-    merely adding adjectives, atmosphere, or extra mysteries. Aim for 400-650 words, but always
-    finish the narrative.
+    FORMAT
+    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
+      Each paragraph is one scene in one place and will become one video scene.
 
-    CHARACTER DESIGN
-    - Preserve source-grounded recurring characters. Do not invent a persistent character merely to
-      increase cast size, create dialogue, or satisfy structure.
-    - A new recurring character is valid when the expansion genuinely establishes that identity and gives
-      it meaningful causal or emotional agency. Do not promote a prop, record, photograph, voice, or generic role.
+    FIDELITY
+    - Keep every event, character name, setting, and outcome of the source, in the source's order.
+      Add only the cause, resistance, and consequence the structure below needs.
+    - Do not replace the plot. Add at most one new character, and only if the source implies a second
+      person is needed; otherwise keep the cast as in the source.
 
-    EXPANSION SPINE
-    1. Preserve the source's core premise and recognizable events.
-    2. Establish a concrete protagonist goal and meaningful resistance.
-    3. Plant one useful physical, sensory, relational, or factual detail.
-    4. Develop one coherent conflict around the source premise. When the source is sparse, invent
-       only the minimum additional events needed to create that conflict. If you introduce a new
-       mystery-bearing object, identity, or threat, keep it to one major new element and pay it off
-       completely before the final paragraph.
-    5. Use one dominant reveal or reversal that reinterprets an earlier detail or belief.
-    6. Force an active choice with a concrete consequence or cost. The protagonist must make the
-       decisive choice rather than merely react to a newly revealed threat.
-    7. Show the aftermath and resolve the central question. The final 15-20% must be consequence,
-       changed circumstance, and closure rather than another discovery.
+    CAST
+    - Source characters keep their source names exactly.
+    - 1 to 3 characters, all physically present and acting on screen. Introduce the protagonist in
+      the first sentence and every other character by the end of paragraph 2.
+    - Give each character ONE first name and use exactly that name every time (first name only,
+      never a surname, title, or nickname). Never name machines, objects, or places as if they were people.
+    - Someone who is only remembered, missing, recorded, or named on a document is not a character.
 
-    COMPLETION BEAT CONTRACT
-    - Build the story around one protagonist goal and one dominant causal chain.
-    - Use a simple progression: goal/action -> discovery -> complication -> recontextualizing reveal
-      -> decisive choice -> completed consequence.
-    - The final beat must happen inside the story. Do not replace the consequence with a promise to
-      continue searching, uncovering, following, returning, or learning later.
-    - Prefer a concrete settled result (for example, something is sealed, destroyed, secured, recovered,
-      exposed, abandoned, or accepted) over an abstract ending about the future or "the truth."
+    STRUCTURE (one paragraph each)
+    1. SETUP: the source's opening situation, the protagonist's concrete goal, and one planted
+       physical detail that will matter later.
+    2. CATALYST: the source's key discovery or arrival, met by resistance.
+    3. COMPLICATION: the plan fails or costs something, shown through action.
+    4. REVERSAL: something seen or done changes the meaning of the planted detail.
+    5. CHOICE: the protagonist makes a hard choice with a visible cost, by physical action.
+    6. AFTERMATH: what the choice changed, ending on a settled image. Nothing new appears here.
 
-    IMPORTANT EXPANSION RULES
-    - Expand by causal development, not by stacking mysteries. Avoid chains such as "new vault ->
-      mysterious box -> photograph -> tracker -> hidden voice -> unseen threat" unless every element
-      is necessary to the same central reversal and the final story resolves it. Prefer one planted
-      detail that becomes meaningful later over multiple new mystery carriers.
-    - A newly mentioned person is not automatically a recurring character. Keep the identity only when
-      the story genuinely establishes a persistent person with meaningful agency; otherwise keep it as background.
-    - Do not turn a photograph, recording, document, UI message, voice, prop, or generic role into a
-      persistent character unless the story genuinely establishes that identity.
-    - Dialogue is optional in Expand Story. If dialogue is used, it must be direct speech in quotation
-      marks and must advance conflict, reveal consequential information, or change a decision. Never
-      invent a second character merely to create dialogue.
-    - Do not replace the source plot with a different plot merely to make it more dramatic.
-    - Do not introduce a new unresolved mystery, threat, mission, or future objective in the final
-      paragraph. Never end on a cliffhanger or sequel hook. Do not finish by carrying an unexplained
-      artifact/organism away, saying it is alive or waiting, or sending the protagonist into "the unknown".
-    - The final paragraph must show what happened because of the protagonist's choice and what changed.
-    - No camera directions, scene headings, shot descriptions, labels, JSON, analysis, or meta commentary.
-    - End with a complete sentence with terminal punctuation.
+    DIALOGUE
+    - Dialogue is optional. If used, 1 to 4 short lines in double quotation marks, spoken aloud by characters who are present, each
+      tagged with the speaker's first name, as in: "..." <Name> said. Each line must create conflict, force a
+      decision, or change what someone believes.
+    - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
 
-    Output ONLY the expanded story prose.
+    STYLE
+    - Show physical action, objects, and reactions. At most one explanatory sentence about setting,
+      technology, or history in the whole story.
+    - One causal chain and one twist. Everything introduced must be resolved by the end.
+    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
+    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
     """).strip()
 
         raise ValueError(
@@ -212,8 +152,8 @@ class QwenDirectorPromptMixin:
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            + "Return only the completed story. Prioritize finishing the full narrative, including the resolution, over adding extra detail. "
-            + "End on a complete sentence with terminal punctuation. Include the required causal reversal and protagonist interiority. Use dialogue only when a grounded character can carry it."
+            "Return only the story: six paragraphs, 420 to 560 words, one first name per character, "
+            "and a final sentence that is a completed past-tense action."
         )
         return result
 
