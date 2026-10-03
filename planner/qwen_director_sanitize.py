@@ -1228,6 +1228,45 @@ class QwenDirectorSanitizeMixin:
         anchors.update(re.findall(r"\b\d+(?:[.,]\d+)?(?:%|[A-Za-z]+)?\b", value.lower()))
         return anchors
 
+    def _global_premise_coverage(
+        self,
+        source: str,
+        result: str,
+        minimum_token_overlap: float = 0.40,
+    ) -> tuple[float, list[str]]:
+        """Measure AI-Story premise coverage across the whole generated story.
+
+        AI Story is allowed to distribute one compact premise across multiple
+        sentences. Sentence-level matching is therefore too brittle: valid
+        paraphrase can preserve the premise while moving its concepts apart.
+        Keep this deterministic by comparing each source sentence against the
+        complete result token set. Expand Story intentionally retains the
+        stricter sentence/event coverage check below.
+        """
+        source_sentences = [
+            sentence.strip()
+            for sentence in re.split(r"[.!?]+", source)
+            if sentence.strip()
+        ]
+        result_tokens = self._meaningful_tokens(result)
+        if not source_sentences:
+            return 1.0, []
+
+        covered = 0
+        missing: list[str] = []
+        for sentence in source_sentences:
+            tokens = self._meaningful_tokens(sentence)
+            if not tokens:
+                continue
+            overlap = len(tokens & result_tokens) / max(1, len(tokens))
+            if overlap >= minimum_token_overlap:
+                covered += 1
+            else:
+                missing.append(sentence[:140])
+
+        coverage = covered / max(1, len(source_sentences))
+        return coverage, missing
+
     def _preservation_coverage(
         self,
         source: str,
@@ -1438,16 +1477,16 @@ class QwenDirectorSanitizeMixin:
                     + ", ".join(missing_anchors[:8])
                 )
 
-            coverage, missing_sentences = self._preservation_coverage(
+            coverage, missing_sentences = self._global_premise_coverage(
                 source,
                 result,
-                minimum_sentence_overlap=0.20,
+                minimum_token_overlap=0.40,
             )
-            if source and coverage < 0.5:
+            if source and coverage < 0.50:
                 detail = "; ".join(missing_sentences[:3])
                 raise RuntimeError(
                     "AI Story mode did not preserve enough of the supplied "
-                    f"premise (coverage={coverage:.2f}). {detail}".strip()
+                    f"premise (global_coverage={coverage:.2f}). {detail}".strip()
                 )
 
             source_tokens = self._meaningful_tokens(source)
