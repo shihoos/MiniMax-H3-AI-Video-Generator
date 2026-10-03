@@ -1370,6 +1370,9 @@ class ProductionController:
                 plan_path_value,
             )
         finally:
+            if runtime_workers is not None:
+                from execution.h3_runtime import H3Runtime
+                H3Runtime.stop_workers(runtime_workers)
             self._lock.release()
 
 
