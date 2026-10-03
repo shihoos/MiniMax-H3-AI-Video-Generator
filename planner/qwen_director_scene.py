@@ -48,6 +48,18 @@ class QwenDirectorSceneMixin:
         if index == total - 1:
             return "finale"
 
+        # The narrative writer owns a deterministic four-to-six beat structure.
+        # When that topology is present, use structural position instead of keyword
+        # guessing so cinematography functions remain stable for any prose vocabulary.
+        structural_by_total = {
+            4: ("setup", "catalyst", "climax", "finale"),
+            5: ("setup", "catalyst", "development", "climax", "finale"),
+            6: ("setup", "catalyst", "development", "midpoint", "climax", "finale"),
+        }
+        structural = structural_by_total.get(total)
+        if structural is not None:
+            return structural[index]
+
         # ----------------------------------------------------
         # Narrative vocabulary
         #
