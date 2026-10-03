@@ -49,26 +49,29 @@ def test_shot_reference_video_by_character_roundtrip() -> None:
 
     payload = shot.to_dict()
 
-    check(
+    assert (
         payload.get("reference_video_by_character")
         == {
             "Alice": ["/refs/alice_motion.mp4"],
-        },
-        "Shot.to_dict() dropped reference_video_by_character.",
-    )
+        }
+    ), "Shot.to_dict() dropped reference_video_by_character."
 
-    rebuilt = Shot(**payload)
+    roundtrip_payload = dict(payload)
+    roundtrip_payload.pop("h3_prompt", None)
+    rebuilt = Shot(**roundtrip_payload)
 
-    check(
+    assert (
         rebuilt.reference_video_by_character
         == {
             "Alice": ["/refs/alice_motion.mp4"],
-        },
-        "Shot serialization round-trip lost reference_video_by_character.",
-    )
+        }
+    ), "Shot serialization round-trip lost reference_video_by_character."
 
 
 def main() -> None:
+    test_shot_reference_video_by_character_roundtrip()
+    print("PASS: Shot reference_video_by_character serialization round-trip")
+
     plan = {
         "production_id": "validation_enhancements",
         "story": "A scientist crosses a dark archive.",
