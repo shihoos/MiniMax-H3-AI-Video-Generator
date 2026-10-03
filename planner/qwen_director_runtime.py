@@ -1401,6 +1401,11 @@ class QwenDirectorRuntimeMixin:
                 "unexpected completion structure."
             ) from exc
 
+        if finish_reason == "length":
+            raise RuntimeError(
+                f"Qwen text generation hit the completion limit for {call_name} before producing a complete response."
+            )
+
         content = str(
             content or ""
         ).strip()
