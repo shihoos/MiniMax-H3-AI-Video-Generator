@@ -415,6 +415,13 @@ class QwenDirector(
                 generated_story = True
             except RuntimeError as first_error:
                 error_text = str(first_error)
+                story_contract_repair = any(
+                    marker in error_text
+                    for marker in (
+                        "exactly six paragraphs",
+                        "420 to 560 words",
+                    )
+                )
                 completion_repair = any(
                     marker in error_text
                     for marker in (
@@ -424,7 +431,56 @@ class QwenDirector(
                         "must contain at least one explicit quoted line",
                     )
                 )
-                if completion_repair and story.strip():
+                if story_contract_repair and story.strip():
+                    # A word/paragraph failure is a format defect, not permission
+                    # to rewrite the narrative. Keep the generated causal chain,
+                    # identities, events, reversal, choice, dialogue, and ending
+                    # intact, and ask Qwen for a surgical structural/length edit.
+                    paragraphs = [
+                        part.strip()
+                        for part in re.split(r"\n\s*\n+", str(story).strip())
+                        if part.strip()
+                    ]
+                    word_matches = re.findall(r"\b[\w'’-]+\b", str(story or ""))
+                    current_word_count = len(word_matches)
+                    paragraph_counts = [
+                        len(re.findall(r"\b[\w'’-]+\b", paragraph))
+                        for paragraph in paragraphs
+                    ]
+                    target_range = "450 to 520 words"
+                    paragraph_guidance = "; ".join(
+                        f"P{index}={count} words"
+                        for index, count in enumerate(paragraph_counts, 1)
+                    ) or "no usable paragraph boundaries"
+                    if mode == AI_STORY_MODE:
+                        contract_details = (
+                            "Keep at least one short direct spoken line by an existing character. "
+                        )
+                    else:
+                        contract_details = "Dialogue remains optional; never invent a speaker merely to pad length. "
+                    repair_user = (
+                        "Perform a SURGICAL EDIT of the existing story. Do not rewrite it from scratch and do not "
+                        "change its plot. Preserve every existing character identity/name, relationship, setting, "
+                        "event, causal connection, planted detail, reversal, choice, consequence, quoted dialogue, "
+                        "and final outcome. "
+                        f"The current story has {current_word_count} words across {len(paragraphs)} paragraphs. "
+                        "Return the COMPLETE revised story, not an explanation. It must contain exactly six paragraphs "
+                        f"separated by blank lines and land in {target_range}; target roughly 70-90 words per paragraph. "
+                        "If the story is short, add only concrete physical action, visible reaction, sensory specificity, "
+                        "or causal connective tissue to events that already exist. If it is long, remove only redundant "
+                        "exposition or repetition. Do not add a new character, location, object, mystery, reveal, or "
+                        "future hook. Do not move events to another paragraph unless necessary to restore exactly six "
+                        "scene-sized beats. Keep the final paragraph at least 25 words and make it consequence/aftermath, "
+                        "not new plot. The final sentence must remain a completed past-tense action in a settled place. "
+                        + contract_details
+                        + "Current paragraph counts for guidance: "
+                        + paragraph_guidance
+                        + "\n\nEXISTING STORY:\n"
+                        + str(story).strip()
+                    )
+                    preserved_prefix = ""
+                    minimum_completion = 520
+                elif completion_repair and story.strip():
                     paragraphs = [
                         part.strip()
                         for part in re.split(r"\n\s*\n", str(story).strip())
@@ -498,10 +554,10 @@ class QwenDirector(
                     minimum_completion = 350
 
                 try:
-                    if completion_repair:
-                        # Completion repair is a constrained edit, not a new creative sample.
-                        retry_temperature = 0.20
-                        retry_top_p = 0.70
+                    if story_contract_repair or completion_repair:
+                        # Structural/completion repairs are constrained edits, not creative resampling.
+                        retry_temperature = 0.15 if story_contract_repair else 0.20
+                        retry_top_p = 0.68 if story_contract_repair else 0.70
                     else:
                         retry_temperature = max(0.50, min(0.68, temperature - 0.08))
                         retry_top_p = max(0.80, min(0.88, top_p - 0.04))
