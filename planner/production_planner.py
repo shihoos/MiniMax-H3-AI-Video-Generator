@@ -2398,6 +2398,43 @@ class ProductionPlanner:
         return True
 
     @classmethod
+    def _single_token_name_has_case_proof(cls, story: str, name: str) -> bool:
+        """True when a one-word name is distinguishable from a capitalized common word.
+
+        English capitalizes the first word of every sentence, so a sentence-initial
+        ``Dust swirled`` / ``"Access granted"`` looks identical to ``Eli stepped``.
+        A single token is therefore only provably a proper name when it is
+        capitalized somewhere capitalization is NOT forced by position, is
+        possessive, is used as a vocative, or is introduced as ``named X``.
+        Anything else is genuinely ambiguous and must be adjudicated semantically
+        rather than trusted deterministically.
+        """
+        text = cls._identity_detection_text(story)
+        core = str(name or "").strip()
+        if not core or not text:
+            return False
+        if len(core.split()) != 1:
+            return True  # multi-token proper names are not subject to this ambiguity
+        if cls._hard_named_source_evidence(story, core):
+            return True
+        esc = re.escape(core)
+        for m in re.finditer(r"(?<![A-Za-z0-9'_-])" + esc + r"(?![A-Za-z0-9_-])", text):
+            tail = text[m.end():m.end() + 3]
+            if re.match(r"(?:'s|\u2019s)", tail):
+                return True  # possessive: "Eli's hands"
+            head = text[:m.start()].rstrip()
+            head = re.sub(r"[\"'\u201c\u2018(\[*_]+$", "", head).rstrip()
+            if head and head[-1] not in ".!?\n":
+                return True  # capitalized mid-sentence
+            if re.match(r"\s*,\s*(?:a|an|the|who|whose|his|her|their|my|our)\b", text[m.end():m.end() + 40]):
+                return True  # appositive: "Eli, a scientist, ..."
+            if re.match(r"\s*[,!?]", text[m.end():m.end() + 3]) and re.search(
+                r"[\"\u201c]\s*$", text[:m.start()]
+            ):
+                return True  # vocative inside dialogue: "Eli, run!"
+        return False
+
+    @classmethod
     def _high_confidence_deterministic_character(
         cls,
         story: str,
@@ -2407,6 +2444,11 @@ class ProductionPlanner:
         story = str(story or "")
         name = str(name or "").strip()
         if not story or not name:
+            return False
+
+        # A sentence-initial single word is not name evidence (capitalization is
+        # positional), so it cannot bypass semantic adjudication.
+        if not cls._single_token_name_has_case_proof(story, name):
             return False
 
         escaped_name = re.escape(name)
