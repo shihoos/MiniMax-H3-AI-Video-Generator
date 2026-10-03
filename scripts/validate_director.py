@@ -492,13 +492,15 @@ def test_disabled_director_path():
 
 def test_story_token_budget_not_reduced():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # Primary creative pass: thinking ON with room for plan + story.
-    _assert("max_completion=3200,\n                    disable_thinking=False" in source, "primary story pass must think with a 3200-token budget")
-    # Retry / repair passes: proven no-think mode, original budget.
-    _assert(source.count("max_completion=1800") >= 1, "story retry budget must stay 1800")
-    _assert(source.count("disable_thinking=True") >= 2, "story retry and non-creative calls must stay no-think")
-    _assert("max_completion=2200" not in source, "old 2200 story budget must not regress back in")
+    # Primary creative pass: thinking stays enabled with a 3200-token reasoning/output budget.
+    _assert(
+        "max_completion=3200,\n                    disable_thinking=False" in source,
+        "primary story pass must keep the 3200-token thinking contract",
+    )
+    # The one controlled retry remains bounded and no-think; do not add another creative retry.
+    _assert(source.count("max_completion=1800") >= 1, "bounded story retry must remain 1800")
     _assert("expand_story_text_retry" in source, "Expand Story controlled retry must remain available")
+    _assert("max_completion=2200" not in source, "old 2200 story budget must not regress in")
 
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
