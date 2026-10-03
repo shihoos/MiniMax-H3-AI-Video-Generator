@@ -402,7 +402,7 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    max_completion=2200,
+                    max_completion=3200,
                     disable_thinking=True,
                 )
                 story = self._validate_story_output_contracts(
