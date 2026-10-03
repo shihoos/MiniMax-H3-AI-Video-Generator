@@ -151,6 +151,10 @@ class QwenDirectorPromptMixin:
                     + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
                 )
         result += (
+            "\n\nPLAN FIRST (inside your thinking, under 250 words, never in the output): "
+            "choose each character's single first name; the goal; the planted detail; what the reversal "
+            "changes about it; the choice and its cost; the final settled image; and which character "
+            "speaks each quoted line. Check that nothing appears for the first time in paragraph six."
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
             "Return only the story: six paragraphs, 420 to 560 words, one first name per character, "
             "and a final sentence that is a completed past-tense action."
@@ -164,14 +168,14 @@ class QwenDirectorPromptMixin:
 
         if mode == AI_STORY_MODE:
             return (
-                0.78,
-                0.90,
+                0.65,
+                0.95,
             )
 
         if mode == EXPAND_USER_STORY_MODE:
             return (
-                0.62,
-                0.88,
+                0.60,
+                0.92,
             )
 
         if mode == PRESERVE_USER_STORY_MODE:
