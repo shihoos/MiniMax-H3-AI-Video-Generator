@@ -21,141 +21,309 @@ from planner.config import (
 )
 
 
-SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE ONLY; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- A dialogue event MUST be an exact contiguous span of a quoted/scripted spoken line present in the supplied story context. If the text is not explicitly spoken, it is NOT dialogue.\n- A sentence such as a character\'s action, breath, expression, realization, or narration is NEVER dialogue, even when it begins with the character\'s name.\n- Every source utterance may be used only once. The only exception is splitting one longer source utterance into exact contiguous pieces across adjacent shots. Never repeat the same source line in multiple shots.\n- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.\n- Relational canonical identities are valid when supplied. Use the exact canonical identity, not a bare role.\n- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.\n- Preserve spoken text exactly; never paraphrase, summarize, invent, or transform narration into speech.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- The user payload may include a `source_dialogue` whitelist containing exact source utterances. Treat it as authoritative: dialogue_events may use only those utterances (or exact contiguous pieces of them) and must never invent a new line from narrative prose. If the supplied scenes contain no applicable source utterance, return dialogue_events as an empty array.\n\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- Treat H3 shot duration as a hard production constraint: target roughly 4–6 seconds of spoken dialogue per shot when natural, leaving timing headroom.\n- When dialogue is present, set duration_seconds from the actual spoken duration plus a small legal margin; do not blindly emit the default short duration. Keep dialogue shots typically around 6–8.5 seconds when required, and never exceed the legal H3 maximum.\n- Prefer one concise dialogue event per shot; use two only when the exchange genuinely needs both sides. Keep each spoken event short when the source permits, but never paraphrase or delete source dialogue.\n- If a source utterance is longer, split its exact contiguous text across adjacent shots with continues_to_next_shot/continues_from_previous_shot rather than forcing an overlong single shot.\n- A continuation edge is SAME-SPEAKER ONLY: if `continues_from_previous_shot` is true, the current speaker MUST be the same canonical character as the previous shot final dialogue speaker. If the speaker changes, both continuation flags at that boundary MUST be false and the new speaker starts a new dialogue turn.\n- Never set `continues_to_next_shot=true` when the next shot begins with a different speaker.\n- Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
+SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = """
+You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
+
+Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
+
+For the `location` field, use ONLY the physical setting where the shot occurs.
+The value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.
+When the shot remains in the same physical setting, preserve the supplied scene location exactly.
+When the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.
+Only change `location` when the narrative explicitly moves to a different physical place.
+EVERY shot of one scene MUST use the identical `location` string (one scene = one place). Never use a different
+wording for the same place between the shots of a scene, and never place an indoor scene on an outdoor platform or vice versa.
+
+The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
+In `characters` and in every dialogue speaker use the EXACT canonical spelling and capitalization from the supplied `characters` list (never a lower-cased or shortened copy).
+Only list a character in a shot if that character is visible in that shot's framing.
+Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
+location must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.
+`action` describes only physical/narrative events; never describe camera behavior there.
+`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.
+Preserve:
+- character identity;
+- chronology;
+- visual continuity;
+- location continuity;
+- emotional progression;
+- visual-language consistency.
+DIALOGUE CONTRACT:
+- dialogue_events contain DIRECT SPOKEN DIALOGUE ONLY; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.
+- A dialogue event MUST be an exact contiguous span of a quoted/scripted spoken line present in the supplied story context. If the text is not explicitly spoken, it is NOT dialogue.
+- Text on signs, tags, labels, screens, monitors, keypads, canisters, files, and IDs is WRITTEN text, never dialogue; never assign it to any speaker.
+- Copy dialogue with its original capitalization and punctuation exactly as listed in `source_dialogue`; never lower-case it.
+- Put a spoken line in the shot where it is actually said in the story, with its speaker visible and listed in `characters`; the `action` of that shot must show that character speaking. Do not spread unspoken shots across a line, and do not assign a line to a shot whose action is about something else.
+- A sentence such as a character's action, breath, expression, realization, or narration is NEVER dialogue, even when it begins with the character's name.
+- Every source utterance may be used only once. The only exception is splitting one longer source utterance into exact contiguous pieces across adjacent shots. Never repeat the same source line in multiple shots.
+- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.
+- Relational canonical identities are valid when supplied. Use the exact canonical identity, not a bare role.
+- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.
+- Preserve spoken text exactly; never paraphrase, summarize, invent, or transform narration into speech.
+- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.
+- The user payload may include a `source_dialogue` whitelist containing exact source utterances. Treat it as authoritative: dialogue_events may use only those utterances (or exact contiguous pieces of them) and must never invent a new line from narrative prose. If the supplied scenes contain no applicable source utterance, return dialogue_events as an empty array.
+
+- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.
+- Do not put timestamps in the response.
+- Treat H3 shot duration as a hard production constraint: target roughly 4–6 seconds of spoken dialogue per shot when natural, leaving timing headroom.
+- When dialogue is present, set duration_seconds from the actual spoken duration plus a small legal margin; do not blindly emit the default short duration. Keep dialogue shots typically around 6–8.5 seconds when required, and never exceed the legal H3 maximum.
+- Prefer one concise dialogue event per shot; use two only when the exchange genuinely needs both sides. Keep each spoken event short when the source permits, but never paraphrase or delete source dialogue.
+- If a source utterance is longer, split its exact contiguous text across adjacent shots with continues_to_next_shot/continues_from_previous_shot rather than forcing an overlong single shot.
+- A continuation edge is SAME-SPEAKER ONLY: if `continues_from_previous_shot` is true, the current speaker MUST be the same canonical character as the previous shot final dialogue speaker. If the speaker changes, both continuation flags at that boundary MUST be false and the new speaker starts a new dialogue turn.
+- Never set `continues_to_next_shot=true` when the next shot begins with a different speaker.
+- Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.
+- describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
+
+Within each scene, the required shots must use meaningfully different
+framing/composition while describing the SAME narrative beat.
+LIGHT AND PLACE CONTINUITY: all shots of one scene share ONE lighting setup. Give every shot of a scene the same
+`lighting` and `color_temperature` strings (same source, direction, and color); vary only framing, lens, movement, and composition.
+Choose lighting that the scene's own location, time of day, weather, and props physically motivate (storm daylight, flashlight beam,
+emergency lamps, monitor glow, moonlight, firelight, sodium streetlight). The lighting vocabulary below is a spelling guide, NOT a menu to rotate:
+never use "practical neon" or "warm tungsten" unless the scene visibly contains neon signs or tungsten lamps, and never use "soft overcast" indoors.
+`visual_prompt` must name the setting and the light source so the image generator can reproduce it.
+
+STORY FIDELITY: depict only events, objects, and states that the scene description or story context actually states.
+Never add an opening, discovery, collapse, sound, object, or line of speech that the text does not contain (a vault described as
+sealed stays sealed; an unnamed object stays unnamed). When a source is short and the same description appears in several scenes, the
+scenes are different COVERAGE of the same moment: vary distance, angle, and detail (approach, threshold, close detail, reaction),
+never advance the plot beyond what the description states, and never repeat the same action/visual in consecutive scenes.
+
+SCENE-FUNCTION DIRECTING:
+Each supplied scene includes scene_function and obligatory_moment.
+Use them as directing constraints, not as new story events.
+setup: establish geography and protagonist context.
+catalyst: reveal the disruptive event, clue, or discovery.
+development: show objective, movement, complication, or escalation.
+midpoint: emphasize new information and changed understanding.
+climax: emphasize danger, decisive action, choice, and consequence.
+finale: emphasize aftermath, resolution, and the closing emotional image.
+Every required shots must visibly serve the supplied obligatory_moment (when it is omitted, the scene description is the obligatory moment).
+
+SHOT / FRAMING VOCABULARY:
+framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
+
+CAMERA MOVEMENT VOCABULARY:
+movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
+
+LENS / DEPTH OF FIELD:
+wide-angle, normal, telephoto, shallow focus, deep focus, selective focus.
+
+COMPOSITION VOCABULARY:
+centered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.
+
+LIGHTING VOCABULARY (spelling guide only; see LIGHT AND PLACE CONTINUITY):
+lighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient, flashlight beam, emergency lamps, monitor glow, firelight.
+Write all framing, movement, lens, and composition terms in lowercase exactly as listed above.
+
+Return JSON only in exactly this structure:
+
+{
+  "scene_shots": [
+    {
+      "scene_id": "scene_001",
+      "shots": [
+        {
+          "shot_id": "scene_001_shot_001",
+          "scene_id": "scene_001",
+          "duration_seconds": 5.2,
+          "characters": [],
+          "location": "<physical setting only>",
+          "action": "...",
+          "camera_shot": "...",
+          "camera_movement": "...",
+          "lens_and_depth_of_field": "...",
+          "composition_notes": "...",
+          "lighting": "...",
+          "color_temperature": "...",
+          "mood": "...",
+          "visual_prompt": "...",
+          "speaking_characters": [],
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {}
+        },
+        {
+          "shot_id": "scene_001_shot_002",
+          "scene_id": "scene_001",
+          "duration_seconds": 5.2,
+          "characters": [],
+          "location": "<physical setting only>",
+          "action": "...",
+          "camera_shot": "...",
+          "camera_movement": "...",
+          "lens_and_depth_of_field": "...",
+          "composition_notes": "...",
+          "lighting": "...",
+          "color_temperature": "...",
+          "mood": "...",
+          "visual_prompt": "...",
+          "speaking_characters": [],
+          "speech_text": "",
+          "dialogue_events": [],
+          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},
+          "is_scene_boundary": false,
+          "character_spatial_bboxes": {},
+          "character_spatial_regions": {},
+          "character_spatial_bboxes_start": {},
+          "character_spatial_bboxes_end": {},
+          "character_spatial_regions_start": {},
+          "character_spatial_regions_end": {}
+        }
+      ]
+    }
+  ]
+}
+
+There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and
+exactly one entry for every supplied scene. Do not add prose outside JSON.
+
+Do NOT output compiler-owned fields.
+Do NOT add scenes.
+Do NOT omit scenes.
+Return JSON only.
+"""
+
 
 class QwenDirectorPromptMixin:
+    # ------------------------------------------------------------------
+    # Story pass
+    # ------------------------------------------------------------------
+    # Design notes (why this is NOT a "think first" prompt):
+    #   * The story model is a 14B AWQ Qwen3. Free-form <think> reasoning consumed
+    #     ~40% of the completion budget, was frequently abandoned by the final prose
+    #     (the plan said "note from Kline", the story wrote a biometric canister),
+    #     and produced contradictions between paragraphs (sealed inside the vault yet
+    #     standing in the corridor; "release or bury" followed by neither).
+    #   * Instead the model writes a SHORT STRUCTURED PLAN in the visible output, then
+    #     the story. The plan forces one causal chain and a position ledger, is cheap
+    #     (~200 tokens), and is stripped deterministically by _extract_story_body().
+    #   * Thinking is disabled for the call; the plan replaces it.
+    STORY_PLAN_MARKER = "STORY:"
+
+    _STORY_COMMON_RULES = """
+OUTPUT FORMAT (exactly two parts)
+PLAN:
+1. PROTAGONIST: <name> | <role taken from the premise> | GOAL: <one concrete, physical, checkable goal>
+2. SKILL: <how the protagonist's role/skill from the premise is used in a decisive action>
+3. RESISTANCE: <the specific thing that physically blocks the goal; a person only if the premise supports one>
+4. PLANTED DETAIL: <one ordinary fact shown in paragraphs 1-3 that will materially affect the choice, or "none">
+5. REVERSAL: <ONE concrete fact discovered that proves the protagonist's earlier belief wrong>
+6. CHOICE: <option A> vs <option B> -> chosen: <A or B>; ACTION: <the physical act>; COST: <visible loss>
+7. AFTERMATH: <the concrete change in the world> ; FINAL IMAGE: <settled place + completed action>
+8. LEDGER: P1 <where protagonist is, what they hold> / P2 ... / P6 ...
+STORY:
+<six paragraphs separated by blank lines>
+
+The PLAN is working notes: terse, no more than 170 words. After the line "STORY:" write ONLY the
+story prose. The story must follow the plan exactly and must never contradict the LEDGER.
+
+HARD STORY RULES
+- Third-person past tense, exactly six paragraphs separated by blank lines. The story must land in
+  420 to 560 words (aim for 450-520); each paragraph is 65-100 words and the final paragraph is at least 70 words.
+  Use one stable canonical name per character.
+- Begin with concrete physical action: paragraph 1 opens in a specific place and names the protagonist in
+  the first sentence. The goal is stated within the first two sentences.
+- One paragraph = one scene = one place = one lighting situation. Do not move the camera-place inside
+  a paragraph; change place only between paragraphs and say how the protagonist got there.
+- Physical consistency: every paragraph must be compatible with the LEDGER. A character cannot be
+  sealed inside a room and standing outside it; an object cannot be both carried away and left behind;
+  a door cannot be both locked and open without an action that changes it.
+- Every object, person, and mechanism that matters later is introduced earlier and used by someone's
+  action. No object may become a magic key, biometric key, secret code, weapon, cure, or prophecy
+  unless the premise establishes that mechanism. No conspiracy, government, or cover-up unless the premise says so.
+- The REVERSAL is a visible fact (something seen, measured, read, or physically happening), stated
+  plainly enough that a viewer understands exactly what changed. It must change the protagonist's decision.
+- The personal stake shown in P3 (a promise, injury, relationship, fear, or responsibility) must matter to the final choice in P5.
+- The CHOICE is two real alternatives that are BOTH stated, then ONE is carried out by a physical action
+  with a visible cost. The action must actually implement the chosen alternative. Equipment failure,
+  coincidence, or an accident never makes the choice.
+- The AFTERMATH paragraph shows the consequence of that action in the world, introduces nothing new,
+  starts no new mission or mystery, and ends on a completed past-tense action in a settled place. No
+  would/will/could/might appears in the last sentence (no would/will/could/might).
+- Machines, screens, radios, recordings, and remembered voices are never quoted as speech and are not
+  characters. Signs, tags, labels, screen text, file names, and IDs are described in plain prose WITHOUT
+  quotation marks.
+- Quotation marks are ONLY for words a present person says aloud. Plain prose only: no markdown, no
+  asterisks, no italics, no headings, no bullet lists, no stage directions, no camera language.
+- Show with action, visible reaction, and consequence. At most one sentence of explanation in the whole
+  story. No lore dumps, no rhetorical questions, no similes stacked on similes.
+- Never hard-code a name from these instructions; invent a fitting canonical name only when the premise
+  gives none, and use that exact name every time.
+- If the request is a SURGICAL EDIT of an existing story, skip the PLAN and return only the complete
+  revised story prose.
+""".strip()
+
     def _story_text_system(
         self,
         mode: str,
     ) -> str:
 
         if mode == AI_STORY_MODE:
-            return textwrap.dedent("""
-    You are the narrative writer for MiniMax H3, a short-film generator. Turn the premise into one
-    complete, filmable short story. Write the story itself, not a planning template.
-
-    FORMAT
-    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
-      words per paragraph and about 450-520 words total, using concrete action and consequence rather
-      than padding.
-
-    CAST
-    - Use 1 to 3 recurring characters only when the story genuinely supports them. The protagonist must
-      appear in the first sentence; any recurring counterpart must be physically present and take meaningful
-      action by the end of paragraph 2. Do not invent a counterpart merely to create dialogue.
-    - Give every named character ONE stable canonical name and use exactly that name throughout. Never
-      hard-code a name from these instructions. Machines, objects, places, recordings, documents, memories,
-      voices, photographs, and holograms are not recurring characters.
-
-    STORY CAUSALITY
-    - Build one dominant causal chain from goal -> resistance -> complication -> concrete revelation ->
-      forced choice -> consequence. Every important detail must have a believable reason to be there.
-    - Do NOT force a symbolic prop or “mystery object” into the plot. A planted detail may be a physical
-      object, place feature, action, relationship, injury, or observed fact, but only use one when it arises
-      naturally from the premise and returns as evidence, constraint, relationship payoff, or consequence.
-    - Never make an object suddenly become a magic key, biometric key, secret code, prophetic symbol, or
-      convenient solution unless the premise has already established the mechanism. If a character carries,
-      uses, loses, or retrieves an object, make that possession/action explicit before it matters.
-    - Avoid stacked clues, vague “entities are not what they seem” revelations, unexplained lore, or multiple
-      nested mysteries. The reversal must reveal ONE concrete fact that makes the protagonist's earlier belief
-      wrong and directly changes the decision they must make.
-
-    STRUCTURE (one paragraph each)
-    1. SETUP: establish a specific place, start with the protagonist's concrete goal in the first two
-       sentences, and establish the relevant obstacle/stakes through action rather than exposition.
-    2. CATALYST: the protagonist acts toward the goal and meets active resistance. If a counterpart exists,
-       show that person's conflicting objective through an action, not a speech that only explains backstory.
-    3. COMPLICATION: the plan fails, tightens, or costs something. Make the personal stake concrete and
-       make sure it must matter to the final choice.
-    4. REVERSAL: a visible event, discovery, or observed consequence changes what the protagonist believes.
-       The new fact must be specific enough that the audience understands exactly what changed.
-    5. CHOICE: the protagonist deliberately chooses between meaningful alternatives and pays a visible cost
-       through physical action. Do not let equipment failure, coincidence, or an accident make the decision
-       for them. If a planted detail naturally exists, it should materially affect the choice or its consequence.
-    6. AFTERMATH: show the concrete external consequence caused by the choice plus the protagonist's emotional
-       shift. Nothing new appears here. End on a settled image and a completed past-tense action.
-
-    DIALOGUE
-    - Use 1 to 3 short lines in double quotation marks, spoken aloud by present named characters. Each line
-      must create conflict, force a decision, reveal important information, or change what someone believes.
-      When a recurring counterpart exists, prefer a real in-scene exchange over mediated speech.
-    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are described in prose
-      and are never quoted as speech or treated as active characters.
-
-    STYLE
-    - Begin with concrete physical action, sensory detail, and a specific environment. Make every scene immediately
-      filmable and legible without explaining the movie to the reader.
-    - Show physical action, visible reaction, relationship behavior, and consequence. Use at most one explanatory
-      sentence about setting, technology, or history in the whole story.
-    - Prefer one strong reversal over several smaller reveals. Do not add a new mystery just to keep the ending open.
-    - The final paragraph is consequence and resolution, not atmosphere-only closure and not a new plot thread.
-      The ending must show what changed in the world and/or relationship because of the protagonist's choice.
-    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
-    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
-    """).strip()
+            return (
+                "You are the narrative writer for MiniMax H3, a short-film generator. Turn the premise into one "
+                "complete, filmable, causally airtight short story. Every concrete element of the premise "
+                "(role, place, weather, object) must appear and matter.\n\n"
+                "CAST\n"
+                "- The default is a SOLO story: the environment, a failing system, or a physical obstacle is the "
+                "resistance. Add a second person only when the premise implies one or when the story truly needs a "
+                "person with a conflicting goal. Never add someone just to create dialogue or a twist.\n"
+                "- A second person, if used, must be physically present by paragraph 2, want something that conflicts "
+                "with the protagonist, and take an action that changes what the protagonist does or risks. They must "
+                "have a believable reason to be in that place.\n"
+                "- The protagonist uses the skill named in the premise in at least one decisive action.\n\n"
+                "DIALOGUE\n"
+                "- Include 1 to 3 short lines of speech, in double quotation marks. A solo protagonist may speak "
+                "aloud to themselves or into a radio (quote only the protagonist, never the voice that answers). "
+                "Each line must reveal a fact, state a decision, or create conflict.\n\n"
+                "NARRATIVE SHAPE (one paragraph each)\n"
+                "P1 SETUP: place, protagonist, concrete goal, the first obstacle.\n"
+                "P2 CATALYST: the discovery or arrival from the premise; resistance becomes physical.\n"
+                "P3 COMPLICATION: the plan fails or costs something; the personal stake becomes concrete.\n"
+                "P4 REVERSAL: one visible fact overturns the protagonist's belief.\n"
+                "P5 CHOICE: two alternatives, one physical act, visible cost.\n"
+                "P6 AFTERMATH: the concrete consequence and the closing image.\n\n"
+                + self._STORY_COMMON_RULES
+            )
 
         if mode == EXPAND_USER_STORY_MODE:
-            return textwrap.dedent("""
-    You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
-    story into one complete, filmable short story while preserving what the source actually establishes.
-
-    FORMAT
-    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
-      words per paragraph and about 450-520 words total without padding.
-
-    FIDELITY AND CAST
-    - Preserve every established event, character identity, setting, relationship, and outcome in source order.
-      Add only the cause, resistance, visible reaction, and consequence needed to make the film coherent.
-    - Preserve source character names exactly. Give every active character ONE stable canonical name; do not shorten,
-      rename, or replace it.
-    - A relational character may be added only when the source explicitly establishes that person/relationship.
-      Never invent a person from a relational noun such as brother, sister, father, mother, husband, wife, son,
-      daughter, mentor, colleague, friend, or commander when the source does not name or establish that person.
-      An unnamed relational reference remains unnamed and non-recurring. Do not create a production character from
-      a memory, document, recording, photograph, hologram, or off-screen mention. Do not invent unrelated people.
-    - Keep the active on-screen cast as small as source fidelity allows. Any additional recurring character must
-      be explicitly grounded by the source and must become physically present and causally active.
-
-    STORY CAUSALITY
-    - Build one dominant causal chain from the source's goal -> resistance -> complication -> concrete revelation
-      -> choice -> consequence. Do not replace the source plot with an unrelated puzzle.
-    - Preserve any source detail that naturally functions as a planted detail, but do not manufacture a symbolic
-      object merely to create a payoff. An object or clue may matter later only through a believable, previously
-      established mechanism. Never turn an ordinary object into a magical key, biometric key, secret code, or
-      unexplained revelation solely because the story needs a twist.
-    - The reversal must preserve the source's causal meaning and make one concrete change in what the protagonist
-      believes. The choice must follow from that changed belief.
-
-    STRUCTURE (one paragraph each)
-    1. SETUP: preserve the source opening, establish the protagonist's concrete goal, and establish the immediate
-       obstacle/stakes through action.
-    2. CATALYST: preserve the source's key discovery or arrival and make resistance physically active. A counterpart,
-       if present, should take an action rather than merely explain backstory.
-    3. COMPLICATION: make the plan fail, tighten, or cost something. Make the personal stake concrete through action
-       or relationship behavior and ensure it must matter to the final choice.
-    4. REVERSAL: show the source-grounded fact or consequence that changes the protagonist's understanding.
-    5. CHOICE: show a deliberate physical choice with a visible cost rather than an accidental outcome.
-    6. AFTERMATH: show the concrete consequence caused by that choice and the resulting emotional shift. Nothing new
-       appears here; finish on a settled image and completed past-tense action.
-
-    DIALOGUE
-    - Dialogue is optional. If used, use 1 to 3 short lines spoken by present named characters. Preserve source
-      wording/meaning when dialogue already exists; never invent a speaker just to satisfy the format.
-    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are prose evidence and are
-      never quoted as speech or treated as active character dialogue.
-
-    STYLE
-    - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and meaningful
-      relationship behavior. Avoid lore dumps and vague mystery language.
-    - Do not stack clues or introduce a fresh mystery in the ending. Everything important introduced must have a
-      concrete causal path into the reversal, choice, or consequence, with “materially affect the choice” applied
-      only where a planted detail naturally exists.
-    - The final paragraph is concrete consequence and resolution, not atmosphere-only closure.
-    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
-    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
-    """).strip()
+            return (
+                "You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied "
+                "story into one complete, filmable, causally airtight short story while keeping everything the source "
+                "establishes exactly as established.\n\n"
+                "FIDELITY AND CAST\n"
+                "- The source's facts are fixed: its characters, names, place, objects, relationships, and outcomes keep "
+                "their meaning and their order. Do not change the kind of place or object (a station stays the kind of "
+                "station described; a vault stays a vault). Add only the cause, resistance, reaction, and consequence "
+                "needed to connect them.\n"
+                "- Preserve source character names exactly. Each active character has ONE canonical name.\n"
+                "- Add no new person unless the source establishes that person. Do not invent unrelated people. A relational character may be added only when the source explicitly establishes that person/relationship; a relational noun (brother, mentor, "
+                "colleague...) in the source does not authorize inventing a character. Memories, documents, recordings, "
+                "photographs, holograms, and off-screen mentions never become characters.\n"
+                "- The default is the source's own cast, usually solo: the place, a failing system, or a physical "
+                "obstacle is the resistance. Do not add genre machinery (conspiracies, governments, weapons, "
+                "experiments) that the source does not contain.\n\n"
+                "DIALOGUE\n"
+                "- Optional. If used, use 1 to 3 short lines spoken aloud by present named characters, in double "
+                "quotation marks. Keep source dialogue word for word. A solo protagonist may speak aloud to themselves.\n\n"
+                "NARRATIVE SHAPE (one paragraph each)\n"
+                "P1 SETUP: the source opening, the protagonist's concrete goal, the first obstacle.\n"
+                "P2 CATALYST: the source's key discovery or arrival; resistance becomes physical.\n"
+                "P3 COMPLICATION: the plan fails or costs something; a personal stake becomes concrete.\n"
+                "P4 REVERSAL: one visible fact, grounded in the source, changes the protagonist's understanding.\n"
+                "P5 CHOICE: two alternatives, one physical act, visible cost.\n"
+                "P6 AFTERMATH: the concrete consequence and the closing image.\n\n"
+                + self._STORY_COMMON_RULES
+            )
 
         raise ValueError(
             "Preserve Story does not use a story-text pass."
@@ -188,32 +356,58 @@ class QwenDirectorPromptMixin:
                 result += (
                     "\n\nSOURCE CHARACTER ANCHORS:\n"
                     + ", ".join(anchors[:16])
-                    + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
+                    + "\nKeep these characters and their exact names. Add another recurring character only if the "
+                    "source establishes that person."
                 )
         result += (
-            "\n\nFINAL OUTPUT CHECK:\n"
-            "Before returning the story, verify internally: exactly six paragraphs; 420-560 words; stable canonical names; "
-            "a concrete goal and resistance; one specific reversal that changes the protagonist's belief; a deliberate physical "
-            "choice with a cost; and an aftermath that shows a concrete consequence. Do not introduce an object, person, "
-            "revelation, or mechanism merely to manufacture a twist. Return only the story prose."
+            "\n\nWrite the PLAN, then the line STORY:, then the six-paragraph story. In the PLAN fill every numbered "
+            "field with specifics from this premise, and keep the LEDGER consistent with the story. "
+            "Use every concrete element of the premise. Plain prose only: no asterisks, no markdown, no quoted signs "
+            "or screen text."
         )
         return result
+
+    @classmethod
+    def _extract_story_body(cls, raw: str) -> str:
+        """Return only the story prose from a PLAN/STORY response.
+
+        Accepts (in order): text after the LAST standalone ``STORY:`` line; a response with no PLAN at
+        all (already plain prose, e.g. a surgical edit). A response that still starts with ``PLAN`` but
+        never reaches ``STORY:`` is incomplete and raises, so the caller's bounded retry handles it
+        instead of passing planning notes downstream as the film.
+        """
+        text = str(raw or "").replace("\r\n", "\n").strip()
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+        if not text:
+            return ""
+        matches = list(re.finditer(r"(?im)^[ \t>*#_-]*STORY[ \t*_]*:[ \t*_]*", text))
+        if matches:
+            body = text[matches[-1].end():].strip()
+            return body
+        if re.match(r"(?i)^[ \t>*#_-]*PLAN\b", text):
+            raise RuntimeError(
+                "Story response contained a PLAN but never reached the STORY section (response incomplete)."
+            )
+        return text
 
     def _sampling_for_mode(
         self,
         mode: str,
     ) -> tuple[float, float]:
 
+        # Lower than the previous 0.78/0.90: with thinking disabled and a structured plan,
+        # extra entropy only buys the incoherence seen in traces (contradicting
+        # paragraphs, magic objects). Creativity comes from the plan, not from sampling noise.
         if mode == AI_STORY_MODE:
             return (
-                0.65,
-                0.95,
+                0.62,
+                0.90,
             )
 
         if mode == EXPAND_USER_STORY_MODE:
             return (
-                0.60,
-                0.92,
+                0.50,
+                0.90,
             )
 
         if mode == PRESERVE_USER_STORY_MODE:
@@ -232,8 +426,8 @@ class QwenDirectorPromptMixin:
     ) -> tuple[float, float]:
 
         return (
-            0.68,
-            0.92,
+            0.60,
+            0.90,
         )
 
     @staticmethod
@@ -688,12 +882,11 @@ class QwenDirectorPromptMixin:
             if not name:
                 continue
 
-            entry = {
-                "name": name,
-                "role": str(
-                    item.get("role", "") or ""
-                ).strip(),
-            }
+            entry = {"name": name}
+            role_value = str(item.get("role", "") or "").strip()
+            # A role identical to the name (or the generic placeholder) carries no information.
+            if role_value and role_value.lower() not in {name.lower(), "story character"}:
+                entry["role"] = role_value
             profile = item.get("identity_profile")
             profile = profile if isinstance(profile, dict) else {}
             for key in ("identity_type", "relationship_to", "relationship"):
@@ -708,6 +901,18 @@ class QwenDirectorPromptMixin:
             if semantic_aliases:
                 entry["semantic_aliases"] = semantic_aliases
             compact_characters.append(entry)
+
+        canonical_names = {
+            str(c.get("name")).strip().lower(): str(c.get("name")).strip()
+            for c in compact_characters
+        }
+        # Placeholder values emitted by the deterministic scene builder. They describe nothing
+        # and some are actively wrong (weather "natural", mood "cinematic"), so they are omitted
+        # rather than sent as if they were story facts.
+        placeholder_values = {
+            "unspecified time", "natural", "cinematic", "cinematic naturalistic lighting",
+            "cinematic depth", "stable environmental continuity",
+        }
 
         language = {}
 
@@ -749,9 +954,13 @@ class QwenDirectorPromptMixin:
                 "weather": str(
                     scene.get("weather", "") or ""
                 ).strip(),
-                "atmosphere": self._limit_text(
-                    scene.get("atmosphere", ""),
-                    DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
+                "atmosphere": (
+                    ""
+                    if "natural cinematic environmental ambience" in str(scene.get("atmosphere", "") or "")
+                    else self._limit_text(
+                        scene.get("atmosphere", ""),
+                        DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
+                    )
                 ),
                 "mood": str(
                     scene.get("mood", "") or ""
@@ -763,18 +972,25 @@ class QwenDirectorPromptMixin:
                 "color_temperature": str(
                     scene.get("color_temperature", "") or ""
                 ).strip(),
-                "environment_details": self._clean_list(
-                    scene.get("environment_details", []),
-                    limit=4,
-                ),
+                "environment_details": [
+                    detail
+                    for detail in self._clean_list(
+                        scene.get("environment_details", []),
+                        limit=4,
+                    )
+                    if str(detail).strip().lower() not in placeholder_values
+                ],
                 "key_props": self._clean_list(
                     scene.get("key_props", []),
                     limit=4,
                 ),
-                "characters": self._clean_list(
-                    scene.get("characters", []),
-                    limit=6,
-                ),
+                "characters": [
+                    canonical_names.get(str(name).strip().lower(), str(name).strip())
+                    for name in self._clean_list(
+                        scene.get("characters", []),
+                        limit=6,
+                    )
+                ],
                 "scene_objective": self._limit_text(
                     scene.get("scene_objective", ""),
                     DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
@@ -799,7 +1015,18 @@ class QwenDirectorPromptMixin:
                 key: value
                 for key, value in scene_payload.items()
                 if value not in ("", [], {})
+                and not (isinstance(value, str) and value.strip().lower() in placeholder_values)
             }
+
+            # scene_objective / obligatory_moment are truncated copies of `description` when the
+            # planner had nothing better. Sending them again triples the prompt for no signal.
+            description_key = re.sub(r"\W+", " ", str(scene.get("description", "") or "").lower()).strip()
+            for duplicate_key in ("scene_objective", "obligatory_moment"):
+                duplicate_value = re.sub(
+                    r"\W+", " ", str(scene_payload.get(duplicate_key, "") or "").lower().replace("…", "")
+                ).strip()
+                if duplicate_value and description_key.startswith(duplicate_value[:120]):
+                    scene_payload.pop(duplicate_key, None)
 
             scene_payloads.append(scene_payload)
 
@@ -821,9 +1048,10 @@ class QwenDirectorPromptMixin:
         if callable(extract_dialogue):
             try:
                 source_dialogue = [
-                    str(segment.get("text", "") or "").strip()
+                    str(segment.get("display", "") or segment.get("text", "") or "").strip()
                     for segment in extract_dialogue(story)
-                    if isinstance(segment, dict) and str(segment.get("text", "") or "").strip()
+                    if isinstance(segment, dict)
+                    and str(segment.get("display", "") or segment.get("text", "") or "").strip()
                 ]
             except Exception:
                 source_dialogue = []
