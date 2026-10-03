@@ -1528,6 +1528,7 @@ class QwenDirectorRuntimeMixin:
         top_p: float,
         max_tokens: int,
         response_format: dict | None = None,
+        min_tokens: int = 0,
     ) -> dict:
         if self._vllm_session is None:
             raise RuntimeError("Qwen director model is not loaded.")
@@ -1540,6 +1541,8 @@ class QwenDirectorRuntimeMixin:
             "max_tokens": int(max_tokens),
             "seed": int(DIRECTOR_VLLM_SEED),
         }
+        if int(min_tokens or 0) > 0:
+            payload["min_tokens"] = int(min_tokens)
         if response_format is not None:
             payload["response_format"] = response_format
 
@@ -1789,6 +1792,7 @@ class QwenDirectorRuntimeMixin:
         call_name: str = "unknown",
         max_completion: int | None = None,
         disable_thinking: bool = True,
+        minimum_output_tokens: int = 0,
     ) -> str:
         if self._vllm_session is None:
             raise RuntimeError(
@@ -1818,6 +1822,13 @@ class QwenDirectorRuntimeMixin:
                 int(max_completion),
             )
 
+        minimum_output_tokens = max(0, int(minimum_output_tokens or 0))
+        if minimum_output_tokens > max_tokens:
+            raise RuntimeError(
+                f"Minimum output token floor {minimum_output_tokens} exceeds the available "
+                f"completion budget {max_tokens} for {call_name}."
+            )
+
         messages = [
             {
                 "role": "system",
@@ -1841,6 +1852,7 @@ class QwenDirectorRuntimeMixin:
                 temperature=temperature,
                 top_p=top_p,
                 max_tokens=max_tokens,
+                min_tokens=minimum_output_tokens,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
