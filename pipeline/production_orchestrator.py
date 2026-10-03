@@ -68,7 +68,11 @@ class ProductionOrchestrator:
 
     @staticmethod
     def _apply_director_critic_patches(plan: dict, critique: dict) -> dict:
-        """Apply only a strict, non-structural subset of critic suggestions."""
+        """Apply only a strict, non-structural subset of critic suggestions.
+
+        lighting / color_temperature are deliberately NOT patchable: they are fixed per scene by the
+        Director's scene-coherence pass and a per-shot critic patch would re-introduce light flips.
+        """
         if not isinstance(plan, dict) or not isinstance(critique, dict):
             return plan
         allowed = {
@@ -77,8 +81,6 @@ class ProductionOrchestrator:
             "camera_movement",
             "lens_and_depth_of_field",
             "composition_notes",
-            "lighting",
-            "color_temperature",
             "mood",
             "visual_prompt",
             "overall_soundscape",
