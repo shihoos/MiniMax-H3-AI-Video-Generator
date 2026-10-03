@@ -72,6 +72,18 @@ def is_written_text_quote(text: str, start: int, end: int) -> bool:
     if has_speech_tag:
         return False
 
+    machine_or_written_context = re.compile(
+        r"\b(?:terminal|computer|system|intercom|radio|recording|recorded voice|speaker|announcement|automated voice|machine|alarm|voice)\b",
+        flags=re.IGNORECASE,
+    )
+    context_window = source[max(0, start - 100):start] + " " + source[end:min(len(source), end + 80)]
+    if machine_or_written_context.search(context_window) and not re.search(
+        rf"(?:[A-Z][\w'\u2019.-]*|he|she|they)\s+(?:{_SPEECH_VERB_RE})\b",
+        prefix + " " + suffix_clause,
+        flags=re.IGNORECASE,
+    ):
+        return True
+
     # Quote that is a short Title-Case/ALL-CAPS label with no sentence punctuation inside a written cue.
     if _WRITTEN_PREFIX_RE.search(prefix):
         return True
