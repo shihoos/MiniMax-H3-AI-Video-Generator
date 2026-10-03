@@ -431,6 +431,13 @@ class QwenDirector(
                         "must contain at least one explicit quoted line",
                     )
                 )
+                premise_fidelity_repair = (
+                    mode == AI_STORY_MODE
+                    and (
+                        "AI Story mode did not preserve enough of the supplied premise" in error_text
+                        or "AI Story mode dropped required source anchors" in error_text
+                    )
+                )
                 expand_cast_repair = (
                     mode == EXPAND_USER_STORY_MODE
                     and "Expand Story introduced unanchored" in error_text
@@ -479,6 +486,13 @@ class QwenDirector(
                                     "must contain at least one explicit quoted line",
                                 )
                             )
+                            premise_fidelity_repair = (
+                                mode == AI_STORY_MODE
+                                and (
+                                    "AI Story mode did not preserve enough of the supplied premise" in error_text
+                                    or "AI Story mode dropped required source anchors" in error_text
+                                )
+                            )
                             expand_cast_repair = (
                                 mode == EXPAND_USER_STORY_MODE
                                 and "Expand Story introduced unanchored" in error_text
@@ -491,7 +505,27 @@ class QwenDirector(
                             )
 
                 if not generated_story:
-                    if expand_cast_repair and story.strip():
+                    if premise_fidelity_repair and story.strip():
+                        # A premise-fidelity failure is a semantic contract defect, not a
+                        # request for a fresh creative rewrite. Keep the generated causal chain
+                        # and repair only the missing source concepts/anchors in-place, using the
+                        # same single bounded retry already allowed for story generation.
+                        repair_user = (
+                            "Perform a SURGICAL PREMISE-FIDELITY EDIT of the existing AI Story. "
+                            "Do not rewrite the story from scratch. Preserve every existing character identity/name, "
+                            "relationship, setting, event, causal connection, reversal, choice, consequence, "
+                            "dialogue, and ending that is already valid. Restore any missing factual/conceptual "
+                            "elements from the SOURCE PREMISE by integrating them into existing story events. "
+                            "Do not invent a new person, location, object, mystery, subplot, or future hook merely "
+                            "to satisfy the premise check. Keep exactly six paragraphs separated by blank lines and "
+                            "420 to 560 words. Return the COMPLETE revised story only.\n\nSOURCE PREMISE:\n"
+                            + str(user_input).strip()
+                            + "\n\nCURRENT STORY:\n"
+                            + str(story).strip()
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 520
+                    elif expand_cast_repair and story.strip():
                         # Expand Story can fail multiple contracts at once (for example,
                         # word count plus an invented relational character). When that
                         # happens, the cast-grounding defect must take precedence over the
@@ -668,7 +702,11 @@ class QwenDirector(
                         minimum_completion = 350
 
                     try:
-                        if story_contract_repair or completion_repair:
+                        if premise_fidelity_repair:
+                            # Premise repair is a constrained semantic edit, never a fresh creative sample.
+                            retry_temperature = 0.15
+                            retry_top_p = 0.68
+                        elif story_contract_repair or completion_repair:
                             # Structural/completion repairs are constrained edits, not creative resampling.
                             retry_temperature = 0.15 if story_contract_repair else 0.20
                             retry_top_p = 0.68 if story_contract_repair else 0.70
