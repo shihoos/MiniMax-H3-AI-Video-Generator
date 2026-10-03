@@ -846,8 +846,9 @@ class QwenDirectorRuntimeMixin:
                 "model": str(speculator_model),
                 "method": DIRECTOR_VLLM_SPECULATIVE_METHOD,
                 "num_speculative_tokens": DIRECTOR_VLLM_SPECULATIVE_TOKENS,
-                # Keep the main Qwen target compiled/graph-optimized while avoiding
-                # a second compile/capture path for the Eagle draft model.
+                # Request eager execution for the Eagle draft model while keeping
+                # the main Qwen target compiled/graph-optimized. Actual Eagle
+                # compile/cudagraph behavior must be verified from the vLLM log.
                 "enforce_eager": eagle_enforce_eager,
             }, separators=(",", ":"))
 
@@ -947,10 +948,19 @@ class QwenDirectorRuntimeMixin:
                 ])
 
             child_env = os.environ.copy()
-            cache_root = os.getenv(
-                "H3_DIRECTOR_VLLM_CACHE_ROOT",
-                "",
-            ).strip()
+            configured_cache_root = os.getenv("H3_DIRECTOR_VLLM_CACHE_ROOT", "").strip()
+            if configured_cache_root:
+                cache_root = configured_cache_root
+            elif Path("/kaggle/working").is_dir():
+                # Keep the vLLM cache on Kaggle's working volume by default so
+                # restarts within the same notebook/session do not fall back to
+                # /root/.cache/vllm. Cross-session persistence still requires
+                # preserving this directory as a Kaggle output/dataset.
+                cache_root = "/kaggle/working/vllm_cache"
+            else:
+                cache_root = ""
+
+            cache_path = None
             if cache_root:
                 cache_path = Path(cache_root).expanduser()
                 try:
@@ -962,7 +972,7 @@ class QwenDirectorRuntimeMixin:
 
             startup_plan_value = os.getenv(
                 "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN",
-                "1" if cache_root else "",
+                "1" if cache_path is not None else "",
             ).strip().lower()
             if startup_plan_value:
                 if startup_plan_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
@@ -975,6 +985,30 @@ class QwenDirectorRuntimeMixin:
                     if startup_plan_value in {"1", "true", "yes", "on"}
                     else "0"
                 )
+
+            warmup_sampler_jit_value = os.getenv(
+                "H3_DIRECTOR_VLLM_WARMUP_SAMPLER_JIT",
+                "0",
+            ).strip().lower()
+            if warmup_sampler_jit_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+                session.close()
+                raise RuntimeError(
+                    "H3_DIRECTOR_VLLM_WARMUP_SAMPLER_JIT must be a boolean environment value."
+                )
+            warmup_sampler_jit = warmup_sampler_jit_value in {
+                "1", "true", "yes", "on"
+            }
+
+            print(
+                "[QWEN] vLLM startup config",
+                f"cache_root={cache_path or 'default'}",
+                f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
+                f"eagle_enforce_eager={eagle_enforce_eager}",
+                f"cudagraph_capture_sizes={capture_sizes if cudagraph_capture_sizes else 'auto'}",
+                f"kv_cache_memory_bytes={kv_cache_memory_bytes or 'auto'}",
+                f"warmup_sampler_jit={warmup_sampler_jit}",
+                flush=True,
+            )
 
             try:
                 log_handle = log_path.open("ab")
@@ -1004,6 +1038,31 @@ class QwenDirectorRuntimeMixin:
                     session,
                     process,
                 )
+
+                if warmup_sampler_jit:
+                    warmup_url = self._vllm_base_url() + "/chat/completions"
+                    warmup_payload = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": "Say OK."}],
+                        "max_tokens": 1,
+                        "temperature": 0.0,
+                    }
+                    try:
+                        warmup_response = session.post(
+                            warmup_url,
+                            json=warmup_payload,
+                            timeout=60,
+                        )
+                        warmup_response.raise_for_status()
+                        print(
+                            "[QWEN] vLLM sampler-JIT warmup completed",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        raise RuntimeError(
+                            "vLLM sampler-JIT warmup failed. Disable "
+                            "H3_DIRECTOR_VLLM_WARMUP_SAMPLER_JIT to skip it."
+                        ) from exc
 
                 if _SHARED_VLLM_TOKENIZER is None:
                     from transformers import AutoTokenizer
