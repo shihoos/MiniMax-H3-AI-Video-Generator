@@ -36,7 +36,9 @@ class QwenDirectorPromptMixin:
 
     FORMAT
     - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene.
+      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
+      words per paragraph (about 450-520 words total) so every scene has enough action and consequence
+      without padding.
 
     CAST
     - 1 to 3 recurring characters, all physically present and causally relevant on screen. Introduce the
@@ -89,7 +91,9 @@ class QwenDirectorPromptMixin:
 
     FORMAT
     - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene.
+      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
+      words per paragraph (about 450-520 words total) so every scene has enough action and consequence
+      without padding.
 
     FIDELITY
     - Keep every event, character identity, setting, and outcome of the source, in the source's order.
