@@ -406,18 +406,12 @@ class QwenDirector(
                     max_completion=3200,
                     disable_thinking=False,
                 )
-                story = self._coerce_story_to_six_paragraphs(story)
-                self._validate_mode_output(
+                story = self._validate_story_output_contracts(
                     mode,
                     user_input,
                     story,
+                    source_character_names=source_character_names,
                 )
-                if mode == EXPAND_USER_STORY_MODE:
-                    self._validate_expand_story_cast(
-                        user_input,
-                        story,
-                        source_character_names=source_character_names,
-                    )
                 generated_story = True
             except RuntimeError as first_error:
                 error_text = str(first_error)
@@ -440,6 +434,12 @@ class QwenDirector(
                 expand_cast_repair = (
                     mode == EXPAND_USER_STORY_MODE
                     and "Expand Story introduced unanchored" in error_text
+                )
+                cast_contract_details = (
+                    " For Expand Story, also remove or replace only unanchored character identities; "
+                    "preserve source-grounded names and relationships exactly."
+                    if expand_cast_repair
+                    else ""
                 )
                 if story_contract_repair and story.strip():
                     # A word/paragraph failure is a format defect, not permission
@@ -483,6 +483,7 @@ class QwenDirector(
                         "scene-sized beats. Keep the final paragraph at least 25 words and make it consequence/aftermath, "
                         "not new plot. The final sentence must remain a completed past-tense action in a settled place. "
                         + contract_details
+                        + cast_contract_details
                         + "Current paragraph counts for guidance: "
                         + paragraph_guidance
                         + "\n\nEXISTING STORY:\n"
@@ -520,6 +521,7 @@ class QwenDirector(
                                     if "must contain at least one explicit quoted line" in error_text
                                     else ""
                                 )
+                                + cast_contract_details
                                 + " Return only the replacement sentence.\n\nSTORY:\n"
                                 + str(story).strip()
                             )
@@ -529,8 +531,9 @@ class QwenDirector(
                             repair_user = (
                                 "Replace only the final paragraph of the existing story. Preserve every earlier paragraph, "
                                 "character, relationship, event, and established fact. Close the conflict with a concrete "
-                                "past-tense consequence. Do not introduce anything new or future-oriented. Return only "
-                                "the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
+                                "past-tense consequence. Do not introduce anything new or future-oriented."
+                                + cast_contract_details
+                                + " Return only the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
                             )
                             minimum_completion = 60
                     else:
@@ -604,28 +607,54 @@ class QwenDirector(
                         story = preserved_prefix + "\n\n" + str(repaired).strip()
                     else:
                         story = repaired
-                    story = self._coerce_story_to_six_paragraphs(story)
-                    self._validate_mode_output(
+                    story = self._validate_story_output_contracts(
                         mode,
                         user_input,
                         story,
+                        source_character_names=source_character_names,
                     )
-                    if mode == EXPAND_USER_STORY_MODE:
-                        self._validate_expand_story_cast(
-                            user_input,
-                            story,
-                            source_character_names=source_character_names,
-                        )
                     generated_story = True
                 except RuntimeError as retry_error:
-                    raise RuntimeError(
-                        (
-                            "AI Story generation failed validation after the controlled retry: "
-                            if mode == AI_STORY_MODE
-                            else "Expand Story generation failed validation after the controlled retry: "
-                        )
-                        + str(retry_error)
-                    ) from retry_error
+                    retry_error_text = str(retry_error)
+                    if "exactly six paragraphs" in retry_error_text:
+                        # Last-resort topology adapter only after Qwen has had the
+                        # opportunity to repair the raw story. This adapter never
+                        # rewrites prose; it only merges/splits at existing boundaries.
+                        fallback = self._coerce_story_to_six_paragraphs(story)
+                        if fallback != str(story).strip():
+                            try:
+                                story = self._validate_story_output_contracts(
+                                    mode,
+                                    user_input,
+                                    fallback,
+                                    source_character_names=source_character_names,
+                                )
+                                generated_story = True
+                            except RuntimeError as fallback_error:
+                                retry_error_text = str(fallback_error)
+                            else:
+                                pass
+                        if generated_story:
+                            # Topology fallback succeeded and the final story is validated.
+                            pass
+                        else:
+                            raise RuntimeError(
+                                (
+                                    "AI Story generation failed validation after the controlled retry: "
+                                    if mode == AI_STORY_MODE
+                                    else "Expand Story generation failed validation after the controlled retry: "
+                                )
+                                + retry_error_text
+                            ) from retry_error
+                    else:
+                        raise RuntimeError(
+                            (
+                                "AI Story generation failed validation after the controlled retry: "
+                                if mode == AI_STORY_MODE
+                                else "Expand Story generation failed validation after the controlled retry: "
+                            )
+                            + retry_error_text
+                        ) from retry_error
 
 
         # ----------------------------------------------------
@@ -636,9 +665,18 @@ class QwenDirector(
         # topology. Qwen supplies the final narrative and creative shot direction;
         # it does not regenerate deterministic production identity here.
         story = self._normalize_story(story)
-        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-            story = self._coerce_story_to_six_paragraphs(story)
-            if mode == EXPAND_USER_STORY_MODE and not generated_story:
+        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and not generated_story:
+            # Resume/checkpoint safety only: generated stories have already passed the
+            # authoritative raw-story validation above. Older checkpoints may predate
+            # the six-paragraph contract, so repair topology here without changing prose.
+            paragraphs = [
+                part.strip()
+                for part in re.split(r"\n\s*\n+", story)
+                if part.strip()
+            ]
+            if len(paragraphs) != 6:
+                story = self._coerce_story_to_six_paragraphs(story)
+            if mode == EXPAND_USER_STORY_MODE:
                 self._validate_expand_story_cast(
                     user_input,
                     story,
@@ -1434,6 +1472,42 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
+    def _validate_story_output_contracts(
+        self,
+        mode: str,
+        user_input: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        """Validate the current story without rewriting its topology.
+
+        Qwen receives the first opportunity to repair contract defects. The deterministic
+        six-paragraph topology adapter is intentionally kept outside this validator as a
+        last-resort fallback, so raw model output is authoritative before any topology
+        normalization is applied.
+        """
+        working = self._normalize_story(story)
+        errors: list[str] = []
+
+        try:
+            self._validate_mode_output(mode, user_input, working)
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+        if mode == EXPAND_USER_STORY_MODE:
+            try:
+                self._validate_expand_story_cast(
+                    user_input,
+                    working,
+                    source_character_names=source_character_names,
+                )
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        if errors:
+            raise RuntimeError(" | ".join(errors))
+        return working
+
     def _validate_expand_story_cast(
         self,
         source_story: str,
@@ -1516,7 +1590,7 @@ class QwenDirector(
 
     @staticmethod
     def _coerce_story_to_six_paragraphs(text: str) -> str:
-        """Deterministically repair paragraph topology without changing story prose."""
+        """Last-resort topology adapter; never changes story prose tokens."""
         value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not value:
             return ""
@@ -1529,6 +1603,8 @@ class QwenDirector(
         if not paragraphs or len(paragraphs) == 6:
             return "\n\n".join(paragraphs)
 
+        original_count = len(paragraphs)
+
         def word_count(part: str) -> int:
             return len(re.findall(r"\b[\w'’-]+\b", part))
 
@@ -1537,8 +1613,7 @@ class QwenDirector(
             return [piece.strip() for piece in pieces if piece.strip()]
 
         # More than six paragraphs: merge the smallest adjacent interior pair.
-        # Avoid touching the opening or closing paragraph unless there is no
-        # interior option, preserving setup and final aftermath as distinct beats.
+        # Keep opening and aftermath paragraphs distinct whenever possible.
         while len(paragraphs) > 6:
             n = len(paragraphs)
             candidate_starts = list(range(1, n - 2)) or list(range(0, n - 1))
@@ -1553,28 +1628,42 @@ class QwenDirector(
             paragraphs[start] = paragraphs[start] + " " + paragraphs[start + 1]
             del paragraphs[start + 1]
 
-        # Fewer than six paragraphs: split the longest paragraph with the most
-        # natural sentence boundary. Never fabricate prose; if a paragraph cannot
-        # be split safely, leave the topology unchanged so the validator fails
-        # loudly rather than inventing text.
+        # Fewer than six paragraphs: split only at an existing sentence boundary.
+        # Prefer the longest splittable paragraph and a split that keeps both halves
+        # reasonably close to the six-scene target without rewriting any prose.
         while len(paragraphs) < 6:
-            candidates = []
+            best = None
             for index, paragraph in enumerate(paragraphs):
                 sentences = sentence_spans(paragraph)
-                if len(sentences) >= 2:
-                    penalty = 1 if index == len(paragraphs) - 1 else 0
-                    candidates.append((penalty, -word_count(paragraph), index, sentences))
-            if not candidates:
+                if len(sentences) < 2:
+                    continue
+                total = word_count(paragraph)
+                for split_index in range(1, len(sentences)):
+                    left = " ".join(sentences[:split_index]).strip()
+                    right = " ".join(sentences[split_index:]).strip()
+                    left_words = word_count(left)
+                    right_words = word_count(right)
+                    if not left or not right:
+                        continue
+                    # Avoid creating a tiny final aftermath fragment.
+                    final_penalty = 60 if index == len(paragraphs) - 1 and right_words < 25 else 0
+                    target_penalty = abs(left_words - 80) + abs(right_words - 80)
+                    score = (final_penalty + target_penalty, -total, index, split_index)
+                    candidate = (score, index, split_index, left, right)
+                    if best is None or score < best[0]:
+                        best = candidate
+            if best is None:
                 break
-            _, _, index, sentences = min(candidates)
-            split_index = max(1, len(sentences) // 2)
-            left = " ".join(sentences[:split_index]).strip()
-            right = " ".join(sentences[split_index:]).strip()
-            if not left or not right:
-                break
+            _, index, split_index, left, right = best
             paragraphs[index:index + 1] = [left, right]
 
-        return "\n\n".join(paragraphs)
+        result = "\n\n".join(paragraphs)
+        if len(paragraphs) != original_count:
+            print(
+                f"[DIRECTOR] story topology fallback: {original_count} -> {len(paragraphs)} paragraphs; prose preserved",
+                flush=True,
+            )
+        return result
 
 
     @staticmethod
