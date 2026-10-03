@@ -1,718 +1,2951 @@
 from __future__ import annotations
 
-import json
+from copy import deepcopy
+from contextlib import redirect_stdout
+import io
+from pathlib import Path
 import os
+import json
 import re
-import textwrap
+
+from planner.cinematic_compiler import CinematicCompiler
+from planner.entity_resolver import EntityResolver
+from pipeline.production_checkpoint import ProductionCheckpoint
+from pipeline.dialogue_timeline import DialogueTimeline
 
 from planner.config import (
-    DIRECTOR_STORY_CONTEXT_CHARS,
     AI_STORY_MODE,
-    DIRECTOR_TEMPERATURE,
-    DIRECTOR_TOP_P,
-    DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
+    DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
+    DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
-    DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
-    DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
-    DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
-    DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
+    DIRECTOR_N_CTX,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
+    director_enabled,
 )
 
+from planner.qwen_director_runtime import (
+    _with_faulthandler_watchdog,
+    QwenDirectorRuntimeMixin,
+)
+from planner.qwen_director_prompts import (
+    QwenDirectorPromptMixin,
+)
+from planner.qwen_director_scene import QwenDirectorSceneMixin
+from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
-SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = '\nYou are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.\n\nCreate exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.\n\nFor the `location` field, use ONLY the physical setting where the shot occurs.\nThe value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.\nWhen the shot remains in the same physical setting, preserve the supplied scene location exactly.\nWhen the supplied scene location is empty, infer the physical setting from the supplied story context, scene description, continuity notes, and environment details. Do not treat an arbitrary prepositional phrase as a location.\nOnly change `location` when the narrative explicitly moves to a different physical place.\n\nThe scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.\nKeep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.\nlocation must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.\n`action` describes only physical/narrative events; never describe camera behavior there.\n`camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.\nPreserve:\n- character identity;\n- chronology;\n- visual continuity;\n- location continuity;\n- emotional progression;\n- visual-language consistency.\nDIALOGUE CONTRACT:\n- dialogue_events contain DIRECT SPOKEN DIALOGUE ONLY; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.\n- A dialogue event MUST be an exact contiguous span of a quoted/scripted spoken line present in the supplied story context. If the text is not explicitly spoken, it is NOT dialogue.\n- A sentence such as a character\'s action, breath, expression, realization, or narration is NEVER dialogue, even when it begins with the character\'s name.\n- Every source utterance may be used only once. The only exception is splitting one longer source utterance into exact contiguous pieces across adjacent shots. Never repeat the same source line in multiple shots.\n- Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.\n- Relational canonical identities are valid when supplied. Use the exact canonical identity, not a bare role.\n- Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.\n- Preserve spoken text exactly; never paraphrase, summarize, invent, or transform narration into speech.\n- When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.\n- The user payload may include a `source_dialogue` whitelist containing exact source utterances. Treat it as authoritative: dialogue_events may use only those utterances (or exact contiguous pieces of them) and must never invent a new line from narrative prose. If the supplied scenes contain no applicable source utterance, return dialogue_events as an empty array.\n\n- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.\n- Do not put timestamps in the response.\n- Treat H3 shot duration as a hard production constraint: target roughly 4–6 seconds of spoken dialogue per shot when natural, leaving timing headroom.\n- When dialogue is present, set duration_seconds from the actual spoken duration plus a small legal margin; do not blindly emit the default short duration. Keep dialogue shots typically around 6–8.5 seconds when required, and never exceed the legal H3 maximum.\n- Prefer one concise dialogue event per shot; use two only when the exchange genuinely needs both sides. Keep each spoken event short when the source permits, but never paraphrase or delete source dialogue.\n- If a source utterance is longer, split its exact contiguous text across adjacent shots with continues_to_next_shot/continues_from_previous_shot rather than forcing an overlong single shot.\n- A continuation edge is SAME-SPEAKER ONLY: if `continues_from_previous_shot` is true, the current speaker MUST be the same canonical character as the previous shot final dialogue speaker. If the speaker changes, both continuation flags at that boundary MUST be false and the new speaker starts a new dialogue turn.\n- Never set `continues_to_next_shot=true` when the next shot begins with a different speaker.\n- Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.\n- describe the shot\'s required initial and ending continuity states in continuity_start_state and continuity_end_state.\n\nWithin each scene, the required shots must use meaningfully different\nframing/composition while describing the SAME narrative beat.\n\nSCENE-FUNCTION DIRECTING:\nEach supplied scene includes scene_function and obligatory_moment.\nUse them as directing constraints, not as new story events.\nsetup: establish geography and protagonist context.\ncatalyst: reveal the disruptive event, clue, or discovery.\ndevelopment: show objective, movement, complication, or escalation.\nmidpoint: emphasize new information and changed understanding.\nclimax: emphasize danger, decisive action, choice, and consequence.\nfinale: emphasize aftermath, resolution, and the closing emotional image.\nEvery required shots must visibly serve the supplied obligatory_moment.\n\nSHOT / FRAMING VOCABULARY:\nframing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.\n\nCAMERA MOVEMENT VOCABULARY:\nmovement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.\n\nLENS / DEPTH OF FIELD:\nwide-angle, normal, telephoto, shallow focus, deep focus, selective focus.\n\nCOMPOSITION VOCABULARY:\ncentered, rule of thirds, leading lines, foreground frame, negative space, silhouette, depth layering, subject isolation.\n\nLIGHTING VOCABULARY:\nlighting: warm tungsten, cool daylight, golden-hour, blue-hour, moonlight, practical neon, hard chiaroscuro, soft overcast, mixed practical/ambient.\n\nReturn JSON only in exactly this structure:\n\n{\n  "scene_shots": [\n    {\n      "scene_id": "scene_001",\n      "shots": [\n        {\n          "shot_id": "scene_001_shot_001",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        },\n        {\n          "shot_id": "scene_001_shot_002",\n          "scene_id": "scene_001",\n          "duration_seconds": 5.2,\n          "characters": [],\n          "location": "<physical setting only>",\n          "action": "...",\n          "camera_shot": "...",\n          "camera_movement": "...",\n          "lens_and_depth_of_field": "...",\n          "composition_notes": "...",\n          "lighting": "...",\n          "color_temperature": "...",\n          "mood": "...",\n          "visual_prompt": "...",\n          "speaking_characters": [],\n          "speech_text": "",\n          "dialogue_events": [],\n          "continuity_start_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "continuity_end_state": {"location": "...", "lighting": "...", "state_description": "..."},\n          "is_scene_boundary": false,\n          "character_spatial_bboxes": {},\n          "character_spatial_regions": {},\n          "character_spatial_bboxes_start": {},\n          "character_spatial_bboxes_end": {},\n          "character_spatial_regions_start": {},\n          "character_spatial_regions_end": {}\n        }\n      ]\n    }\n  ]\n}\n\nThere must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and\nexactly one entry for every supplied scene. Do not add prose outside JSON.\n\nDo NOT output compiler-owned fields.\nDo NOT add scenes.\nDo NOT omit scenes.\nReturn JSON only.\n'
 
-class QwenDirectorPromptMixin:
-    def _story_text_system(
+class QwenDirector(
+    QwenDirectorRuntimeMixin,
+    QwenDirectorPromptMixin,
+    QwenDirectorSceneMixin,
+    QwenDirectorSanitizeMixin,
+):
+    # Production planning limits. Keep the narrative rich, but bound the
+    # production graph so an LLM cannot accidentally explode a short film
+    # into dozens of scenes and therefore dozens of expensive Qwen calls.
+    MAX_SCENES = 6
+    SHOTS_PER_SCENE = DIRECTOR_SHOTS_PER_SCENE
+    # Creative shot batching may cover up to two fresh adjacent scenes.
+    # The runtime selects the largest batch that still fits the 8K context
+    # budget with a bounded completion reserve. Missing shots are deterministic
+    # fallbacks; no per-scene Qwen recovery is used.
+    MAX_SHOT_BATCH_SCENES = 2
+
+    FORBIDDEN_CHARACTER_NAMES = {
+        "treat",
+        "develop",
+        "clarify",
+        "every",
+        "above",
+        "far",
+        "tone",
+        "visual",
+        "story",
+        "scene",
+        "scenes",
+        "shot",
+        "shots",
+        "camera",
+        "lighting",
+        "sound",
+        "soundscape",
+        "environment",
+        "action",
+        "continuity",
+        "mood",
+        "location",
+        "weather",
+        "dialogue",
+        "music",
+        "character",
+        "characters",
+        "the",
+        "a",
+        "an",
+        "he",
+        "she",
+        "his",
+        "her",
+        "it",
+        "they",
+        "them",
+        "this",
+        "that",
+        "these",
+        "those",
+        "when",
+        "while",
+        "after",
+        "before",
+        "finally",
+        "suddenly",
+        "meanwhile",
+        "developing",
+        "preserve",
+        "expand",
+        "generate",
+        "generation",
+        "priority",
+        "description",
+        "details",
+        "detail",
+        "camera_shot",
+        "camera_movement",
+        "negative_prompt",
+        "visual_prompt",
+    }
+
+    _MODE_LABELS = {
+        AI_STORY_MODE: "AI STORY MODE",
+        EXPAND_USER_STORY_MODE: "EXPAND STORY MODE",
+        PRESERVE_USER_STORY_MODE: "PRESERVE STORY MODE",
+    }
+
+    def __init__(
         self,
-        mode: str,
-    ) -> str:
+        project_root: Path,
+    ):
 
-        if mode == AI_STORY_MODE:
-            return textwrap.dedent("""
-    You are the narrative writer for MiniMax H3, a short-film generator. Turn the premise into one
-    complete, filmable short story.
-
-    FORMAT
-    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      HARD CONTRACT: each paragraph MUST contain 70-90 words. Target about 480 words and do not stop
-      before all six paragraphs are complete. Each paragraph is one scene in one place and will become
-      one video scene. Use concrete action, reaction, and consequence to reach the target; never pad
-      with generic exposition.
-
-    CAST
-    - 1 to 3 recurring characters, all physically present and causally relevant on screen. Introduce the
-      protagonist in the first sentence and every other recurring character by the end of paragraph 2.
-    - If a recurring counterpart exists, that person MUST be physically present and take consequential action.
-      Do not use a voice over a speaker, recording, radio, logbook, photograph, hologram, or remembered person
-      as the active counterpart. Those can supply evidence, but they are not recurring cast.
-    - Give each named character ONE stable canonical name and use exactly that name every time. Full names
-      are allowed; never alternate between a full name and a different nickname or title. Never hard-code
-      names from these instructions. Machines, objects, places, and recordings are not characters.
-    - Someone who is only remembered, missing, recorded, photographed, hologrammed, or named on a document
-      is not a recurring character.
-
-    STRUCTURE (one paragraph each)
-    1. SETUP: establish a specific place, start with the protagonist's concrete goal in the first two
-       sentences, and plant one physical detail (object, sound, habit, or injury) that will matter later.
-    2. CATALYST: the protagonist acts toward the goal and meets resistance. A counterpart, if present,
-       has an immediate objective or belief that conflicts with the protagonist and TAKES AN ACTION here
-       that blocks, redirects, tests, or threatens; do not make the counterpart an exposition device.
-    3. COMPLICATION: the plan fails, tightens, or costs something. Make the personal stake concrete
-       through an action, relationship, object, or brief memory rather than a backstory dump. The stake
-       must matter to the final choice.
-    4. REVERSAL: new information or an observed consequence changes what the protagonist believes and
-       directly changes the decision they must make. Recontextualize the planted detail with one dominant
-       reversal; do not replace causality with an abstract message or stack unrelated mysteries.
-    5. CHOICE: the protagonist makes a hard choice between meaningful alternatives, with a visible cost,
-       carried out by physical action. Do not let equipment failure, an accident, or a random event make the
-       choice for them. The planted detail must materially affect the choice or the consequence of that choice.
-    6. AFTERMATH: show the concrete consequence caused by the choice and the resulting emotional shift,
-       ending on a settled image in one place. Nothing new appears in this paragraph.
-
-    DIALOGUE
-    - 1 to 3 short lines in double quotation marks, spoken aloud by characters who are present, each tagged
-      with the speaker's stable name. When a recurring counterpart exists, make those lines a real in-scene
-      exchange between the present characters. Every line must create conflict, force a decision, reveal
-      information, or change what someone believes.
-    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are described in prose
-      and never quoted as speech; they are never treated as a character's dialogue.
-
-    STYLE
-    - Begin with concrete physical action, sensory detail, and a specific environment; make the visual
-      situation immediately filmable rather than opening on abstract explanation.
-    - Show physical action, objects, reactions, and relationship behavior. At most one explanatory sentence
-      about setting, technology, or history in the whole story.
-    - One dominant causal chain and one meaningful reversal. Avoid stacked clues, secret objects, repeated
-      reveals, or a new mystery introduced only to keep the ending open. Every important detail must have a
-      concrete causal path into the reversal, choice, or consequence; do not make a planted object become a
-      magical key or biometric explanation without grounding it earlier.
-    - Reserve the final paragraph for concrete external consequence plus the protagonist's emotional shift,
-      not new plot information. The ending must show what changed, not only describe a mood.
-    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
-    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
-    """).strip()
-
-        if mode == EXPAND_USER_STORY_MODE:
-            return textwrap.dedent("""
-    You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
-    story into one complete, filmable short story.
-
-    FORMAT
-    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
-      words per paragraph (about 450-520 words total) so every scene has enough action and consequence
-      without padding.
-
-    FIDELITY
-    - Keep every event, character identity, setting, and outcome of the source, in the source's order.
-      Add only the cause, resistance, and consequence the structure below needs.
-    - Do not replace the plot. Keep source characters. An additional relational character is allowed only when
-      the source explicitly establishes that specific person/relationship; NEVER invent a new person from a relational
-      noun such as brother, sister, father, mother, husband, wife, son, daughter, mentor, colleague, friend, or commander
-      when the source does not name or establish that person. An unnamed relational reference remains unnamed and
-      non-recurring. Do not create a canonical character from a memory, document, recording, photograph, hologram,
-      or off-screen mention. Do not invent unrelated people.
-
-    CAST
-    - Preserve source character names exactly. Never shorten, rename, or replace a source identity.
-    - Keep the active on-screen cast as small as source fidelity allows. Introduce the protagonist in the
-      first sentence and every other recurring active character by the end of paragraph 2.
-    - Any newly introduced non-source character gets ONE stable canonical name and keeps it consistently.
-    - Someone who is only remembered, missing, recorded, or named on a document is not an active character
-      unless the source explicitly turns that identity into a physically present causal participant.
-
-    STRUCTURE (one paragraph each)
-    1. SETUP: preserve the source's opening situation, give the protagonist a concrete immediate goal, and
-       plant or preserve one physical detail that will matter later.
-    2. CATALYST: preserve the source's key discovery or arrival and make the resistance physically active.
-       A counterpart, if present, should take an action rather than merely explain the backstory.
-    3. COMPLICATION: the plan fails, tightens, or costs something. Make the personal stake concrete through
-       an action, relationship, object, or brief memory; it must matter to the final choice.
-    4. REVERSAL: something seen or done changes what the protagonist believes and recontextualizes the planted
-       detail. Preserve the source's causal meaning instead of adding unrelated mystery layers.
-    5. CHOICE: the protagonist makes a hard choice with a visible cost, by physical action. The planted detail
-       should materially affect the choice or the consequence when the source supports one.
-    6. AFTERMATH: show the concrete consequence caused by the choice and the resulting emotional shift, ending
-       on a settled image. Nothing new appears here.
-
-    DIALOGUE
-    - Dialogue is optional. If used, 1 to 3 short lines in double quotation marks, spoken aloud by characters who
-      are present, each tagged with that character's exact source/stable name. Preserve source dialogue meaning
-      and wording; do not invent unnecessary speeches. Each line should create conflict, force a decision, or
-      change what someone believes.
-    - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
-
-    STYLE
-    - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and
-      meaningful relationship behavior. Avoid lore dumps or explanatory backstory.
-    - One dominant causal chain and one meaningful reversal. Avoid stacked clues, secret objects, repeated reveals,
-      or a new mystery introduced only to keep the ending open. Everything important introduced must drive the
-      reversal/choice or be resolved by the end.
-    - Reserve the final paragraph for consequence and resolution, not new plot information.
-    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
-    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
-    """).strip()
-
-        raise ValueError(
-            "Preserve Story does not use a story-text pass."
+        self.project_root = (
+            Path(
+                project_root
+            )
+            .resolve()
         )
 
-    def _story_text_user(
+        self._vllm_session = None
+
+        self._model_path = (
+            self._find_model()
+            if director_enabled()
+            else None
+        )
+
+        self._fallback_planner = None
+        self._entity_resolver = EntityResolver()
+        self._reference_visual_context: dict[str, dict] = {}
+        self._character_semantic_calls = 0
+
+        # Optional development diagnostics. Both are disabled unless the
+        # corresponding environment variable is explicitly configured.
+        self._trace_dir = self._optional_directory_env(
+            "H3_DIRECTOR_TRACE_DIR"
+        )
+        self._cache_dir = self._optional_directory_env(
+            "H3_DIRECTOR_CACHE_DIR"
+        )
+        self._cache_namespace = "minimax-h3-qwen-vllm-json-v1"
+
+        # Runtime Qwen telemetry is intentionally lightweight: keep only
+        # aggregate/per-call metrics needed to diagnose latency, token usage,
+        # retries, cache behavior, and deterministic recovery decisions.
+        self._qwen_telemetry = {
+            "calls": [],
+            "total_elapsed_seconds": 0.0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "deterministic_recoveries": 0,
+        }
+
+    def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
+        self._reference_visual_context = {
+            str(key): dict(value)
+            for key, value in (context or {}).items()
+            if isinstance(value, dict)
+        }
+
+    @_with_faulthandler_watchdog
+    def generate(
+        self,
+        *,
+        mode: str,
+        user_input: str,
+        base_plan: dict,
+        checkpoint_session_id: str | None = None,
+        resume_state: dict | None = None,
+    ) -> dict:
+
+        self._character_semantic_calls = 0
+        if not director_enabled():
+
+            plan = deepcopy(base_plan)
+            scenes = list(plan.get("scenes", []) or [])
+            shots = list(plan.get("shots", []) or [])
+            characters = {
+                str(character.get("name", "")).strip()
+                for character in plan.get("characters", []) or []
+                if isinstance(character, dict)
+                and str(character.get("name", "")).strip()
+            }
+            if scenes and shots:
+                normalized_shots = []
+                shots_by_scene = {}
+                for raw_shot in shots:
+                    if isinstance(raw_shot, dict):
+                        shots_by_scene.setdefault(str(raw_shot.get("scene_id", "")).strip(), []).append(raw_shot)
+                for scene in scenes:
+                    if not isinstance(scene, dict):
+                        continue
+                    scene_id = str(scene.get("scene_id", "")).strip()
+                    normalized_shots.extend(
+                        self._sanitize_shots(
+                            shots_by_scene.get(scene_id, []),
+                            scene,
+                            characters,
+                        )
+                    )
+                plan["shots"] = CinematicCompiler(
+                    character_names=characters
+                ).compile_all(scenes, normalized_shots)
+
+            return {
+                "enabled": False,
+                "plan": plan,
+                "director_notes": "",
+            }
+
+        if mode not in (
+            self._MODE_LABELS
+        ):
+
+            raise ValueError(
+                f"Unsupported story mode: {mode}"
+            )
+
+        if (resume_state or {}).get("stage") in {
+            "director_complete",
+            "production_plan",
+            "rendering",
+            "render_complete",
+        }:
+            prior = deepcopy(
+                (resume_state or {}).get("director_plan", {}) or {}
+            )
+            if (
+                prior.get("story")
+                and prior.get("scenes")
+                and prior.get("shots")
+            ):
+                return {
+                    "enabled": True,
+                    "plan": prior,
+                    "director_notes": str(
+                        prior.get("director_notes", "") or ""
+                    ),
+                }
+
+        self.load()
+
+        if self._vllm_session is None:
+
+            raise RuntimeError(
+                "Qwen director model failed to load."
+            )
+
+        checkpoint_store = (
+            ProductionCheckpoint(
+                self.project_root
+            )
+            if checkpoint_session_id
+            else None
+        )
+
+        prior_director_plan = (
+            deepcopy(
+                (resume_state or {}).get(
+                    "director_plan",
+                    {},
+                )
+                or {}
+            )
+        )
+
+        prior_shots = list(
+            prior_director_plan.get(
+                "shots",
+                [],
+            )
+            or []
+        )
+
+        resume_stage = str(
+            (resume_state or {}).get(
+                "stage",
+                "",
+            )
+            or ""
+        ).strip()
+
+        resuming = bool(
+            resume_state
+            and prior_director_plan
+            and resume_stage in {
+                "initialized",
+                "narrative",
+                "metadata",
+                "shots",
+                "director_complete",
+            }
+        )
+
+        # Each top-level plan gets an isolated telemetry session. On resume,
+        # carry forward the semantic-call budget recorded in the checkpoint
+        # instead of resetting the character extractor/adjudicator allowance.
+        self._qwen_telemetry = {
+            "calls": [],
+            "total_elapsed_seconds": 0.0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "retries": 0,
+            "cache_hits": 0,
+            "deterministic_recoveries": 0,
+        }
+        if resuming:
+            try:
+                self._character_semantic_calls = max(
+                    0,
+                    min(2, int(prior_director_plan.get("_character_semantic_calls_used", 0) or 0)),
+                )
+            except (TypeError, ValueError):
+                self._character_semantic_calls = 0
+
+        temperature, top_p = (
+            self._sampling_for_mode(
+                mode
+            )
+        )
+
+        # ----------------------------------------------------
+        # PASS 1A: narrative
+        # ----------------------------------------------------
+
+        generated_story = False
+        source_character_names: list[str] = [
+            str(character.get("name", "")).strip()
+            for character in (base_plan.get("characters", []) or [])
+            if isinstance(character, dict) and str(character.get("name", "")).strip()
+        ]
+
+        if resuming and prior_director_plan.get(
+            "story"
+        ):
+
+            story = self._normalize_story(
+                prior_director_plan.get(
+                    "story",
+                    "",
+                )
+            )
+
+
+        elif mode == PRESERVE_USER_STORY_MODE:
+
+            story = self._normalize_story(
+                user_input
+            )
+
+
+        else:
+
+            story = ""
+
+            story_system = (
+                self._story_text_system(
+                    mode
+                )
+            )
+
+            story_user = (
+                self._story_text_user(
+                    mode,
+                    user_input,
+                    source_character_names=source_character_names,
+                )
+            )
+
+            try:
+                story = self._chat_text(
+                    story_system,
+                    story_user,
+                    minimum_completion=350,
+                    temperature=temperature,
+                    top_p=top_p,
+                    call_name=(
+                        "ai_story_text_pass"
+                        if mode == AI_STORY_MODE
+                        else "expand_story_text_pass"
+                    ),
+                    # Keep thinking enabled for the single creative story pass.
+                    # This pass must solve multiple coupled constraints (goal, resistance,
+                    # reversal, choice, consequence, cast, dialogue, and six-scene topology).
+                    # 3200 tokens provide reasoning + final-story headroom; the existing
+                    # single bounded no-think retry remains the only creative recovery path.
+                    max_completion=3200,
+                    disable_thinking=False,
+                )
+                story = self._validate_story_output_contracts(
+                    mode,
+                    user_input,
+                    story,
+                    source_character_names=source_character_names,
+                )
+                generated_story = True
+            except RuntimeError as first_error:
+                error_text = str(first_error)
+                story_contract_repair = any(
+                    marker in error_text
+                    for marker in (
+                        "exactly six paragraphs",
+                        "420 to 560 words",
+                    )
+                )
+                completion_repair = any(
+                    marker in error_text
+                    for marker in (
+                        "unresolved future hook",
+                        "underdeveloped final aftermath paragraph",
+                        "does not end in a complete sentence",
+                        "must contain at least one explicit quoted line",
+                    )
+                )
+                expand_cast_repair = (
+                    mode == EXPAND_USER_STORY_MODE
+                    and "Expand Story introduced unanchored" in error_text
+                )
+                cast_contract_details = (
+                    " For Expand Story, also remove or replace only unanchored character identities; "
+                    "preserve source-grounded names and relationships exactly."
+                    if expand_cast_repair
+                    else ""
+                )
+                topology_only_repair = (
+                    "exactly six paragraphs" in error_text
+                    and "420 to 560 words" not in error_text
+                )
+                if topology_only_repair and story.strip():
+                    # Paragraph topology is a deterministic formatting defect. Repair it
+                    # without spending another Qwen call or altering any story prose.
+                    fallback = self._coerce_story_to_six_paragraphs(story)
+                    if fallback != str(story).strip():
+                        try:
+                            story = self._validate_story_output_contracts(
+                                mode,
+                                user_input,
+                                fallback,
+                                source_character_names=source_character_names,
+                            )
+                            generated_story = True
+                        except RuntimeError as topology_error:
+                            # Coercion can only repair paragraph topology. If validation
+                            # exposes another genuine contract defect, let the existing
+                            # bounded retry handle that defect below.
+                            error_text = str(topology_error)
+                            story_contract_repair = any(
+                                marker in error_text
+                                for marker in (
+                                    "exactly six paragraphs",
+                                    "420 to 560 words",
+                                )
+                            )
+                            completion_repair = any(
+                                marker in error_text
+                                for marker in (
+                                    "unresolved future hook",
+                                    "underdeveloped final aftermath paragraph",
+                                    "does not end in a complete sentence",
+                                    "must contain at least one explicit quoted line",
+                                )
+                            )
+                            expand_cast_repair = (
+                                mode == EXPAND_USER_STORY_MODE
+                                and "Expand Story introduced unanchored" in error_text
+                            )
+                            cast_contract_details = (
+                                " For Expand Story, also remove or replace only unanchored character identities; "
+                                "preserve source-grounded names and relationships exactly."
+                                if expand_cast_repair
+                                else ""
+                            )
+
+                if not generated_story:
+                    if story_contract_repair and story.strip():
+                        # A word/paragraph failure is a format defect, not permission
+                        # to rewrite the narrative. Keep the generated causal chain,
+                        # identities, events, reversal, choice, dialogue, and ending
+                        # intact, and ask Qwen for a surgical structural/length edit.
+                        paragraphs = [
+                            part.strip()
+                            for part in re.split(r"\n\s*\n+", str(story).strip())
+                            if part.strip()
+                        ]
+                        word_matches = re.findall(r"\b[\w'’-]+\b", str(story or ""))
+                        current_word_count = len(word_matches)
+                        paragraph_counts = [
+                            len(re.findall(r"\b[\w'’-]+\b", paragraph))
+                            for paragraph in paragraphs
+                        ]
+                        target_range = "450 to 520 words"
+                        paragraph_guidance = "; ".join(
+                            f"P{index}={count} words"
+                            for index, count in enumerate(paragraph_counts, 1)
+                        ) or "no usable paragraph boundaries"
+                        if mode == AI_STORY_MODE:
+                            contract_details = (
+                                "Keep at least one short direct spoken line by an existing character. "
+                            )
+                        else:
+                            contract_details = "Dialogue remains optional; never invent a speaker merely to pad length. "
+                        repair_user = (
+                            "Perform a SURGICAL EDIT of the existing story. Do not rewrite it from scratch and do not "
+                            "change its plot. Preserve every existing character identity/name, relationship, setting, "
+                            "event, causal connection, planted detail, reversal, choice, consequence, quoted dialogue, "
+                            "and final outcome. "
+                            f"The current story has {current_word_count} words across {len(paragraphs)} paragraphs. "
+                            "Return the COMPLETE revised story, not an explanation. It must contain exactly six paragraphs "
+                            f"separated by blank lines and land in {target_range}; target roughly 70-90 words per paragraph. "
+                            "If the story is short, add only concrete physical action, visible reaction, sensory specificity, "
+                            "or causal connective tissue to events that already exist. If it is long, remove only redundant "
+                            "exposition or repetition. Do not add a new character, location, object, mystery, reveal, or "
+                            "future hook. Do not move events to another paragraph unless necessary to restore exactly six "
+                            "scene-sized beats. Keep the final paragraph at least 25 words and make it consequence/aftermath, "
+                            "not new plot. The final sentence must remain a completed past-tense action in a settled place. "
+                            + contract_details
+                            + cast_contract_details
+                            + "Current paragraph counts for guidance: "
+                            + paragraph_guidance
+                            + "\n\nEXISTING STORY:\n"
+                            + str(story).strip()
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 520
+                    elif completion_repair and story.strip():
+                        paragraphs = [
+                            part.strip()
+                            for part in re.split(r"\n\s*\n", str(story).strip())
+                            if part.strip()
+                        ]
+                        if paragraphs:
+                            final_paragraph = paragraphs[-1]
+                            sentence_matches = list(
+                                re.finditer(r"(?<=[.!?])\s+", final_paragraph)
+                            )
+                            if sentence_matches:
+                                split_at = sentence_matches[-1].end()
+                                preserved_final_body = final_paragraph[:split_at].strip()
+                            else:
+                                preserved_final_body = ""
+
+                            if preserved_final_body:
+                                preserved_prefix = "\n\n".join(paragraphs[:-1] + [preserved_final_body])
+                                repair_user = (
+                                    "Replace only the final sentence of the existing story. Keep every earlier sentence, "
+                                    "character, relationship, event, and established fact unchanged. Write one concrete "
+                                    "past-tense consequence that closes the conflict. Do not introduce anything new. "
+                                    "Do not use would, will, could, might, should, or a future intention. "
+                                    "End with what happened, not what the protagonist plans to do next."
+                                    + (
+                                        " Include one short direct spoken line by an existing character."
+                                        if "must contain at least one explicit quoted line" in error_text
+                                        else ""
+                                    )
+                                    + cast_contract_details
+                                    + " Return only the replacement sentence.\n\nSTORY:\n"
+                                    + str(story).strip()
+                                )
+                                minimum_completion = 24
+                            else:
+                                preserved_prefix = "\n\n".join(paragraphs[:-1])
+                                repair_user = (
+                                    "Replace only the final paragraph of the existing story. Preserve every earlier paragraph, "
+                                    "character, relationship, event, and established fact. Close the conflict with a concrete "
+                                    "past-tense consequence. Do not introduce anything new or future-oriented."
+                                    + cast_contract_details
+                                    + " Return only the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
+                                )
+                                minimum_completion = 60
+                        else:
+                            preserved_prefix = ""
+                            repair_user = (
+                                "Complete the existing story without changing its characters, relationships, or established events. "
+                                "End with a concrete past-tense consequence, not a future intention. Return only the finished story."
+                                + "\n\nSTORY:\n" + str(story).strip()
+                            )
+                            minimum_completion = 80
+                    elif expand_cast_repair and story.strip():
+                        preserved_prefix = ""
+                        repair_user = (
+                            "Perform a CAST-CORRECTION EDIT of the existing Expand Story. "
+                            "Preserve the plot, causal chain, setting, source-grounded characters, relationships, "
+                            "reversal, choice, consequence, dialogue, paragraph structure, and ending. "
+                            "Remove or replace only character identities that were invented without support from the source story. "
+                            "You may keep a relational character only when that relationship is explicitly grounded in the source. "
+                            "Do not add any new person. Return the complete revised story only. "
+                            "Keep exactly six paragraphs separated by blank lines and 420 to 560 words. "
+                            "Do not introduce a new plot thread or future hook.\n\nSOURCE STORY:\n"
+                            + str(user_input).strip()
+                            + "\n\nCURRENT EXPANSION:\n"
+                            + str(story).strip()
+                        )
+                        minimum_completion = 520
+                    else:
+                        if mode == AI_STORY_MODE:
+                            retry_requirements = (
+                                "Rewrite the story only as needed to satisfy the failed contract. Preserve every causally earned "
+                                "character and do not add a person merely to satisfy validation. "
+                            )
+                        else:
+                            retry_requirements = (
+                                "Rewrite only as needed to complete the expansion. The SOURCE CHARACTER ANCHORS are a hard safety "
+                                "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
+                                "Do not invent a person merely to satisfy validation. "
+                            )
+                        repair_user = (
+                            story_user
+                            + "\n\n"
+                            + retry_requirements
+                            + "Prioritize causal coherence and a finished resolution over extra detail. Return ONLY the finished story prose."
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 350
+
+                    try:
+                        if story_contract_repair or completion_repair:
+                            # Structural/completion repairs are constrained edits, not creative resampling.
+                            retry_temperature = 0.15 if story_contract_repair else 0.20
+                            retry_top_p = 0.68 if story_contract_repair else 0.70
+                        else:
+                            retry_temperature = max(0.50, min(0.68, temperature - 0.08))
+                            retry_top_p = max(0.80, min(0.88, top_p - 0.04))
+                        repaired = self._chat_text(
+                            story_system,
+                            repair_user,
+                            minimum_completion=minimum_completion,
+                            temperature=retry_temperature,
+                            top_p=retry_top_p,
+                            call_name=(
+                                "ai_story_text_retry"
+                                if mode == AI_STORY_MODE
+                                else "expand_story_text_retry"
+                            ),
+                            max_completion=1800,
+                            disable_thinking=True,
+                        )
+                        if completion_repair and preserved_prefix:
+                            story = preserved_prefix + "\n\n" + str(repaired).strip()
+                        else:
+                            story = repaired
+                        story = self._validate_story_output_contracts(
+                            mode,
+                            user_input,
+                            story,
+                            source_character_names=source_character_names,
+                        )
+                        generated_story = True
+                    except RuntimeError as retry_error:
+                        retry_error_text = str(retry_error)
+                        if "exactly six paragraphs" in retry_error_text:
+                            # Last-resort topology adapter only after Qwen has had the
+                            # opportunity to repair the raw story. This adapter never
+                            # rewrites prose; it only merges/splits at existing boundaries.
+                            fallback = self._coerce_story_to_six_paragraphs(story)
+                            if fallback != str(story).strip():
+                                try:
+                                    story = self._validate_story_output_contracts(
+                                        mode,
+                                        user_input,
+                                        fallback,
+                                        source_character_names=source_character_names,
+                                    )
+                                    generated_story = True
+                                except RuntimeError as fallback_error:
+                                    retry_error_text = str(fallback_error)
+                                else:
+                                    pass
+                            if generated_story:
+                                # Topology fallback succeeded and the final story is validated.
+                                pass
+                            else:
+                                raise RuntimeError(
+                                    (
+                                        "AI Story generation failed validation after the controlled retry: "
+                                        if mode == AI_STORY_MODE
+                                        else "Expand Story generation failed validation after the controlled retry: "
+                                    )
+                                    + retry_error_text
+                                ) from retry_error
+                        else:
+                            raise RuntimeError(
+                                (
+                                    "AI Story generation failed validation after the controlled retry: "
+                                    if mode == AI_STORY_MODE
+                                    else "Expand Story generation failed validation after the controlled retry: "
+                                )
+                                + retry_error_text
+                            ) from retry_error
+
+
+
+        # ----------------------------------------------------
+        # PASS 1B: deterministic production foundation
+        # ----------------------------------------------------
+        #
+        # The ProductionPlanner owns the canonical production roster and scene
+        # topology. Qwen supplies the final narrative and creative shot direction;
+        # it does not regenerate deterministic production identity here.
+        story = self._normalize_story(story)
+        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and not generated_story:
+            # Resume/checkpoint safety only: generated stories have already passed the
+            # authoritative raw-story validation above. Older checkpoints may predate
+            # the six-paragraph contract, so repair topology here without changing prose.
+            paragraphs = [
+                part.strip()
+                for part in re.split(r"\n\s*\n+", story)
+                if part.strip()
+            ]
+            if len(paragraphs) != 6:
+                story = self._coerce_story_to_six_paragraphs(story)
+            if mode == EXPAND_USER_STORY_MODE:
+                self._validate_expand_story_cast(
+                    user_input,
+                    story,
+                    source_character_names=source_character_names,
+                )
+
+        metadata_source = (
+            prior_director_plan
+            if resuming
+            else base_plan
+        )
+        director_notes = str(
+            metadata_source.get("director_notes", "") or ""
+        ).strip()
+
+        visual_language = self._sanitize_visual_language(
+            metadata_source.get("visual_language", {})
+        )
+        for key, value in self._baseline_visual_language().items():
+            if not visual_language.get(key):
+                visual_language[key] = value
+
+        print("[DIRECTOR] resolving canonical roster", flush=True)
+
+        # ----------------------------------------------------
+        # CANONICAL CHARACTERS / SCENES
+        # ----------------------------------------------------
+        #
+        # AI Story / Expand Story:
+        # Qwen first creates the final narrative. The canonical production
+        # roster and scene topology must then be derived from THAT final story.
+        #
+        # Preserve Story:
+        # the supplied user story remains the source of truth.
+        #
+        # Qwen owns semantic character identity. ProductionPlanner performs
+        # only bounded validation/canonicalization before production binding.
+
+        planner = self._planner()
+
+        if mode in (
+            AI_STORY_MODE,
+            EXPAND_USER_STORY_MODE,
+        ):
+            canonical_source_story = story
+        else:
+            canonical_source_story = user_input
+
+        resume_roster = []
+        if resuming and prior_director_plan.get("_canonical_character_roster_verified") is True:
+            prior_roster = prior_director_plan.get("characters", []) or []
+            if isinstance(prior_roster, list):
+                resume_roster = [dict(item) for item in prior_roster if isinstance(item, dict)]
+
+        if resume_roster:
+            from schemas.character import Character
+            canonical_characters = []
+            for item in resume_roster:
+                canonical_characters.append(Character.from_dict(deepcopy(item)))
+        else:
+            # Named-only stories have a deterministic canonical roster already:
+            # every identity is strongly grounded, no relational/descriptive
+            # identity needs semantic adjudication, so avoid two redundant Qwen
+            # calls. Ambiguous/relational/descriptive stories still use the
+            # bounded semantic extraction + adjudication path.
+            deterministic_descriptors = planner._canonicalize_character_descriptors(
+                [
+                    *planner.detect_character_descriptors(canonical_source_story),
+                    *planner._explicit_source_character_names(canonical_source_story),
+                ]
+            )
+            title_tokens = {
+                "dr", "doctor", "prof", "professor", "mr", "mrs", "ms", "miss",
+                "captain", "commander", "detective", "agent",
+            }
+            deterministic_descriptors = [
+                name for name in deterministic_descriptors
+                if str(name).strip().lower().rstrip(".") not in title_tokens
+            ]
+            relational_hints = planner._extract_relational_character_hints(
+                canonical_source_story,
+                deterministic_descriptors,
+            )
+            has_descriptive_identity = any(
+                planner._descriptive_identity_is_grounded(
+                    canonical_source_story,
+                    name,
+                )
+                for name in deterministic_descriptors
+            )
+            named_only_deterministic = bool(deterministic_descriptors) and not relational_hints and not has_descriptive_identity and all(
+                planner._high_confidence_deterministic_character(
+                    canonical_source_story,
+                    name,
+                )
+                for name in deterministic_descriptors
+            )
+            canonical_characters = planner.create_characters(
+                canonical_source_story,
+                qwen_character_extractor=None if named_only_deterministic else self.extract_character_entities,
+                qwen_character_adjudicator=None if named_only_deterministic else self.adjudicate_character_entities,
+            )
+
+        character_payloads = []
+        for character in canonical_characters:
+            if character is None:
+                continue
+            payload = character.to_dict()
+            metadata = getattr(character, "_semantic_identity_metadata", None)
+            if isinstance(metadata, dict) and metadata:
+                profile = dict(payload.get("identity_profile", {}) or {})
+                profile.update(metadata)
+                payload["identity_profile"] = profile
+            character_payloads.append(payload)
+
+        characters = self._sanitize_characters(
+            character_payloads
+        )
+
+        if not characters:
+            raise RuntimeError(
+                "No canonical characters could be derived from the final story."
+            )
+
+        character_names = {
+            str(character.get("name", "")).strip().lower()
+            for character in characters
+            if isinstance(character, dict)
+            and str(character.get("name", "")).strip()
+        }
+
+        if not character_names:
+            raise RuntimeError(
+                "Canonical character extraction produced no usable names."
+            )
+
+        canonical_scenes = planner.create_scenes(
+            canonical_source_story,
+            canonical_characters,
+        )
+
+        scenes = self._sanitize_scenes(
+            [
+                scene.to_dict()
+                for scene in canonical_scenes
+                if scene is not None
+            ],
+            character_names,
+        )
+    
+        if not scenes:
+            raise RuntimeError(
+                "Deterministic base plan contains no canonical scenes."
+            )
+
+        if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
+            raise RuntimeError(
+                "Deterministic base plan scene count is outside "
+                f"the required 4-{self.MAX_SCENES} range: {len(scenes)}"
+            )
+
+        # Preserve deterministic scene topology and only add the
+        # Director's creative scene annotations if they already exist.
+        scenes = self._annotate_scene_functions(
+            scenes
+        )
+
+        director_plan = {
+            "story": story,
+            "story_mode": mode,
+            "director_notes": director_notes,
+            "visual_language": visual_language,
+            "characters": deepcopy(characters),
+            # This marker is set only after ProductionPlanner has performed
+            # deterministic extraction plus the bounded Qwen semantic pass.
+            # enrich_plan may use this verified roster, but never raw Qwen
+            # character metadata from the creative response.
+            "_canonical_character_roster_verified": True,
+            "_character_semantic_calls_used": int(self._character_semantic_calls),
+            "scenes": deepcopy(scenes),
+            "shots": prior_shots,
+        }
+
+        completed_scene_ids = []
+        prior_by_scene = {}
+
+        for shot in prior_shots:
+            if not isinstance(shot, dict):
+                continue
+
+            sid = str(
+                shot.get("scene_id", "") or ""
+            ).strip()
+
+            if sid:
+                prior_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(shot)
+
+        for scene in scenes:
+            sid = str(
+                scene.get("scene_id", "") or ""
+            ).strip()
+
+            if len(prior_by_scene.get(sid, [])) >= self.SHOTS_PER_SCENE:
+                completed_scene_ids.append(sid)
+
+        if checkpoint_store and checkpoint_session_id:
+            self._save_checkpoint(
+                checkpoint_store,
+                checkpoint_session_id,
+                self._checkpoint_state(
+                    checkpoint_session_id,
+                    mode,
+                    user_input,
+                    base_plan,
+                    director_plan,
+                    "running",
+                    "shots",
+                    completed_scene_ids,
+                    completed_scene_ids[-1]
+                    if completed_scene_ids
+                    else "",
+                ),
+            )
+
+        print(f"[DIRECTOR] roster={len(characters)} scenes={len(scenes)}; scene count locked before shot batches", flush=True)
+
+        # ----------------------------------------------------
+        # PASS 2: cinematography
+        #
+        # Fresh scenes are planned in bounded creative batches of up to two.
+        # Qwen supplies only
+        # creative shot direction; deterministic compilation/rebinding
+        # supplies all production identity and technical fields.
+        # ----------------------------------------------------
+
+        all_shots: list[dict] = []
+        shot_temperature, shot_top_p = self._shot_sampling()
+
+        try:
+
+            scene_index = 0
+
+            while scene_index < len(scenes):
+
+                scene = scenes[
+                    scene_index
+                ]
+
+                scene_id = str(
+                    scene.get(
+                        "scene_id",
+                        "",
+                    )
+                    or ""
+                ).strip()
+
+                existing_scene_shots = [
+                    deepcopy(item)
+                    for item
+                    in prior_by_scene.get(
+                        scene_id,
+                        [],
+                    )[: self.SHOTS_PER_SCENE]
+                    if isinstance(
+                        item,
+                        dict,
+                    )
+                ]
+
+                # Resumed scene: never regenerate completed work.
+                if len(existing_scene_shots) >= self.SHOTS_PER_SCENE:
+
+                    existing_scene_shots = (
+                        existing_scene_shots[
+                            : self.SHOTS_PER_SCENE
+                        ]
+                    )
+
+                    all_shots.extend(
+                        existing_scene_shots
+                    )
+
+                    scene_index += 1
+                    continue
+
+                # Build the largest safe batch of fresh adjacent scenes.
+                # A partially completed/resumed scene is deterministic-only:
+                # its existing shots are preserved and any shortage is filled
+                # later from the canonical base plan. Fresh scenes receive
+                # exactly one creative Qwen batch call.
+                if existing_scene_shots:
+                    batch_scenes = [scene]
+                else:
+                    max_count = min(
+                        self.MAX_SHOT_BATCH_SCENES,
+                        len(scenes) - scene_index,
+                    )
+
+                    batch_scenes = []
+                    for offset in range(max_count):
+                        candidate_scene = scenes[scene_index + offset]
+                        candidate_id = str(
+                            candidate_scene.get("scene_id", "") or ""
+                        ).strip()
+
+                        # Do not cross a checkpoint/resume boundary.
+                        if prior_by_scene.get(candidate_id):
+                            break
+
+                        batch_scenes.append(candidate_scene)
+
+                    if not batch_scenes:
+                        batch_scenes = [scene]
+
+                generated_by_scene: dict[str, list[dict]] = {}
+
+                # ------------------------------------------------
+                # CREATIVE SHOT PASS
+                # ------------------------------------------------
+                # One fresh batch call for 1–2 scenes. No per-scene retry
+                # or missing-shot Qwen recovery is performed.
+                if existing_scene_shots:
+                    generated_by_scene[scene_id] = list(
+                        existing_scene_shots
+                    )[: self.SHOTS_PER_SCENE]
+
+                else:
+                    # Start with the largest candidate and shrink only if the
+                    # prompt would leave less than a useful completion reserve
+                    # inside the fixed 8192-token context.
+                    while True:
+                        batch_user = self._shot_director_batch_user(
+                            story,
+                            characters,
+                            batch_scenes,
+                            visual_language,
+                        )
+
+                        desired_completion = self._shot_batch_completion_budget(
+                            len(batch_scenes)
+                        )
+
+                        prompt_tokens = self._count_tokens(
+                            self._shot_director_batch_system()
+                            + "\n\n"
+                            + batch_user
+                        )
+
+                        if (
+                            prompt_tokens
+                            <= int(DIRECTOR_N_CTX)
+                            - 128
+                            - desired_completion
+                        ):
+                            break
+
+                        if len(batch_scenes) == 1:
+                            break
+
+                        batch_scenes = batch_scenes[:-1]
+
+                    batch_ids = [
+                        str(
+                            item.get("scene_id", "") or ""
+                        ).strip()
+                        for item in batch_scenes
+                    ]
+
+                    try:
+                        batch_response = self._chat_json(
+                            self._shot_director_batch_system(),
+                            batch_user,
+                            minimum_completion=320,
+                            temperature=shot_temperature,
+                            top_p=shot_top_p,
+                            call_name=(
+                                "shot_batch:"
+                                + "_".join(batch_ids)
+                            ),
+                            max_completion=self._shot_batch_completion_budget(
+                                len(batch_scenes)
+                            ),
+                            json_mode=True,
+                            disable_thinking=True,
+                            response_schema=self._shot_batch_json_schema(
+                                scene_count=len(batch_scenes),
+                            ),
+                        )
+
+                        batch_map = self._normalize_batch_shot_response(
+                            batch_response
+                        )
+
+                        for target_scene in batch_scenes:
+                            target_id = str(
+                                target_scene.get("scene_id", "") or ""
+                            ).strip()
+
+                            candidate = self._sanitize_shots(
+                                batch_map.get(
+                                    target_id,
+                                    [],
+                                ),
+                                target_scene,
+                                character_names,
+                            )
+
+                            if candidate:
+                                generated_by_scene[target_id] = candidate[
+                                    : self.SHOTS_PER_SCENE
+                                ]
+
+                    except Exception as batch_error:
+                        self._record_recovery(
+                            "shot_batch_deterministic_fallback",
+                            str(batch_error),
+                        )
+
+                # The deterministic repair pass after the loop owns missing
+                # shots. Never launch another Qwen request here.
+                # PERSIST THIS BATCH
+                # ------------------------------------------------
+                batch_added = []
+
+                for target_scene in batch_scenes:
+
+                    target_id = str(
+                        target_scene.get(
+                            "scene_id",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    scene_shots = list(
+                        generated_by_scene.get(
+                            target_id,
+                            [],
+                        )
+                    )
+
+                    # Missing shots are intentionally not regenerated with Qwen.
+                    # The deterministic repair pass below fills them from base_plan.
+                    if (
+                        target_id == scene_id
+                        and existing_scene_shots
+                    ):
+
+                        if not scene_shots:
+                            scene_shots = existing_scene_shots
+
+                        elif len(existing_scene_shots) == 1:
+                            scene_shots = [
+                                existing_scene_shots[0],
+                                scene_shots[0],
+                            ]
+
+                    scene_shots = scene_shots[
+                        : self.SHOTS_PER_SCENE
+                    ]
+
+                    batch_added.extend(
+                        scene_shots
+                    )
+
+                    if len(scene_shots) >= self.SHOTS_PER_SCENE:
+                        if target_id not in completed_scene_ids:
+                            completed_scene_ids.append(
+                                target_id
+                            )
+
+                all_shots.extend(
+                    batch_added
+                )
+
+                if batch_added:
+
+                    director_plan["shots"] = deepcopy(
+                        all_shots
+                    )
+
+                    last_scene_id = str(
+                        batch_scenes[-1].get(
+                            "scene_id",
+                            "",
+                        )
+                        or ""
+                    ).strip()
+
+                    self._save_checkpoint(
+                        checkpoint_store,
+                        checkpoint_session_id,
+                        self._checkpoint_state(
+                            checkpoint_session_id or "",
+                            mode,
+                            user_input,
+                            base_plan,
+                            director_plan,
+                            "running",
+                            "shots",
+                            completed_scene_ids,
+                            last_scene_id,
+                        ),
+                    )
+
+                scene_index += len(
+                    batch_scenes
+                )
+
+        except Exception as exc:
+
+            director_plan["shots"] = deepcopy(
+                all_shots
+            )
+
+            self._save_checkpoint(
+                checkpoint_store,
+                checkpoint_session_id,
+                self._checkpoint_state(
+                    checkpoint_session_id or "",
+                    mode,
+                    user_input,
+                    base_plan,
+                    director_plan,
+                    "failed",
+                    "shots",
+                    completed_scene_ids,
+                    scene_id if 'scene_id' in locals() else "",
+                    str(exc),
+                ),
+            )
+
+            raise
+
+        # Deterministic shot fallback: if Qwen failed to provide enough
+        # creative shots for a scene, reuse only the corresponding canonical
+        # base-plan shots. This keeps the production structurally complete
+        # without inventing entities or making another model call.
+        base_shots_by_scene: dict[str, list[dict]] = {}
+
+        for base_shot in (
+            base_plan.get("shots", [])
+            or []
+        ):
+            if not isinstance(base_shot, dict):
+                continue
+
+            sid = str(
+                base_shot.get("scene_id", "") or ""
+            ).strip()
+
+            if sid:
+                base_shots_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(
+                    deepcopy(base_shot)
+                )
+
+        shots_by_scene: dict[str, list[dict]] = {}
+
+        for shot in all_shots:
+            if not isinstance(shot, dict):
+                continue
+
+            sid = str(
+                shot.get("scene_id", "") or ""
+            ).strip()
+
+            if sid:
+                shots_by_scene.setdefault(
+                    sid,
+                    [],
+                ).append(shot)
+
+        repaired_shots: list[dict] = []
+
+        for scene in scenes:
+            sid = str(
+                scene.get("scene_id", "") or ""
+            ).strip()
+
+            current = list(
+                shots_by_scene.get(sid, [])
+            )[: self.SHOTS_PER_SCENE]
+
+            if len(current) < self.SHOTS_PER_SCENE:
+                for fallback in base_shots_by_scene.get(sid, []):
+                    if len(current) >= self.SHOTS_PER_SCENE:
+                        break
+
+                    candidate = deepcopy(fallback)
+
+                    # Never let fallback structural identity conflict with
+                    # the canonical scene.
+                    candidate["scene_id"] = sid
+
+                    existing_ids = {
+                        str(
+                            item.get("shot_id", "")
+                        ).strip()
+                        for item in current
+                        if isinstance(item, dict)
+                    }
+
+                    candidate_id = str(
+                        candidate.get("shot_id", "")
+                    ).strip()
+
+                    if candidate_id in existing_ids:
+                        continue
+
+                    current.append(candidate)
+
+            # Final safety gate: deterministic fallback shots must traverse
+            # the same sanitizer as Qwen-generated shots before compilation.
+            # This prevents missing cinematography fields from reaching the
+            # strict CinematicCompiler validator.
+            current = self._sanitize_shots(
+                current,
+                scene,
+                character_names,
+            )[: self.SHOTS_PER_SCENE]
+
+            if len(current) < self.SHOTS_PER_SCENE:
+                self._record_recovery(
+                    "shot_field_sanitization_incomplete",
+                    f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
+                )
+
+            repaired_shots.extend(current)
+
+        all_shots = repaired_shots
+
+        # No Qwen-shot failure is fatal here: the deterministic compiler
+        # completes production fields while preserving every valid creative
+        # shot Qwen produced.
+        # Canonicalize scene/shot IDs before the final dialogue-boundary pass.
+        # This ordering is deliberate: the boundary pass groups shots by the
+        # final canonical scene IDs, so temporary or legacy scene IDs cannot
+        # cause dialogue continuation to leak across scene boundaries.
+        self._normalize_ids(
+            scenes,
+            all_shots,
+        )
+
+        # Canonicalize continuation flags before semantic speaker filtering.
+        # The pass is alias-aware, so a valid continuation may survive when Qwen
+        # uses a safe alias (for example, a first-name form) for the same canonical
+        # character. Speaker changes are never allowed to inherit continuation.
+        # A second final pass is performed after filtering below because dialogue
+        # normalization may remove boundary events.
+        self._normalize_dialogue_continuations(
+            scenes,
+            all_shots,
+            characters,
+        )
+
+        # Canonicalize and semantically filter dialogue BEFORE compilation so
+        # CinematicCompiler can never embed invalid speech into h3_prompt.
+        self._normalize_dialogue_speakers(
+            story,
+            scenes,
+            all_shots,
+            characters,
+        )
+
+        # Dialogue speaker normalization may remove or replace events. That can
+        # change which event is actually at a shot boundary, so continuation
+        # flags must be canonicalized again against the FINAL dialogue event
+        # lists before the timeline scheduler sees the plan. Without this second
+        # pass, a removed boundary event can leave stale continuation metadata
+        # on either side of a shot boundary.
+        self._normalize_dialogue_continuations(
+            scenes,
+            all_shots,
+            characters,
+        )
+
+        # Enforce the same H3 dialogue feasibility contract used downstream by
+        # DialogueTimeline before the creative plan leaves the Director. This
+        # pass never rewrites spoken text or invents dialogue; it only performs
+        # deterministic, scene-local redistribution when two adjacent shots can
+        # legally carry the existing dialogue in a different partition. A final
+        # continuation-aware split is allowed only for an explicitly continuing
+        # final event, preserving the original spoken text exactly in order.
+        self._normalize_dialogue_h3_feasibility(
+            scenes,
+            all_shots,
+            characters,
+        )
+
+        self._validate_dialogue_speaker_contract(
+            all_shots,
+            characters,
+        )
+
+        all_shots = CinematicCompiler(
+            character_names=character_names,
+        ).compile_all(
+            scenes,
+            all_shots,
+        )
+
+        fallback_shot_count = sum(
+            1
+            for shot in all_shots
+            if "_shot_fallback_" in str(shot.get("shot_id", ""))
+        )
+        print(
+            "[DIRECTOR] creative shot coverage: "
+            f"{len(all_shots) - fallback_shot_count}/{len(all_shots)} Qwen-generated",
+            flush=True,
+        )
+        if fallback_shot_count:
+            self._record_recovery(
+                "shot_fallback_templates_used",
+                f"count={fallback_shot_count}",
+            )
+
+        for scene in scenes:
+
+            scene["shot_ids"] = [
+                shot["shot_id"]
+                for shot in all_shots
+                if shot.get("scene_id") == scene.get("scene_id")
+            ]
+
+        self._validate_shot_character_contract(
+            all_shots,
+            characters,
+        )
+        self._validate_dialogue_speaker_contract(
+            all_shots,
+            characters,
+        )
+
+        self._validate_production_quality(
+            mode=mode,
+            story=story,
+            scenes=scenes,
+            shots=all_shots,
+            characters=characters,
+        )
+
+        final_director_plan = {
+            "story": story,
+            "story_mode": mode,
+            "director_notes": director_notes,
+            "visual_language": visual_language,
+            "characters": characters,
+            # Preserve the verified canonical roster marker produced by the
+            # planner. Without this marker, the orchestrator correctly falls
+            # back to its pre-director roster, which is empty for AI_STORY
+            # before Qwen has generated the final narrative.
+            "_canonical_character_roster_verified": True,
+            "scenes": scenes,
+            "shots": all_shots,
+        }
+
+        self._print_qwen_summary("POST-GENERATION")
+
+        if not os.getenv("H3_DIRECTOR_CRITIC", "1").strip().lower() in {"1", "true", "yes", "on"}:
+            self._print_qwen_summary("FINAL")
+
+        self._save_checkpoint(
+            checkpoint_store,
+            checkpoint_session_id,
+            self._checkpoint_state(
+                checkpoint_session_id or "",
+                mode,
+                user_input,
+                base_plan,
+                final_director_plan,
+                "director_completed",
+                "director_complete",
+                [
+                    str(scene.get("scene_id", "")).strip()
+                    for scene in scenes
+                    if str(scene.get("scene_id", "")).strip()
+                ],
+                "",
+                "",
+            ),
+        )
+
+        return {
+            "enabled": True,
+            "plan": final_director_plan,
+            "director_notes": director_notes,
+        }
+
+    def _validate_story_output_contracts(
         self,
         mode: str,
+        user_input: str,
         story: str,
         source_character_names: list[str] | None = None,
     ) -> str:
+        """Validate the current story without rewriting its topology.
 
-        source_text = self._compact_story_context(
-            story,
-            DIRECTOR_STORY_CONTEXT_CHARS,
-        )
-        result = (
-            "MODE: "
-            + str(mode)
-            + "\n\nSOURCE STORY / PREMISE:\n"
-            + source_text
-        )
-        if mode == EXPAND_USER_STORY_MODE and source_character_names:
-            anchors = list(dict.fromkeys(
-                str(value).strip()
-                for value in source_character_names
-                if str(value).strip()
-            ))
-            if anchors:
-                result += (
-                    "\n\nSOURCE CHARACTER ANCHORS:\n"
-                    + ", ".join(anchors[:16])
-                    + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
-                )
-        result += (
-            "\n\nFINAL OUTPUT CHECK:\n"
-            "Before returning the story, verify internally that there are exactly six paragraphs, each 70-90 words, "
-            "the counterpart is physically present when one exists, dialogue is spoken only by present named characters, "
-            "the reversal directly changes the protagonist's decision, the choice is made by physical action, and the "
-            "sixth paragraph contains only consequence and resolution. Return only the story prose."
-        )
-        return result
+        Qwen receives the first opportunity to repair contract defects. The deterministic
+        six-paragraph topology adapter is intentionally kept outside this validator as a
+        last-resort fallback, so raw model output is authoritative before any topology
+        normalization is applied.
+        """
+        working = self._normalize_story(story)
+        errors: list[str] = []
 
-    def _sampling_for_mode(
-        self,
-        mode: str,
-    ) -> tuple[float, float]:
-
-        if mode == AI_STORY_MODE:
-            return (
-                0.65,
-                0.95,
-            )
+        try:
+            self._validate_mode_output(mode, user_input, working)
+        except RuntimeError as exc:
+            errors.append(str(exc))
 
         if mode == EXPAND_USER_STORY_MODE:
-            return (
-                0.60,
-                0.92,
+            try:
+                self._validate_expand_story_cast(
+                    user_input,
+                    working,
+                    source_character_names=source_character_names,
+                )
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        if errors:
+            raise RuntimeError(" | ".join(errors))
+        return working
+
+    def _validate_expand_story_cast(
+        self,
+        source_story: str,
+        generated_story: str,
+        source_character_names: list[str] | None = None,
+    ) -> None:
+        """Keep Expand Story identities grounded in the source narrative."""
+        planner = self._planner()
+
+        source_descriptors = planner._canonicalize_character_descriptors(
+            [
+                *planner.detect_character_descriptors(source_story),
+                *planner._explicit_source_character_names(source_story),
+            ]
+        )
+        allowed = {
+            EntityResolver.normalize(str(name).strip())
+            for name in (source_character_names or [])
+            if str(name).strip()
+        }
+        allowed.update(
+            EntityResolver.normalize(str(name).strip())
+            for name in source_descriptors
+            if str(name).strip()
+        )
+
+        # Source-grounded relations such as "Eli's father" are legitimate even
+        # when the base production roster contains only "Eli". They must be
+        # derived from the SOURCE, not accepted merely because Qwen invented them.
+        source_relations = planner._extract_relational_character_hints(
+            source_story,
+            source_descriptors,
+        )
+        allowed.update(
+            EntityResolver.normalize(str(item.get("name", "")).strip())
+            for item in source_relations
+            if item.get("strong") and str(item.get("name", "")).strip()
+        )
+
+        generated_descriptors = planner._canonicalize_character_descriptors(
+            [
+                *planner.detect_character_descriptors(generated_story),
+                *planner._explicit_source_character_names(generated_story),
+            ]
+        )
+        generated_named = {
+            EntityResolver.normalize(str(name).strip())
+            for name in generated_descriptors
+            if str(name).strip()
+            and planner._high_confidence_deterministic_character(
+                generated_story,
+                str(name).strip(),
+            )
+        }
+        extra_named = sorted(name for name in generated_named if name not in allowed)
+        if extra_named:
+            raise RuntimeError(
+                "Expand Story introduced unanchored character(s): "
+                + ", ".join(extra_named)
             )
 
-        if mode == PRESERVE_USER_STORY_MODE:
-            return (
-                0.10,
-                0.80,
+        generated_relations = planner._extract_relational_character_hints(
+            generated_story,
+            generated_descriptors,
+        )
+        extra_relations = sorted(
+            {
+                str(item.get("name", "")).strip()
+                for item in generated_relations
+                if item.get("strong")
+                and str(item.get("name", "")).strip()
+                and EntityResolver.normalize(str(item.get("name", "")).strip()) not in allowed
+            }
+        )
+        if extra_relations:
+            raise RuntimeError(
+                "Expand Story introduced unanchored relational character(s): "
+                + ", ".join(extra_relations)
             )
 
-        return (
-            DIRECTOR_TEMPERATURE,
-            DIRECTOR_TOP_P,
-        )
-
-    def _shot_sampling(
-        self,
-    ) -> tuple[float, float]:
-
-        return (
-            0.68,
-            0.92,
-        )
-
     @staticmethod
-    def _character_extraction_json_schema() -> dict:
-        return {
-            "type": "object",
-            "properties": {
-                "candidates": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "entity_type": {
-                                "type": "string",
-                                "enum": [
-                                    "PERSON",
-                                    "CHARACTER",
-                                    "SENTIENT",
-                                    "ORGANIZATION",
-                                    "LOCATION",
-                                    "FACILITY",
-                                    "OBJECT",
-                                    "ROLE",
-                                    "EVENT",
-                                    "OTHER",
-                                ],
-                            },
-                            "is_character": {"type": "boolean"},
-                            "aliases": {
-                                "type": "array",
-                                "maxItems": 8,
-                                "items": {"type": "string"},
-                            },
-                            "identity_type": {
-                                "type": "string",
-                                "enum": [
-                                    "named_character",
-                                    "relational_character",
-                                    "descriptive_character",
-                                ],
-                            },
-                            "relationship_to": {
-                                "type": "string",
-                            },
-                            "relationship": {
-                                "type": "string",
-                            },
-                        },
-                        "required": [
-                            "name",
-                            "entity_type",
-                            "is_character",
-                            "aliases",
-                            "identity_type",
-                            "relationship_to",
-                            "relationship",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["candidates"],
-            "additionalProperties": False,
-        }
+    def _coerce_story_to_six_paragraphs(text: str) -> str:
+        """Last-resort topology adapter; never changes story prose tokens."""
+        value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not value:
+            return ""
 
-    def extract_character_entities(
-        self,
-        story: str,
-        deterministic_candidates: list[str] | None = None,
-    ) -> dict:
-        """Use the loaded Qwen model as the semantic character authority.
-
-        The planner performs only bounded production-safety validation and
-        canonicalization after this call. No lower layer may call Qwen for
-        character identity or alias semantics.
-        """
-        story = str(story or "").strip()
-        if not story:
-            return {"candidates": []}
-
-        self._character_semantic_calls += 1
-        if self._character_semantic_calls > 2:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
-
-        candidate_hints = [
-            str(value).strip()
-            for value in (deterministic_candidates or [])
-            if str(value).strip()
-        ]
-
-        system_prompt = textwrap.dedent("""
-    You are a strict character/entity extraction component for a cinematic production planner.
-    Return JSON only. Analyze the supplied story and classify stable human/sentient identities that can receive
-    an identity lock. There are THREE valid character identity types:
-
-    1) named_character: a proper/named character grounded directly in the supplied story.
-    2) relational_character: a persistent unnamed character whose identity is grounded by a named story
-       character and a concrete grounded relationship, expressed as a canonical relational identity.
-    3) descriptive_character: a persistent unnamed person whose identity is grounded by a distinctive,
-       recurring description, such as "the man in the suit" or "the woman with piercing eyes".
-
-    Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
-    "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a canonical
-    identity. A descriptive_character must contain a distinguishing description beyond the bare role.
-    Reject pronouns, contractions, sentence fragments, ordinary prose tokens, UI/status words, and other
-    non-identity surfaces as character candidates.
-    If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT. Do not use EVENT,
-    LOCATION, OBJECT, ROLE, or OTHER for a character identity. If `is_character=false`, do not emit a
-    named_character, relational_character, or descriptive_character identity type.
-    Relationship surfaces such as "father", "uncle", "his father", or "the man" are semantic references,
-    not new canonical entities unless the story establishes a persistent relational/descriptive identity.
-
-    Do NOT invent a relationship or identity. For a relational_character, relationship_to MUST name a canonical
-    character actually grounded in the story, relationship MUST be one concrete family/role relation, and the
-    supplied story must contain enough evidence to support that link. Prefer a canonical name in the form
-    "<Canonical Character>'s <relationship>" and include grounded surface forms in aliases.
-    For a descriptive_character, do not invent a relationship; preserve the most specific stable descriptor
-    actually grounded in the story and include generic surface forms only as aliases.
-
-    Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
-    weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
-    A person mentioned only as a historical incident, dead/missing subject, past researcher, archival reference,
-    name on a container/document/photograph, voice on a speaker/radio/recording, remembered voice, photograph,
-    video, hologram, or other backstory/mediated-only identity is NOT a production character unless that person
-    is physically present in the story and takes meaningful on-screen action.
-    Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
-    For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
-    them as an object label, historical/backstory reference, interrogative word, or other non-present identity.
-    Do not promote a weak textual surface into a canonical character merely because it is capitalized.
-    Recover stable named, relational, and descriptive identities that the deterministic scan may not have named yet.
-    """).strip()
-
-        user_payload = json.dumps(
-            {
-                "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_candidates": candidate_hints[:32],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-        result = self._chat_json(
-            system_prompt,
-            user_payload,
-            minimum_completion=96,
-            temperature=0.05,
-            top_p=0.70,
-            call_name="character_entity_extraction",
-            max_completion=768,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
-        )
-    
-        # Raw character-extractor payloads are intentionally hidden from normal production logs.
-        # Use an explicit TRACE value only when low-level debugging is actually requested.
-        if os.getenv("H3_DEBUG_CHARACTERS", "0").strip().lower() == "trace":
-            print("\n[CHARACTER QWEN RAW RESULT]")
-            print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
-    
-        return result
-
-    def adjudicate_character_entities(
-        self,
-        story: str,
-        deterministic_candidates: list[str] | None,
-        semantic_result,
-    ) -> dict:
-        """Run the single bounded semantic adjudication pass when extraction disagrees with safety evidence."""
-        self._character_semantic_calls += 1
-        if self._character_semantic_calls > 2:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
-
-        candidates = [
-            str(value).strip()
-            for value in (deterministic_candidates or [])
-            if str(value).strip()
-        ][:12]
-        supplied = semantic_result if isinstance(semantic_result, dict) else {}
-        system_prompt = textwrap.dedent("""
-    You are the final character-identity adjudicator. Return JSON only and obey the supplied JSON schema exactly.
-    Review only the supplied candidate names and the supplied semantic extraction. Never invent an unrelated person.
-    For every supplied candidate, emit an explicit boolean `is_character` decision.
-    Use `is_character=false` for NOT_CHARACTER or UNCERTAIN; there is no separate `decision` field.
-    Use `entity_type=PERSON` and `identity_type=named_character` for named characters.
-    A true character decision must use entity_type PERSON, CHARACTER, or SENTIENT; never EVENT,
-    LOCATION, OBJECT, ROLE, or OTHER. Keep `is_character`, `entity_type`, and `identity_type` semantically
-    consistent. Pronouns, contractions, fragments, and ordinary prose tokens must remain non-characters.
-    Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
-    relationship is explicitly or unambiguously established by the story.
-    Use `identity_type=descriptive_character` for a recurring unnamed person whose identity is grounded by a
-    distinctive description (for example, `the woman with piercing eyes` or `the man in the suit`). The
-    canonical descriptive name must contain the distinguishing description; bare `man`/`woman`/`stranger`
-    are never canonical identities. If a candidate has no concrete supported relationship, do NOT force it into
-    `relational_character`; classify it as `descriptive_character` when its distinguishing description is stable.
-    Preserve grounded aliases without turning the alias itself into another canonical person.
-    For possessive pronouns, follow the established discourse owner, not the nearest noun. Do not invent
-    a relationship whose owner is not explicitly established by the story. A person appearing only through a
-    recording, speaker, radio, photograph, video, hologram, document, memory, or off-screen mention is not a
-    canonical production character unless the story also makes that person physically present and causally active.
-    A strongly story-grounded named, relational, or descriptive character must not be removed merely because a
-    generic role label was classified negatively; explicit source evidence outranks a weak generic-role negative.
-    """).strip()
-        payload = json.dumps(
-            {
-                "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_candidates": candidates,
-                "semantic_result": supplied,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return self._chat_json(
-            system_prompt,
-            payload,
-            minimum_completion=96,
-            temperature=0.05,
-            top_p=0.70,
-            call_name="character_entity_adjudication",
-            max_completion=256,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
-        )
-
-    @staticmethod
-    def _shot_json_schema(
-        min_items: int = 2,
-        max_items: int = 2,
-    ) -> dict:
-        shot_properties = {
-            "shot_id": {"type": "string"},
-            "scene_id": {"type": "string"},
-            "duration_seconds": {"type": "number"},
-            "characters": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "location": {"type": "string"},
-            "action": {"type": "string"},
-            "camera_shot": {"type": "string"},
-            "camera_movement": {"type": "string"},
-            "lens_and_depth_of_field": {"type": "string"},
-            "composition_notes": {"type": "string"},
-            "lighting": {"type": "string"},
-            "color_temperature": {"type": "string"},
-            "mood": {"type": "string"},
-            "visual_prompt": {"type": "string"},
-            "speaking_characters": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            "speech_text": {"type": "string"},
-            "dialogue_events": {
-                "type": "array",
-                "maxItems": 6,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "speaker": {"type": "string"},
-                        "text": {"type": "string"},
-                        "continues_from_previous_shot": {"type": "boolean"},
-                        "continues_to_next_shot": {"type": "boolean"},
-                    },
-                    "required": [
-                        "speaker",
-                        "text",
-                        "continues_from_previous_shot",
-                        "continues_to_next_shot",
-                    ],
-                    "additionalProperties": False,
-                },
-            },
-            "continuity_start_state": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                    "lighting": {"type": "string"},
-                    "environment": {"type": "string"},
-                    "props": {"type": "array", "items": {"type": "string"}},
-                    "camera_side": {"type": "string"},
-                    "state_description": {"type": "string"},
-                },
-                "additionalProperties": False,
-            },
-            "continuity_end_state": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string"},
-                    "lighting": {"type": "string"},
-                    "environment": {"type": "string"},
-                    "props": {"type": "array", "items": {"type": "string"}},
-                    "camera_side": {"type": "string"},
-                    "state_description": {"type": "string"},
-                },
-                "additionalProperties": False,
-            },
-            "is_scene_boundary": {"type": "boolean"},
-            "character_spatial_bboxes": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "minItems": 4,
-                    "maxItems": 4,
-                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                },
-            },
-            "character_spatial_regions": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "character_spatial_bboxes_start": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "minItems": 4,
-                    "maxItems": 4,
-                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                },
-            },
-            "character_spatial_bboxes_end": {
-                "type": "object",
-                "additionalProperties": {
-                    "type": "array",
-                    "minItems": 4,
-                    "maxItems": 4,
-                    "items": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                },
-            },
-            "character_spatial_regions_start": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-            "character_spatial_regions_end": {
-                "type": "object",
-                "additionalProperties": {"type": "string"},
-            },
-        }
-        required = list(shot_properties.keys())
-        return {
-            "type": "object",
-            "properties": {
-                "shots": {
-                    "type": "array",
-                    "minItems": min_items,
-                    "maxItems": max_items,
-                    "items": {
-                        "type": "object",
-                        "properties": shot_properties,
-                        "required": required,
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["shots"],
-            "additionalProperties": False,
-        }
-
-    @staticmethod
-    def _shot_batch_json_schema(
-        scene_count: int = 2,
-    ) -> dict:
-        shot_schema = QwenDirectorPromptMixin._shot_json_schema()[
-            "properties"
-        ]["shots"]["items"]
-        return {
-            "type": "object",
-            "properties": {
-                "scene_shots": {
-                    "type": "array",
-                    "minItems": scene_count,
-                    "maxItems": scene_count,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "scene_id": {"type": "string"},
-                            "shots": {
-                                "type": "array",
-                                "minItems": DIRECTOR_SHOTS_PER_SCENE,
-                                "maxItems": DIRECTOR_SHOTS_PER_SCENE,
-                                "items": shot_schema,
-                            },
-                        },
-                        "required": [
-                            "scene_id",
-                            "shots",
-                        ],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["scene_shots"],
-            "additionalProperties": False,
-        }
-
-    def _shot_director_batch_system(
-        self,
-    ) -> str:
-        return SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT.replace(
-            "__SHOTS_PER_SCENE__",
-            str(self.SHOTS_PER_SCENE),
-        )
-
-    @staticmethod
-    def _compact_story_context(story: str, max_chars: int = DIRECTOR_SHOT_STORY_CONTEXT_CHARS) -> str:
-        """Return a compact narrative spine for repeated shot-planning prompts."""
-        value = str(story or "").strip()
-        if len(value) <= max_chars:
-            return value
-
-        sentences = [
-            part.strip()
-            for part in re.split(r"(?<=[.!?])\s+", value)
+        paragraphs = [
+            re.sub(r"[ \t\n]+", " ", part).strip()
+            for part in re.split(r"\n\s*\n+", value)
             if part.strip()
         ]
-        if not sentences:
-            return value[:max_chars].rstrip() + "…"
+        if not paragraphs or len(paragraphs) == 6:
+            return "\n\n".join(paragraphs)
 
-        if len(sentences) == 1:
-            return value[:max_chars].rstrip() + "…"
+        original_count = len(paragraphs)
 
-        first = sentences[0]
-        last = sentences[-1]
-        if len(first) + len(last) + 1 <= max_chars:
-            return f"{first} {last}"
+        def word_count(part: str) -> int:
+            return len(re.findall(r"\b[\w'’-]+\b", part))
 
-        first_budget = max(220, int(max_chars * 0.60))
-        last_budget = max_chars - first_budget - 1
+        def sentence_spans(part: str) -> list[str]:
+            pieces = re.split(r"(?<=[.!?])\s+", part.strip())
+            return [piece.strip() for piece in pieces if piece.strip()]
+
+        # More than six paragraphs: merge the smallest adjacent interior pair.
+        # Keep opening and aftermath paragraphs distinct whenever possible.
+        while len(paragraphs) > 6:
+            n = len(paragraphs)
+            candidate_starts = list(range(1, n - 2)) or list(range(0, n - 1))
+            start = min(
+                candidate_starts,
+                key=lambda i: (
+                    word_count(paragraphs[i]) + word_count(paragraphs[i + 1]),
+                    abs(word_count(paragraphs[i]) - word_count(paragraphs[i + 1])),
+                    i,
+                ),
+            )
+            paragraphs[start] = paragraphs[start] + " " + paragraphs[start + 1]
+            del paragraphs[start + 1]
+
+        # Fewer than six paragraphs: split only at an existing sentence boundary.
+        # Prefer the longest splittable paragraph and a split that keeps both halves
+        # reasonably close to the six-scene target without rewriting any prose.
+        while len(paragraphs) < 6:
+            best = None
+            for index, paragraph in enumerate(paragraphs):
+                sentences = sentence_spans(paragraph)
+                if len(sentences) < 2:
+                    continue
+                total = word_count(paragraph)
+                for split_index in range(1, len(sentences)):
+                    left = " ".join(sentences[:split_index]).strip()
+                    right = " ".join(sentences[split_index:]).strip()
+                    left_words = word_count(left)
+                    right_words = word_count(right)
+                    if not left or not right:
+                        continue
+                    # Avoid creating a tiny final aftermath fragment.
+                    final_penalty = 60 if index == len(paragraphs) - 1 and right_words < 25 else 0
+                    target_penalty = abs(left_words - 80) + abs(right_words - 80)
+                    score = (final_penalty + target_penalty, -total, index, split_index)
+                    candidate = (score, index, split_index, left, right)
+                    if best is None or score < best[0]:
+                        best = candidate
+            if best is None:
+                break
+            _, index, split_index, left, right = best
+            paragraphs[index:index + 1] = [left, right]
+
+        result = "\n\n".join(paragraphs)
+        if len(paragraphs) != original_count:
+            print(
+                f"[DIRECTOR] story topology fallback: {original_count} -> {len(paragraphs)} paragraphs; prose preserved",
+                flush=True,
+            )
+        return result
+
+
+    @staticmethod
+    def _refresh_dialogue_summary(shot: dict) -> None:
+        events = [
+            event
+            for event in (shot.get("dialogue_events", []) or [])
+            if isinstance(event, dict)
+        ]
+        shot["dialogue_events"] = events
+        shot["speaking_characters"] = list(dict.fromkeys(
+            str(event.get("speaker", "") or "").strip()
+            for event in events
+            if str(event.get("speaker", "") or "").strip()
+        ))
+        shot["speech_text"] = " ".join(
+            str(event.get("text", "") or "").strip()
+            for event in events
+            if str(event.get("text", "") or "").strip()
+        )
+
+    @staticmethod
+    def _dialogue_scene_fits_h3(
+        scene_shots: list[dict],
+        characters: list[dict],
+    ) -> tuple[bool, str]:
+        """Check dialogue feasibility using the exact downstream scheduler."""
+        trial_plan = {"shots": deepcopy(scene_shots)}
+        try:
+            with redirect_stdout(io.StringIO()):
+                DialogueTimeline(
+                    [dict(character) for character in characters if isinstance(character, dict)]
+                ).apply_to_plan(trial_plan)
+        except ValueError as exc:
+            detail = str(exc)
+            # Treat only scheduler errors that specifically mean the dialogue
+            # cannot fit the H3 timing contract as a failed feasibility trial.
+            # Other ValueErrors (empty dialogue, invalid speaker binding,
+            # continuation mismatch, overlap, etc.) are real source/contract
+            # defects and must propagate instead of being misclassified as a
+            # candidate partition that simply does not fit.
+            feasibility_markers = (
+                "maximum H3 runtime",
+                "maximum schedulable H3 runtime",
+                "maximum legal duration",
+                "H3-effective shot boundary",
+                "dialogue does not fit shot duration",
+                "dialogue timing exceeds",
+                "dialogue exceeds H3-effective shot duration",
+            )
+            if any(marker in detail for marker in feasibility_markers):
+                return False, detail
+            raise
+        return True, ""
+
+    def _normalize_dialogue_h3_feasibility(
+        self,
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Make generated dialogue satisfy the exact H3 timing contract.
+
+        Dialogue is a semantic contract, while H3 duration is a hard production
+        contract. This pass therefore searches only over existing dialogue events
+        and existing shot boundaries. It never invents, truncates, paraphrases, or
+        reorders spoken content, and it never creates or removes creative shots.
+
+        The search is scene-global rather than greedy pairwise: every candidate
+        repartition is validated against the exact downstream ``DialogueTimeline``
+        for the complete scene. Candidates are ordered by boundary movement so the
+        first successful solution is the smallest deterministic change to Qwen's
+        original editorial partition. Only when no intact-event repartition works
+        is an explicitly continuing final event eligible for a whitespace split.
+        """
+        if not shots:
+            return
+
+        shots_by_scene: dict[str, list[dict]] = {}
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            scene_id = str(shot.get("scene_id", "") or "").strip()
+            if scene_id:
+                shots_by_scene.setdefault(scene_id, []).append(shot)
+
+        scene_lookup = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in scenes
+            if isinstance(scene, dict) and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        for scene_id, scene_shots in shots_by_scene.items():
+            if len(scene_shots) < 2:
+                continue
+
+            for item in scene_shots:
+                self._refresh_dialogue_summary(item)
+
+            fits, detail = self._dialogue_scene_fits_h3(scene_shots, characters)
+            if fits:
+                continue
+
+            original_events: list[dict] = []
+            original_boundaries: list[int] = []
+            running = 0
+            for shot in scene_shots[:-1]:
+                events = [
+                    dict(event)
+                    for event in (shot.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                ]
+                original_events.extend(events)
+                running += len(events)
+                original_boundaries.append(running)
+            original_events.extend(
+                dict(event)
+                for event in (scene_shots[-1].get("dialogue_events", []) or [])
+                if isinstance(event, dict)
+            )
+
+            if not original_events:
+                # The scheduler rejected the scene despite there being no dialogue
+                # events. That is not a repartition problem and must propagate.
+                raise RuntimeError(
+                    "Director dialogue feasibility failed for a dialogue-free scene: "
+                    f"scene={scene_id} detail={detail or 'unknown scheduler failure'}"
+                )
+
+            shot_count = len(scene_shots)
+            event_count = len(original_events)
+
+            # Keep the exact scene-global partition search bounded. The current
+            # production contract uses two shots per scene; this guard prevents a
+            # future shot-count/configuration change from turning the recursive
+            # enumeration into an unbounded combinatorial search.
+            if shot_count > 4 or event_count > 12:
+                raise RuntimeError(
+                    "Dialogue H3 feasibility search exceeds the bounded partition "
+                    f"contract: scene={scene_id} shots={shot_count} events={event_count}."
+                )
+
+            # Enumerate all monotonic cuts through the original ordered event list.
+            # For the project's normal 2-shot scenes this is simply every possible
+            # cut. More generally this is an exact scene-global search over all
+            # event-to-shot partitions, with no duplicated timing model.
+            partition_candidates: list[tuple[int, tuple[int, ...]]] = []
+
+            def _enumerate_cuts(
+                boundary_index: int,
+                previous_cut: int,
+                cuts: list[int],
+            ) -> None:
+                if boundary_index == shot_count - 1:
+                    cost = sum(
+                        abs(cut - original)
+                        for cut, original in zip(cuts, original_boundaries)
+                    )
+                    partition_candidates.append((cost, tuple(cuts)))
+                    return
+                for cut in range(previous_cut, event_count + 1):
+                    cuts.append(cut)
+                    _enumerate_cuts(boundary_index + 1, cut, cuts)
+                    cuts.pop()
+
+            _enumerate_cuts(0, 0, [])
+            partition_candidates.sort(key=lambda item: (item[0], item[1]))
+
+            repaired = False
+            failure_detail = detail
+            original_counts = [
+                len(shot.get("dialogue_events", []) or [])
+                for shot in scene_shots
+            ]
+
+            for _, cuts in partition_candidates:
+                candidate_shots = deepcopy(scene_shots)
+                starts = [0, *cuts]
+                ends = [*cuts, event_count]
+
+                for index, (start, end) in enumerate(zip(starts, ends)):
+                    candidate_shots[index]["dialogue_events"] = deepcopy(
+                        original_events[start:end]
+                    )
+
+                for item in candidate_shots:
+                    self._refresh_dialogue_summary(item)
+
+                temp_scene = deepcopy(
+                    scene_lookup.get(scene_id, {"scene_id": scene_id})
+                )
+                self._normalize_dialogue_continuations(
+                    [temp_scene],
+                    candidate_shots,
+                    characters,
+                )
+                for item in candidate_shots:
+                    self._refresh_dialogue_summary(item)
+
+                fits, candidate_detail = self._dialogue_scene_fits_h3(
+                    candidate_shots,
+                    characters,
+                )
+                if not fits:
+                    failure_detail = candidate_detail or failure_detail
+                    continue
+
+                for index, shot in enumerate(scene_shots):
+                    shot["dialogue_events"] = deepcopy(
+                        candidate_shots[index]["dialogue_events"]
+                    )
+                    self._refresh_dialogue_summary(shot)
+
+                self._normalize_dialogue_continuations(
+                    [scene_lookup.get(scene_id, {"scene_id": scene_id})],
+                    scene_shots,
+                    characters,
+                )
+                for item in scene_shots:
+                    self._refresh_dialogue_summary(item)
+
+                final_counts = [
+                    len(shot.get("dialogue_events", []) or [])
+                    for shot in scene_shots
+                ]
+                self._record_recovery(
+                    "dialogue_h3_repartition",
+                    f"scene={scene_id} original_counts={original_counts} "
+                    f"final_counts={final_counts} cuts={cuts}",
+                )
+                repaired = True
+                break
+
+            if repaired:
+                # Revalidate the final mutated scene using the exact downstream
+                # scheduler. This is an explicit invariant, not merely a property
+                # inferred from the candidate that happened to succeed.
+                final_fits, final_detail = self._dialogue_scene_fits_h3(
+                    scene_shots,
+                    characters,
+                )
+                if not final_fits:
+                    raise RuntimeError(
+                        "Director dialogue repair produced a scene that no longer "
+                        "satisfies the H3 timing contract: "
+                        f"scene={scene_id} detail={final_detail or failure_detail}"
+                    )
+                continue
+
+            # Last resort: split only an explicitly continuing event. Search all
+            # eligible continuation events in scene order and all whitespace cuts,
+            # while still requiring the COMPLETE scene to pass the real scheduler.
+            flattened_positions: list[tuple[int, int, dict]] = []
+            for shot_index, shot in enumerate(scene_shots):
+                for event_index, event in enumerate(
+                    shot.get("dialogue_events", []) or []
+                ):
+                    if isinstance(event, dict):
+                        flattened_positions.append((shot_index, event_index, event))
+
+            for source_shot_index, source_event_index, source_event in flattened_positions:
+                if not bool(source_event.get("continues_to_next_shot", False)):
+                    continue
+                source_text = str(source_event.get("text", "") or "")
+                if not source_text.strip():
+                    continue
+                if any(
+                    source_event.get(key) not in (None, "")
+                    for key in (
+                        "expected_duration_seconds",
+                        "duration_seconds",
+                        "expected_duration_ms",
+                    )
+                ):
+                    continue
+
+                split_positions = [
+                    index
+                    for index, char in enumerate(source_text)
+                    if char == " " and 0 < index < len(source_text) - 1
+                ]
+
+                for split_index in reversed(split_positions):
+                    first_text = source_text[:split_index]
+                    second_text = source_text[split_index + 1:]
+                    if not first_text.strip() or not second_text.strip():
+                        continue
+
+                    first_part = dict(source_event)
+                    second_part = dict(source_event)
+                    first_part["text"] = first_text
+                    second_part["text"] = second_text
+                    second_part["continues_from_previous_shot"] = True
+                    second_part["continues_to_next_shot"] = False
+
+                    candidate_shots = deepcopy(scene_shots)
+                    source_events = candidate_shots[source_shot_index].get(
+                        "dialogue_events", []
+                    ) or []
+                    candidate_shots[source_shot_index]["dialogue_events"] = (
+                        deepcopy(source_events[:source_event_index])
+                        + [first_part]
+                        + deepcopy(source_events[source_event_index + 1:])
+                    )
+
+                    # The split must cross an existing adjacent shot boundary. A
+                    # continuation event is therefore only eligible when its source
+                    # shot has a real next shot in the same scene.
+                    if source_shot_index + 1 >= shot_count:
+                        continue
+                    target_events = candidate_shots[source_shot_index + 1].get(
+                        "dialogue_events", []
+                    ) or []
+                    candidate_shots[source_shot_index + 1]["dialogue_events"] = (
+                        [second_part] + deepcopy(target_events)
+                    )
+
+                    for item in candidate_shots:
+                        self._refresh_dialogue_summary(item)
+                    temp_scene = deepcopy(
+                        scene_lookup.get(scene_id, {"scene_id": scene_id})
+                    )
+                    self._normalize_dialogue_continuations(
+                        [temp_scene],
+                        candidate_shots,
+                        characters,
+                    )
+                    for item in candidate_shots:
+                        self._refresh_dialogue_summary(item)
+
+                    fits, candidate_detail = self._dialogue_scene_fits_h3(
+                        candidate_shots,
+                        characters,
+                    )
+                    if not fits:
+                        failure_detail = candidate_detail or failure_detail
+                        continue
+
+                    for index, shot in enumerate(scene_shots):
+                        shot["dialogue_events"] = deepcopy(
+                            candidate_shots[index]["dialogue_events"]
+                        )
+                        self._refresh_dialogue_summary(shot)
+                    self._normalize_dialogue_continuations(
+                        [scene_lookup.get(scene_id, {"scene_id": scene_id})],
+                        scene_shots,
+                        characters,
+                    )
+                    for item in scene_shots:
+                        self._refresh_dialogue_summary(item)
+
+                    final_fits, final_detail = self._dialogue_scene_fits_h3(
+                        scene_shots,
+                        characters,
+                    )
+                    if not final_fits:
+                        raise RuntimeError(
+                            "Director dialogue continuation split produced a scene "
+                            "that no longer satisfies the H3 timing contract: "
+                            f"scene={scene_id} detail={final_detail or failure_detail}"
+                        )
+
+                    self._record_recovery(
+                        "dialogue_h3_continuation_split",
+                        f"scene={scene_id} shot={scene_shots[source_shot_index].get('shot_id','')} "
+                        f"source_chars={len(source_text)} split_at={split_index}",
+                    )
+                    repaired = True
+                    break
+
+                if repaired:
+                    break
+
+            if not repaired:
+                raise RuntimeError(
+                    "Director dialogue cannot satisfy the H3 timing contract without "
+                    "dropping, truncating, or reordering spoken content: "
+                    f"scene={scene_id} detail={failure_detail or 'no legal scene-global repartition found'}"
+                )
+
+    def _normalize_dialogue_continuations(
+        self,
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict] | None = None,
+    ) -> None:
+        """Canonicalize dialogue continuation flags against canonical speakers.
+
+        Speaker/entity normalization can remove or canonicalize dialogue events.
+        This pass therefore runs both before and after semantic speaker filtering.
+        A continuation edge is valid only when the final speaker of the previous
+        shot and the first speaker of the current shot resolve to the same
+        canonical character. A speaker change always starts a new dialogue turn.
+        """
+        alias_map = EntityResolver.build_character_alias_map(characters or [])
+
+        def _speaker_key(event: dict) -> str:
+            raw = str(
+                event.get("speaker", event.get("speaker_name", "")) or ""
+            ).strip()
+            normalized = EntityResolver.normalize(raw)
+            return alias_map.get(normalized, normalized)
+        shots_by_scene_order: dict[str, list[dict]] = {}
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            scene_id = str(shot.get("scene_id", "") or "").strip()
+            if scene_id:
+                shots_by_scene_order.setdefault(scene_id, []).append(shot)
+
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            scene_shots = shots_by_scene_order.get(scene_id, [])
+            previous_events: list[dict] | None = None
+
+            for position, shot in enumerate(scene_shots):
+                events = shot.get("dialogue_events", [])
+                if not isinstance(events, list):
+                    events = []
+                    shot["dialogue_events"] = events
+
+                events[:] = [event for event in events if isinstance(event, dict)]
+
+                if not events:
+                    if previous_events:
+                        previous_events[-1]["continues_to_next_shot"] = False
+                    previous_events = None
+                    continue
+
+                for event in events:
+                    event["continues_from_previous_shot"] = bool(
+                        event.get("continues_from_previous_shot", False)
+                    )
+                    event["continues_to_next_shot"] = bool(
+                        event.get("continues_to_next_shot", False)
+                    )
+
+                if position == 0 or previous_events is None:
+                    events[0]["continues_from_previous_shot"] = False
+                else:
+                    previous_flag = bool(
+                        previous_events[-1].get("continues_to_next_shot", False)
+                    )
+                    current_flag = bool(
+                        events[0].get("continues_from_previous_shot", False)
+                    )
+                    continuation_requested = previous_flag or current_flag
+                    same_speaker = (
+                        bool(_speaker_key(previous_events[-1]))
+                        and bool(_speaker_key(events[0]))
+                        and _speaker_key(previous_events[-1]) == _speaker_key(events[0])
+                    )
+                    continuation = continuation_requested and same_speaker
+                    if continuation_requested and not same_speaker:
+                        self._record_recovery(
+                            "dialogue_continuation_speaker_boundary_reset",
+                            (
+                                f"previous={_speaker_key(previous_events[-1])!r} "
+                                f"current={_speaker_key(events[0])!r}"
+                            ),
+                        )
+                    previous_events[-1]["continues_to_next_shot"] = continuation
+                    events[0]["continues_from_previous_shot"] = continuation
+
+                for event in events[1:]:
+                    event["continues_from_previous_shot"] = False
+
+                # Only the final surviving event in a shot may carry the
+                # continuation-to-next-shot flag. Clear any stale flags on
+                # earlier events before storing the shot as the boundary state.
+                for event in events[:-1]:
+                    event["continues_to_next_shot"] = False
+
+                previous_events = events
+
+            # A scene boundary is a hard semantic boundary for dialogue. The
+            # final event of the final shot in this scene can never continue
+            # into another scene, even if Qwen emitted a stale continuation
+            # flag or an earlier reconciliation left one behind.
+            if previous_events:
+                for event in previous_events:
+                    event["continues_to_next_shot"] = False
+
+    @staticmethod
+    def _normalize_dialogue_text(value: str) -> str:
         return (
-            first[:first_budget].rstrip()
-            + " "
-            + last[:max(120, last_budget)].rstrip()
-        ).strip()[:max_chars].rstrip() + "…"
+            re.sub(
+                r"\s+",
+                " ",
+                str(value or "").strip().strip('"“”‘’'),
+            )
+            .replace("’", "'")
+            .replace("‘", "'")
+            .replace("—", "-")
+            .replace("–", "-")
+            .lower()
+        )
 
-    def _shot_director_batch_user(
+    _SPEECH_TAG_VERBS = (
+        "said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+        "called|calls|muttered|mutters|murmured|murmurs|warned|warns|snapped|snaps|"
+        "answered|answers|cried|cries|yelled|yells|demanded|demands|breathed|added|"
+        "adds|continued|insisted|insists|pleaded|pleads|growled|growls|hissed|hisses|"
+        "gasped|gasps|stammered|stammers|announced|announces|ordered|orders"
+    )
+    _SPEECH_TAG_NAME = r"([A-Z][A-Za-z0-9'\u2019_-]*(?:\s+[A-Z][A-Za-z0-9'\u2019_-]*){0,2})"
+
+    @classmethod
+    def _speech_tag_speakers(cls, before: str, after: str) -> set[str]:
+        """Return the speaker named by an adjacent speech tag, or an empty set.
+
+        Recognises only unambiguous forms:
+            "...," Mara said.   "..." said Mara.   Mara said, "..."
+        Pronouns, articles and lowercase subjects ("the terminal said") never
+        produce a speaker, so machine voices and unresolved tags stay empty.
+        """
+        verbs = cls._SPEECH_TAG_VERBS
+        name = cls._SPEECH_TAG_NAME
+        blocked = set(EntityResolver.PRONOUNS) | {"the", "a", "an", "then", "and", "but"}
+        found: list[str] = []
+        patterns = (
+            (after, rf"^\s*[,;]?\s*(?:\u2014|-)?\s*{name}\s+(?:{verbs})\b"),
+            (after, rf"^\s*[,;]?\s*(?:{verbs})\s+{name}\b"),
+            (before, rf"{name}\s+(?:{verbs})(?:\s+[a-z]+ly)?\s*[,:]?\s*$"),
+        )
+        for window, pattern in patterns:
+            match = re.search(pattern, window)
+            if not match:
+                continue
+            candidate = match.group(1).strip()
+            first = candidate.split()[0].lower()
+            if first in blocked:
+                continue
+            found.append(EntityResolver.normalize(candidate))
+            break
+        return set(found)
+
+    @classmethod
+    def _extract_story_spoken_segments(cls, story: str) -> list[dict]:
+        """Extract ordered source-speech segments with exact occurrence boundaries.
+
+        Each quoted/scripted utterance is a finite source-text budget. The Director may
+        split one utterance across adjacent shots, but it must not duplicate an utterance
+        or turn narrative prose into speech.
+        """
+        text = str(story or "")
+        segments: list[dict] = []
+        quote_spans: list[tuple[int, int]] = []
+
+        quote_pattern = re.compile(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        screen_context = re.compile(
+            r"\b(?:on|from|across|over|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b|"
+            r"\b(?:screen|monitor|display|terminal)\b.{0,80}\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears|message|text)\b|"
+            r"\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears)\b.{0,80}\b(?:screen|monitor|display|terminal)\b|"
+            r"\b(?:message|text|label|caption)\b.{0,80}\b(?:on|over|across|inside|appeared|displayed|flashed|read|shows|shown)\b.{0,40}\b(?:screen|monitor|display|terminal)\b",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+
+        for match in quote_pattern.finditer(text):
+            value = next((part for part in match.groups() if part), "")
+            normalized = cls._normalize_dialogue_text(value)
+            if not normalized:
+                continue
+
+            prefix_window = text[max(0, match.start() - 180):match.start()]
+            prefix = re.split(r"[.!?][\"”’]?\s+", prefix_window)[-1]
+            suffix_window = text[match.end():match.end() + 100]
+            suffix = re.split(r"[.!?]\s+", suffix_window, maxsplit=1)[0]
+            suffix_context = re.sub(r"^[,;:\s]+", "", suffix)
+
+            if screen_context.search(prefix) or re.search(
+                r"^(?:is|was|were|appears|appeared|appearing|shows|showed|display|displayed|displays|displaying|reads|read|flashed|flashes|shown|showing)\b.{0,80}\b(?:on|in|across|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b",
+                suffix_context,
+                flags=re.IGNORECASE | re.DOTALL,
+            ):
+                continue
+
+            segments.append({
+                "text": normalized,
+                "source_speakers": set(),
+                "tag_speakers": cls._speech_tag_speakers(
+                    text[max(0, match.start() - 90):match.start()],
+                    text[match.end():match.end() + 90],
+                ),
+                "start": match.start(),
+                "end": match.end(),
+            })
+            quote_spans.append((match.start(), match.end()))
+
+        label_pattern = re.compile(
+            r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
+        )
+
+        for match in label_pattern.finditer(text):
+            if any(
+                start <= match.start() < end
+                or start < match.end() <= end
+                for start, end in quote_spans
+            ):
+                continue
+
+            speaker = match.group(1).strip()
+            spoken = match.group(2).strip()
+            normalized = cls._normalize_dialogue_text(spoken)
+            if not speaker or not normalized:
+                continue
+
+            segments.append({
+                "text": normalized,
+                "source_speakers": {EntityResolver.normalize(speaker)},
+                "start": match.start(),
+                "end": match.end(),
+            })
+
+        segments.sort(key=lambda item: (item["start"], item["end"]))
+        for segment in segments:
+            segment.pop("start", None)
+            segment.pop("end", None)
+        return segments
+
+    @classmethod
+    def _extract_story_spoken_texts(cls, story: str) -> dict[str, set[str]]:
+        """Return source dialogue anchors for compatibility with existing callers."""
+        anchors: dict[str, set[str]] = {}
+        for segment in cls._extract_story_spoken_segments(story):
+            anchor = str(segment.get("text", "") or "").strip()
+            if not anchor:
+                continue
+            anchors.setdefault(anchor, set()).update(
+                str(value).strip()
+                for value in (segment.get("source_speakers", set()) or set())
+                if str(value).strip()
+            )
+        return anchors
+
+    def _normalize_dialogue_speakers(
         self,
         story: str,
-        characters: list[dict],
         scenes: list[dict],
-        visual_language: dict | None = None,
-        reference_visual_context: dict[str, dict] | None = None,
-    ) -> str:
-        compact_characters = []
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Canonicalize speakers and remove dialogue not anchored in explicit speech."""
+        allowed_names = [
+            str(value.get("name", "")).strip()
+            for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
+        ]
+        if not allowed_names:
+            return
 
-        for item in characters:
-            if not isinstance(item, dict):
+        scene_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in (scenes or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        canonical_by_norm = {name.lower(): name for name in allowed_names}
+        aliases = EntityResolver.build_character_alias_map(characters)
+        spoken_segments = self._extract_story_spoken_segments(story)
+        segment_progress = [0 for _ in spoken_segments]
+
+        last_tag_speakers: set[str] = set()
+
+        def _consume_source_dialogue(normalized_text: str):
+            last_tag_speakers.clear()
+            if not normalized_text:
+                return None
+
+            def _match_key(value: str) -> str:
+                return re.sub(r"[.,!?;:]+$", "", str(value or "").strip())
+
+            candidate_key = _match_key(normalized_text)
+            if not candidate_key:
+                return None
+
+            # Prefer the earliest source utterance whose remaining text can carry
+            # this exact contiguous event. This gives each source occurrence a
+            # finite budget and supports safe splitting of long utterances while
+            # tolerating a terminal-punctuation difference from Qwen.
+            for index, segment in enumerate(spoken_segments):
+                source_text = str(segment.get("text", "") or "")
+                progress = segment_progress[index]
+                remaining = source_text[progress:]
+                if not remaining:
+                    continue
+
+                remaining_key = _match_key(remaining)
+                if candidate_key == remaining_key:
+                    segment_progress[index] = min(
+                        len(source_text),
+                        progress + len(normalized_text),
+                    )
+                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
+                    return set(segment.get("source_speakers", set()) or set())
+
+                if remaining_key.startswith(candidate_key):
+                    segment_progress[index] = min(
+                        len(source_text),
+                        progress + len(normalized_text),
+                    )
+                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
+                    return set(segment.get("source_speakers", set()) or set())
+
+            return None
+
+        def _resolve(value: str) -> str | None:
+            normalized = EntityResolver.normalize(value)
+            if normalized in canonical_by_norm:
+                return canonical_by_norm[normalized]
+            resolved = aliases.get(normalized)
+            if resolved and resolved in canonical_by_norm:
+                return canonical_by_norm[resolved]
+            stripped = EntityResolver.strip_honorific(normalized)
+            resolved = aliases.get(stripped)
+            if resolved and resolved in canonical_by_norm:
+                return canonical_by_norm[resolved]
+            contextual = EntityResolver.contextual_generic_alias(
+                value,
+                characters,
+                bound_names=None,
+                story=story,
+            )
+            if contextual and contextual.lower() in canonical_by_norm:
+                return canonical_by_norm[contextual.lower()]
+            return None
+
+        for shot in shots:
+            if not isinstance(shot, dict):
                 continue
 
-            name = str(
-                item.get("name", "") or ""
+            shot_id = str(shot.get("shot_id", "")).strip()
+            bound = {
+                canonical.lower()
+                for canonical in (
+                    _resolve(str(name))
+                    for name in (shot.get("characters", []) or [])
+                )
+                if canonical
+            }
+
+            raw_events = shot.get("dialogue_events", [])
+            events = raw_events if isinstance(raw_events, list) else []
+            repaired_events = []
+
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                speaker = str(event.get("speaker", "") or "").strip()
+                text = str(event.get("text", "") or "").strip()
+                if not speaker or not text:
+                    continue
+
+                # When the source story contains explicit speech anchors, only
+                # anchored speech can become audio. Substring matching supports
+                # a quoted line split into multiple valid events while still
+                # rejecting whole narrative/action sentences.
+                normalized_text = self._normalize_dialogue_text(text)
+                if not spoken_segments:
+                    continue
+
+                matched_source_speakers = _consume_source_dialogue(normalized_text)
+                if matched_source_speakers is None:
+                    # Qwen sometimes emits a narrative sentence or repeats a source
+                    # line in multiple shots. Neither is valid audio. Drop it before
+                    # any timing/compilation stage can treat it as speech.
+                    continue
+
+                canonical = _resolve(speaker)
+                if canonical is None:
+                    contextual = EntityResolver.contextual_generic_alias(
+                        speaker,
+                        characters,
+                        bound_names=bound,
+                        story=story,
+                    )
+                    if contextual and contextual.lower() in canonical_by_norm:
+                        canonical = canonical_by_norm[contextual.lower()]
+                if canonical is None:
+                    # Explicit source dialogue is a protected semantic contract.
+                    # Never silently delete a real spoken line because Qwen used
+                    # an unresolved speaker surface. A later stage cannot recover
+                    # an event that is discarded here, so fail closed with the
+                    # exact shot/speaker context instead.
+                    self._record_recovery(
+                        "dialogue_speaker_unresolved",
+                        f"shot={shot_id} speaker={speaker!r}",
+                    )
+                    raise RuntimeError(
+                        "Explicit dialogue speaker could not be canonically resolved: "
+                        f"shot={shot_id} speaker={speaker!r}"
+                    )
+
+                explicit_source_canonicals = {
+                    resolved.lower()
+                    for source_speaker in matched_source_speakers
+                    if (resolved := _resolve(source_speaker)) is not None
+                }
+                if matched_source_speakers and not explicit_source_canonicals:
+                    # Explicit source attribution is authoritative enough to reject
+                    # an unsafe remap, but not to justify deleting the spoken line.
+                    # Stop production so the caller can surface the exact semantic
+                    # conflict instead of silently losing dialogue.
+                    self._record_recovery(
+                        "dialogue_source_speaker_unresolved",
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}",
+                    )
+                    raise RuntimeError(
+                        "Explicit dialogue source speaker could not be resolved: "
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}"
+                    )
+
+                if not explicit_source_canonicals and last_tag_speakers:
+                    # The prose names who spoke ("..." Mara said). That tag is
+                    # stronger than the shot model's guess, so correct the
+                    # speaker instead of trusting or failing on it.
+                    tagged = {
+                        resolved.lower()
+                        for tag in last_tag_speakers
+                        if (resolved := _resolve(tag)) is not None
+                    }
+                    if len(tagged) == 1 and canonical.lower() not in tagged:
+                        remapped = canonical_by_norm[next(iter(tagged))]
+                        self._record_recovery(
+                            "dialogue_speaker_tag_remap",
+                            f"shot={shot_id} from={canonical!r} to={remapped!r}",
+                        )
+                        canonical = remapped
+
+                normalized_speaker = canonical.lower()
+                if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
+                    # The source gives explicit speaker provenance that conflicts
+                    # with Qwen's attribution. Never silently delete or remap the
+                    # line; fail closed so the semantic conflict is visible.
+                    self._record_recovery(
+                        "dialogue_speaker_source_mismatch",
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}",
+                    )
+                    raise RuntimeError(
+                        "Explicit dialogue speaker conflicts with source attribution: "
+                        f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}"
+                    )
+
+                if bound and normalized_speaker not in bound:
+                    # The speaker already resolved to a canonical identity. If Qwen
+                    # omitted that identity from the shot binding, restore the existing
+                    # canonical entity deterministically rather than deleting dialogue.
+                    shot_characters = shot.get("characters")
+                    if not isinstance(shot_characters, list):
+                        shot_characters = list(shot_characters or [])
+                        shot["characters"] = shot_characters
+                    existing_norm = {
+                        EntityResolver.normalize(str(value or ""))
+                        for value in shot_characters
+                        if str(value or "").strip()
+                    }
+                    if normalized_speaker not in existing_norm:
+                        shot_characters.append(canonical)
+                    bound.add(normalized_speaker)
+
+                    scene_id = str(shot.get("scene_id", "") or "").strip()
+                    scene = scene_by_id.get(scene_id)
+                    if scene is not None:
+                        scene_characters = scene.get("characters", [])
+                        if not isinstance(scene_characters, list):
+                            scene_characters = list(scene_characters or [])
+                            scene["characters"] = scene_characters
+                        scene_norms = {
+                            EntityResolver.normalize(str(value or ""))
+                            for value in scene_characters
+                            if str(value or "").strip()
+                        }
+                        if normalized_speaker not in scene_norms:
+                            scene_characters.append(canonical)
+
+                repaired = dict(event)
+                repaired["speaker"] = canonical
+                repaired_events.append(repaired)
+
+            shot["dialogue_events"] = repaired_events
+            shot["speaking_characters"] = list(dict.fromkeys(
+                str(event["speaker"]).strip()
+                for event in repaired_events
+                if str(event.get("speaker", "")).strip()
+            ))
+            shot["speech_text"] = " ".join(
+                str(event.get("text", "")).strip()
+                for event in repaired_events
+                if str(event.get("text", "")).strip()
+            )
+
+    def _validate_dialogue_speaker_contract(
+        self,
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Pure post-normalization dialogue contract validation."""
+        allowed_names = {
+            str(value.get("name", "")).strip().lower()
+            for value in characters
+            if isinstance(value, dict)
+            and str(value.get("name", "")).strip()
+        }
+        if not allowed_names:
+            return
+
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            shot_id = str(shot.get("shot_id", "")).strip()
+            bound = {
+                str(name).strip().lower()
+                for name in (shot.get("characters", []) or [])
+                if str(name).strip()
+            }
+            events = shot.get("dialogue_events", [])
+            if not isinstance(events, list):
+                raise RuntimeError(
+                    f"Shot {shot_id} dialogue_events must be a list."
+                )
+            expected_speakers = []
+            for event in events:
+                if not isinstance(event, dict):
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains a non-object dialogue event."
+                    )
+                speaker = str(event.get("speaker", "") or "").strip().lower()
+                text = str(event.get("text", "") or "").strip()
+                if not speaker or not text:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains an empty dialogue speaker/text."
+                    )
+                if speaker not in allowed_names:
+                    raise RuntimeError(
+                        f"Shot {shot_id} contains unknown dialogue speaker '{event.get('speaker', '')}'."
+                    )
+                if bound and speaker not in bound:
+                    raise RuntimeError(
+                        f"Shot {shot_id} has dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
+                    )
+                expected_speakers.append(event["speaker"])
+
+            actual_speakers = [
+                str(name).strip()
+                for name in (shot.get("speaking_characters", []) or [])
+                if str(name).strip()
+            ]
+            if actual_speakers != list(dict.fromkeys(expected_speakers)):
+                raise RuntimeError(
+                    f"Shot {shot_id} speaking_characters is inconsistent with dialogue_events."
+                )
+
+            expected_speech_text = " ".join(
+                str(event.get("text", "")).strip()
+                for event in events
+                if str(event.get("text", "")).strip()
+            )
+            if str(shot.get("speech_text", "") or "").strip() != expected_speech_text:
+                raise RuntimeError(
+                    f"Shot {shot_id} speech_text is inconsistent with dialogue_events."
+                )
+
+    @staticmethod
+    def _shot_batch_completion_budget(scene_count: int) -> int:
+        """Return the completion-token cap for one batched shot request.
+
+        SHOTS_PER_SCENE is a topology constraint, not a token budget.
+        Never use it as a completion-token cap.
+        """
+        count = max(1, int(scene_count))
+        return min(
+            int(DIRECTOR_MAX_TOKENS),
+            max(320, 1400 * count),
+        )
+
+    @_with_faulthandler_watchdog
+    def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
+        """Run an optional read-only cinematic critique.
+
+        The critic may identify problems but never mutates the canonical plan.
+        """
+        system_prompt = """
+    You audit a film production plan against its story. Check each item and report only defects you
+    can point to.
+
+    CHECKS
+    1. ROSTER: enforce the roster in both directions. Every name in a scene or shot `characters` list
+       must appear in `roster`, and every roster entry must correspond to an actual active person/character
+       established by the story (not merely a remembered, missing, recorded, document-only, machine, or object entity).
+    2. FIDELITY: each shot `action` and `visual_prompt` must depict events that happen in the story
+       for that scene. Report invented events, objects, or people.
+    3. MATCH: `visual_prompt` must describe the same moment as `action`. Report contradictions.
+    4. CONTINUITY: lighting, location, and who is present must not change between consecutive shots
+       of one scene without a story reason.
+    5. FRAMING: shots of one scene must not repeat the same camera_shot and camera_movement.
+
+    OUTPUT RULES
+    - overall_score is 1 (unusable) to 10 (no defects).
+    - status is "review" if there is at least one finding, otherwise "pass".
+    - Every finding names a shot_id or scene_id and says what is wrong in under 25 words.
+    - Add a shot_patch only for a defect in checks 2, 3, or 5, rewriting only that field in the same
+      style and length. Never change ids, characters, timing, or continuity. If no concrete defect
+      exists, return empty arrays.
+    """.strip()
+        def _slim_shot(shot: dict) -> dict:
+            return {
+                "shot_id": str(shot.get("shot_id", "") or ""),
+                "scene_id": str(shot.get("scene_id", "") or ""),
+                "camera_shot": str(shot.get("camera_shot", "") or ""),
+                "camera_movement": str(shot.get("camera_movement", "") or ""),
+                "lens_and_depth_of_field": str(shot.get("lens_and_depth_of_field", "") or ""),
+                "lighting": str(shot.get("lighting", "") or ""),
+                "mood": str(shot.get("mood", "") or ""),
+                "characters": shot.get("characters", []) or [],
+                "visual_prompt": str(shot.get("visual_prompt", "") or "")[:400],
+                "action": str(shot.get("action", "") or "")[:300],
+                "dialogue_events": [
+                    {
+                        "speaker": str(event.get("speaker", "") or ""),
+                        "text": str(event.get("text", "") or "")[:240],
+                    }
+                    for event in (shot.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                ][:4],
+            }
+
+        def _slim_scene(scene: dict) -> dict:
+            return {
+                "scene_id": str(scene.get("scene_id", "") or ""),
+                "title": str(scene.get("title", "") or ""),
+                "description": str(scene.get("description", "") or "")[:500],
+                "scene_objective": str(scene.get("scene_objective", "") or "")[:300],
+                "location": str(scene.get("location", "") or ""),
+                "characters": scene.get("characters", []) or [],
+            }
+
+        compact = {
+            "mode": mode,
+            "story": self._compact_story_context(
+                str(plan.get("story", user_input) or ""),
+                DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
+            ),
+            "roster": [
+                str(c.get("name", "") or "").strip()
+                for c in (plan.get("characters", []) or [])
+                if isinstance(c, dict) and str(c.get("name", "") or "").strip()
+            ],
+            "visual_language": plan.get("visual_language", {}) or {},
+            "scenes": [
+                _slim_scene(scene)
+                for scene in (plan.get("scenes", []) or [])
+                if isinstance(scene, dict)
+            ],
+            "shots": [
+                _slim_shot(shot)
+                for shot in (plan.get("shots", []) or [])
+                if isinstance(shot, dict)
+            ],
+        }
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "overall_score": {"type": "number"},
+                "status": {"type": "string", "enum": ["pass", "review"]},
+                "findings": {"type": "array", "items": {"type": "string"}},
+                "shot_findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "shot_id": {"type": "string"},
+                            "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
+                            "finding": {"type": "string"},
+                        },
+                        "required": ["shot_id", "severity", "finding"],
+                    },
+                },
+                "recommended_focus": {"type": "array", "items": {"type": "string"}},
+                "shot_patches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "shot_id": {"type": "string"},
+                            "patch": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "action": {"type": "string"},
+                                    "camera_shot": {"type": "string"},
+                                    "camera_movement": {"type": "string"},
+                                    "lens_and_depth_of_field": {"type": "string"},
+                                    "composition_notes": {"type": "string"},
+                                    "lighting": {"type": "string"},
+                                    "color_temperature": {"type": "string"},
+                                    "mood": {"type": "string"},
+                                    "visual_prompt": {"type": "string"},
+                                    "overall_soundscape": {"type": "string"},
+                                    "non_diegetic_music": {"type": "string"},
+                                },
+                            },
+                        },
+                        "required": ["shot_id", "patch"],
+                    },
+                },
+            },
+            "required": ["overall_score", "status", "findings", "shot_findings", "recommended_focus", "shot_patches"],
+        }
+        try:
+            result = self._chat_json(
+                system_prompt,
+                json.dumps(compact, ensure_ascii=False, separators=(",", ":")),
+                minimum_completion=300,
+                temperature=0.10,
+                top_p=0.75,
+                call_name="director_critique",
+                max_completion=1000,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=schema,
+            )
+            return result
+        finally:
+            self._print_qwen_summary("FINAL")
+
+    def enrich_plan(
+        self,
+        *,
+        mode: str,
+        user_input: str,
+        base_plan: dict,
+        checkpoint_session_id: str | None = None,
+        resume_state: dict | None = None,
+    ) -> dict:
+
+        result = self.generate(
+            mode=mode,
+            user_input=user_input,
+            base_plan=base_plan,
+            checkpoint_session_id=checkpoint_session_id,
+            resume_state=resume_state,
+        )
+
+        if not result.get(
+            "enabled",
+            False,
+        ):
+
+            return deepcopy(
+                base_plan
+            )
+
+        creative = (
+            result.get(
+                "plan",
+                {},
+            )
+            or {}
+        )
+
+        merged = deepcopy(
+            base_plan
+        )
+
+        if mode == PRESERVE_USER_STORY_MODE:
+
+            merged[
+                "story"
+            ] = user_input.strip()
+
+        else:
+
+            merged[
+                "story"
+            ] = str(
+                creative.get(
+                    "story",
+                    merged.get(
+                        "story",
+                        user_input,
+                    ),
+                )
+                or merged.get(
+                    "story",
+                    user_input,
+                )
             ).strip()
 
-            if not name:
-                continue
+        merged[
+            "story_mode"
+        ] = mode
 
-            entry = {
-                "name": name,
-                "role": str(
-                    item.get("role", "") or ""
-                ).strip(),
-            }
-            profile = item.get("identity_profile")
-            profile = profile if isinstance(profile, dict) else {}
-            for key in ("identity_type", "relationship_to", "relationship"):
-                value = str(item.get(key, profile.get(key, "")) or "").strip()
-                if value:
-                    entry[key] = value
-            semantic_aliases = [
-                str(value).strip()
-                for value in (item.get("semantic_aliases", profile.get("semantic_aliases", [])) or [])
-                if str(value).strip()
-            ][:8]
-            if semantic_aliases:
-                entry["semantic_aliases"] = semantic_aliases
-            compact_characters.append(entry)
+        merged[
+            "director_notes"
+        ] = str(
+            creative.get(
+                "director_notes",
+                "",
+            )
+            or ""
+        )
 
-        language = {}
+        creative_visual_language = (
+            creative.get(
+                "visual_language",
+                {},
+            )
+            or {}
+        )
 
-        if isinstance(visual_language, dict):
+        # Visual language is creative metadata, not production identity.
+        # Merge field-by-field so a partial Qwen response cannot erase
+        # deterministic/default visual-language fields already present in
+        # the base plan. Qwen never gets ownership of unrelated keys.
+        base_visual_language = merged.get(
+            "visual_language",
+            {},
+        )
+        if not isinstance(base_visual_language, dict):
+            base_visual_language = {}
+
+        if isinstance(creative_visual_language, dict):
             for key in (
                 "genre_tone",
                 "color_palette",
@@ -720,128 +2953,134 @@ class QwenDirectorPromptMixin:
                 "camera_philosophy",
                 "pacing",
             ):
-                value = str(
-                    visual_language.get(key, "") or ""
-                ).strip()
+                value = creative_visual_language.get(key)
+                if value not in (None, "", [], {}):
+                    base_visual_language[key] = deepcopy(value)
 
-                if value:
-                    language[key] = value
+        merged["visual_language"] = base_visual_language
 
-        scene_payloads = []
-
-        for scene in scenes:
-            scene_payload = {
-                "scene_id": str(
-                    scene.get("scene_id", "") or ""
-                ).strip(),
-                "title": str(
-                    scene.get("title", "") or ""
-                ).strip(),
-                "location": str(
-                    scene.get("location", "") or ""
-                ).strip(),
-                "description": self._limit_text(
-                    scene.get("description", ""),
-                    DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
-                ),
-                "time_of_day": str(
-                    scene.get("time_of_day", "") or ""
-                ).strip(),
-                "weather": str(
-                    scene.get("weather", "") or ""
-                ).strip(),
-                "atmosphere": self._limit_text(
-                    scene.get("atmosphere", ""),
-                    DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
-                ),
-                "mood": str(
-                    scene.get("mood", "") or ""
-                ).strip(),
-                "lighting": self._limit_text(
-                    scene.get("lighting", ""),
-                    180,
-                ),
-                "color_temperature": str(
-                    scene.get("color_temperature", "") or ""
-                ).strip(),
-                "environment_details": self._clean_list(
-                    scene.get("environment_details", []),
-                    limit=4,
-                ),
-                "key_props": self._clean_list(
-                    scene.get("key_props", []),
-                    limit=4,
-                ),
-                "characters": self._clean_list(
-                    scene.get("characters", []),
-                    limit=6,
-                ),
-                "scene_objective": self._limit_text(
-                    scene.get("scene_objective", ""),
-                    DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
-                ),
-                "continuity_notes": self._limit_text(
-                    scene.get("continuity_notes", ""),
-                    DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
-                ),
-                "scene_function": str(
-                    scene.get("scene_function", "development")
-                    or "development"
-                ).strip(),
-                "obligatory_moment": self._limit_text(
-                    scene.get("obligatory_moment", scene.get("description", "")),
-                    220,
-                ),
-            }
-
-            # Lossless prompt compaction: omit only fields carrying no
-            # information. Populated semantic/cinematic values are unchanged.
-            scene_payload = {
-                key: value
-                for key, value in scene_payload.items()
-                if value not in ("", [], {})
-            }
-
-            scene_payloads.append(scene_payload)
-
-        visual_context = {}
-        context_source = reference_visual_context or self._reference_visual_context
-        for path, analysis in context_source.items():
-            if isinstance(analysis, dict):
-                visual_context[str(path)] = {
-                    "description": str(analysis.get("description", "") or "")[:500],
-                    "identity_features": [str(v) for v in (analysis.get("identity_features", []) or [])][:6],
-                    "wardrobe": [str(v) for v in (analysis.get("wardrobe", []) or [])][:6],
-                    "environment": [str(v) for v in (analysis.get("environment", []) or [])][:6],
-                    "lighting": str(analysis.get("lighting", "") or "")[:220],
-                    "composition": str(analysis.get("composition", "") or "")[:220],
-                }
-
-        source_dialogue = []
-        extract_dialogue = getattr(self, "_extract_story_spoken_segments", None)
-        if callable(extract_dialogue):
-            try:
-                source_dialogue = [
-                    str(segment.get("text", "") or "").strip()
-                    for segment in extract_dialogue(story)
-                    if isinstance(segment, dict) and str(segment.get("text", "") or "").strip()
-                ]
-            except Exception:
-                source_dialogue = []
-        source_dialogue = source_dialogue[:24]
-
-        payload = {
-            "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
-            "characters": compact_characters,
-            "visual_language": language,
-            "reference_visual_analysis": visual_context,
-            "scenes": scene_payloads,
-        }
-        if source_dialogue:
-            payload["source_dialogue"] = source_dialogue
-
-        return json.dumps(
-            payload,
-            ensure_ascii=False,
-            separators=(",", ":"),
+        # Canonical structure is never taken directly from raw creative Qwen
+        # metadata. The only exception is the roster that generate() itself
+        # marked as verified after deterministic + semantic reconciliation.
+        base_characters = deepcopy(
+            base_plan.get("characters", [])
+            or []
         )
+
+        creative_characters = deepcopy(
+            creative.get("characters", [])
+            or []
+        )
+
+        if creative.get("_canonical_character_roster_verified") is True:
+            merged["characters"] = creative_characters or base_characters
+        else:
+            merged["characters"] = base_characters
+
+        # Propagate the verification flag itself. Without this, the
+        # orchestrator's boundary check (which relies on this exact key
+        # to decide whether it may trust the roster just computed above)
+        # always sees it missing and silently discards a correctly
+        # verified, story-derived roster in favor of its own premise-
+        # derived one -- which is empty for AI Story / Expand Story mode,
+        # since the premise rarely names the characters Qwen goes on to
+        # invent in the final story.
+        merged["_canonical_character_roster_verified"] = (
+            creative.get("_canonical_character_roster_verified") is True
+        )
+
+        # Canonical scene topology defaults to the premise-derived base
+        # plan, but a verified director pass (generate() succeeded and
+        # derived its roster/topology from the FINAL story, not the
+        # premise) produces its own scene topology that must take
+        # priority. Without this, any scene beyond what the short
+        # premise alone produces gets silently dropped later by the
+        # valid_scene_ids filter -- discarding real, already-paid-for
+        # Qwen shot-batch work for those scenes.
+        verified_pass = (
+            creative.get("_canonical_character_roster_verified") is True
+        )
+
+        creative_scenes = (
+            creative.get("scenes", [])
+            or []
+        )
+
+        premise_scenes = deepcopy(
+            base_plan.get("scenes", [])
+            or []
+        )
+
+        story_derived_scenes = [
+            deepcopy(scene)
+            for scene in creative_scenes
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "") or "").strip()
+        ]
+
+        if verified_pass and story_derived_scenes:
+            canonical_scenes = story_derived_scenes
+        else:
+            canonical_scenes = premise_scenes
+
+        creative_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in creative_scenes
+            if isinstance(scene, dict)
+            and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        # Creative scene fields may enrich an existing scene, but structural
+        # identity/topology remains deterministic.
+        protected_scene_fields = {
+            "scene_id",
+            "order",
+            "characters",
+            "shot_ids",
+        }
+
+        for scene in canonical_scenes:
+            sid = str(
+                scene.get("scene_id", "") or ""
+            ).strip()
+
+            creative_scene = creative_by_id.get(sid)
+
+            if not isinstance(creative_scene, dict):
+                continue
+
+            for key, value in creative_scene.items():
+                if key in protected_scene_fields:
+                    continue
+                if value in (None, "", [], {}):
+                    continue
+                scene[key] = deepcopy(value)
+
+        merged["scenes"] = canonical_scenes
+
+        creative_shots = (
+            creative.get("shots", [])
+            or []
+        )
+
+        if creative_shots:
+            valid_scene_ids = {
+                str(scene.get("scene_id", "") or "").strip()
+                for scene in canonical_scenes
+            }
+
+            merged["shots"] = [
+                deepcopy(shot)
+                for shot in creative_shots
+                if isinstance(shot, dict)
+                and str(
+                    shot.get("scene_id", "") or ""
+                ).strip() in valid_scene_ids
+            ]
+        else:
+            merged["shots"] = deepcopy(
+                base_plan.get("shots", [])
+                or []
+            )
+
+        return merged
