@@ -616,36 +616,101 @@ class QwenDirector(
                     generated_story = True
                 except RuntimeError as retry_error:
                     retry_error_text = str(retry_error)
+
+                    # Normalize topology first when Qwen returned the right prose with
+                    # an accidental paragraph-boundary defect. This never invents,
+                    # deletes, or paraphrases story content.
                     if "exactly six paragraphs" in retry_error_text:
-                        # Last-resort topology adapter only after Qwen has had the
-                        # opportunity to repair the raw story. This adapter never
-                        # rewrites prose; it only merges/splits at existing boundaries.
                         fallback = self._coerce_story_to_six_paragraphs(story)
                         if fallback != str(story).strip():
+                            story = fallback
                             try:
                                 story = self._validate_story_output_contracts(
                                     mode,
                                     user_input,
-                                    fallback,
+                                    story,
                                     source_character_names=source_character_names,
                                 )
                                 generated_story = True
                             except RuntimeError as fallback_error:
                                 retry_error_text = str(fallback_error)
-                            else:
-                                pass
-                        if generated_story:
-                            # Topology fallback succeeded and the final story is validated.
-                            pass
+
+                    # The bounded retry can still undershoot the hard word-count
+                    # contract even after topology repair (as in a 394-word retry).
+                    # Give Qwen one final length-only surgical pass instead of
+                    # failing the whole production run. This is still a model-owned
+                    # prose edit: deterministic code does not pad, paraphrase, or
+                    # invent narrative content.
+                    if (
+                        not generated_story
+                        and "420 to 560 words" in retry_error_text
+                        and str(story).strip()
+                    ):
+                        base_story = self._coerce_story_to_six_paragraphs(story)
+                        current_word_count = len(
+                            re.findall(r"\b[\w'’-]+\b", str(base_story or ""))
+                        )
+                        length_repair_user = (
+                            "Perform one FINAL LENGTH-ONLY SURGICAL EDIT of the existing story. "
+                            "Preserve every existing character identity/name, relationship, setting, event, "
+                            "causal connection, planted detail, reversal, choice, quoted dialogue, and outcome. "
+                            "Do not rewrite the plot and do not introduce any new character, location, object, "
+                            "mystery, reveal, subplot, or future hook. The only job is to bring the story into "
+                            "the hard length/topology contract. "
+                            f"The current story is {current_word_count} words. "
+                            "Return the COMPLETE story in exactly six paragraphs separated by blank lines and "
+                            "450 to 520 words. Add the missing words only through concrete physical action, "
+                            "visible reaction, sensory specificity, relationship behavior, or causal connective "
+                            "tissue that is already implied by the existing story. Do not stop below 450 words. "
+                            "Keep the final paragraph at least 25 words and keep its existing consequence/aftermath "
+                            "meaning. The final sentence must remain a completed past-tense action in a settled place."
+                        )
+                        if mode == AI_STORY_MODE:
+                            length_repair_user += (
+                                " Keep the existing short direct spoken line(s) by established characters; "
+                                "do not add a new speaker merely to increase length."
+                            )
                         else:
-                            raise RuntimeError(
-                                (
-                                    "AI Story generation failed validation after the controlled retry: "
+                            length_repair_user += (
+                                " Dialogue remains optional; never invent a speaker merely to increase length."
+                            )
+                        if mode == EXPAND_USER_STORY_MODE:
+                            length_repair_user += (
+                                " Preserve source-grounded character identities and source-event fidelity exactly."
+                            )
+                        length_repair_user += (
+                            "\n\nEXISTING STORY:\n"
+                            + str(base_story).strip()
+                        )
+
+                        try:
+                            repaired_again = self._chat_text(
+                                story_system,
+                                length_repair_user,
+                                minimum_completion=600,
+                                temperature=0.12,
+                                top_p=0.68,
+                                call_name=(
+                                    "ai_story_text_length_retry"
                                     if mode == AI_STORY_MODE
-                                    else "Expand Story generation failed validation after the controlled retry: "
-                                )
-                                + retry_error_text
-                            ) from retry_error
+                                    else "expand_story_text_length_retry"
+                                ),
+                                max_completion=1800,
+                                disable_thinking=True,
+                            )
+                            repaired_again = self._coerce_story_to_six_paragraphs(repaired_again)
+                            story = self._validate_story_output_contracts(
+                                mode,
+                                user_input,
+                                repaired_again,
+                                source_character_names=source_character_names,
+                            )
+                            generated_story = True
+                        except RuntimeError as length_error:
+                            retry_error_text = str(length_error)
+
+                    if generated_story:
+                        pass
                     else:
                         raise RuntimeError(
                             (
