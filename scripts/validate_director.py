@@ -482,10 +482,28 @@ def test_disabled_director_path():
 
 def test_story_token_budget_not_reduced():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    _assert(source.count('max_completion=1800') >= 2, "story generation budget must be 1800 for primary pass and retry")
-    _assert(source.count('disable_thinking=True') >= 2, "story generation must keep the proven no-think mode")
-    _assert('max_completion=2200' not in source, "old 2200 story budget must not regress back in")
-    _assert('expand_story_text_retry' in source, "Expand Story controlled retry must remain available")
+    # Primary creative pass: thinking ON with room for plan + story.
+    _assert("max_completion=3200,\n                    disable_thinking=False" in source, "primary story pass must think with a 3200-token budget")
+    # Retry / repair passes: proven no-think mode, original budget.
+    _assert(source.count("max_completion=1800") >= 1, "story retry budget must stay 1800")
+    _assert(source.count("disable_thinking=True") >= 2, "story retry and non-creative calls must stay no-think")
+    _assert("max_completion=2200" not in source, "old 2200 story budget must not regress back in")
+    _assert("expand_story_text_retry" in source, "Expand Story controlled retry must remain available")
+
+
+def test_quoted_dialogue_speaker_comes_from_speech_tag():
+    from planner.qwen_director import QwenDirector
+    cases = (
+        ('"Nobody goes up," Ines said. She held the chain.', {"ines"}),
+        ('Tomas turned. "Move aside," said Tomas.', {"tomas"}),
+        ('Ines whispered, "It is already open."', {"ines"}),
+        ('"Access granted," the terminal said.', set()),
+        ('"Run," she said.', set()),
+    )
+    for text, expected in cases:
+        segments = QwenDirector._extract_story_spoken_segments(text)
+        got = set().union(*[s.get("tag_speakers", set()) for s in segments]) if segments else set()
+        _assert(got == expected, f"speech-tag attribution wrong for {text!r}: {got} != {expected}")
 
 def test_named_only_roster_skips_semantic_character_calls_safely():
     from planner.production_planner import ProductionPlanner
@@ -600,6 +618,33 @@ def test_unresolved_explicit_dialogue_fails_closed():
                 f"unexpected unresolved-dialogue error: {exc}")
     else:
         raise AssertionError("unresolved explicit dialogue was silently accepted/dropped")
+
+
+def test_wrong_shot_speaker_is_corrected_by_speech_tag():
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    director._qwen_telemetry = {"deterministic_recoveries": 0}
+    story = 'Tomas pushed the door. "Nobody goes up," Ines said. "Then stop me," Tomas said.'
+    characters = [
+        {"name": "Tomas", "identity_type": "named_character", "semantic_aliases": []},
+        {"name": "Ines", "identity_type": "named_character", "semantic_aliases": []},
+    ]
+    scenes = [{"scene_id": "scene_001", "characters": ["Tomas", "Ines"]}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": ["Tomas", "Ines"],
+        "dialogue_events": [
+            {"speaker": "Tomas", "text": "Nobody goes up,"},
+            {"speaker": "Tomas", "text": "Then stop me,"},
+        ],
+    }]
+    director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    speakers = [e["speaker"] for e in shots[0]["dialogue_events"]]
+    _assert(speakers == ["Ines", "Tomas"], f"speech tag must correct a wrong shot speaker: {speakers}")
+    _assert(shots[0]["speaking_characters"] == ["Ines", "Tomas"], "speaking_characters must follow corrected speakers")
 
 
 def test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene():
@@ -1109,11 +1154,13 @@ def main():
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
         test_story_token_budget_not_reduced,
+        test_quoted_dialogue_speaker_comes_from_speech_tag,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
         test_job_state_clears_stale_completion,
         test_unresolved_explicit_dialogue_fails_closed,
+        test_wrong_shot_speaker_is_corrected_by_speech_tag,
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
         test_downstream_production_preserves_dialogue_multiset,
         test_dialogue_scene_boundary_clears_stale_continuation,
