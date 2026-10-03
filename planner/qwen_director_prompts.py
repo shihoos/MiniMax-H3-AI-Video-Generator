@@ -383,19 +383,16 @@ class QwenDirectorPromptMixin:
         mode: str,
     ) -> tuple[float, float]:
 
-        # Lower than the previous 0.78/0.90: with thinking disabled and a structured plan,
-        # extra entropy only buys the incoherence seen in traces (contradicting
-        # paragraphs, magic objects). Creativity comes from the plan, not from sampling noise.
         if mode == AI_STORY_MODE:
             return (
-                0.62,
+                0.78,
                 0.90,
             )
 
         if mode == EXPAND_USER_STORY_MODE:
             return (
-                0.50,
-                0.90,
+                0.60,
+                0.92,
             )
 
         if mode == PRESERVE_USER_STORY_MODE:
