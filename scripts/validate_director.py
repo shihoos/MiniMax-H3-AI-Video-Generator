@@ -500,19 +500,19 @@ def test_disabled_director_path():
 
 def test_story_token_budget_contract():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    
+    # Primary creative pass stays on the established thinking-enabled configuration.
     _assert(
-        "max_completion=2200" in source and "disable_thinking=True" in source,
-        "primary story pass must use the 2200-token no-think contract",
-    )
-    _assert(
-        "minimum_output_tokens=700" in source,
-        "story pass must enforce a 700-token vLLM generation floor",
+        "max_completion=3200,\n                    disable_thinking=False" in source,
+        "primary story pass must use the 3200-token thinking-enabled contract",
     )
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
-    
-    _assert("max_completion=1800" not in source, "creative story retry must be removed")
-    _assert("expand_story_text_retry" not in source, "Expand Story controlled retry must be removed")
+    _assert(
+        "minimum_output_tokens=1250" in source,
+        "primary story pass must enforce a 1250-token minimum output floor",
+    )
+    _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
+    _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
+    _assert("max_completion=1800" not in source, "obsolete story retry completion budget remains")
 
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
