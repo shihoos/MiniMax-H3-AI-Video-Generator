@@ -110,6 +110,29 @@ def _validate_control_plane_requirements() -> None:
             )
 
 
+def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
+    """Return recognized main() call targets in lexical source order.
+
+    The production bootstrap wraps stage calls in _run_timed(...), so the
+    validator must inspect wrapped calls instead of requiring bare
+    install_*() expression statements.
+    """
+    recognized: list[tuple[int, str]] = []
+    for node in ast.walk(main):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+
+        if node.func.id == "_run_timed" and len(node.args) >= 2:
+            target = node.args[1]
+            if isinstance(target, ast.Name):
+                recognized.append((node.lineno, target.id))
+            continue
+
+        recognized.append((node.lineno, node.func.id))
+
+    return sorted(recognized, key=lambda item: item[0])
+
+
 def _validate_bootstrap_order() -> None:
     bootstrap_path = ROOT / "kaggle/bootstrap.py"
     tree = ast.parse(bootstrap_path.read_text(encoding="utf-8"), filename=str(bootstrap_path))
@@ -119,19 +142,19 @@ def _validate_bootstrap_order() -> None:
     )
     if main is None:
         raise RuntimeError("kaggle/bootstrap.py main() is missing.")
-    calls = [
-        node.value.func.id
-        for node in main.body
-        if isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-    ]
+
+    calls = _bootstrap_main_call_names(main)
+    call_names = [name for _, name in calls]
     try:
-        nodes_index = calls.index("install_nodes")
-        base_index = calls.index("install_base_requirements")
-        torch_index = calls.index("install_pytorch_runtime")
+        nodes_index = call_names.index("install_nodes")
+        base_index = call_names.index("install_base_requirements")
+        torch_index = call_names.index("install_pytorch_runtime")
     except ValueError as exc:
-        raise RuntimeError("Bootstrap dependency/Torch install calls are missing.") from exc
+        raise RuntimeError(
+            "Bootstrap dependency/Torch install calls are missing. "
+            "The validator recognizes both direct calls and _run_timed(...) wrappers."
+        ) from exc
+
     if not nodes_index < base_index < torch_index:
         raise RuntimeError(
             "Bootstrap must run the final control-plane dependency install after custom nodes and before locked PyTorch."
