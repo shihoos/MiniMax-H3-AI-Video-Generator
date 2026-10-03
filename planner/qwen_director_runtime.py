@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import atexit
 import faulthandler
-import sys
 import gc
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from functools import wraps
 from pathlib import Path
 
 import requests
-
 
 from planner.config import (
     DIRECTOR_KAGGLE_INPUT_ROOT,
@@ -40,7 +40,6 @@ from planner.config import (
     director_enabled,
 )
 
-
 NO_THINK_SUFFIX = "\n/no_think"
 
 # Pin the Director sampling stream at the request layer as well as the server layer.
@@ -50,7 +49,7 @@ DIRECTOR_VLLM_SEED = int(os.getenv("H3_DIRECTOR_VLLM_SEED", "0"))
 # Keep one Director server alive for the whole Python/Kaggle session.
 # The orchestrator intentionally calls director.unload() after each operation;
 # treating that as a hard vLLM shutdown causes a multi-minute cold start for
-# every subsequent Director mode.  The shared process/session below separates
+# every subsequent Director mode. The shared process/session below separates
 # request-client lifetime from GPU model lifetime.
 _SHARED_VLLM_LOCK = threading.RLock()
 _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
@@ -139,6 +138,222 @@ class QwenDirectorRuntimeMixin:
                 flags=re.IGNORECASE,
             )[0].strip()
         return value
+
+    @staticmethod
+    def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
+        """Stage NFS-mounted Kaggle models to local NVMe scratch safely and atomically."""
+        stage_enabled = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "1").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if not stage_enabled:
+            return source_path
+
+        resolved = source_path.resolve()
+        is_kaggle_input = False
+        try:
+            is_kaggle_input = (
+                Path("/kaggle/input").resolve() in resolved.parents
+                or str(resolved).startswith("/kaggle/input")
+            )
+        except Exception:
+            is_kaggle_input = "/kaggle/input" in str(resolved)
+
+        if not is_kaggle_input:
+            return source_path
+
+        scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
+        target_dir = scratch / "staged_models" / resolved.name
+        manifest_name = ".h3_stage_manifest.json"
+
+        def checkpoint_fingerprint(directory: Path) -> dict:
+            """Build a cheap content/layout identity without hashing multi-GB weight files."""
+            config_path = directory / "config.json"
+            index_path = directory / "model.safetensors.index.json"
+
+            def sha256_small_file(path: Path) -> str:
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                return digest.hexdigest()
+
+            fingerprint: dict = {
+                "schema": 1,
+                "config_sha256": sha256_small_file(config_path) if config_path.is_file() else "",
+                "index_sha256": sha256_small_file(index_path) if index_path.is_file() else "",
+                "files": {},
+            }
+
+            if index_path.is_file():
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                weight_map = index.get("weight_map", {})
+                if not isinstance(weight_map, dict) or not weight_map:
+                    raise ValueError(f"Invalid checkpoint weight_map: {index_path}")
+                names = sorted({str(value) for value in weight_map.values()})
+            else:
+                names = sorted(
+                    str(path.relative_to(directory))
+                    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
+                    for path in directory.glob(pattern)
+                    if path.is_file()
+                )
+
+            for name in names:
+                path = directory / name
+                if not path.is_file():
+                    raise FileNotFoundError(f"Missing checkpoint weight file: {path}")
+                fingerprint["files"][name] = path.stat().st_size
+
+            tokenizer_path = directory / "tokenizer.json"
+            if tokenizer_path.is_file():
+                fingerprint["tokenizer_size"] = tokenizer_path.stat().st_size
+            return fingerprint
+
+        def is_valid_checkpoint(directory: Path, expected_fingerprint: dict | None = None) -> bool:
+            """Fail closed on structure and, when present, the staged identity manifest."""
+            config_path = directory / "config.json"
+            if not config_path.is_file():
+                return False
+
+            index_file = directory / "model.safetensors.index.json"
+            try:
+                if index_file.is_file():
+                    index = json.loads(index_file.read_text(encoding="utf-8"))
+                    weight_map = index.get("weight_map", {})
+                    if not isinstance(weight_map, dict) or not weight_map:
+                        return False
+                    if not all(
+                        (directory / str(filename)).is_file()
+                        for filename in set(weight_map.values())
+                    ):
+                        return False
+                elif not any(
+                    any(directory.glob(pattern))
+                    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
+                ):
+                    return False
+            except Exception:
+                return False
+
+            # Preserve tokenizer completeness for models that provide tokenizer.json.
+            source_has_tokenizer = (resolved / "tokenizer.json").is_file()
+            if source_has_tokenizer and not (directory / "tokenizer.json").is_file():
+                return False
+
+            if expected_fingerprint is not None:
+                manifest_path = directory / manifest_name
+                if not manifest_path.is_file():
+                    return False
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception:
+                    return False
+                if manifest != expected_fingerprint:
+                    return False
+
+            return True
+
+        try:
+            source_fingerprint = checkpoint_fingerprint(resolved)
+        except Exception as exc:
+            print(
+                f"[QWEN] Failed to fingerprint {label}; using direct mount. Error: {exc}",
+                flush=True,
+            )
+            return source_path
+
+        if target_dir.is_dir() and is_valid_checkpoint(target_dir, source_fingerprint):
+            print(f"[QWEN] Reusing locally staged {label} at {target_dir}", flush=True)
+            return target_dir
+
+        try:
+            stat = os.statvfs(scratch)
+            avail_bytes = stat.f_bavail * stat.f_frsize
+            source_size = sum(
+                path.stat().st_size
+                for path in resolved.rglob("*")
+                if path.is_file()
+            )
+            if avail_bytes < source_size + 2 * (1024**3):
+                print(
+                    f"[QWEN] Insufficient scratch space to stage {label} "
+                    f"({avail_bytes / 1e9:.1f}GB free, {source_size / 1e9:.1f}GB needed). "
+                    "Using direct mount.",
+                    flush=True,
+                )
+                return source_path
+        except Exception:
+            print(
+                f"[QWEN] Could not verify scratch capacity for {label}; using direct mount.",
+                flush=True,
+            )
+            return source_path
+
+        print(
+            f"[QWEN] Staging {label} to local NVMe scratch ({target_dir}) to bypass NFS mmap stalls...",
+            flush=True,
+        )
+        start_time = time.perf_counter()
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_target = target_dir.with_name(f"{target_dir.name}.tmp_{os.getpid()}")
+
+        try:
+            if tmp_target.exists():
+                shutil.rmtree(tmp_target, ignore_errors=True)
+
+            copied_bytes = [0]
+            last_print_time = [time.perf_counter()]
+
+            def tracked_copy(src, dst, *, follow_symlinks=True):
+                """Chunked copy function to track and report staging progress."""
+                length = 16 * 1024 * 1024
+                with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+                    while True:
+                        buf = fsrc.read(length)
+                        if not buf:
+                            break
+                        fdst.write(buf)
+                        copied_bytes[0] += len(buf)
+                        now = time.perf_counter()
+                        if now - last_print_time[0] > 5.0:
+                            print(
+                                f"[QWEN] Staging {label}: "
+                                f"{copied_bytes[0] / 1e9:.1f}GB / {source_size / 1e9:.1f}GB...",
+                                flush=True,
+                            )
+                            last_print_time[0] = now
+                shutil.copystat(src, dst, follow_symlinks=follow_symlinks)
+                return dst
+
+            shutil.copytree(resolved, tmp_target, copy_function=tracked_copy)
+            (tmp_target / manifest_name).write_text(
+                json.dumps(source_fingerprint, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            if not is_valid_checkpoint(tmp_target, source_fingerprint):
+                raise RuntimeError(
+                    f"staged {label} checkpoint failed post-copy validation"
+                )
+
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+            tmp_target.rename(target_dir)
+        except Exception as exc:
+            if tmp_target.exists():
+                shutil.rmtree(tmp_target, ignore_errors=True)
+            print(
+                f"[QWEN] Failed to stage {label}, falling back to direct mount. Error: {exc}",
+                flush=True,
+            )
+            return source_path
+
+        elapsed = time.perf_counter() - start_time
+        print(f"[QWEN] Staged {label} in {elapsed:.2f}s", flush=True)
+        return target_dir
 
     def _record_qwen_call(
         self,
@@ -342,9 +557,6 @@ class QwenDirectorRuntimeMixin:
         json_mode: bool,
         disable_thinking: bool,
     ) -> str:
-        # Cache identity must include every model/runtime parameter that can
-        # change the generated answer.  Otherwise a model/config change can
-        # incorrectly reuse an older semantic decision.
         try:
             model_name = self._vllm_model_name()
         except Exception:
@@ -441,6 +653,12 @@ class QwenDirectorRuntimeMixin:
         explicit = os.getenv(DIRECTOR_MODEL_ENV, "").strip()
         candidates: list[Path] = []
 
+        local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
+        for prefix in (local_scratch / "staged_models", local_scratch):
+            staged = prefix / Path(DIRECTOR_MODEL_PATH).name
+            if staged.is_dir():
+                candidates.append(staged)
+
         if explicit:
             candidates.append(Path(explicit).expanduser())
 
@@ -484,7 +702,7 @@ class QwenDirectorRuntimeMixin:
             if not path.is_dir():
                 continue
             if all((path / item).is_file() for item in required):
-                return path
+                return self._stage_to_local_scratch(path, "Qwen3-14B-AWQ")
 
         raise FileNotFoundError(
             "Qwen3-14B-AWQ director model was not found as a complete "
@@ -496,13 +714,7 @@ class QwenDirectorRuntimeMixin:
         )
 
     def _find_speculator_model(self) -> Path:
-        """Resolve the pinned local Qwen3-14B EAGLE-3 speculator checkpoint.
-
-        Eagle3 is a speculative-decoding accelerator for the Qwen Director; it
-        has no semantic authority of its own. Production therefore stays pinned
-        to /kaggle/input/eagle-3 unless an explicit development override is
-        enabled with H3_DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE=1.
-        """
+        """Resolve the pinned local Qwen3-14B EAGLE-3 speculator checkpoint."""
         explicit = os.getenv("H3_DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH", "").strip()
         if explicit and not DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE:
             raise RuntimeError(
@@ -516,7 +728,12 @@ class QwenDirectorRuntimeMixin:
             else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
         )
 
-        candidates = [configured]
+        local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
+        candidates = [
+            local_scratch / "staged_models" / configured.name,
+            local_scratch / configured.name,
+            configured,
+        ]
 
         if DIRECTOR_KAGGLE_INPUT_ROOT.is_dir():
             try:
@@ -529,7 +746,7 @@ class QwenDirectorRuntimeMixin:
                 )
             except OSError:
                 pass
-                
+
         if DIRECTOR_VLLM_SPECULATIVE_METHOD != "eagle3":
             raise RuntimeError(
                 "runtime_versions.yaml director.speculative_method must be eagle3 "
@@ -561,9 +778,6 @@ class QwenDirectorRuntimeMixin:
 
             index_files = list(candidate.glob("*.index.json"))
             if index_files:
-                # If a model index exists, it is the authoritative file list.
-                # Do not accept a partial checkpoint merely because some weight
-                # file happens to exist in the directory.
                 for index_path in index_files:
                     try:
                         index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -588,10 +802,10 @@ class QwenDirectorRuntimeMixin:
                             "EAGLE-3 checkpoint is incomplete; missing indexed weight files: "
                             + ", ".join(missing)
                         )
-                return candidate.resolve()
+                return self._stage_to_local_scratch(candidate.resolve(), "Qwen3-14B EAGLE-3 speculator")
 
             if any(any(candidate.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")):
-                return candidate.resolve()
+                return self._stage_to_local_scratch(candidate.resolve(), "Qwen3-14B EAGLE-3 speculator")
 
             raise RuntimeError(
                 f"EAGLE-3 checkpoint has config.json but no model weight files: {candidate}"
@@ -607,14 +821,12 @@ class QwenDirectorRuntimeMixin:
     def model_path(
         self,
     ) -> Path | None:
-
         return self._model_path
 
     @property
     def available(
         self,
     ) -> bool:
-
         return bool(
             director_enabled()
             and self._model_path is not None
@@ -690,10 +902,9 @@ class QwenDirectorRuntimeMixin:
     def load(
         self,
     ) -> None:
-
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
         global _SHARED_VLLM_TOKENIZER
-        
+
         if not self.available:
             return
 
@@ -704,12 +915,6 @@ class QwenDirectorRuntimeMixin:
             session = requests.Session()
             model_name = self._vllm_model_name()
 
-            # Reuse an already-running compatible Director server. This is the
-            # critical lifecycle fix: production_orchestrator.unload() closes
-            # its HTTP client after each operation, but the GPU-backed vLLM
-            # process stays resident for the whole Python/Kaggle session.
-            # A new QwenDirector instance therefore does not trigger another
-            # multi-minute model load/compile cycle.
             try:
                 reuse_timeout = float(
                     os.getenv("H3_DIRECTOR_VLLM_REUSE_TIMEOUT", "8")
@@ -795,8 +1000,6 @@ class QwenDirectorRuntimeMixin:
                 session.close()
                 raise
 
-            # If a previously shared child died unexpectedly, retire its stale
-            # log handle before replacing the shared process/handle pair.
             stale_process = _SHARED_VLLM_PROCESS
             if stale_process is not None and stale_process.poll() is not None:
                 _SHARED_VLLM_PROCESS = None
@@ -846,11 +1049,10 @@ class QwenDirectorRuntimeMixin:
                 "model": str(speculator_model),
                 "method": DIRECTOR_VLLM_SPECULATIVE_METHOD,
                 "num_speculative_tokens": DIRECTOR_VLLM_SPECULATIVE_TOKENS,
-                # Request eager execution for the Eagle draft model while keeping
-                # the main Qwen target compiled/graph-optimized. Actual Eagle
-                # compile/cudagraph behavior must be verified from the vLLM log.
                 "enforce_eager": eagle_enforce_eager,
             }, separators=(",", ":"))
+
+            max_batched_tokens = os.getenv("H3_DIRECTOR_VLLM_MAX_NUM_BATCHED_TOKENS", "4096").strip()
 
             command = [
                 str(vllm_python),
@@ -872,6 +1074,8 @@ class QwenDirectorRuntimeMixin:
                 str(DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION),
                 "--max-num-seqs",
                 str(DIRECTOR_VLLM_MAX_NUM_SEQS),
+                "--max-num-batched-tokens",
+                str(max_batched_tokens),
                 "--seed",
                 str(DIRECTOR_VLLM_SEED),
                 "--generation-config",
@@ -881,9 +1085,10 @@ class QwenDirectorRuntimeMixin:
                 "--trust-remote-code",
             ]
 
-            # Leave the strategy unset by default and let vLLM 0.30 select its
-            # documented NFS-aware behavior. Explicit overrides remain supported
-            # through H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY.
+            enforce_eager_base_val = os.getenv("H3_DIRECTOR_VLLM_ENFORCE_EAGER", "0").strip().lower()
+            if enforce_eager_base_val in {"1", "true", "yes", "on"}:
+                command.append("--enforce-eager")
+
             safetensors_strategy = os.getenv(
                 "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
                 "",
@@ -951,11 +1156,9 @@ class QwenDirectorRuntimeMixin:
                 ])
 
             child_env = os.environ.copy()
-            # Do not redirect vLLM's compile cache into /kaggle/working by default.
-            # The previous known-good runs used vLLM's normal /root/.cache/vllm
-            # location, which keeps generated artifacts out of the saved notebook
-            # output while still allowing reuse for repeated boots in the same
-            # running Kaggle session. A caller can still override this explicitly.
+            # Disable FlashInfer sampler probe on SM75 (T4) to silence warnings and use native paths cleanly
+            child_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+
             configured_cache_root = os.getenv("H3_DIRECTOR_VLLM_CACHE_ROOT", "").strip()
             cache_root = configured_cache_root or ""
 
@@ -987,7 +1190,7 @@ class QwenDirectorRuntimeMixin:
 
             warmup_sampler_jit_value = os.getenv(
                 "H3_DIRECTOR_VLLM_WARMUP_SAMPLER_JIT",
-                "0",
+                "1",
             ).strip().lower()
             if warmup_sampler_jit_value not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
                 session.close()
@@ -1002,7 +1205,9 @@ class QwenDirectorRuntimeMixin:
                 "[QWEN] vLLM startup config",
                 f"cache_root={cache_path or 'default(/root/.cache/vllm)'}",
                 f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
+                f"enforce_eager={enforce_eager_base_val in {'1', 'true', 'yes', 'on'}}",
                 f"eagle_enforce_eager={eagle_enforce_eager}",
+                f"max_batched_tokens={max_batched_tokens}",
                 f"cudagraph_capture_sizes={capture_sizes if cudagraph_capture_sizes else 'auto'}",
                 f"kv_cache_memory_bytes={kv_cache_memory_bytes or 'auto'}",
                 f"warmup_sampler_jit={warmup_sampler_jit}",
@@ -1043,8 +1248,9 @@ class QwenDirectorRuntimeMixin:
                     warmup_payload = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": "Say OK."}],
-                        "max_tokens": 1,
-                        "temperature": 0.0,
+                        "max_tokens": 2,
+                        "temperature": float(DIRECTOR_TEMPERATURE if DIRECTOR_TEMPERATURE is not None else 0.7),
+                        "top_p": float(DIRECTOR_TOP_P if DIRECTOR_TOP_P is not None else 0.9),
                     }
                     try:
                         warmup_response = session.post(
@@ -1115,9 +1321,6 @@ class QwenDirectorRuntimeMixin:
                 ) from exc
 
     def _shutdown_vllm(self) -> None:
-        # Kept as an explicit emergency shutdown hook for startup failures and
-        # process exit. Normal Director unload must not terminate the shared
-        # GPU-backed server.
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE
         with _SHARED_VLLM_LOCK:
             process = _SHARED_VLLM_PROCESS
@@ -1146,10 +1349,6 @@ class QwenDirectorRuntimeMixin:
     def unload(
         self,
     ) -> None:
-
-        # The orchestrator calls unload() after every Director operation.
-        # Closing only this instance's HTTP client avoids the historical cold
-        # start while leaving the model, CUDA graphs, and compilation cache warm.
         session = self._vllm_session
         self._vllm_session = None
 
@@ -1162,8 +1361,6 @@ class QwenDirectorRuntimeMixin:
         tokenizer = getattr(self, "_tokenizer", None)
         self._tokenizer = None
         if tokenizer is not None:
-            # Keep the shared tokenizer alive; it is small and avoids redundant
-            # local checkpoint reads for every newly-created Director instance.
             if tokenizer is not _SHARED_VLLM_TOKENIZER:
                 del tokenizer
 
@@ -1176,8 +1373,6 @@ class QwenDirectorRuntimeMixin:
         try:
             import torch
             if torch.cuda.is_available():
-                # Do not empty the CUDA cache here: that would evict warm vLLM
-                # allocations and defeat the persistent-server optimization.
                 pass
         except Exception:
             pass
@@ -1186,7 +1381,6 @@ class QwenDirectorRuntimeMixin:
         self,
         text: str,
     ) -> int:
-
         if self._vllm_session is None:
             raise RuntimeError(
                 "Qwen director model is not loaded."
@@ -1213,7 +1407,6 @@ class QwenDirectorRuntimeMixin:
         user_prompt: str,
         minimum_completion: int = 512,
     ) -> tuple[int, int]:
-
         context = int(
             DIRECTOR_N_CTX
         )
@@ -1235,7 +1428,6 @@ class QwenDirectorRuntimeMixin:
         )
 
         if available < minimum_completion:
-
             raise RuntimeError(
                 "Qwen director prompt is too large "
                 f"for the {context}-token context window.\n"
@@ -1258,7 +1450,6 @@ class QwenDirectorRuntimeMixin:
         text: str,
         max_chars: int,
     ) -> str:
-
         value = str(
             text or ""
         ).strip()
@@ -1278,7 +1469,6 @@ class QwenDirectorRuntimeMixin:
     def _extract_json(
         text: str,
     ) -> dict:
-
         value = QwenDirectorRuntimeMixin._strip_thinking(text)
         value = re.sub(r"^```(?:json)?\s*", "", value, flags=re.IGNORECASE)
         value = re.sub(r"\s*```$", "", value).strip()
@@ -1386,7 +1576,6 @@ class QwenDirectorRuntimeMixin:
         disable_thinking: bool = True,
         response_schema: dict | None = None,
     ) -> dict:
-
         if self._vllm_session is None:
             raise RuntimeError(
                 "Qwen director model is not loaded."
@@ -1459,14 +1648,12 @@ class QwenDirectorRuntimeMixin:
             },
         ]
 
-
         kwargs = {
             "messages": messages,
             "temperature": temperature,
             "top_p": top_p,
             "max_tokens": max_tokens,
         }
-
 
         if json_mode:
             if response_schema is None:
@@ -1517,11 +1704,6 @@ class QwenDirectorRuntimeMixin:
             )
             completion_tokens = int(
                 usage.get("completion_tokens", 0) or 0
-            )
-            decode_tps = (
-                completion_tokens / elapsed
-                if elapsed > 0 and completion_tokens > 0
-                else 0.0
             )
             finish_reason = ""
             if isinstance(response, dict):
@@ -1608,7 +1790,6 @@ class QwenDirectorRuntimeMixin:
         max_completion: int | None = None,
         disable_thinking: bool = True,
     ) -> str:
-
         if self._vllm_session is None:
             raise RuntimeError(
                 "Qwen director model is not loaded."
@@ -1648,7 +1829,6 @@ class QwenDirectorRuntimeMixin:
             },
         ]
 
-
         started = time.perf_counter()
         response = None
         error_text = ""
@@ -1685,11 +1865,6 @@ class QwenDirectorRuntimeMixin:
 
             prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
             completion_tokens = int(usage.get("completion_tokens", 0) or 0)
-            decode_tps = (
-                completion_tokens / elapsed
-                if elapsed > 0 and completion_tokens > 0
-                else 0.0
-            )
             finish_reason = ""
             if isinstance(response, dict):
                 try:
@@ -1751,9 +1926,6 @@ class QwenDirectorRuntimeMixin:
             content or ""
         ).strip()
 
-        # Qwen3 may emit internal reasoning in a <think>...</think> block.
-        # Keep narrative reasoning enabled, but never expose that block as
-        # part of the story returned to the application.
         content = re.sub(
             r"<think>.*?</think>",
             "",
@@ -1761,8 +1933,6 @@ class QwenDirectorRuntimeMixin:
             flags=re.IGNORECASE | re.DOTALL,
         ).strip()
         if re.search(r"<think>", content, flags=re.IGNORECASE):
-            # A truncated reasoning block means the model spent its output
-            # budget on hidden reasoning and never produced usable narrative.
             content = re.split(r"<think>", content, maxsplit=1, flags=re.IGNORECASE)[0].strip()
 
         if not content:
