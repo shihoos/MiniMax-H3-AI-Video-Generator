@@ -399,8 +399,13 @@ class QwenDirector(
                         if mode == AI_STORY_MODE
                         else "expand_story_text_pass"
                     ),
-                    max_completion=1800,
-                    disable_thinking=True,
+                    # Thinking is ON for the one creative pass that decides the
+                    # whole film. The plan is capped to ~250 words by the prompt;
+                    # 3200 tokens covers plan + ~800-token story with headroom.
+                    # If the plan is ever truncated, the empty-response error
+                    # below falls through to the existing no-think retry.
+                    max_completion=3200,
+                    disable_thinking=False,
                 )
                 self._validate_mode_output(
                     mode,
@@ -1887,6 +1892,45 @@ class QwenDirector(
             .lower()
         )
 
+    _SPEECH_TAG_VERBS = (
+        "said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+        "called|calls|muttered|mutters|murmured|murmurs|warned|warns|snapped|snaps|"
+        "answered|answers|cried|cries|yelled|yells|demanded|demands|breathed|added|"
+        "adds|continued|insisted|insists|pleaded|pleads|growled|growls|hissed|hisses|"
+        "gasped|gasps|stammered|stammers|announced|announces|ordered|orders"
+    )
+    _SPEECH_TAG_NAME = r"([A-Z][A-Za-z0-9'\u2019_-]*(?:\s+[A-Z][A-Za-z0-9'\u2019_-]*){0,2})"
+
+    @classmethod
+    def _speech_tag_speakers(cls, before: str, after: str) -> set[str]:
+        """Return the speaker named by an adjacent speech tag, or an empty set.
+
+        Recognises only unambiguous forms:
+            "...," Mara said.   "..." said Mara.   Mara said, "..."
+        Pronouns, articles and lowercase subjects ("the terminal said") never
+        produce a speaker, so machine voices and unresolved tags stay empty.
+        """
+        verbs = cls._SPEECH_TAG_VERBS
+        name = cls._SPEECH_TAG_NAME
+        blocked = set(EntityResolver.PRONOUNS) | {"the", "a", "an", "then", "and", "but"}
+        found: list[str] = []
+        patterns = (
+            (after, rf"^\s*[,;]?\s*(?:\u2014|-)?\s*{name}\s+(?:{verbs})\b"),
+            (after, rf"^\s*[,;]?\s*(?:{verbs})\s+{name}\b"),
+            (before, rf"{name}\s+(?:{verbs})(?:\s+[a-z]+ly)?\s*[,:]?\s*$"),
+        )
+        for window, pattern in patterns:
+            match = re.search(pattern, window)
+            if not match:
+                continue
+            candidate = match.group(1).strip()
+            first = candidate.split()[0].lower()
+            if first in blocked:
+                continue
+            found.append(EntityResolver.normalize(candidate))
+            break
+        return set(found)
+
     @classmethod
     def _extract_story_spoken_segments(cls, story: str) -> list[dict]:
         """Extract ordered source-speech segments with exact occurrence boundaries.
@@ -1933,6 +1977,10 @@ class QwenDirector(
             segments.append({
                 "text": normalized,
                 "source_speakers": set(),
+                "tag_speakers": cls._speech_tag_speakers(
+                    text[max(0, match.start() - 90):match.start()],
+                    text[match.end():match.end() + 90],
+                ),
                 "start": match.start(),
                 "end": match.end(),
             })
@@ -2012,7 +2060,10 @@ class QwenDirector(
         spoken_segments = self._extract_story_spoken_segments(story)
         segment_progress = [0 for _ in spoken_segments]
 
+        last_tag_speakers: set[str] = set()
+
         def _consume_source_dialogue(normalized_text: str):
+            last_tag_speakers.clear()
             if not normalized_text:
                 return None
 
@@ -2040,6 +2091,7 @@ class QwenDirector(
                         len(source_text),
                         progress + len(normalized_text),
                     )
+                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
                 if remaining_key.startswith(candidate_key):
@@ -2047,6 +2099,7 @@ class QwenDirector(
                         len(source_text),
                         progress + len(normalized_text),
                     )
+                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
             return None
@@ -2156,6 +2209,23 @@ class QwenDirector(
                         "Explicit dialogue source speaker could not be resolved: "
                         f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}"
                     )
+
+                if not explicit_source_canonicals and last_tag_speakers:
+                    # The prose names who spoke ("..." Mara said). That tag is
+                    # stronger than the shot model's guess, so correct the
+                    # speaker instead of trusting or failing on it.
+                    tagged = {
+                        resolved.lower()
+                        for tag in last_tag_speakers
+                        if (resolved := _resolve(tag)) is not None
+                    }
+                    if len(tagged) == 1 and canonical.lower() not in tagged:
+                        remapped = canonical_by_norm[next(iter(tagged))]
+                        self._record_recovery(
+                            "dialogue_speaker_tag_remap",
+                            f"shot={shot_id} from={canonical!r} to={remapped!r}",
+                        )
+                        canonical = remapped
 
                 normalized_speaker = canonical.lower()
                 if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
