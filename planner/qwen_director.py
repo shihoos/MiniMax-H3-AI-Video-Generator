@@ -576,7 +576,7 @@ class QwenDirector(
                             len(re.findall(r"\b[\w'’-]+\b", paragraph))
                             for paragraph in paragraphs
                         ]
-                        target_range = "450 to 520 words"
+                        target_range = "445 to 520 words"
                         paragraph_guidance = "; ".join(
                             f"P{index}={count} words"
                             for index, count in enumerate(paragraph_counts, 1)
@@ -594,7 +594,10 @@ class QwenDirector(
                             "and final outcome. "
                             f"The current story has {current_word_count} words across {len(paragraphs)} paragraphs. "
                             "Return the COMPLETE revised story, not an explanation. It must contain exactly six paragraphs "
-                            f"separated by blank lines and land in {target_range}; target roughly 70-90 words per paragraph. "
+                            f"separated by blank lines and land in {target_range}; target roughly 75-90 words per paragraph. "
+                            "Do not stop below 445 words. Before ending the final paragraph, continue adding only concrete "
+                            "physical action, visible reaction, sensory specificity, or causal connective tissue from events already present "
+                            "until the story is safely inside the target range. "
                             "If the story is short, add only concrete physical action, visible reaction, sensory specificity, "
                             "or causal connective tissue to events that already exist. If it is long, remove only redundant "
                             "exposition or repetition. Do not add a new character, location, object, mystery, reveal, or "
@@ -609,7 +612,7 @@ class QwenDirector(
                             + str(story).strip()
                         )
                         preserved_prefix = ""
-                        minimum_completion = 520
+                        minimum_completion = 700
                     elif completion_repair and story.strip():
                         paragraphs = [
                             part.strip()
@@ -706,9 +709,11 @@ class QwenDirector(
                             retry_temperature = 0.15
                             retry_top_p = 0.68
                         elif story_contract_repair or completion_repair:
-                            # Structural/completion repairs are constrained edits, not creative resampling.
-                            retry_temperature = 0.15 if story_contract_repair else 0.20
-                            retry_top_p = 0.68 if story_contract_repair else 0.70
+                            # Structural/completion repairs remain the single controlled retry.
+                            # Give a length repair enough sampling freedom to finish inside the
+                            # existing contract instead of over-constraining it into another short stop.
+                            retry_temperature = 0.30 if story_contract_repair else 0.20
+                            retry_top_p = 0.85 if story_contract_repair else 0.70
                         else:
                             retry_temperature = max(0.50, min(0.68, temperature - 0.08))
                             retry_top_p = max(0.80, min(0.88, top_p - 0.04))
