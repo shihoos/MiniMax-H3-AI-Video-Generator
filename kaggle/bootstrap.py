@@ -1,9 +1,12 @@
 from __future__ import annotations
 import hashlib
+import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import yaml
 ROOT = (
@@ -36,6 +39,304 @@ RUNTIME_MANIFEST = (
     / "configs"
     / "runtime_versions.yaml"
 )
+
+# Persistent warm-bootstrap state lives outside the repository checkout so it
+# survives a notebook-side project re-clone within the same Kaggle kernel.
+BOOTSTRAP_CACHE_ROOT = Path(
+    os.getenv("H3_BOOTSTRAP_CACHE_DIR", "/kaggle/working/.minimax_h3_bootstrap_cache")
+).expanduser().resolve()
+BOOTSTRAP_CACHE_FILE = BOOTSTRAP_CACHE_ROOT / "bootstrap_state.json"
+BOOTSTRAP_CACHE_SCHEMA = 1
+_WARM_BOOTSTRAP_ACTIVE = False
+_WARM_BOOTSTRAP_STATE: dict = {}
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _stable_text_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _git_head(path: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+
+
+def _git_status_fingerprint(path: Path) -> str:
+    status = subprocess.check_output(
+        ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    )
+    return _stable_text_sha256(status)
+
+
+def _python_package_fingerprint(python_executable: Path | str) -> str:
+    script = (
+        "import hashlib, importlib.metadata as m; "
+        "items=[]; "
+        "[items.append((str(d.metadata.get('Name','')).lower(), str(d.version))) for d in m.distributions() if d.metadata.get('Name')]; "
+        "payload='\\n'.join(f'{n}=={v}' for n,v in sorted(set(items))); "
+        "print(hashlib.sha256(payload.encode()).hexdigest())"
+    )
+    probe = subprocess.run(
+        [str(python_executable), "-c", script],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            f"Package fingerprint probe failed for {python_executable}.\n"
+            + (probe.stdout or "")
+            + (probe.stderr or "")
+        )
+    value = (probe.stdout or "").strip()
+    if len(value) != 64:
+        raise RuntimeError(f"Invalid package fingerprint for {python_executable}: {value!r}")
+    return value
+
+
+def _probe_system_pytorch(runtime: dict) -> bool:
+    config = dict(runtime.get("pytorch", {}) or {})
+    version = str(config.get("version", "") or "").strip()
+    cuda = str(config.get("cuda", "") or "").strip().lower()
+    torchvision_version = str(config.get("torchvision_version", "") or "").strip()
+    torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
+    if not all((version, cuda, torchvision_version, torchaudio_version)):
+        return False
+    digits = cuda[2:] if cuda.startswith("cu") else ""
+    if len(digits) != 3 or not digits.isdigit():
+        return False
+    expected_torch = f"{version}+{cuda}"
+    expected_cuda = f"{digits[:2]}.{digits[2:]}"
+    code = (
+        "import torch, torchaudio, torchvision; "
+        f"assert torch.__version__ == {expected_torch!r}; "
+        f"assert torch.version.cuda == {expected_cuda!r}; "
+        f"assert torchvision.__version__ == {torchvision_version!r}; "
+        f"assert torchaudio.__version__ == {torchaudio_version!r}; "
+        "assert torch.cuda.is_available(); "
+        "assert torch.cuda.device_count() == 2; "
+        "assert torch.cuda.get_device_capability(0) == (7, 5); "
+        "assert torch.cuda.get_device_capability(1) == (7, 5)"
+    )
+    probe = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
+
+def _probe_pillow(expected_version: str) -> bool:
+    code = (
+        "from PIL import Image; from PIL._typing import _Ink; "
+        f"assert Image.__version__ == {expected_version!r}; "
+        "print(Image.__version__); print(_Ink)"
+    )
+    probe = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    return probe.returncode == 0
+
+
+def _probe_director_venv(runtime: dict, venv_python: Path) -> bool:
+    director = runtime.get("director", {}) or {}
+    vllm_version = str(director.get("vllm_version", "") or "").strip()
+    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
+    tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
+    if not venv_python.is_file():
+        return False
+    code = (
+        "import inspect, torch, vllm, wrapt; "
+        "from vllm.config import SpeculativeConfig; "
+        f"assert vllm.__version__ == {vllm_version!r}; "
+        f"assert wrapt.__version__ == {wrapt_version!r}; "
+        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
+        "assert torch.cuda.is_available(); "
+        f"assert torch.cuda.device_count() == {tensor_parallel_size}; "
+        "assert torch.cuda.get_device_capability(0) == (7, 5)"
+    )
+    probe = subprocess.run([str(venv_python), "-c", code], capture_output=True, text=True, check=False)
+    return probe.returncode == 0
+
+
+def _requirements_hash(path: Path) -> str:
+    return _sha256_file(path) if path.is_file() else "missing"
+
+
+def _bootstrap_cache_inputs(runtime: dict) -> dict:
+    return {
+        "schema": BOOTSTRAP_CACHE_SCHEMA,
+        "bootstrap_sha256": _sha256_file(Path(__file__).resolve()),
+        "python_executable": str(Path(sys.executable).resolve()),
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "runtime_manifest_sha256": _sha256_file(RUNTIME_MANIFEST),
+        "node_manifest_sha256": _sha256_file(NODE_MANIFEST),
+        "model_manifest_sha256": _sha256_file(MODEL_MANIFEST),
+        "project_requirements_sha256": _requirements_hash(ROOT / "requirements.txt"),
+        "comfyui_revision": str(runtime["comfyui"]["revision"]).strip(),
+        "sage_revision": str(runtime["sage_attention"]["revision"]).strip(),
+        "h3_revision": str(runtime["h3_optimization"]["revision"]).strip(),
+    }
+
+
+def _save_bootstrap_cache(runtime: dict) -> None:
+    try:
+        BOOTSTRAP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        state = _bootstrap_cache_inputs(runtime)
+        state.update({
+            "valid": True,
+            "system_package_fingerprint": _python_package_fingerprint(Path(sys.executable)),
+            "system_pytorch_ok": _probe_system_pytorch(runtime),
+            "pillow_version": str(runtime["storyboard"]["pillow_version"]).strip(),
+            "qwen_env": str(Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()),
+            "qwen_package_fingerprint": None,
+            "repo_state": {},
+            "sage_state": {},
+            "saved_at": time.time(),
+        })
+        qwen_python = Path(state["qwen_env"]) / "bin" / "python"
+        if qwen_python.is_file():
+            state["qwen_package_fingerprint"] = _python_package_fingerprint(qwen_python)
+        repo_state = {}
+        if COMFY.is_dir() and (COMFY / ".git").is_dir():
+            repo_state["ComfyUI"] = {
+                "head": _git_head(COMFY),
+                "status": _git_status_fingerprint(COMFY),
+                "requirements": _requirements_hash(COMFY / "requirements.txt"),
+            }
+        manifest = load_yaml(NODE_MANIFEST)
+        for node in _ordered_custom_nodes(manifest):
+            name = str(node["name"])
+            path = CUSTOM / name
+            if path.is_dir() and (path / ".git").is_dir():
+                repo_state[name] = {
+                    "head": _git_head(path),
+                    "status": _git_status_fingerprint(path),
+                    "requirements": _requirements_hash(path / "requirements.txt"),
+                }
+        state["repo_state"] = repo_state
+        sage_dir = CUSTOM / str(runtime["sage_attention"]["directory"])
+        sage_kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+        sage_so = sorted(str(path.relative_to(sage_dir)) for path in sage_dir.glob("sageattention/*.so")) if sage_dir.is_dir() else []
+        state["sage_state"] = {
+            "head": _git_head(sage_dir) if (sage_dir / ".git").is_dir() else "",
+            "kernel_sha256": _sha256_file(sage_kernel) if sage_kernel.is_file() else "",
+            "so_files": sage_so,
+            "so_sha256": {rel: _sha256_file(sage_dir / rel) for rel in sage_so},
+            "version": str(runtime["sage_attention"]["version"]).strip(),
+        }
+        tmp = BOOTSTRAP_CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(BOOTSTRAP_CACHE_FILE)
+        print(f"[BOOTSTRAP CACHE] saved: {BOOTSTRAP_CACHE_FILE}")
+    except Exception as exc:
+        print(f"[BOOTSTRAP CACHE] save skipped: {exc}")
+
+
+def _warm_cache_ready(runtime: dict) -> tuple[bool, str]:
+    try:
+        if os.getenv("H3_BOOTSTRAP_FORCE_REFRESH", "").strip().lower() in {"1", "true", "yes"}:
+            return False, "H3_BOOTSTRAP_FORCE_REFRESH is enabled"
+        if not BOOTSTRAP_CACHE_FILE.is_file():
+            return False, "cache file missing"
+        state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
+        if state.get("valid") is not True:
+            return False, "cache is not marked valid"
+        expected = _bootstrap_cache_inputs(runtime)
+        for key, value in expected.items():
+            if state.get(key) != value:
+                return False, f"cache input mismatch: {key}"
+        if not _probe_system_pytorch(runtime):
+            return False, "system PyTorch/GPU probe failed"
+        if _python_package_fingerprint(Path(sys.executable)) != state.get("system_package_fingerprint"):
+            return False, "system package fingerprint changed"
+        pillow_version = str(runtime["storyboard"]["pillow_version"]).strip()
+        if pillow_version != state.get("pillow_version") or not _probe_pillow(pillow_version):
+            return False, "Pillow contract changed"
+        qwen_env = Path(state.get("qwen_env", ""))
+        qwen_python = qwen_env / "bin" / "python"
+        if not _probe_director_venv(runtime, qwen_python):
+            return False, "Director vLLM environment probe failed"
+        if _python_package_fingerprint(qwen_python) != state.get("qwen_package_fingerprint"):
+            return False, "Director vLLM package fingerprint changed"
+        repo_state = state.get("repo_state", {}) or {}
+        comfy_state = repo_state.get("ComfyUI", {}) or {}
+        if not COMFY.is_dir() or not (COMFY / ".git").is_dir():
+            return False, "ComfyUI checkout missing"
+        if _git_head(COMFY) != comfy_state.get("head") or _git_status_fingerprint(COMFY) != comfy_state.get("status"):
+            return False, "ComfyUI checkout state changed"
+        if _requirements_hash(COMFY / "requirements.txt") != comfy_state.get("requirements"):
+            return False, "ComfyUI requirements changed"
+        manifest = load_yaml(NODE_MANIFEST)
+        for node in _ordered_custom_nodes(manifest):
+            name = str(node["name"])
+            path = CUSTOM / name
+            cached = repo_state.get(name, {}) or {}
+            if not path.is_dir() or not (path / ".git").is_dir():
+                return False, f"custom node missing: {name}"
+            if _git_head(path) != cached.get("head") or _git_status_fingerprint(path) != cached.get("status"):
+                return False, f"custom node state changed: {name}"
+            if _requirements_hash(path / "requirements.txt") != cached.get("requirements"):
+                return False, f"custom node requirements changed: {name}"
+        sage_state = state.get("sage_state", {}) or {}
+        sage_dir = CUSTOM / str(runtime["sage_attention"]["directory"])
+        sage_kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+        if not sage_dir.is_dir() or not (sage_dir / ".git").is_dir():
+            return False, "SageAttention checkout missing"
+        if _git_head(sage_dir) != sage_state.get("head"):
+            return False, "SageAttention revision changed"
+        if not sage_kernel.is_file() or _sha256_file(sage_kernel) != sage_state.get("kernel_sha256"):
+            return False, "SageAttention patched source changed"
+        so_files = list(sage_state.get("so_files", []) or [])
+        if not so_files:
+            return False, "SageAttention compiled artifacts missing"
+        for rel in so_files:
+            artifact = sage_dir / rel
+            if not artifact.is_file() or _sha256_file(artifact) != (sage_state.get("so_sha256", {}) or {}).get(rel):
+                return False, f"SageAttention binary changed: {rel}"
+        return True, "all warm-cache contracts match"
+    except Exception as exc:
+        return False, f"warm-cache probe failed closed: {exc}"
+
+
+def _warm_stage(message: str) -> None:
+    print(f"[BOOTSTRAP WARM] {message}")
+
+
+def _disable_warm(reason: str) -> None:
+    global _WARM_BOOTSTRAP_ACTIVE, _WARM_BOOTSTRAP_STATE
+    if _WARM_BOOTSTRAP_ACTIVE:
+        print(f"[BOOTSTRAP WARM] DISABLED: {reason}")
+    _WARM_BOOTSTRAP_ACTIVE = False
+    _WARM_BOOTSTRAP_STATE = {}
+
+
+def _mark_cache_in_progress() -> None:
+    try:
+        if not BOOTSTRAP_CACHE_FILE.is_file():
+            return
+        state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
+        state["valid"] = False
+        state["run_started_at"] = time.time()
+        tmp = BOOTSTRAP_CACHE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+        tmp.replace(BOOTSTRAP_CACHE_FILE)
+    except Exception as exc:
+        print(f"[BOOTSTRAP CACHE] could not mark previous cache in-progress: {exc}")
+
+
 def run(
     *args,
     env=None,
@@ -260,6 +561,9 @@ def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
 
 def install_base_requirements() -> None:
     requirements = ROOT / "requirements.txt"
+    if _WARM_BOOTSTRAP_ACTIVE:
+        _warm_stage("reusing project requirements environment")
+        return
     if not requirements.is_file():
         raise RuntimeError(
             f"Repository dependency manifest is missing: {requirements}"
@@ -282,6 +586,23 @@ def install_comfyui(runtime: dict) -> None:
     expected_version = str(config.get("expected_version", "") or "").strip()
     if not repository or not revision:
         raise RuntimeError("runtime_versions.yaml comfyui.repository/revision are required.")
+
+    if _WARM_BOOTSTRAP_ACTIVE:
+        head = _git_head(COMFY)
+        expected_head = subprocess.check_output(
+            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+            text=True,
+        ).strip()
+        tagged = subprocess.run(
+            ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if head == expected_head and (not expected_version or tagged in {expected_version, f"v{expected_version}"}):
+            _warm_stage(f"reusing ComfyUI revision={head} version={tagged or 'untagged'}")
+            return
+        _disable_warm("ComfyUI checkout no longer matches the cached state")
 
     COMFY.parent.mkdir(parents=True, exist_ok=True)
     if COMFY.exists() and not (COMFY / ".git").is_dir():
@@ -485,6 +806,11 @@ def install_pytorch_runtime(runtime: dict) -> None:
             "runtime_versions.yaml pytorch.cuda must use a cuNNN wheel tag; "
             f"got {cuda!r}."
         )
+    if _WARM_BOOTSTRAP_ACTIVE and _probe_system_pytorch(runtime):
+        _warm_stage(f"reusing PyTorch={version}+{cuda} CUDA={cuda}")
+        return
+    if _WARM_BOOTSTRAP_ACTIVE:
+        _disable_warm("PyTorch cache probe failed")
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
@@ -807,6 +1133,15 @@ def install_director_runtime(
     env_dir = Path(
         os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
     ).expanduser().resolve()
+    if _WARM_BOOTSTRAP_ACTIVE:
+        venv_python = env_dir / "bin" / "python"
+        if _probe_director_venv(runtime, venv_python):
+            cached_fp = _WARM_BOOTSTRAP_STATE.get("qwen_package_fingerprint")
+            if cached_fp and _python_package_fingerprint(venv_python) == cached_fp:
+                _warm_stage(f"reusing Director vLLM environment={env_dir}")
+                print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
+                return
+        _disable_warm("Director vLLM environment probe failed")
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
@@ -905,6 +1240,9 @@ def install_storyboard_runtime(
     Final Pillow enforcement/verification happens immediately before the final
     runtime checks, after every package installer has completed.
     """
+    if _WARM_BOOTSTRAP_ACTIVE:
+        _warm_stage("reusing storyboard dependencies")
+        return
     storyboard = runtime["storyboard"]
     gradio_version = str(
         storyboard.get("gradio_version", "")
@@ -922,6 +1260,11 @@ def install_storyboard_runtime(
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
     pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
     if not pillow_version: raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
+    if _WARM_BOOTSTRAP_ACTIVE and _probe_pillow(pillow_version):
+        _warm_stage(f"reusing Pillow={pillow_version}")
+        return
+    if _WARM_BOOTSTRAP_ACTIVE:
+        _disable_warm("Pillow cache probe failed")
     run(sys.executable, "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "-q", "--disable-pip-version-check", f"Pillow=={pillow_version}")
     _repair_loaded_pillow(pillow_version)
     verify = subprocess.run([sys.executable, "-c", "from PIL import Image; from PIL._typing import _Ink; print(Image.__version__); print(_Ink)"], capture_output=True, text=True, check=False)
@@ -2181,6 +2524,15 @@ def install_nodes() -> None:
                 "name"
             ]
         )
+        if _WARM_BOOTSTRAP_ACTIVE:
+            cached = (_WARM_BOOTSTRAP_STATE.get("repo_state", {}) or {}).get(node["name"], {}) or {}
+            current = _git_head(destination) if (destination / ".git").is_dir() else ""
+            current_status = _git_status_fingerprint(destination) if (destination / ".git").is_dir() else ""
+            current_req = _requirements_hash(destination / "requirements.txt")
+            if current == cached.get("head") and current_status == cached.get("status") and current_req == cached.get("requirements"):
+                _warm_stage(f"reusing custom node={node['name']} revision={current}")
+                continue
+            _disable_warm(f"custom node cache probe failed for {node['name']}")
         if not destination.exists():
             run(
                 "git",
@@ -2459,6 +2811,66 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
     return source
 
+def _warm_sage_smoke_check(
+    runtime: dict,
+    sage_dir: Path,
+    expected_version: str,
+    expected_revision: str,
+) -> bool:
+    try:
+        state = (_WARM_BOOTSTRAP_STATE.get("sage_state", {}) or {})
+        kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+        if not kernel.is_file() or _sha256_file(kernel) != state.get("kernel_sha256"):
+            return False
+        if _git_head(sage_dir) != expected_revision:
+            return False
+        so_files = list(state.get("so_files", []) or [])
+        if not so_files:
+            return False
+        for rel in so_files:
+            artifact = sage_dir / rel
+            if not artifact.is_file() or _sha256_file(artifact) != (state.get("so_sha256", {}) or {}).get(rel):
+                return False
+        library_dirs = _cuda_library_dirs(runtime)
+        if not library_dirs:
+            return False
+        child_env = _configure_cuda_environment(library_dirs)
+        child_env["CUDA_VISIBLE_DEVICES"] = "0"
+        code = (
+            "import torch, sageattention; "
+            "from sageattention import sageattn; "
+            f"assert str(getattr(sageattention, '__version__', '')).strip() == {expected_version!r}; "
+            f"assert __import__('pathlib').Path(sageattention.__file__).resolve().is_relative_to(__import__('pathlib').Path({str(sage_dir)!r}).resolve() / 'sageattention'); "
+            "assert bool(getattr(sageattention, 'SM75_CUDA_ENABLED', False)); "
+            "from sageattention import _fused as _sage_fused; "
+            "assert torch.cuda.is_available(); "
+            "assert torch.cuda.get_device_capability(0) == (7, 5); "
+            "q=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
+            "k=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
+            "v=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
+            "out=sageattn(q,k,v,tensor_layout='HND',is_causal=False,sm_scale=128**-0.5,smooth_k=True,qk_quant_gran='per_warp'); "
+            "torch.cuda.synchronize(); "
+            "assert tuple(out.shape)==tuple(q.shape); assert out.dtype==torch.float16; assert torch.isfinite(out).all().item(); "
+            "print('[SAGE WARM SMOKE] gpu=0 hd=128 smooth_k=True finite=PASS')"
+        )
+        verification = subprocess.run(
+            [sys.executable, "-c", code],
+            env=child_env,
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if verification.stdout:
+            print(verification.stdout, end="")
+        if verification.stderr:
+            print(verification.stderr, end="")
+        return verification.returncode == 0
+    except Exception as exc:
+        print(f"[SAGE WARM SMOKE] failed closed: {exc}")
+        return False
+
+
 def install_sageattention_sm75(runtime: dict) -> None:
     """Clone, apply the proven SM75 fragment-mapping fix, build, and verify the pinned fork."""
     cfg = dict(runtime.get("sage_attention", {}) or {})
@@ -2473,6 +2885,13 @@ def install_sageattention_sm75(runtime: dict) -> None:
         raise RuntimeError("runtime_versions.yaml sage_attention.repository/revision are required and must be SHA-pinned.")
     if not expected_version:
         raise RuntimeError("runtime_versions.yaml sage_attention.version is required.")
+
+    if _WARM_BOOTSTRAP_ACTIVE:
+        sage_dir = CUSTOM / directory
+        if _warm_sage_smoke_check(runtime, sage_dir, expected_version, revision):
+            _warm_stage(f"reusing SageAttention revision={revision} version={expected_version}")
+            return
+        _disable_warm("SageAttention cache probe failed")
 
     CUSTOM.mkdir(parents=True, exist_ok=True)
     if install_dir.exists() and not (install_dir / ".git").is_dir():
@@ -2882,6 +3301,21 @@ def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
     runtime = load_yaml(RUNTIME_MANIFEST)
+    global _WARM_BOOTSTRAP_ACTIVE, _WARM_BOOTSTRAP_STATE
+    warm_ready, warm_reason = _warm_cache_ready(runtime)
+    _WARM_BOOTSTRAP_ACTIVE = warm_ready
+    if warm_ready:
+        try:
+            _WARM_BOOTSTRAP_STATE = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            _WARM_BOOTSTRAP_ACTIVE = False
+            _WARM_BOOTSTRAP_STATE = {}
+            warm_reason = f"warm cache load failed: {exc}"
+    if _WARM_BOOTSTRAP_ACTIVE:
+        print(f"[BOOTSTRAP WARM] ENABLED: {warm_reason}")
+        _mark_cache_in_progress()
+    else:
+        print(f"[BOOTSTRAP WARM] DISABLED: {warm_reason}")
     pytorch_cuda = str(runtime["pytorch"]["cuda"])
     legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
     if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
@@ -2927,6 +3361,7 @@ def main():
     install_models()
     verify_inventory()
     verify_runtime_files(runtime)
+    _save_bootstrap_cache(runtime)
     print(
         "=" * 80
     )
