@@ -363,6 +363,7 @@ class QwenDirectorRuntimeMixin:
         prompt_tokens: int = 0,
         completion_tokens: int = 0,
         max_tokens: int = 0,
+        min_tokens: int = 0,
         temperature: float | None = None,
         top_p: float | None = None,
         response_format=None,
@@ -387,6 +388,7 @@ class QwenDirectorRuntimeMixin:
                 else 0.0
             ),
             "max_tokens": int(max_tokens or 0),
+            "min_tokens": int(min_tokens or 0),
             "temperature": temperature,
             "top_p": top_p,
             "response_format": (
@@ -425,6 +427,7 @@ class QwenDirectorRuntimeMixin:
             f"total_tokens={prompt_tokens + completion_tokens}",
             f"decode_tps={record['decode_tps']:.2f}",
             f"max_tokens={int(max_tokens or 0)}",
+            f"min_tokens={int(min_tokens or 0)}" if int(min_tokens or 0) > 0 else "",
             (f"finish_reason={record['finish_reason']}" if record["finish_reason"] else ""),
             (f"cache_hit={cache_hit}" if cache_hit else ""),
             (f"error={error}" if error else ""),
@@ -1892,6 +1895,7 @@ class QwenDirectorRuntimeMixin:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 max_tokens=max_tokens,
+                min_tokens=minimum_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 response_format=None,
