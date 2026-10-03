@@ -38,8 +38,11 @@ def test_deterministic_character_regressions():
 
 def test_story_prompt_restores_successful_compact_narrative_contract():
     source = Path(ROOT, "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    ai = source[source.index("You are the narrative writer for MiniMax H3"):source.index("You are the narrative expansion writer")]
-    expand = source[source.index("You are the narrative expansion writer"):source.index("Preserve Story does not use a story-text pass.")]
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+    _mixin = QwenDirectorPromptMixin()
+    ai = _mixin._story_text_system(AI_STORY_MODE)
+    expand = _mixin._story_text_system(EXPAND_USER_STORY_MODE)
     for label, text in (("AI story", ai), ("Expand story", expand)):
         _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
         _assert("420 to 560 words" in text, f"{label} prompt must state its word target")
@@ -492,15 +495,16 @@ def test_disabled_director_path():
 
 def test_story_token_budget_not_reduced():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # Primary creative pass: thinking stays enabled with a 3200-token reasoning/output budget.
+    # Primary creative pass: structured PLAN + STORY in visible output, thinking disabled
+    # (inline <think> blocks consumed ~40% of the budget and were ignored by the prose).
     _assert(
-        "max_completion=3200,\n                    disable_thinking=False" in source,
-        "primary story pass must keep the 3200-token thinking contract",
+        "max_completion=2600,\n                    disable_thinking=True" in source,
+        "primary story pass must use the 2600-token plan-then-write contract",
     )
+    _assert("_extract_story_body" in source, "story responses must strip the PLAN section")
     # The one controlled retry remains bounded and no-think; do not add another creative retry.
-    _assert(source.count("max_completion=1800") >= 1, "bounded story retry must remain 1800")
+    _assert(source.count("max_completion=2200") >= 1, "bounded story retry must remain 2200")
     _assert("expand_story_text_retry" in source, "Expand Story controlled retry must remain available")
-    _assert("max_completion=2200" not in source, "old 2200 story budget must not regress in")
 
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
