@@ -56,8 +56,6 @@ _SHARED_VLLM_LOCK = threading.RLock()
 _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
 _SHARED_VLLM_LOG_HANDLE = None
 _SHARED_VLLM_LOG_PATH: Path | None = None
-_SHARED_VLLM_MODEL_NAME: str | None = None
-_SHARED_VLLM_MODEL_PATH: str | None = None
 _SHARED_VLLM_TOKENIZER = None
 
 
@@ -694,7 +692,7 @@ class QwenDirectorRuntimeMixin:
     ) -> None:
 
         global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_LOG_PATH
-        global _SHARED_VLLM_MODEL_NAME, _SHARED_VLLM_MODEL_PATH, _SHARED_VLLM_TOKENIZER
+        global _SHARED_VLLM_TOKENIZER
         
         if not self.available:
             return
@@ -886,8 +884,6 @@ class QwenDirectorRuntimeMixin:
                 _SHARED_VLLM_PROCESS = process
                 _SHARED_VLLM_LOG_HANDLE = log_handle
                 _SHARED_VLLM_LOG_PATH = log_path
-                _SHARED_VLLM_MODEL_NAME = model_name
-                _SHARED_VLLM_MODEL_PATH = str(self._model_path)
 
                 self._vllm_process = process
                 self._vllm_log_handle = log_handle
@@ -923,8 +919,6 @@ class QwenDirectorRuntimeMixin:
                     _SHARED_VLLM_PROCESS = None
                     _SHARED_VLLM_LOG_HANDLE = None
                     _SHARED_VLLM_LOG_PATH = None
-                    _SHARED_VLLM_MODEL_NAME = None
-                    _SHARED_VLLM_MODEL_PATH = None
                 if process is not None:
                     try:
                         if process.poll() is None:
