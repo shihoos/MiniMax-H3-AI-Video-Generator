@@ -57,19 +57,31 @@ RUNTIME_MANIFEST = (
 )
 
 # Bootstrap state/checkouts live outside the repository checkout so a
-# notebook-side project re-clone cannot destroy them. Keep the sizeable
-# ComfyUI/custom-node cache out of /kaggle/working by default; callers that
-# explicitly want cross-session persistence can set H3_BOOTSTRAP_CACHE_DIR.
-_default_cache_parent = "/kaggle/tmp" if Path("/kaggle/tmp").is_dir() else "/tmp"
+# notebook-side project re-clone cannot destroy them. On Kaggle, prefer
+# /kaggle/working so repeated bootstrap invocations in the same notebook/session
+# can reuse the expensive ComfyUI/custom-node/Sage artifacts. A different
+# persistent location can still be supplied explicitly.
+if Path("/kaggle/working").is_dir():
+    _default_cache_parent = "/kaggle/working"
+elif Path("/kaggle/tmp").is_dir():
+    _default_cache_parent = "/kaggle/tmp"
+else:
+    _default_cache_parent = "/tmp"
 BOOTSTRAP_CACHE_ROOT = Path(
     os.getenv(
         "H3_BOOTSTRAP_CACHE_DIR",
         str(Path(_default_cache_parent) / "minimax_h3_bootstrap_cache"),
     )
 ).expanduser().resolve()
+SAGE_PREBUILT_ROOT = Path(
+    os.getenv(
+        "H3_SAGE_PREBUILT_ROOT",
+        str(BOOTSTRAP_CACHE_ROOT / "artifacts"),
+    )
+).expanduser().resolve()
 BOOTSTRAP_CACHE_FILE = BOOTSTRAP_CACHE_ROOT / "bootstrap_state.json"
 BOOTSTRAP_CHECKOUT_ROOT = BOOTSTRAP_CACHE_ROOT / "checkouts"
-BOOTSTRAP_CACHE_SCHEMA = 2
+BOOTSTRAP_CACHE_SCHEMA = 3
 def _reuse_allowed() -> bool:
     return os.getenv("H3_BOOTSTRAP_FORCE_REFRESH", "").strip().lower() not in {"1", "true", "yes"}
 
@@ -101,6 +113,171 @@ def _ensure_cached_comfyui_link() -> None:
     if cache_dir.exists() and (cache_dir / ".git").is_dir():
         if not COMFY.exists() and not COMFY.is_symlink():
             COMFY.symlink_to(cache_dir, target_is_directory=True)
+
+def _sage_source_contract_valid(sage_dir: Path) -> bool:
+    kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+    if not kernel.is_file():
+        return False
+    try:
+        source = kernel.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    required_markers = (
+        "H3-T4-SM75-KERNEL-FIX",
+        "constexpr int WARP_K_SM75 = 64;",
+        "H3-T4-SM75-PV-FRAGMENT-FIX",
+        "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
+        "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
+        "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
+        "float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;",
+        "uint32_t thread_row1 = thread_row0 + 8;",
+        "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
+    )
+    return (
+        all(marker in source for marker in required_markers)
+        and "constexpr int WARP_K_SM75 = 16;" not in source
+        and bool(list(sage_dir.glob("sageattention/*.so")))
+    )
+
+
+def _sage_artifact_manifest_path(sage_dir: Path) -> Path:
+    return sage_dir / ".h3_sage_prebuilt.json"
+
+
+def _write_sage_artifact_manifest(runtime: dict, sage_dir: Path) -> None:
+    cfg = dict(runtime.get("sage_attention", {}) or {})
+    torch_cfg = dict(runtime.get("pytorch", {}) or {})
+    manifest = {
+        "schema": 1,
+        "repository": str(cfg.get("repository", "")).strip(),
+        "revision": str(cfg.get("revision", "")).strip(),
+        "version": str(cfg.get("version", "")).strip(),
+        "directory": str(cfg.get("directory", "")).strip(),
+        "torch": str(torch_cfg.get("version", "")).strip(),
+        "cuda": str(torch_cfg.get("cuda", "")).strip(),
+        "architecture": "sm75",
+        "built_by": "MiniMax H3 bootstrap",
+    }
+    _sage_artifact_manifest_path(sage_dir).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _sage_artifact_manifest_matches(runtime: dict, sage_dir: Path) -> bool:
+    manifest_path = _sage_artifact_manifest_path(sage_dir)
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    cfg = dict(runtime.get("sage_attention", {}) or {})
+    torch_cfg = dict(runtime.get("pytorch", {}) or {})
+    expected = {
+        "schema": 1,
+        "revision": str(cfg.get("revision", "")).strip(),
+        "version": str(cfg.get("version", "")).strip(),
+        "directory": str(cfg.get("directory", "")).strip(),
+        "torch": str(torch_cfg.get("version", "")).strip(),
+        "cuda": str(torch_cfg.get("cuda", "")).strip(),
+        "architecture": "sm75",
+    }
+    return all(manifest.get(key) == value for key, value in expected.items())
+
+
+def _sage_prebuilt_candidates(runtime: dict) -> list[Path]:
+    directory = str(runtime.get("sage_attention", {}).get("directory", "SageAttention-T4")).strip()
+    candidates: list[Path] = []
+    configured = os.getenv("H3_SAGE_ARTIFACT_PATH", "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    candidates.append(SAGE_PREBUILT_ROOT / directory)
+    if KAGGLE_INPUT.is_dir():
+        # Avoid recursively scanning /kaggle/input: model datasets can be large.
+        # Support the common dataset layouts without turning artifact discovery
+        # itself into a startup bottleneck.
+        named = KAGGLE_INPUT / directory
+        candidates.append(named)
+        try:
+            for dataset_root in KAGGLE_INPUT.iterdir():
+                if not dataset_root.is_dir():
+                    continue
+                candidates.append(dataset_root / directory)
+                for child in dataset_root.iterdir():
+                    if child.is_dir() and child.name == directory:
+                        candidates.append(child)
+        except OSError:
+            pass
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(resolved)
+    return unique
+
+
+def _materialize_sage_prebuilt(runtime: dict, install_dir: Path) -> bool:
+    for candidate in _sage_prebuilt_candidates(runtime):
+        if not candidate.is_dir():
+            continue
+        if not _sage_artifact_manifest_matches(runtime, candidate):
+            continue
+        if not _sage_source_contract_valid(candidate):
+            continue
+        if install_dir.exists() or install_dir.is_symlink():
+            _safe_unlink_or_rmtree(install_dir)
+        install_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            candidate,
+            install_dir,
+            symlinks=True,
+            ignore=shutil.ignore_patterns(
+                ".git", "build", "dist", "*.egg-info", "__pycache__",
+            ),
+        )
+        _install_sage_path_hook(install_dir)
+        print(f"[SAGE SM75 PREBUILT] restored artifact={candidate}")
+        return True
+    return False
+
+
+def _export_sage_prebuilt(runtime: dict, install_dir: Path) -> None:
+    if not _sage_source_contract_valid(install_dir):
+        return
+    target = SAGE_PREBUILT_ROOT / str(runtime["sage_attention"]["directory"]).strip()
+    if target.resolve() == install_dir.resolve():
+        _write_sage_artifact_manifest(runtime, install_dir)
+        return
+    if target.exists() or target.is_symlink():
+        _safe_unlink_or_rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        install_dir,
+        target,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(
+            ".git", "build", "dist", "*.egg-info", "__pycache__",
+        ),
+    )
+    _write_sage_artifact_manifest(runtime, target)
+    print(f"[SAGE SM75 PREBUILT] exported artifact={target}")
+
+
+def _install_sage_path_hook(install_dir: Path) -> None:
+    site_packages = _site_packages()
+    if not site_packages:
+        raise RuntimeError("Unable to locate Python site-packages for SageAttention path hook.")
+    hook = site_packages[0] / "minimax_h3_sageattention_t4.pth"
+    hook.write_text(str(install_dir.resolve()) + "\n", encoding="utf-8")
+
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -2705,46 +2882,24 @@ def _warm_sage_smoke_check(
     expected_version: str,
     expected_revision: str,
 ) -> bool:
-    """Reuse Sage when the live checkout/source/binary/runtime are valid.
+    """Reuse Sage when the locked source/binary/runtime are already valid.
 
-    This probe deliberately does not depend on bootstrap_state.json. The cache
-    record is only an optimization hint; a missing/stale record must not force
-    a rebuild of an otherwise-valid Sage installation.
+    The installation may be either the SHA-pinned git checkout built locally or
+    a prebuilt artifact carrying the same locked build manifest. This probe
+    deliberately does not depend on bootstrap_state.json.
     """
     if not _reuse_allowed():
         return False
     try:
-        if not sage_dir.is_dir() or not (sage_dir / ".git").is_dir():
+        if not sage_dir.is_dir():
             return False
-        if _git_head(sage_dir) != expected_revision:
+        has_git_lock = (sage_dir / ".git").is_dir() and _git_head(sage_dir) == expected_revision
+        has_prebuilt_lock = _sage_artifact_manifest_matches(runtime, sage_dir)
+        if not (has_git_lock or has_prebuilt_lock):
             return False
-        kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
-        if not kernel.is_file():
+        if not _sage_source_contract_valid(sage_dir):
             return False
-        source = kernel.read_text(encoding="utf-8")
-        required_markers = (
-            "H3-T4-SM75-KERNEL-FIX",
-            "constexpr int WARP_K_SM75 = 64;",
-            "H3-T4-SM75-PV-FRAGMENT-FIX",
-        )
-        if any(marker not in source for marker in required_markers):
-            return False
-        # Accept both the current v3 patched source (which predates the
-        # distinct staged/direct marker comments) and future installs produced
-        # by this bootstrap. The actual row-mapping source contract is what
-        # determines correctness; comments are only accelerators for inspection.
-        staged_contract = (
-            "uint32_t thread_row0 = lane_id / 4;" in source
-            and "uint32_t thread_row1 = thread_row0 + 8;" in source
-        )
-        direct_contract = (
-            "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);" in source
-            and "uint32_t thread_row1 = thread_row0 + 8;" in source
-        )
-        if not (staged_contract and direct_contract):
-            return False
-        if not list(sage_dir.glob("sageattention/*.so")):
-            return False
+        _install_sage_path_hook(sage_dir)
         library_dirs = _cuda_library_dirs(runtime)
         if not library_dirs:
             return False
@@ -2804,6 +2959,18 @@ def install_sageattention_sm75(runtime: dict) -> None:
     if _warm_sage_smoke_check(runtime, sage_dir, expected_version, revision):
         _warm_stage(f"reusing SageAttention revision={revision} version={expected_version}")
         return
+
+    # Prefer a validated prebuilt SM75 artifact over cloning and compiling.
+    # The artifact is accepted only when it carries the exact locked Sage/Torch/CUDA
+    # manifest and the corrected SM75 source plus compiled extension are present.
+    if _reuse_allowed() and _materialize_sage_prebuilt(runtime, install_dir):
+        if _warm_sage_smoke_check(runtime, install_dir, expected_version, revision):
+            _warm_stage(
+                f"reusing prebuilt SageAttention revision={revision} version={expected_version}"
+            )
+            return
+        _safe_unlink_or_rmtree(install_dir)
+
     CUSTOM.mkdir(parents=True, exist_ok=True)
     if install_dir.exists() and not (install_dir / ".git").is_dir():
         raise RuntimeError(f"SageAttention path exists but is not a git checkout: {install_dir}")
@@ -3161,6 +3328,9 @@ print(
                 f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
             )
 
+    _write_sage_artifact_manifest(runtime, install_dir)
+    _install_sage_path_hook(install_dir)
+    _export_sage_prebuilt(runtime, install_dir)
     print(
         f"[SAGE SM75] repository={repository} revision={actual_revision} "
         f"version={expected_version} build=PASS gpu0=PASS gpu1=PASS"
