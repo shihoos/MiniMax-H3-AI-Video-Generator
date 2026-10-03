@@ -1472,7 +1472,7 @@ class QwenDirectorSanitizeMixin:
         return bool(re.search(r"[.!?][\"'\u2019\u201d\u00bb\u203a\)\]\}]*$", value))
 
     def _validate_story_completion_contract(self, mode: str, result: str) -> None:
-        """Reject incomplete or structurally invalid stories before the bounded retry."""
+        """Reject incomplete or structurally invalid stories from the single creative pass."""
         if mode not in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
             return
 
@@ -1496,7 +1496,7 @@ class QwenDirectorSanitizeMixin:
         # AI Story is a free-form cinematic generation pass where direct dialogue is part of
         # the narrative contract. Expand Story may legitimately be a one-character expansion,
         # so requiring spoken dialogue can itself cause the model to invent an unwanted character
-        # and trigger an avoidable retry.
+        # and trigger an avoidable second creative pass.
         if mode == AI_STORY_MODE and not self._story_has_explicit_dialogue(result):
             raise RuntimeError(
                 "Generated AI story must contain at least one explicit quoted line of direct dialogue."
