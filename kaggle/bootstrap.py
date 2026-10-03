@@ -40,15 +40,51 @@ RUNTIME_MANIFEST = (
     / "runtime_versions.yaml"
 )
 
-# Persistent warm-bootstrap state lives outside the repository checkout so it
-# survives a notebook-side project re-clone within the same Kaggle kernel.
+# Bootstrap state/checkouts live outside the repository checkout so a
+# notebook-side project re-clone cannot destroy them. Keep the sizeable
+# ComfyUI/custom-node cache out of /kaggle/working by default; callers that
+# explicitly want cross-session persistence can set H3_BOOTSTRAP_CACHE_DIR.
+_default_cache_parent = "/kaggle/tmp" if Path("/kaggle/tmp").is_dir() else "/tmp"
 BOOTSTRAP_CACHE_ROOT = Path(
-    os.getenv("H3_BOOTSTRAP_CACHE_DIR", "/kaggle/working/.minimax_h3_bootstrap_cache")
+    os.getenv(
+        "H3_BOOTSTRAP_CACHE_DIR",
+        str(Path(_default_cache_parent) / "minimax_h3_bootstrap_cache"),
+    )
 ).expanduser().resolve()
 BOOTSTRAP_CACHE_FILE = BOOTSTRAP_CACHE_ROOT / "bootstrap_state.json"
-BOOTSTRAP_CACHE_SCHEMA = 1
-_WARM_BOOTSTRAP_ACTIVE = False
-_WARM_BOOTSTRAP_STATE: dict = {}
+BOOTSTRAP_CHECKOUT_ROOT = BOOTSTRAP_CACHE_ROOT / "checkouts"
+BOOTSTRAP_CACHE_SCHEMA = 2
+def _reuse_allowed() -> bool:
+    return os.getenv("H3_BOOTSTRAP_FORCE_REFRESH", "").strip().lower() not in {"1", "true", "yes"}
+
+
+def _safe_unlink_or_rmtree(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _ensure_cached_comfyui_link() -> None:
+    """Keep the expensive ComfyUI checkout outside the freshly cloned project tree."""
+    cache_dir = BOOTSTRAP_CHECKOUT_ROOT / "ComfyUI"
+    BOOTSTRAP_CHECKOUT_ROOT.mkdir(parents=True, exist_ok=True)
+
+    # If this bootstrap is running after the outer notebook cloned a fresh
+    # project, move that one-time ComfyUI checkout into the persistent cache.
+    if COMFY.exists() and not COMFY.is_symlink() and (COMFY / ".git").is_dir():
+        if cache_dir.exists() and not (cache_dir / ".git").is_dir():
+            _safe_unlink_or_rmtree(cache_dir)
+        if not cache_dir.exists():
+            cache_dir.parent.mkdir(parents=True, exist_ok=True)
+            COMFY.rename(cache_dir)
+        else:
+            # Keep the already-validated cached checkout; the fresh clone is disposable.
+            _safe_unlink_or_rmtree(COMFY)
+
+    if cache_dir.exists() and (cache_dir / ".git").is_dir():
+        if not COMFY.exists() and not COMFY.is_symlink():
+            COMFY.symlink_to(cache_dir, target_is_directory=True)
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -172,6 +208,62 @@ def _probe_director_venv(runtime: dict, venv_python: Path) -> bool:
 def _requirements_hash(path: Path) -> str:
     return _sha256_file(path) if path.is_file() else "missing"
 
+def _requirements_satisfied(path: Path, python_executable: Path | str = Path(sys.executable)) -> bool:
+    """Conservatively check whether ordinary requirements are already installed."""
+    if not path.is_file():
+        return False
+    try:
+        from packaging.requirements import Requirement
+        from packaging.markers import default_environment
+    except Exception:
+        return False
+    requirements = []
+    env = default_environment()
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("-"):
+            continue
+        if " #" in line:
+            line = line.split(" #", 1)[0].strip()
+        try:
+            req = Requirement(line)
+        except Exception:
+            return False
+        if req.url:
+            return False
+        if req.marker is not None and not req.marker.evaluate(env):
+            continue
+        requirements.append((req.name, str(req.specifier)))
+    if not requirements:
+        return True
+    import json as _json
+    script = r"""
+import importlib.metadata as m
+import json, sys
+from packaging.specifiers import SpecifierSet
+
+bad = []
+for name, spec in json.loads(sys.argv[1]):
+    try:
+        version = m.version(name)
+    except m.PackageNotFoundError:
+        bad.append((name, "missing"))
+        continue
+    if spec and version not in SpecifierSet(spec):
+        bad.append((name, version, spec))
+print(json.dumps(bad))
+"""
+    probe = subprocess.run(
+        [str(python_executable), "-c", script, _json.dumps(requirements)],
+        capture_output=True, text=True, check=False,
+    )
+    if probe.returncode != 0:
+        return False
+    try:
+        return not bool(_json.loads((probe.stdout or "[]").strip() or "[]"))
+    except Exception:
+        return False
+
 
 def _bootstrap_cache_inputs(runtime: dict) -> dict:
     return {
@@ -245,82 +337,8 @@ def _save_bootstrap_cache(runtime: dict) -> None:
         print(f"[BOOTSTRAP CACHE] save skipped: {exc}")
 
 
-def _warm_cache_ready(runtime: dict) -> tuple[bool, str]:
-    try:
-        if os.getenv("H3_BOOTSTRAP_FORCE_REFRESH", "").strip().lower() in {"1", "true", "yes"}:
-            return False, "H3_BOOTSTRAP_FORCE_REFRESH is enabled"
-        if not BOOTSTRAP_CACHE_FILE.is_file():
-            return False, "cache file missing"
-        state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
-        if state.get("valid") is not True:
-            return False, "cache is not marked valid"
-        expected = _bootstrap_cache_inputs(runtime)
-        for key, value in expected.items():
-            if state.get(key) != value:
-                return False, f"cache input mismatch: {key}"
-        if not _probe_system_pytorch(runtime):
-            return False, "system PyTorch/GPU probe failed"
-        if _python_package_fingerprint(Path(sys.executable)) != state.get("system_package_fingerprint"):
-            return False, "system package fingerprint changed"
-        pillow_version = str(runtime["storyboard"]["pillow_version"]).strip()
-        if pillow_version != state.get("pillow_version") or not _probe_pillow(pillow_version):
-            return False, "Pillow contract changed"
-        qwen_env = Path(state.get("qwen_env", ""))
-        qwen_python = qwen_env / "bin" / "python"
-        if not _probe_director_venv(runtime, qwen_python):
-            return False, "Director vLLM environment probe failed"
-        if _python_package_fingerprint(qwen_python) != state.get("qwen_package_fingerprint"):
-            return False, "Director vLLM package fingerprint changed"
-        repo_state = state.get("repo_state", {}) or {}
-        comfy_state = repo_state.get("ComfyUI", {}) or {}
-        if not COMFY.is_dir() or not (COMFY / ".git").is_dir():
-            return False, "ComfyUI checkout missing"
-        if _git_head(COMFY) != comfy_state.get("head") or _git_status_fingerprint(COMFY) != comfy_state.get("status"):
-            return False, "ComfyUI checkout state changed"
-        if _requirements_hash(COMFY / "requirements.txt") != comfy_state.get("requirements"):
-            return False, "ComfyUI requirements changed"
-        manifest = load_yaml(NODE_MANIFEST)
-        for node in _ordered_custom_nodes(manifest):
-            name = str(node["name"])
-            path = CUSTOM / name
-            cached = repo_state.get(name, {}) or {}
-            if not path.is_dir() or not (path / ".git").is_dir():
-                return False, f"custom node missing: {name}"
-            if _git_head(path) != cached.get("head") or _git_status_fingerprint(path) != cached.get("status"):
-                return False, f"custom node state changed: {name}"
-            if _requirements_hash(path / "requirements.txt") != cached.get("requirements"):
-                return False, f"custom node requirements changed: {name}"
-        sage_state = state.get("sage_state", {}) or {}
-        sage_dir = CUSTOM / str(runtime["sage_attention"]["directory"])
-        sage_kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
-        if not sage_dir.is_dir() or not (sage_dir / ".git").is_dir():
-            return False, "SageAttention checkout missing"
-        if _git_head(sage_dir) != sage_state.get("head"):
-            return False, "SageAttention revision changed"
-        if not sage_kernel.is_file() or _sha256_file(sage_kernel) != sage_state.get("kernel_sha256"):
-            return False, "SageAttention patched source changed"
-        so_files = list(sage_state.get("so_files", []) or [])
-        if not so_files:
-            return False, "SageAttention compiled artifacts missing"
-        for rel in so_files:
-            artifact = sage_dir / rel
-            if not artifact.is_file() or _sha256_file(artifact) != (sage_state.get("so_sha256", {}) or {}).get(rel):
-                return False, f"SageAttention binary changed: {rel}"
-        return True, "all warm-cache contracts match"
-    except Exception as exc:
-        return False, f"warm-cache probe failed closed: {exc}"
-
-
 def _warm_stage(message: str) -> None:
     print(f"[BOOTSTRAP WARM] {message}")
-
-
-def _disable_warm(reason: str) -> None:
-    global _WARM_BOOTSTRAP_ACTIVE, _WARM_BOOTSTRAP_STATE
-    if _WARM_BOOTSTRAP_ACTIVE:
-        print(f"[BOOTSTRAP WARM] DISABLED: {reason}")
-    _WARM_BOOTSTRAP_ACTIVE = False
-    _WARM_BOOTSTRAP_STATE = {}
 
 
 def _mark_cache_in_progress() -> None:
@@ -561,25 +579,15 @@ def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
 
 def install_base_requirements() -> None:
     requirements = ROOT / "requirements.txt"
-    if _WARM_BOOTSTRAP_ACTIVE:
+    if not requirements.is_file():
+        raise RuntimeError(f"Repository dependency manifest is missing: {requirements}")
+    if _reuse_allowed() and _requirements_satisfied(requirements):
         _warm_stage("reusing project requirements environment")
         return
-    if not requirements.is_file():
-        raise RuntimeError(
-            f"Repository dependency manifest is missing: {requirements}"
-        )
-    run(
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "--disable-pip-version-check",
-        "-r",
-        requirements,
-    )
+    run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", requirements)
+
 def install_comfyui(runtime: dict) -> None:
-    """Install the locked ComfyUI checkout and its dependencies."""
+    """Install locked ComfyUI, reusing an already-correct checkout and dependencies."""
     config = dict(runtime.get("comfyui", {}) or {})
     repository = str(config.get("repository", "") or "").strip()
     revision = str(config.get("revision", "") or "").strip()
@@ -587,54 +595,48 @@ def install_comfyui(runtime: dict) -> None:
     if not repository or not revision:
         raise RuntimeError("runtime_versions.yaml comfyui.repository/revision are required.")
 
-    if _WARM_BOOTSTRAP_ACTIVE:
-        head = _git_head(COMFY)
-        expected_head = subprocess.check_output(
-            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
-            text=True,
-        ).strip()
-        tagged = subprocess.run(
-            ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-        if head == expected_head and (not expected_version or tagged in {expected_version, f"v{expected_version}"}):
-            _warm_stage(f"reusing ComfyUI revision={head} version={tagged or 'untagged'}")
-            return
-        _disable_warm("ComfyUI checkout no longer matches the cached state")
+    _ensure_cached_comfyui_link()
 
-    COMFY.parent.mkdir(parents=True, exist_ok=True)
-    if COMFY.exists() and not (COMFY / ".git").is_dir():
-        raise RuntimeError(f"ComfyUI path exists but is not a git checkout: {COMFY}")
-    if not COMFY.exists():
-        run("git", "clone", repository, COMFY)
+    def checkout_matches() -> bool:
+        if not _reuse_allowed():
+            return False
+        if not COMFY.is_dir() or not (COMFY / ".git").is_dir():
+            return False
+        try:
+            head = _git_head(COMFY)
+            expected_head = subprocess.check_output(["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True).strip()
+            tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+            return head == expected_head and (not expected_version or tagged in {expected_version, f"v{expected_version}"})
+        except Exception:
+            return False
 
-    run("git", "-C", COMFY, "fetch", "--all", "--tags", "--prune")
-    run("git", "-C", COMFY, "checkout", "--detach", revision)
-    run(
-        sys.executable, "-m", "pip", "install", "-q",
-        "--disable-pip-version-check", "-r", COMFY / "requirements.txt",
-    )
+    if not checkout_matches():
+        COMFY.parent.mkdir(parents=True, exist_ok=True)
+        if COMFY.exists() and not (COMFY / ".git").is_dir():
+            raise RuntimeError(f"ComfyUI path exists but is not a git checkout: {COMFY}")
+        cache_dir = BOOTSTRAP_CHECKOUT_ROOT / "ComfyUI"
+        if not cache_dir.exists():
+            run("git", "clone", repository, cache_dir)
+        if not COMFY.exists() and not COMFY.is_symlink():
+            COMFY.symlink_to(cache_dir, target_is_directory=True)
+        reachable = subprocess.run(["git", "-C", str(COMFY), "cat-file", "-e", f"{revision}^{{commit}}"], capture_output=True, text=True, check=False).returncode == 0
+        if not reachable:
+            run("git", "-C", COMFY, "fetch", "--no-tags", "origin", revision)
+        run("git", "-C", COMFY, "checkout", "--detach", revision)
 
-    head = subprocess.check_output(
-        ["git", "-C", str(COMFY), "rev-parse", "HEAD"], text=True
-    ).strip()
-    expected_head = subprocess.check_output(
-        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True
-    ).strip()
+    if _reuse_allowed() and _requirements_satisfied(COMFY / "requirements.txt"):
+        _warm_stage("reusing ComfyUI requirements environment")
+    else:
+        run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", COMFY / "requirements.txt")
+
+    head = _git_head(COMFY)
+    expected_head = subprocess.check_output(["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True).strip()
     if head != expected_head:
         raise RuntimeError(f"ComfyUI checkout mismatch: expected={expected_head}, actual={head}")
-    tagged = subprocess.run(
-        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
-        capture_output=True, text=True, check=False,
-    ).stdout.strip()
+    tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
     if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
-        raise RuntimeError(
-            f"ComfyUI release mismatch: expected={expected_version}, actual={tagged or 'untagged'}"
-        )
+        raise RuntimeError(f"ComfyUI release mismatch: expected={expected_version}, actual={tagged or 'untagged'}")
     print(f"[COMFYUI] revision={head} version={tagged or 'untagged'}")
-
 
 def apply_embedded_h3_runtime_overlay() -> None:
     """Apply the project-owned H3 runtime patches without embedding full upstream source."""
@@ -806,11 +808,10 @@ def install_pytorch_runtime(runtime: dict) -> None:
             "runtime_versions.yaml pytorch.cuda must use a cuNNN wheel tag; "
             f"got {cuda!r}."
         )
-    if _WARM_BOOTSTRAP_ACTIVE and _probe_system_pytorch(runtime):
+    if _reuse_allowed() and _probe_system_pytorch(runtime):
         _warm_stage(f"reusing PyTorch={version}+{cuda} CUDA={cuda}")
         return
-    if _WARM_BOOTSTRAP_ACTIVE:
-        _disable_warm("PyTorch cache probe failed")
+    print("[BOOTSTRAP REPAIR] PyTorch live probe failed; installing locked runtime")
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
@@ -1133,15 +1134,12 @@ def install_director_runtime(
     env_dir = Path(
         os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
     ).expanduser().resolve()
-    if _WARM_BOOTSTRAP_ACTIVE:
-        venv_python = env_dir / "bin" / "python"
-        if _probe_director_venv(runtime, venv_python):
-            cached_fp = _WARM_BOOTSTRAP_STATE.get("qwen_package_fingerprint")
-            if cached_fp and _python_package_fingerprint(venv_python) == cached_fp:
-                _warm_stage(f"reusing Director vLLM environment={env_dir}")
-                print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
-                return
-        _disable_warm("Director vLLM environment probe failed")
+    venv_python = env_dir / "bin" / "python"
+    if _reuse_allowed() and _probe_director_venv(runtime, venv_python):
+        _warm_stage(f"reusing Director vLLM environment={env_dir}")
+        print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
+        return
+    print("[BOOTSTRAP REPAIR] Director vLLM live probe failed; installing locked runtime")
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
@@ -1231,40 +1229,25 @@ def install_director_runtime(
             f"observed={observed_gpu_count}, configured tensor_parallel_size={tensor_parallel_size}."
         )
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
-def install_storyboard_runtime(
-    runtime: dict,
-) -> None:
-    """Install storyboard UI dependencies from the project runtime lock.
-    Pillow is intentionally NOT verified here because later ComfyUI/custom-node
-    dependency installation may mutate the shared Kaggle Python environment.
-    Final Pillow enforcement/verification happens immediately before the final
-    runtime checks, after every package installer has completed.
-    """
-    if _WARM_BOOTSTRAP_ACTIVE:
-        _warm_stage("reusing storyboard dependencies")
-        return
+def install_storyboard_runtime(runtime: dict) -> None:
     storyboard = runtime["storyboard"]
-    gradio_version = str(
-        storyboard.get("gradio_version", "")
-    ).strip()
-    if gradio_version:
-        run(
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "--disable-pip-version-check",
-            f"gradio=={gradio_version}",
-        )
+    gradio_version = str(storyboard.get("gradio_version", "")).strip()
+    if not gradio_version:
+        return
+    probe = subprocess.run([sys.executable, "-c", f"import importlib.metadata as m; assert m.version('gradio') == {gradio_version!r}"], capture_output=True, text=True, check=False)
+    if _reuse_allowed() and probe.returncode == 0:
+        _warm_stage(f"reusing Gradio={gradio_version}")
+        return
+    run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", f"gradio=={gradio_version}")
+
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
     pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
     if not pillow_version: raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-    if _WARM_BOOTSTRAP_ACTIVE and _probe_pillow(pillow_version):
+    if _reuse_allowed() and _probe_pillow(pillow_version):
+        _repair_loaded_pillow(pillow_version)
         _warm_stage(f"reusing Pillow={pillow_version}")
         return
-    if _WARM_BOOTSTRAP_ACTIVE:
-        _disable_warm("Pillow cache probe failed")
+    print("[BOOTSTRAP REPAIR] Pillow live probe failed; installing locked runtime")
     run(sys.executable, "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "-q", "--disable-pip-version-check", f"Pillow=={pillow_version}")
     _repair_loaded_pillow(pillow_version)
     verify = subprocess.run([sys.executable, "-c", "from PIL import Image; from PIL._typing import _Ink; print(Image.__version__); print(_Ink)"], capture_output=True, text=True, check=False)
@@ -2482,111 +2465,42 @@ def _ordered_custom_nodes(manifest: dict) -> list[dict]:
 
 
 def install_nodes() -> None:
-    manifest = load_yaml(
-        NODE_MANIFEST
-    )
+    manifest = load_yaml(NODE_MANIFEST)
     policy = dict(manifest.get("policy", {}) or {})
-    if policy.get("clone_at_runtime") is not True:
-        raise RuntimeError(
-            "custom_nodes.yaml policy.clone_at_runtime must be true for the locked Kaggle bootstrap."
-        )
-    if policy.get("pin_revisions") is not True:
-        raise RuntimeError(
-            "custom_nodes.yaml policy.pin_revisions must be true for the locked Kaggle bootstrap."
-        )
-    if policy.get("vendor_source_code") is not False:
-        raise RuntimeError(
-            "custom_nodes.yaml policy.vendor_source_code must be false for the locked bootstrap."
-        )
-    if policy.get("third_party_models") is not False:
-        raise RuntimeError(
-            "custom_nodes.yaml policy.third_party_models must be false for the locked bootstrap."
-        )
-    CUSTOM.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    if policy.get("clone_at_runtime") is not True or policy.get("pin_revisions") is not True:
+        raise RuntimeError("custom_nodes.yaml must enable clone_at_runtime and pin_revisions.")
+    if policy.get("vendor_source_code") is not False or policy.get("third_party_models") is not False:
+        raise RuntimeError("custom_nodes.yaml vendor/model policy is invalid for the locked bootstrap.")
+    CUSTOM.mkdir(parents=True, exist_ok=True)
     for node in _ordered_custom_nodes(manifest):
         name = str(node.get("name", "") or "").strip()
         repository = str(node.get("repository", "") or "").strip()
         revision = str(node.get("revision", "") or "").strip()
-        if not repository or not revision:
-            raise RuntimeError(
-                f"Custom-node {name!r} must declare repository and pinned revision."
-            )
-        if len(revision) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in revision):
-            raise RuntimeError(
-                f"Custom-node {name!r} revision must be a full 40-character SHA: {revision!r}"
-            )
-        destination = (
-            CUSTOM
-            / node[
-                "name"
-            ]
-        )
-        if _WARM_BOOTSTRAP_ACTIVE:
-            cached = (_WARM_BOOTSTRAP_STATE.get("repo_state", {}) or {}).get(node["name"], {}) or {}
-            current = _git_head(destination) if (destination / ".git").is_dir() else ""
-            current_status = _git_status_fingerprint(destination) if (destination / ".git").is_dir() else ""
-            current_req = _requirements_hash(destination / "requirements.txt")
-            if current == cached.get("head") and current_status == cached.get("status") and current_req == cached.get("requirements"):
-                _warm_stage(f"reusing custom node={node['name']} revision={current}")
+        if not repository or len(revision) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in revision):
+            raise RuntimeError(f"Custom-node {name!r} repository/revision is invalid.")
+        destination = CUSTOM / name
+        current = _git_head(destination) if (destination / ".git").is_dir() else ""
+        if _reuse_allowed() and current == revision:
+            requirements = destination / "requirements.txt"
+            if not requirements.is_file() or _requirements_satisfied(requirements):
+                _warm_stage(f"reusing custom node={name} revision={revision}")
+                print("[NODE]", name)
                 continue
-            _disable_warm(f"custom node cache probe failed for {node['name']}")
+        if destination.exists() and not (destination / ".git").is_dir():
+            raise RuntimeError(f"Custom-node path exists but is not a git checkout: {destination}")
         if not destination.exists():
-            run(
-                "git",
-                "clone",
-                node[
-                    "repository"
-                ],
-                destination,
-            )
-        run(
-            "git",
-            "-C",
-            destination,
-            "fetch",
-            "--all",
-            "--tags",
-            "--prune",
-        )
-        if node["name"] == "H3-Optimizations":
+            run("git", "clone", repository, destination)
+        reachable = subprocess.run(["git", "-C", str(destination), "cat-file", "-e", f"{revision}^{{commit}}"], capture_output=True, text=True, check=False).returncode == 0
+        if not reachable:
+            run("git", "-C", destination, "fetch", "--no-tags", "origin", revision)
+        if name == "H3-Optimizations" and current != revision:
             run("git", "-C", destination, "reset", "--hard")
-        run(
-            "git",
-            "-C",
-            destination,
-            "checkout",
-            "--detach",
-            node[
-                "revision"
-            ],
-        )
+        run("git", "-C", destination, "checkout", "--detach", revision)
         requirements = destination / "requirements.txt"
-        if requirements.is_file():
-            run(
-                sys.executable,
-                "-m",
-                "pip",
-                "install",
-                "-q",
-                "--disable-pip-version-check",
-                "-r",
-                requirements,
-            )
-            print(
-                "[NODE DEPS]",
-                node[
-                    "name"
-                ],
-            )
-        print(
-            "[NODE]",
-            node[
-                "name"
-            ],
-        )
+        if requirements.is_file() and not _requirements_satisfied(requirements):
+            run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", requirements)
+            print("[NODE DEPS]", name)
+        print("[NODE]", name)
 
 # Project-owned SageAttention SM75 correction recipe.
 # This is intentionally embedded here so the bootstrap is self-contained:
@@ -2714,7 +2628,7 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         uint32_t thread_col1 = thread_col0 + 1;
         uint32_t smem_row_base = o_start_row_warp;
 """
-    new = r"""        // H3-T4-SM75-PV-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
+    new = r"""        // H3-T4-SM75-STAGED-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
         uint32_t thread_row0 = lane_id / 4;
         uint32_t thread_row1 = thread_row0 + 8;
         uint32_t thread_col0 = (lane_id % 4) * 2;
@@ -2758,7 +2672,7 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         }
     }
 """
-    new = r"""        // Path B: Direct scattered write using the SM75 fragment row mapping.
+    new = r"""        // H3-T4-SM75-DIRECT-FRAGMENT-FIX: SM75 fragment row mapping.
         #pragma unroll
         for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
             uint32_t col_base = fk * MMA_SV_N_SM75;
@@ -2817,20 +2731,46 @@ def _warm_sage_smoke_check(
     expected_version: str,
     expected_revision: str,
 ) -> bool:
+    """Reuse Sage when the live checkout/source/binary/runtime are valid.
+
+    This probe deliberately does not depend on bootstrap_state.json. The cache
+    record is only an optimization hint; a missing/stale record must not force
+    a rebuild of an otherwise-valid Sage installation.
+    """
+    if not _reuse_allowed():
+        return False
     try:
-        state = (_WARM_BOOTSTRAP_STATE.get("sage_state", {}) or {})
-        kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
-        if not kernel.is_file() or _sha256_file(kernel) != state.get("kernel_sha256"):
+        if not sage_dir.is_dir() or not (sage_dir / ".git").is_dir():
             return False
         if _git_head(sage_dir) != expected_revision:
             return False
-        so_files = list(state.get("so_files", []) or [])
-        if not so_files:
+        kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+        if not kernel.is_file():
             return False
-        for rel in so_files:
-            artifact = sage_dir / rel
-            if not artifact.is_file() or _sha256_file(artifact) != (state.get("so_sha256", {}) or {}).get(rel):
-                return False
+        source = kernel.read_text(encoding="utf-8")
+        required_markers = (
+            "H3-T4-SM75-KERNEL-FIX",
+            "constexpr int WARP_K_SM75 = 64;",
+            "H3-T4-SM75-PV-FRAGMENT-FIX",
+        )
+        if any(marker not in source for marker in required_markers):
+            return False
+        # Accept both the current v3 patched source (which predates the
+        # distinct staged/direct marker comments) and future installs produced
+        # by this bootstrap. The actual row-mapping source contract is what
+        # determines correctness; comments are only accelerators for inspection.
+        staged_contract = (
+            "uint32_t thread_row0 = lane_id / 4;" in source
+            and "uint32_t thread_row1 = thread_row0 + 8;" in source
+        )
+        direct_contract = (
+            "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);" in source
+            and "uint32_t thread_row1 = thread_row0 + 8;" in source
+        )
+        if not (staged_contract and direct_contract):
+            return False
+        if not list(sage_dir.glob("sageattention/*.so")):
+            return False
         library_dirs = _cuda_library_dirs(runtime)
         if not library_dirs:
             return False
@@ -2886,13 +2826,10 @@ def install_sageattention_sm75(runtime: dict) -> None:
     if not expected_version:
         raise RuntimeError("runtime_versions.yaml sage_attention.version is required.")
 
-    if _WARM_BOOTSTRAP_ACTIVE:
-        sage_dir = CUSTOM / directory
-        if _warm_sage_smoke_check(runtime, sage_dir, expected_version, revision):
-            _warm_stage(f"reusing SageAttention revision={revision} version={expected_version}")
-            return
-        _disable_warm("SageAttention cache probe failed")
-
+    sage_dir = CUSTOM / directory
+    if _warm_sage_smoke_check(runtime, sage_dir, expected_version, revision):
+        _warm_stage(f"reusing SageAttention revision={revision} version={expected_version}")
+        return
     CUSTOM.mkdir(parents=True, exist_ok=True)
     if install_dir.exists() and not (install_dir / ".git").is_dir():
         raise RuntimeError(f"SageAttention path exists but is not a git checkout: {install_dir}")
@@ -3297,76 +3234,106 @@ def _warn_if_torch_already_imported() -> None:
     print("=" * 80)
 
 
+def _run_timed(label: str, fn, *args, **kwargs):
+    started = time.perf_counter()
+    result = fn(*args, **kwargs)
+    print(f"[BOOTSTRAP TIMER] {label}={time.perf_counter() - started:.2f}s")
+    return result
+
+
 def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
     runtime = load_yaml(RUNTIME_MANIFEST)
-    global _WARM_BOOTSTRAP_ACTIVE, _WARM_BOOTSTRAP_STATE
-    warm_ready, warm_reason = _warm_cache_ready(runtime)
-    _WARM_BOOTSTRAP_ACTIVE = warm_ready
-    if warm_ready:
+    reuse_enabled = _reuse_allowed()
+    if reuse_enabled and BOOTSTRAP_CACHE_FILE.is_file():
         try:
-            _WARM_BOOTSTRAP_STATE = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
+            state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
+            expected_inputs = _bootstrap_cache_inputs(runtime)
+            if all(state.get(key) == value for key, value in expected_inputs.items()):
+                print("[BOOTSTRAP WARM] STATE HINT: matching prior successful bootstrap")
+            else:
+                print("[BOOTSTRAP WARM] STATE HINT: stale; live probes remain authoritative")
         except Exception as exc:
-            _WARM_BOOTSTRAP_ACTIVE = False
-            _WARM_BOOTSTRAP_STATE = {}
-            warm_reason = f"warm cache load failed: {exc}"
-    if _WARM_BOOTSTRAP_ACTIVE:
-        print(f"[BOOTSTRAP WARM] ENABLED: {warm_reason}")
-        _mark_cache_in_progress()
+            print(f"[BOOTSTRAP WARM] STATE HINT: unavailable ({exc}); live probes remain authoritative")
+    elif reuse_enabled:
+        print("[BOOTSTRAP WARM] STATE HINT: missing; live probes remain authoritative")
     else:
-        print(f"[BOOTSTRAP WARM] DISABLED: {warm_reason}")
+        print("[BOOTSTRAP WARM] FORCE_REFRESH: live reuse disabled")
+    _mark_cache_in_progress()
+
     pytorch_cuda = str(runtime["pytorch"]["cuda"])
     legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
-    if legacy_runtime.exists(): shutil.rmtree(legacy_runtime, ignore_errors=True)
-    ensure_kaggle_startup_wrapt(runtime)
-    director_model = Path(
-        os.getenv(
-            "H3_DIRECTOR_MODEL_PATH",
-            str(runtime["director"]["model_path"]),
-        )
-    ).expanduser().resolve()
-    print(
-        "[DIRECTOR MODEL]",
-        director_model,
-    )
-    install_comfyui(runtime)
-    install_director_runtime(
-        runtime
-    )
-    # Custom-node requirements are installed before the project PyTorch lock.
-    # This makes the lock authoritative even when a node declares a transitive
-    # Torch/CUDA dependency. The verification inside install_pytorch_runtime()
-    # runs in a fresh child interpreter, so it remains valid even when the live
-    # Kaggle kernel imported Torch before bootstrap.
-    install_nodes()
-    remove_legacy_context_ir_node()
-    # Re-assert the repository's control-plane pins after every ComfyUI/custom-node
-    # dependency installer has run. This prevents a third-party requirement from
-    # silently changing transformers/tokenizers/gradio/other shared dependencies.
-    install_base_requirements()
-    install_storyboard_runtime(
-        runtime
-    )
-    install_pytorch_runtime(runtime)
-    install_and_verify_pillow_runtime(runtime)
-    install_sageattention_sm75(runtime)
-    prepare_locked_h3_optimization_source(runtime)
-    patch_h3_bounded_qkv(runtime)
-    patch_h3_qkv_binding_lifetime(runtime)
-    patch_h3_sage_attention(runtime)
-    apply_embedded_h3_runtime_overlay()
-    patch_h3_embedding_memory_compatibility(runtime)
-    verify_h3_optimization_runtime(runtime)
-    install_models()
-    verify_inventory()
-    verify_runtime_files(runtime)
-    _save_bootstrap_cache(runtime)
-    print(
-        "=" * 80
-    )
-    print(
-        "MiniMax H3 Kaggle bootstrap PASSED."
-    )
+    if legacy_runtime.exists():
+        shutil.rmtree(legacy_runtime, ignore_errors=True)
+    _run_timed("kaggle_startup_wrapt", ensure_kaggle_startup_wrapt, runtime)
+    director_model = Path(os.getenv("H3_DIRECTOR_MODEL_PATH", str(runtime["director"]["model_path"]))).expanduser().resolve()
+    print("[DIRECTOR MODEL]", director_model)
+
+    director_future = None
+    director_executor = None
+    director_env = Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()
+    director_ready = _reuse_allowed() and _probe_director_venv(runtime, director_env / "bin" / "python")
+    if director_ready:
+        print(f"[BOOTSTRAP WARM] reusing Director vLLM environment={director_env}")
+    else:
+        if shutil.which("uv") is not None:
+            from concurrent.futures import ThreadPoolExecutor
+            director_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-qwen-bootstrap")
+            director_future = director_executor.submit(install_director_runtime, runtime)
+            print("[BOOTSTRAP PARALLEL] Director vLLM install started")
+
+    sage_future = None
+    sage_executor = None
+    sage_started = False
+    try:
+        _run_timed("comfyui", install_comfyui, runtime)
+        _run_timed("custom_nodes", install_nodes)
+        _run_timed("remove_legacy_context_ir", remove_legacy_context_ir_node)
+        _run_timed("project_requirements", install_base_requirements)
+        _run_timed("storyboard_runtime", install_storyboard_runtime, runtime)
+        _run_timed("pytorch", install_pytorch_runtime, runtime)
+        _run_timed("pillow", install_and_verify_pillow_runtime, runtime)
+
+        sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", ""))
+        sage_cfg = runtime.get("sage_attention", {}) or {}
+        sage_ready = _warm_sage_smoke_check(runtime, sage_dir, str(sage_cfg.get("version", "")), str(sage_cfg.get("revision", "")))
+        if _reuse_allowed() and not sage_ready:
+            from concurrent.futures import ThreadPoolExecutor
+            sage_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-sage-bootstrap")
+            sage_future = sage_executor.submit(install_sageattention_sm75, runtime)
+            sage_started = True
+            print("[BOOTSTRAP PARALLEL] SageAttention build started")
+
+        _run_timed("h3_source_lock", prepare_locked_h3_optimization_source, runtime)
+        _run_timed("h3_bounded_qkv", patch_h3_bounded_qkv, runtime)
+        _run_timed("h3_qkv_binding", patch_h3_qkv_binding_lifetime, runtime)
+        _run_timed("h3_sage_source", patch_h3_sage_attention, runtime)
+        _run_timed("h3_runtime_overlay", apply_embedded_h3_runtime_overlay)
+        _run_timed("h3_memory_compatibility", patch_h3_embedding_memory_compatibility, runtime)
+
+        if sage_future is not None:
+            _run_timed("sage_wait", sage_future.result)
+        elif not sage_ready:
+            _run_timed("sage_runtime_install", install_sageattention_sm75, runtime)
+
+        if director_future is not None:
+            _run_timed("director_wait", director_future.result)
+        elif not director_ready:
+            _run_timed("director_runtime", install_director_runtime, runtime)
+
+        _run_timed("h3_runtime_verify", verify_h3_optimization_runtime, runtime)
+        _run_timed("models", install_models)
+        _run_timed("inventory", verify_inventory)
+        _run_timed("runtime_files", verify_runtime_files, runtime)
+        _save_bootstrap_cache(runtime)
+        print("=" * 80)
+        print("MiniMax H3 Kaggle bootstrap PASSED.")
+    finally:
+        if director_executor is not None:
+            director_executor.shutdown(wait=True, cancel_futures=False)
+        if sage_executor is not None:
+            sage_executor.shutdown(wait=True, cancel_futures=False)
+
 if __name__ == "__main__":
     main()
