@@ -343,7 +343,11 @@ class QwenDirector(
         # ----------------------------------------------------
 
         generated_story = False
-        source_character_names: list[str] = []
+        source_character_names: list[str] = [
+            str(character.get("name", "")).strip()
+            for character in (base_plan.get("characters", []) or [])
+            if isinstance(character, dict) and str(character.get("name", "")).strip()
+        ]
 
         if resuming and prior_director_plan.get(
             "story"
@@ -374,11 +378,6 @@ class QwenDirector(
                 )
             )
 
-            source_character_names = [
-                str(character.get("name", "")).strip()
-                for character in (base_plan.get("characters", []) or [])
-                if isinstance(character, dict) and str(character.get("name", "")).strip()
-            ]
             story_user = (
                 self._story_text_user(
                     mode,
@@ -407,17 +406,13 @@ class QwenDirector(
                     max_completion=3200,
                     disable_thinking=False,
                 )
+                story = self._coerce_story_to_six_paragraphs(story)
                 self._validate_mode_output(
                     mode,
                     user_input,
                     story,
                 )
                 if mode == EXPAND_USER_STORY_MODE:
-                    # Expand Story has a second semantic boundary beyond the
-                    # generic story validator: every active character identity
-                    # must be grounded in the supplied source story. Keep this
-                    # inside the bounded retry path so an unanchored character
-                    # can be repaired once instead of poisoning canonical state.
                     self._validate_expand_story_cast(
                         user_input,
                         story,
@@ -433,10 +428,6 @@ class QwenDirector(
                         "420 to 560 words",
                     )
                 )
-                cast_repair = (
-                    mode == EXPAND_USER_STORY_MODE
-                    and "Expand Story introduced unanchored" in error_text
-                )
                 completion_repair = any(
                     marker in error_text
                     for marker in (
@@ -445,6 +436,10 @@ class QwenDirector(
                         "does not end in a complete sentence",
                         "must contain at least one explicit quoted line",
                     )
+                )
+                expand_cast_repair = (
+                    mode == EXPAND_USER_STORY_MODE
+                    and "Expand Story introduced unanchored" in error_text
                 )
                 if story_contract_repair and story.strip():
                     # A word/paragraph failure is a format defect, not permission
@@ -546,6 +541,22 @@ class QwenDirector(
                             + "\n\nSTORY:\n" + str(story).strip()
                         )
                         minimum_completion = 80
+                elif expand_cast_repair and story.strip():
+                    preserved_prefix = ""
+                    repair_user = (
+                        "Perform a CAST-CORRECTION EDIT of the existing Expand Story. "
+                        "Preserve the plot, causal chain, setting, source-grounded characters, relationships, "
+                        "reversal, choice, consequence, dialogue, paragraph structure, and ending. "
+                        "Remove or replace only character identities that were invented without support from the source story. "
+                        "You may keep a relational character only when that relationship is explicitly grounded in the source. "
+                        "Do not add any new person. Return the complete revised story only. "
+                        "Keep exactly six paragraphs separated by blank lines and 420 to 560 words. "
+                        "Do not introduce a new plot thread or future hook.\n\nSOURCE STORY:\n"
+                        + str(user_input).strip()
+                        + "\n\nCURRENT EXPANSION:\n"
+                        + str(story).strip()
+                    )
+                    minimum_completion = 520
                 else:
                     if mode == AI_STORY_MODE:
                         retry_requirements = (
@@ -558,11 +569,6 @@ class QwenDirector(
                             "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
                             "Do not invent a person merely to satisfy validation. "
                         )
-                        if cast_repair:
-                            retry_requirements += (
-                                "Every active named or relational character must be grounded in the supplied source story. "
-                                "Remove any newly invented named or relational character that lacks source grounding; do not replace it with another unrelated person. "
-                            )
                     repair_user = (
                         story_user
                         + "\n\n"
@@ -598,6 +604,7 @@ class QwenDirector(
                         story = preserved_prefix + "\n\n" + str(repaired).strip()
                     else:
                         story = repaired
+                    story = self._coerce_story_to_six_paragraphs(story)
                     self._validate_mode_output(
                         mode,
                         user_input,
@@ -621,18 +628,6 @@ class QwenDirector(
                     ) from retry_error
 
 
-        # Resumed Expand Story plans may bypass the fresh story-generation retry
-        # path. Re-assert source-grounded cast semantics before canonical roster
-        # derivation so a stale/incomplete checkpoint can never silently admit an
-        # unanchored character identity. Fresh generations have already passed the
-        # same check inside their bounded generation/retry path above.
-        if mode == EXPAND_USER_STORY_MODE and resuming:
-            self._validate_expand_story_cast(
-                user_input,
-                story,
-                source_character_names=source_character_names,
-            )
-
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
         # ----------------------------------------------------
@@ -641,6 +636,14 @@ class QwenDirector(
         # topology. Qwen supplies the final narrative and creative shot direction;
         # it does not regenerate deterministic production identity here.
         story = self._normalize_story(story)
+        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            story = self._coerce_story_to_six_paragraphs(story)
+            if mode == EXPAND_USER_STORY_MODE and not generated_story:
+                self._validate_expand_story_cast(
+                    user_input,
+                    story,
+                    source_character_names=source_character_names,
+                )
 
         metadata_source = (
             prior_director_plan
@@ -1437,16 +1440,9 @@ class QwenDirector(
         generated_story: str,
         source_character_names: list[str] | None = None,
     ) -> None:
-        """Keep Expand Story active character identities grounded in the source."""
-        planner = self._planner() if hasattr(self, "_fallback_planner") else None
-        if planner is None:
-            from planner.production_planner import ProductionPlanner
-            planner = ProductionPlanner(".")
+        """Keep Expand Story identities grounded in the source narrative."""
+        planner = self._planner()
 
-        # Build the allowed source cast from BOTH caller-provided canonical names
-        # and the actual source narrative. The previous implementation stopped at
-        # provided names, which incorrectly rejected legitimate relational identities
-        # such as ``Eli's father`` when the base planner roster contained only ``Eli``.
         source_descriptors = planner._canonicalize_character_descriptors(
             [
                 *planner.detect_character_descriptors(source_story),
@@ -1464,6 +1460,9 @@ class QwenDirector(
             if str(name).strip()
         )
 
+        # Source-grounded relations such as "Eli's father" are legitimate even
+        # when the base production roster contains only "Eli". They must be
+        # derived from the SOURCE, not accepted merely because Qwen invented them.
         source_relations = planner._extract_relational_character_hints(
             source_story,
             source_descriptors,
@@ -1480,20 +1479,27 @@ class QwenDirector(
                 *planner._explicit_source_character_names(generated_story),
             ]
         )
-        generated_named = sorted(
-            {
-                str(name).strip()
-                for name in generated_descriptors
-                if str(name).strip()
-                and EntityResolver.normalize(str(name).strip()) not in allowed
-            }
-        )
+        generated_named = {
+            EntityResolver.normalize(str(name).strip())
+            for name in generated_descriptors
+            if str(name).strip()
+            and planner._high_confidence_deterministic_character(
+                generated_story,
+                str(name).strip(),
+            )
+        }
+        extra_named = sorted(name for name in generated_named if name not in allowed)
+        if extra_named:
+            raise RuntimeError(
+                "Expand Story introduced unanchored character(s): "
+                + ", ".join(extra_named)
+            )
 
         generated_relations = planner._extract_relational_character_hints(
             generated_story,
             generated_descriptors,
         )
-        generated_relation_names = sorted(
+        extra_relations = sorted(
             {
                 str(item.get("name", "")).strip()
                 for item in generated_relations
@@ -1502,17 +1508,73 @@ class QwenDirector(
                 and EntityResolver.normalize(str(item.get("name", "")).strip()) not in allowed
             }
         )
-
-        if generated_named:
-            raise RuntimeError(
-                "Expand Story introduced unanchored character(s): "
-                + ", ".join(generated_named)
-            )
-        if generated_relation_names:
+        if extra_relations:
             raise RuntimeError(
                 "Expand Story introduced unanchored relational character(s): "
-                + ", ".join(generated_relation_names)
+                + ", ".join(extra_relations)
             )
+
+    @staticmethod
+    def _coerce_story_to_six_paragraphs(text: str) -> str:
+        """Deterministically repair paragraph topology without changing story prose."""
+        value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not value:
+            return ""
+
+        paragraphs = [
+            re.sub(r"[ \t\n]+", " ", part).strip()
+            for part in re.split(r"\n\s*\n+", value)
+            if part.strip()
+        ]
+        if not paragraphs or len(paragraphs) == 6:
+            return "\n\n".join(paragraphs)
+
+        def word_count(part: str) -> int:
+            return len(re.findall(r"\b[\w'’-]+\b", part))
+
+        def sentence_spans(part: str) -> list[str]:
+            pieces = re.split(r"(?<=[.!?])\s+", part.strip())
+            return [piece.strip() for piece in pieces if piece.strip()]
+
+        # More than six paragraphs: merge the smallest adjacent interior pair.
+        # Avoid touching the opening or closing paragraph unless there is no
+        # interior option, preserving setup and final aftermath as distinct beats.
+        while len(paragraphs) > 6:
+            n = len(paragraphs)
+            candidate_starts = list(range(1, n - 2)) or list(range(0, n - 1))
+            start = min(
+                candidate_starts,
+                key=lambda i: (
+                    word_count(paragraphs[i]) + word_count(paragraphs[i + 1]),
+                    abs(word_count(paragraphs[i]) - word_count(paragraphs[i + 1])),
+                    i,
+                ),
+            )
+            paragraphs[start] = paragraphs[start] + " " + paragraphs[start + 1]
+            del paragraphs[start + 1]
+
+        # Fewer than six paragraphs: split the longest paragraph with the most
+        # natural sentence boundary. Never fabricate prose; if a paragraph cannot
+        # be split safely, leave the topology unchanged so the validator fails
+        # loudly rather than inventing text.
+        while len(paragraphs) < 6:
+            candidates = []
+            for index, paragraph in enumerate(paragraphs):
+                sentences = sentence_spans(paragraph)
+                if len(sentences) >= 2:
+                    penalty = 1 if index == len(paragraphs) - 1 else 0
+                    candidates.append((penalty, -word_count(paragraph), index, sentences))
+            if not candidates:
+                break
+            _, _, index, sentences = min(candidates)
+            split_index = max(1, len(sentences) // 2)
+            left = " ".join(sentences[:split_index]).strip()
+            right = " ".join(sentences[split_index:]).strip()
+            if not left or not right:
+                break
+            paragraphs[index:index + 1] = [left, right]
+
+        return "\n\n".join(paragraphs)
 
 
     @staticmethod
@@ -1644,6 +1706,16 @@ class QwenDirector(
 
             shot_count = len(scene_shots)
             event_count = len(original_events)
+
+            # Keep the exact scene-global partition search bounded. The current
+            # production contract uses two shots per scene; this guard prevents a
+            # future shot-count/configuration change from turning the recursive
+            # enumeration into an unbounded combinatorial search.
+            if shot_count > 4 or event_count > 12:
+                raise RuntimeError(
+                    "Dialogue H3 feasibility search exceeds the bounded partition "
+                    f"contract: scene={scene_id} shots={shot_count} events={event_count}."
+                )
 
             # Enumerate all monotonic cuts through the original ordered event list.
             # For the project's normal 2-shot scenes this is simply every possible
