@@ -36,17 +36,22 @@ class QwenDirectorPromptMixin:
 
     FORMAT
     - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
-      words per paragraph (about 450-520 words total) so every scene has enough action and consequence
-      without padding.
+      HARD CONTRACT: each paragraph MUST contain 70-90 words. Target about 480 words and do not stop
+      before all six paragraphs are complete. Each paragraph is one scene in one place and will become
+      one video scene. Use concrete action, reaction, and consequence to reach the target; never pad
+      with generic exposition.
 
     CAST
     - 1 to 3 recurring characters, all physically present and causally relevant on screen. Introduce the
       protagonist in the first sentence and every other recurring character by the end of paragraph 2.
+    - If a recurring counterpart exists, that person MUST be physically present and take consequential action.
+      Do not use a voice over a speaker, recording, radio, logbook, photograph, hologram, or remembered person
+      as the active counterpart. Those can supply evidence, but they are not recurring cast.
     - Give each named character ONE stable canonical name and use exactly that name every time. Full names
       are allowed; never alternate between a full name and a different nickname or title. Never hard-code
       names from these instructions. Machines, objects, places, and recordings are not characters.
-    - Someone who is only remembered, missing, recorded, or named on a document is not a character.
+    - Someone who is only remembered, missing, recorded, photographed, hologrammed, or named on a document
+      is not a recurring character.
 
     STRUCTURE (one paragraph each)
     1. SETUP: establish a specific place, start with the protagonist's concrete goal in the first two
@@ -58,18 +63,21 @@ class QwenDirectorPromptMixin:
        through an action, relationship, object, or brief memory rather than a backstory dump. The stake
        must matter to the final choice.
     4. REVERSAL: new information or an observed consequence changes what the protagonist believes and
-       recontextualizes the planted detail. The reversal should be one dominant change, not a stack of
-       unrelated mysteries.
-    5. CHOICE: the protagonist makes a hard choice with a visible cost, carried out by physical action.
-       The planted detail must materially affect the choice or the consequence of that choice.
+       directly changes the decision they must make. Recontextualize the planted detail with one dominant
+       reversal; do not replace causality with an abstract message or stack unrelated mysteries.
+    5. CHOICE: the protagonist makes a hard choice between meaningful alternatives, with a visible cost,
+       carried out by physical action. Do not let equipment failure, an accident, or a random event make the
+       choice for them. The planted detail must materially affect the choice or the consequence of that choice.
     6. AFTERMATH: show the concrete consequence caused by the choice and the resulting emotional shift,
        ending on a settled image in one place. Nothing new appears in this paragraph.
 
     DIALOGUE
-    - 1 to 3 short lines in double quotation marks, spoken aloud by characters who are present, each
-      tagged with the speaker's stable name, as in: "..." <Name> said. Prefer concise lines; each line must
-      create conflict, force a decision, or change what someone believes.
-    - Machines, screens, speakers, recordings, and radios are described in prose and never quoted as speech.
+    - 1 to 3 short lines in double quotation marks, spoken aloud by characters who are present, each tagged
+      with the speaker's stable name. When a recurring counterpart exists, make those lines a real in-scene
+      exchange between the present characters. Every line must create conflict, force a decision, reveal
+      information, or change what someone believes.
+    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are described in prose
+      and never quoted as speech; they are never treated as a character's dialogue.
 
     STYLE
     - Begin with concrete physical action, sensory detail, and a specific environment; make the visual
@@ -77,9 +85,11 @@ class QwenDirectorPromptMixin:
     - Show physical action, objects, reactions, and relationship behavior. At most one explanatory sentence
       about setting, technology, or history in the whole story.
     - One dominant causal chain and one meaningful reversal. Avoid stacked clues, secret objects, repeated
-      reveals, or a new mystery introduced only to keep the ending open. Everything important introduced
-      must drive the reversal/choice or be resolved by the end.
-    - Reserve the final paragraph for consequence and resolution, not new plot information.
+      reveals, or a new mystery introduced only to keep the ending open. Every important detail must have a
+      concrete causal path into the reversal, choice, or consequence; do not make a planted object become a
+      magical key or biometric explanation without grounding it earlier.
+    - Reserve the final paragraph for concrete external consequence plus the protagonist's emotional shift,
+      not new plot information. The ending must show what changed, not only describe a mood.
     - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
     - Output only the story prose: no title, headings, labels, camera directions, or commentary.
     """).strip()
@@ -98,9 +108,12 @@ class QwenDirectorPromptMixin:
     FIDELITY
     - Keep every event, character identity, setting, and outcome of the source, in the source's order.
       Add only the cause, resistance, and consequence the structure below needs.
-    - Do not replace the plot. Keep source characters; an additional relational character is allowed only
-      when the source explicitly establishes that relationship or identity (for example, a father or sister)
-      and the expansion makes that person causally active and physically present. Do not invent unrelated people.
+    - Do not replace the plot. Keep source characters. An additional relational character is allowed only when
+      the source explicitly establishes that specific person/relationship; NEVER invent a new person from a relational
+      noun such as brother, sister, father, mother, husband, wife, son, daughter, mentor, colleague, friend, or commander
+      when the source does not name or establish that person. An unnamed relational reference remains unnamed and
+      non-recurring. Do not create a canonical character from a memory, document, recording, photograph, hologram,
+      or off-screen mention. Do not invent unrelated people.
 
     CAST
     - Preserve source character names exactly. Never shorten, rename, or replace a source identity.
@@ -176,15 +189,11 @@ class QwenDirectorPromptMixin:
                     + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
                 )
         result += (
-            "\n\nPLAN FIRST (inside your thinking, under 250 words, never in the output): "
-            "choose each character's stable canonical name (preserving source names in Expand Story); the goal; "
-            "the planted detail; the counterpart's conflicting objective; the personal stake; the reversal; "
-            "the forced choice and its cost; the final consequence/image; and which character speaks each quoted line. "
-            "Verify that the planted detail returns at the reversal and materially affects the final choice or its consequence. "
-            "Check that nothing appears for the first time in paragraph six."
-            "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            "Return only the story: six paragraphs, 420 to 560 words, stable canonical character names, "
-            "and a final sentence that is a completed past-tense action."
+            "\n\nFINAL OUTPUT CHECK:\n"
+            "Before returning the story, verify internally that there are exactly six paragraphs, each 70-90 words, "
+            "the counterpart is physically present when one exists, dialogue is spoken only by present named characters, "
+            "the reversal directly changes the protagonist's decision, the choice is made by physical action, and the "
+            "sixth paragraph contains only consequence and resolution. Return only the story prose."
         )
         return result
 
@@ -347,8 +356,9 @@ class QwenDirectorPromptMixin:
     Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
     weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
     A person mentioned only as a historical incident, dead/missing subject, past researcher, archival reference,
-    name on a container/document/photograph, or other backstory-only identity is NOT a production character
-    unless that person is physically present in the story and takes meaningful action.
+    name on a container/document/photograph, voice on a speaker/radio/recording, remembered voice, photograph,
+    video, hologram, or other backstory/mediated-only identity is NOT a production character unless that person
+    is physically present in the story and takes meaningful on-screen action.
     Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
     For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
     them as an object label, historical/backstory reference, interrogative word, or other non-present identity.
@@ -421,7 +431,9 @@ class QwenDirectorPromptMixin:
     `relational_character`; classify it as `descriptive_character` when its distinguishing description is stable.
     Preserve grounded aliases without turning the alias itself into another canonical person.
     For possessive pronouns, follow the established discourse owner, not the nearest noun. Do not invent
-    a relationship whose owner is not explicitly established by the story.
+    a relationship whose owner is not explicitly established by the story. A person appearing only through a
+    recording, speaker, radio, photograph, video, hologram, document, memory, or off-screen mention is not a
+    canonical production character unless the story also makes that person physically present and causally active.
     A strongly story-grounded named, relational, or descriptive character must not be removed merely because a
     generic role label was classified negatively; explicit source evidence outranks a weak generic-role negative.
     """).strip()
