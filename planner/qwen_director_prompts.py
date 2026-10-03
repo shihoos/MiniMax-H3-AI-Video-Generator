@@ -195,135 +195,146 @@ Return JSON only.
 
 
 class QwenDirectorPromptMixin:
-    # ------------------------------------------------------------------
-    # Story pass
-    # ------------------------------------------------------------------
-    # Design notes (why this is NOT a "think first" prompt):
-    #   * The story model is a 14B AWQ Qwen3. Free-form <think> reasoning consumed
-    #     ~40% of the completion budget, was frequently abandoned by the final prose
-    #     (the plan said "note from Kline", the story wrote a biometric canister),
-    #     and produced contradictions between paragraphs (sealed inside the vault yet
-    #     standing in the corridor; "release or bury" followed by neither).
-    #   * Instead the model writes a SHORT STRUCTURED PLAN in the visible output, then
-    #     the story. The plan forces one causal chain and a position ledger, is cheap
-    #     (~200 tokens), and is stripped deterministically by _extract_story_body().
-    #   * Thinking is disabled for the call; the plan replaces it.
-    STORY_PLAN_MARKER = "STORY:"
-
-    _STORY_COMMON_RULES = """
-OUTPUT FORMAT (exactly two parts)
-PLAN:
-1. PROTAGONIST: <name> | <role taken from the premise> | GOAL: <one concrete, physical, checkable goal>
-2. SKILL: <how the protagonist's role/skill from the premise is used in a decisive action>
-3. RESISTANCE: <the specific thing that physically blocks the goal; a person only if the premise supports one>
-4. PLANTED DETAIL: <one ordinary fact shown in paragraphs 1-3 that will materially affect the choice, or "none">
-5. REVERSAL: <ONE concrete fact discovered that proves the protagonist's earlier belief wrong>
-6. CHOICE: <option A> vs <option B> -> chosen: <A or B>; ACTION: <the physical act>; COST: <visible loss>
-7. AFTERMATH: <the concrete change in the world> ; FINAL IMAGE: <settled place + completed action>
-8. LEDGER: P1 <where protagonist is, what they hold> / P2 ... / P6 ...
-STORY:
-<six paragraphs separated by blank lines>
-
-The PLAN is working notes: terse, no more than 170 words. After the line "STORY:" write ONLY the
-story prose. The story must follow the plan exactly and must never contradict the LEDGER.
-
-HARD STORY RULES
-- Third-person past tense, exactly six paragraphs separated by blank lines. The story must land in
-  420 to 560 words (aim for 450-520); each paragraph is 65-100 words and the final paragraph is at least 70 words.
-  Use one stable canonical name per character.
-- Begin with concrete physical action: paragraph 1 opens in a specific place and names the protagonist in
-  the first sentence. The goal is stated within the first two sentences.
-- One paragraph = one scene = one place = one lighting situation. Do not move the camera-place inside
-  a paragraph; change place only between paragraphs and say how the protagonist got there.
-- Physical consistency: every paragraph must be compatible with the LEDGER. A character cannot be
-  sealed inside a room and standing outside it; an object cannot be both carried away and left behind;
-  a door cannot be both locked and open without an action that changes it.
-- Every object, person, and mechanism that matters later is introduced earlier and used by someone's
-  action. No object may become a magic key, biometric key, secret code, weapon, cure, or prophecy
-  unless the premise establishes that mechanism. No conspiracy, government, or cover-up unless the premise says so.
-- The REVERSAL is a visible fact (something seen, measured, read, or physically happening), stated
-  plainly enough that a viewer understands exactly what changed. It must change the protagonist's decision.
-- The personal stake shown in P3 (a promise, injury, relationship, fear, or responsibility) must matter to the final choice in P5.
-- The CHOICE is two real alternatives that are BOTH stated, then ONE is carried out by a physical action
-  with a visible cost. The action must actually implement the chosen alternative. Equipment failure,
-  coincidence, or an accident never makes the choice.
-- The AFTERMATH paragraph shows the consequence of that action in the world, introduces nothing new,
-  starts no new mission or mystery, and ends on a completed past-tense action in a settled place. No
-  would/will/could/might appears in the last sentence (no would/will/could/might).
-- Machines, screens, radios, recordings, and remembered voices are never quoted as speech and are not
-  characters. Signs, tags, labels, screen text, file names, and IDs are described in plain prose WITHOUT
-  quotation marks.
-- Quotation marks are ONLY for words a present person says aloud. Plain prose only: no markdown, no
-  asterisks, no italics, no headings, no bullet lists, no stage directions, no camera language.
-- Show with action, visible reaction, and consequence. At most one sentence of explanation in the whole
-  story. No lore dumps, no rhetorical questions, no similes stacked on similes.
-- Never hard-code a name from these instructions; invent a fitting canonical name only when the premise
-  gives none, and use that exact name every time.
-- If the request is a SURGICAL EDIT of an existing story, skip the PLAN and return only the complete
-  revised story prose.
-""".strip()
-
     def _story_text_system(
         self,
         mode: str,
     ) -> str:
 
         if mode == AI_STORY_MODE:
-            return (
-                "You are the narrative writer for MiniMax H3, a short-film generator. Turn the premise into one "
-                "complete, filmable, causally airtight short story. Every concrete element of the premise "
-                "(role, place, weather, object) must appear and matter.\n\n"
-                "CAST\n"
-                "- The default is a SOLO story: the environment, a failing system, or a physical obstacle is the "
-                "resistance. Add a second person only when the premise implies one or when the story truly needs a "
-                "person with a conflicting goal. Never add someone just to create dialogue or a twist.\n"
-                "- A second person, if used, must be physically present by paragraph 2, want something that conflicts "
-                "with the protagonist, and take an action that changes what the protagonist does or risks. They must "
-                "have a believable reason to be in that place.\n"
-                "- The protagonist uses the skill named in the premise in at least one decisive action.\n\n"
-                "DIALOGUE\n"
-                "- Include 1 to 3 short lines of speech, in double quotation marks. A solo protagonist may speak "
-                "aloud to themselves or into a radio (quote only the protagonist, never the voice that answers). "
-                "Each line must reveal a fact, state a decision, or create conflict.\n\n"
-                "NARRATIVE SHAPE (one paragraph each)\n"
-                "P1 SETUP: place, protagonist, concrete goal, the first obstacle.\n"
-                "P2 CATALYST: the discovery or arrival from the premise; resistance becomes physical.\n"
-                "P3 COMPLICATION: the plan fails or costs something; the personal stake becomes concrete.\n"
-                "P4 REVERSAL: one visible fact overturns the protagonist's belief.\n"
-                "P5 CHOICE: two alternatives, one physical act, visible cost.\n"
-                "P6 AFTERMATH: the concrete consequence and the closing image.\n\n"
-                + self._STORY_COMMON_RULES
-            )
+            return textwrap.dedent("""
+    You are the narrative writer for MiniMax H3.
+
+    The user provides a premise. Write a complete cinematic short-film story with a clear beginning,
+    escalating middle, irreversible choice or point of no return, climax, consequence, and explicit
+    resolution. Completion is more important than reaching a target word count, and causal integrity
+    matters more than mechanically satisfying every instruction as a separate beat.
+
+    THINKING
+    - Use your internal reasoning before drafting. Briefly test the strongest plausible causal
+      interpretation(s) of the premise and choose the one that creates the most meaning from facts
+      already present in the premise.
+    - Prefer existing places, actions, relationships, or evidence over newly invented lore, objects,
+      organizations, or threats.
+    - Do not expose the alternatives or the reasoning in the answer.
+
+    FORMAT
+    - Third-person past tense. Aim for about 480 words; the returned story must land within 420-560
+      words and contain exactly six paragraphs separated by blank lines.
+    - Paragraphs are scene-sized beats; do not pad to equal lengths.
+
+    CAST
+    - Character count is an organic narrative decision. Do not force a minimum or maximum cast. Use one stable canonical name per character.
+    - State the protagonist's concrete goal in the first two sentences. The protagonist must appear in
+      the first sentence, and the first major action must pursue that goal.
+    - Use a recurring counterpart only when the premise genuinely supports one. A supporting character
+      must be an active causal or emotional counterpart, not an exposition device, with an immediate objective or belief that conflicts with the protagonist;
+      the counterpart must take an action that materially alters what the protagonist does, believes,
+      or risks.
+    - Never invent a recurring person merely to create dialogue, resistance, or a twist. Never hard-code
+      character names from these instructions; Qwen must create them.
+
+    NARRATIVE
+    - Build one dominant causal chain: goal -> resistance -> complication -> concrete revelation ->
+      deliberate choice -> consequence.
+    - Establish meaningful resistance or consequence before the midpoint. By the midpoint, the protagonist's
+      plan, belief, or relationship must materially change because of what happened.
+
+    PERSONAL STAKE
+    - When supported by the premise, give the protagonist one concrete prior choice, relationship, memory,
+      promise, fear, desire, or responsibility before the midpoint; do not manufacture backstory.
+
+    PLANTED DETAIL
+    - Establish one concrete detail only when it arises naturally and make its later payoff causal rather
+      than decorative.
+
+    REVERSAL, CHOICE, ENDING
+    - Use ONE meaningful reversal. A later fact should recontextualize an earlier detail or belief. The reversal
+      should change what the protagonist believes or decides. Do not add a second "it was actually X" twist,
+      stacked clues, or unrelated mystery layers.
+    - The protagonist must make the decisive choice through physical action. Do not state a binary choice
+      and then take a third option; the climax action must actually implement the chosen outcome and carry
+      a visible cost.
+    - End with the concrete consequence of that choice and what changed. Nothing important first appears
+      in the final paragraph.
+
+    DIALOGUE
+    - Include at least one short line of direct spoken dialogue by a present named character. The line must
+      create conflict, reveal a consequential fact, or change a decision. Do not invent a counterpart solely
+      to satisfy dialogue; the protagonist may be the speaker when the premise supports that naturally.
+    - Never turn narration, recordings, screens, memories, radios, or UI text into quoted speech or character dialogue.
+
+    STYLE
+    - Begin with concrete physical action, sensory detail, and a specific environment.
+    - Prefer action, evidence, visible reaction, and implication over explanatory backstory or lore dumps.
+    - Do not introduce a new unresolved mystery, mission, intention, or future objective in the final paragraph.
+    - End with a complete aftermath paragraph showing what happened to the protagonist and what changed.
+    - Do not write a teaser, sequel hook, future mission, or unresolved final mystery. The final sentence is a
+      completed past-tense action in a settled place.
+    - Output only the finished story prose.
+    """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
-            return (
-                "You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied "
-                "story into one complete, filmable, causally airtight short story while keeping everything the source "
-                "establishes exactly as established.\n\n"
-                "FIDELITY AND CAST\n"
-                "- The source's facts are fixed: its characters, names, place, objects, relationships, and outcomes keep "
-                "their meaning and their order. Do not change the kind of place or object (a station stays the kind of "
-                "station described; a vault stays a vault). Add only the cause, resistance, reaction, and consequence "
-                "needed to connect them.\n"
-                "- Preserve source character names exactly. Each active character has ONE canonical name.\n"
-                "- Add no new person unless the source establishes that person. Do not invent unrelated people. A relational character may be added only when the source explicitly establishes that person/relationship; a relational noun (brother, mentor, "
-                "colleague...) in the source does not authorize inventing a character. Memories, documents, recordings, "
-                "photographs, holograms, and off-screen mentions never become characters.\n"
-                "- The default is the source's own cast, usually solo: the place, a failing system, or a physical "
-                "obstacle is the resistance. Do not add genre machinery (conspiracies, governments, weapons, "
-                "experiments) that the source does not contain.\n\n"
-                "DIALOGUE\n"
-                "- Optional. If used, use 1 to 3 short lines spoken aloud by present named characters, in double "
-                "quotation marks. Keep source dialogue word for word. A solo protagonist may speak aloud to themselves.\n\n"
-                "NARRATIVE SHAPE (one paragraph each)\n"
-                "P1 SETUP: the source opening, the protagonist's concrete goal, the first obstacle.\n"
-                "P2 CATALYST: the source's key discovery or arrival; resistance becomes physical.\n"
-                "P3 COMPLICATION: the plan fails or costs something; a personal stake becomes concrete.\n"
-                "P4 REVERSAL: one visible fact, grounded in the source, changes the protagonist's understanding.\n"
-                "P5 CHOICE: two alternatives, one physical act, visible cost.\n"
-                "P6 AFTERMATH: the concrete consequence and the closing image.\n\n"
-                + self._STORY_COMMON_RULES
-            )
+            return textwrap.dedent("""
+    You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
+    story into one complete, filmable short story while preserving what the source actually establishes.
+
+    FORMAT
+    - Third-person past tense, 420 to 560 words, exactly six paragraphs separated by blank lines.
+      Each paragraph is one scene in one place and will become one video scene. Aim for roughly 70-90
+      words per paragraph and about 450-520 words total without padding.
+
+    FIDELITY AND CAST
+    - Preserve every established event, character identity, setting, relationship, and outcome in source order.
+      Add only the cause, resistance, visible reaction, and consequence needed to make the film coherent.
+    - Preserve source character names exactly. Give every active character ONE stable canonical name; do not shorten,
+      rename, or replace it.
+    - A relational character may be added only when the source explicitly establishes that person/relationship.
+      Never invent a person from a relational noun such as brother, sister, father, mother, husband, wife, son,
+      daughter, mentor, colleague, friend, or commander when the source does not name or establish that person.
+      An unnamed relational reference remains unnamed and non-recurring. Do not create a production character from
+      a memory, document, recording, photograph, hologram, or off-screen mention. Do not invent unrelated people.
+    - Keep the active on-screen cast as small as source fidelity allows. Any additional recurring character must
+      be explicitly grounded by the source and must become physically present and causally active.
+
+    STORY CAUSALITY
+    - Build one dominant causal chain from the source's goal -> resistance -> complication -> concrete revelation
+      -> choice -> consequence. Do not replace the source plot with an unrelated puzzle.
+    - Preserve any source detail that naturally functions as a planted detail, but do not manufacture a symbolic
+      object merely to create a payoff. An object or clue may matter later only through a believable, previously
+      established mechanism. Never turn an ordinary object into a magical key, biometric key, secret code, or
+      unexplained revelation solely because the story needs a twist.
+    - The reversal must preserve the source's causal meaning and make one concrete change in what the protagonist
+      believes. The choice must follow from that changed belief.
+
+    STRUCTURE (one paragraph each)
+    1. SETUP: preserve the source opening, establish the protagonist's concrete goal, and establish the immediate
+       obstacle/stakes through action.
+    2. CATALYST: preserve the source's key discovery or arrival and make resistance physically active. A counterpart,
+       if present, should take an action rather than merely explain backstory.
+    3. COMPLICATION: make the plan fail, tighten, or cost something. Make the personal stake concrete through action
+       or relationship behavior and ensure it must matter to the final choice.
+    4. REVERSAL: show the source-grounded fact or consequence that changes the protagonist's understanding.
+    5. CHOICE: show a deliberate physical choice with a visible cost rather than an accidental outcome.
+    6. AFTERMATH: show the concrete consequence caused by that choice and the resulting emotional shift. Nothing new
+       appears here; finish on a settled image and completed past-tense action.
+
+    DIALOGUE
+    - Dialogue is optional. If used, use 1 to 3 short lines spoken by present named characters. Preserve source
+      wording/meaning when dialogue already exists; never invent a speaker just to satisfy the format.
+    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are prose evidence and are
+      never quoted as speech or treated as active character dialogue.
+
+    STYLE
+    - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and meaningful
+      relationship behavior. Avoid lore dumps and vague mystery language.
+    - Do not stack clues or introduce a fresh mystery in the ending. Everything important introduced must have a
+      concrete causal path into the reversal, choice, or consequence, with “materially affect the choice” applied
+      only where a planted detail naturally exists.
+    - Expand by causal development, not by stacking mysteries. If a new mystery-bearing element is necessary, use one major new element and pay it off completely.
+    - The final paragraph is concrete consequence and resolution, not atmosphere-only closure.
+    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
+    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
+    """).strip()
 
         raise ValueError(
             "Preserve Story does not use a story-text pass."
@@ -356,39 +367,16 @@ HARD STORY RULES
                 result += (
                     "\n\nSOURCE CHARACTER ANCHORS:\n"
                     + ", ".join(anchors[:16])
-                    + "\nKeep these characters and their exact names. Add another recurring character only if the "
-                    "source establishes that person."
+                    + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
                 )
         result += (
-            "\n\nWrite the PLAN, then the line STORY:, then the six-paragraph story. In the PLAN fill every numbered "
-            "field with specifics from this premise, and keep the LEDGER consistent with the story. "
-            "Use every concrete element of the premise. Plain prose only: no asterisks, no markdown, no quoted signs "
-            "or screen text."
+            "\n\nFINAL OUTPUT REQUIREMENTS:\n"
+            "Return only the finished story prose. Prioritize finishing the full narrative, including the resolution, over padding. "
+            "Do not create a plot beat merely to satisfy formatting. "
+            "Resolve the central conflict before the ending."
         )
         return result
 
-    @classmethod
-    def _extract_story_body(cls, raw: str) -> str:
-        """Return only the story prose from a PLAN/STORY response.
-
-        Accepts (in order): text after the LAST standalone ``STORY:`` line; a response with no PLAN at
-        all (already plain prose, e.g. a surgical edit). A response that still starts with ``PLAN`` but
-        never reaches ``STORY:`` is incomplete and raises, so the caller's bounded retry handles it
-        instead of passing planning notes downstream as the film.
-        """
-        text = str(raw or "").replace("\r\n", "\n").strip()
-        text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
-        if not text:
-            return ""
-        matches = list(re.finditer(r"(?im)^[ \t>*#_-]*STORY[ \t*_]*:[ \t*_]*", text))
-        if matches:
-            body = text[matches[-1].end():].strip()
-            return body
-        if re.match(r"(?i)^[ \t>*#_-]*PLAN\b", text):
-            raise RuntimeError(
-                "Story response contained a PLAN but never reached the STORY section (response incomplete)."
-            )
-        return text
 
     def _sampling_for_mode(
         self,
