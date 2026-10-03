@@ -412,6 +412,17 @@ class QwenDirector(
                     user_input,
                     story,
                 )
+                if mode == EXPAND_USER_STORY_MODE:
+                    # Expand Story has a second semantic boundary beyond the
+                    # generic story validator: every active character identity
+                    # must be grounded in the supplied source story. Keep this
+                    # inside the bounded retry path so an unanchored character
+                    # can be repaired once instead of poisoning canonical state.
+                    self._validate_expand_story_cast(
+                        user_input,
+                        story,
+                        source_character_names=source_character_names,
+                    )
                 generated_story = True
             except RuntimeError as first_error:
                 error_text = str(first_error)
@@ -421,6 +432,10 @@ class QwenDirector(
                         "exactly six paragraphs",
                         "420 to 560 words",
                     )
+                )
+                cast_repair = (
+                    mode == EXPAND_USER_STORY_MODE
+                    and "Expand Story introduced unanchored" in error_text
                 )
                 completion_repair = any(
                     marker in error_text
@@ -543,6 +558,11 @@ class QwenDirector(
                             "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
                             "Do not invent a person merely to satisfy validation. "
                         )
+                        if cast_repair:
+                            retry_requirements += (
+                                "Every active named or relational character must be grounded in the supplied source story. "
+                                "Remove any newly invented named or relational character that lacks source grounding; do not replace it with another unrelated person. "
+                            )
                     repair_user = (
                         story_user
                         + "\n\n"
@@ -550,7 +570,6 @@ class QwenDirector(
                         + "Prioritize causal coherence and a finished resolution over extra detail. Return ONLY the finished story prose."
                     )
                     preserved_prefix = ""
-                    current_final = ""
                     minimum_completion = 350
 
                 try:
@@ -584,6 +603,12 @@ class QwenDirector(
                         user_input,
                         story,
                     )
+                    if mode == EXPAND_USER_STORY_MODE:
+                        self._validate_expand_story_cast(
+                            user_input,
+                            story,
+                            source_character_names=source_character_names,
+                        )
                     generated_story = True
                 except RuntimeError as retry_error:
                     raise RuntimeError(
@@ -595,6 +620,18 @@ class QwenDirector(
                         + str(retry_error)
                     ) from retry_error
 
+
+        # Resumed Expand Story plans may bypass the fresh story-generation retry
+        # path. Re-assert source-grounded cast semantics before canonical roster
+        # derivation so a stale/incomplete checkpoint can never silently admit an
+        # unanchored character identity. Fresh generations have already passed the
+        # same check inside their bounded generation/retry path above.
+        if mode == EXPAND_USER_STORY_MODE and resuming:
+            self._validate_expand_story_cast(
+                user_input,
+                story,
+                source_character_names=source_character_names,
+            )
 
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
@@ -1400,39 +1437,42 @@ class QwenDirector(
         generated_story: str,
         source_character_names: list[str] | None = None,
     ) -> None:
-        """Keep Expand Story relational identities grounded in the source cast."""
-        if hasattr(self, "_fallback_planner"):
-            planner = self._planner()
-        else:
+        """Keep Expand Story active character identities grounded in the source."""
+        planner = self._planner() if hasattr(self, "_fallback_planner") else None
+        if planner is None:
             from planner.production_planner import ProductionPlanner
             planner = ProductionPlanner(".")
 
+        # Build the allowed source cast from BOTH caller-provided canonical names
+        # and the actual source narrative. The previous implementation stopped at
+        # provided names, which incorrectly rejected legitimate relational identities
+        # such as ``Eli's father`` when the base planner roster contained only ``Eli``.
+        source_descriptors = planner._canonicalize_character_descriptors(
+            [
+                *planner.detect_character_descriptors(source_story),
+                *planner._explicit_source_character_names(source_story),
+            ]
+        )
         allowed = {
             EntityResolver.normalize(str(name).strip())
             for name in (source_character_names or [])
             if str(name).strip()
         }
-        if not allowed:
-            source_descriptors = planner._canonicalize_character_descriptors(
-                [
-                    *planner.detect_character_descriptors(source_story),
-                    *planner._explicit_source_character_names(source_story),
-                ]
-            )
-            allowed.update(
-                EntityResolver.normalize(str(name).strip())
-                for name in source_descriptors
-                if str(name).strip()
-            )
-            source_relations = planner._extract_relational_character_hints(
-                source_story,
-                source_descriptors,
-            )
-            allowed.update(
-                EntityResolver.normalize(str(item.get("name", "")).strip())
-                for item in source_relations
-                if item.get("strong") and str(item.get("name", "")).strip()
-            )
+        allowed.update(
+            EntityResolver.normalize(str(name).strip())
+            for name in source_descriptors
+            if str(name).strip()
+        )
+
+        source_relations = planner._extract_relational_character_hints(
+            source_story,
+            source_descriptors,
+        )
+        allowed.update(
+            EntityResolver.normalize(str(item.get("name", "")).strip())
+            for item in source_relations
+            if item.get("strong") and str(item.get("name", "")).strip()
+        )
 
         generated_descriptors = planner._canonicalize_character_descriptors(
             [
@@ -1440,11 +1480,20 @@ class QwenDirector(
                 *planner._explicit_source_character_names(generated_story),
             ]
         )
+        generated_named = sorted(
+            {
+                str(name).strip()
+                for name in generated_descriptors
+                if str(name).strip()
+                and EntityResolver.normalize(str(name).strip()) not in allowed
+            }
+        )
+
         generated_relations = planner._extract_relational_character_hints(
             generated_story,
             generated_descriptors,
         )
-        extra_relations = sorted(
+        generated_relation_names = sorted(
             {
                 str(item.get("name", "")).strip()
                 for item in generated_relations
@@ -1453,10 +1502,16 @@ class QwenDirector(
                 and EntityResolver.normalize(str(item.get("name", "")).strip()) not in allowed
             }
         )
-        if extra_relations:
+
+        if generated_named:
+            raise RuntimeError(
+                "Expand Story introduced unanchored character(s): "
+                + ", ".join(generated_named)
+            )
+        if generated_relation_names:
             raise RuntimeError(
                 "Expand Story introduced unanchored relational character(s): "
-                + ", ".join(extra_relations)
+                + ", ".join(generated_relation_names)
             )
 
 
