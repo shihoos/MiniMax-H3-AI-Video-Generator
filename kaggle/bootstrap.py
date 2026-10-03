@@ -131,32 +131,6 @@ def _git_status_fingerprint(path: Path) -> str:
     return _stable_text_sha256(status)
 
 
-def _python_package_fingerprint(python_executable: Path | str) -> str:
-    script = (
-        "import hashlib, importlib.metadata as m; "
-        "items=[]; "
-        "[items.append((str(d.metadata.get('Name','')).lower(), str(d.version))) for d in m.distributions() if d.metadata.get('Name')]; "
-        "payload='\\n'.join(f'{n}=={v}' for n,v in sorted(set(items))); "
-        "print(hashlib.sha256(payload.encode()).hexdigest())"
-    )
-    probe = subprocess.run(
-        [str(python_executable), "-c", script],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if probe.returncode != 0:
-        raise RuntimeError(
-            f"Package fingerprint probe failed for {python_executable}.\n"
-            + (probe.stdout or "")
-            + (probe.stderr or "")
-        )
-    value = (probe.stdout or "").strip()
-    if len(value) != 64:
-        raise RuntimeError(f"Invalid package fingerprint for {python_executable}: {value!r}")
-    return value
-
-
 def _probe_system_pytorch(runtime: dict) -> bool:
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
@@ -305,7 +279,6 @@ def _save_bootstrap_cache(runtime: dict) -> None:
         state = _bootstrap_cache_inputs(runtime)
         state.update({
             "valid": True,
-            "system_pytorch_ok": _probe_system_pytorch(runtime),
             "pillow_version": str(runtime["storyboard"]["pillow_version"]).strip(),
             "qwen_env": str(Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()),
             "repo_state": {},
