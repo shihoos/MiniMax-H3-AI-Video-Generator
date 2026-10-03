@@ -441,285 +441,271 @@ class QwenDirector(
                     if expand_cast_repair
                     else ""
                 )
-                if story_contract_repair and story.strip():
-                    # A word/paragraph failure is a format defect, not permission
-                    # to rewrite the narrative. Keep the generated causal chain,
-                    # identities, events, reversal, choice, dialogue, and ending
-                    # intact, and ask Qwen for a surgical structural/length edit.
-                    paragraphs = [
-                        part.strip()
-                        for part in re.split(r"\n\s*\n+", str(story).strip())
-                        if part.strip()
-                    ]
-                    word_matches = re.findall(r"\b[\w'’-]+\b", str(story or ""))
-                    current_word_count = len(word_matches)
-                    paragraph_counts = [
-                        len(re.findall(r"\b[\w'’-]+\b", paragraph))
-                        for paragraph in paragraphs
-                    ]
-                    target_range = "450 to 520 words"
-                    paragraph_guidance = "; ".join(
-                        f"P{index}={count} words"
-                        for index, count in enumerate(paragraph_counts, 1)
-                    ) or "no usable paragraph boundaries"
-                    if mode == AI_STORY_MODE:
-                        contract_details = (
-                            "Keep at least one short direct spoken line by an existing character. "
-                        )
-                    else:
-                        contract_details = "Dialogue remains optional; never invent a speaker merely to pad length. "
-                    repair_user = (
-                        "Perform a SURGICAL EDIT of the existing story. Do not rewrite it from scratch and do not "
-                        "change its plot. Preserve every existing character identity/name, relationship, setting, "
-                        "event, causal connection, planted detail, reversal, choice, consequence, quoted dialogue, "
-                        "and final outcome. "
-                        f"The current story has {current_word_count} words across {len(paragraphs)} paragraphs. "
-                        "Return the COMPLETE revised story, not an explanation. It must contain exactly six paragraphs "
-                        f"separated by blank lines and land in {target_range}; target roughly 70-90 words per paragraph. "
-                        "If the story is short, add only concrete physical action, visible reaction, sensory specificity, "
-                        "or causal connective tissue to events that already exist. If it is long, remove only redundant "
-                        "exposition or repetition. Do not add a new character, location, object, mystery, reveal, or "
-                        "future hook. Do not move events to another paragraph unless necessary to restore exactly six "
-                        "scene-sized beats. Keep the final paragraph at least 25 words and make it consequence/aftermath, "
-                        "not new plot. The final sentence must remain a completed past-tense action in a settled place. "
-                        + contract_details
-                        + cast_contract_details
-                        + "Current paragraph counts for guidance: "
-                        + paragraph_guidance
-                        + "\n\nEXISTING STORY:\n"
-                        + str(story).strip()
-                    )
-                    preserved_prefix = ""
-                    minimum_completion = 520
-                elif completion_repair and story.strip():
-                    paragraphs = [
-                        part.strip()
-                        for part in re.split(r"\n\s*\n", str(story).strip())
-                        if part.strip()
-                    ]
-                    if paragraphs:
-                        final_paragraph = paragraphs[-1]
-                        sentence_matches = list(
-                            re.finditer(r"(?<=[.!?])\s+", final_paragraph)
-                        )
-                        if sentence_matches:
-                            split_at = sentence_matches[-1].end()
-                            preserved_final_body = final_paragraph[:split_at].strip()
-                        else:
-                            preserved_final_body = ""
-
-                        if preserved_final_body:
-                            preserved_prefix = "\n\n".join(paragraphs[:-1] + [preserved_final_body])
-                            repair_user = (
-                                "Replace only the final sentence of the existing story. Keep every earlier sentence, "
-                                "character, relationship, event, and established fact unchanged. Write one concrete "
-                                "past-tense consequence that closes the conflict. Do not introduce anything new. "
-                                "Do not use would, will, could, might, should, or a future intention. "
-                                "End with what happened, not what the protagonist plans to do next."
-                                + (
-                                    " Include one short direct spoken line by an existing character."
-                                    if "must contain at least one explicit quoted line" in error_text
-                                    else ""
-                                )
-                                + cast_contract_details
-                                + " Return only the replacement sentence.\n\nSTORY:\n"
-                                + str(story).strip()
-                            )
-                            minimum_completion = 24
-                        else:
-                            preserved_prefix = "\n\n".join(paragraphs[:-1])
-                            repair_user = (
-                                "Replace only the final paragraph of the existing story. Preserve every earlier paragraph, "
-                                "character, relationship, event, and established fact. Close the conflict with a concrete "
-                                "past-tense consequence. Do not introduce anything new or future-oriented."
-                                + cast_contract_details
-                                + " Return only the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
-                            )
-                            minimum_completion = 60
-                    else:
-                        preserved_prefix = ""
-                        repair_user = (
-                            "Complete the existing story without changing its characters, relationships, or established events. "
-                            "End with a concrete past-tense consequence, not a future intention. Return only the finished story."
-                            + "\n\nSTORY:\n" + str(story).strip()
-                        )
-                        minimum_completion = 80
-                elif expand_cast_repair and story.strip():
-                    preserved_prefix = ""
-                    repair_user = (
-                        "Perform a CAST-CORRECTION EDIT of the existing Expand Story. "
-                        "Preserve the plot, causal chain, setting, source-grounded characters, relationships, "
-                        "reversal, choice, consequence, dialogue, paragraph structure, and ending. "
-                        "Remove or replace only character identities that were invented without support from the source story. "
-                        "You may keep a relational character only when that relationship is explicitly grounded in the source. "
-                        "Do not add any new person. Return the complete revised story only. "
-                        "Keep exactly six paragraphs separated by blank lines and 420 to 560 words. "
-                        "Do not introduce a new plot thread or future hook.\n\nSOURCE STORY:\n"
-                        + str(user_input).strip()
-                        + "\n\nCURRENT EXPANSION:\n"
-                        + str(story).strip()
-                    )
-                    minimum_completion = 520
-                else:
-                    if mode == AI_STORY_MODE:
-                        retry_requirements = (
-                            "Rewrite the story only as needed to satisfy the failed contract. Preserve every causally earned "
-                            "character and do not add a person merely to satisfy validation. "
-                        )
-                    else:
-                        retry_requirements = (
-                            "Rewrite only as needed to complete the expansion. The SOURCE CHARACTER ANCHORS are a hard safety "
-                            "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
-                            "Do not invent a person merely to satisfy validation. "
-                        )
-                    repair_user = (
-                        story_user
-                        + "\n\n"
-                        + retry_requirements
-                        + "Prioritize causal coherence and a finished resolution over extra detail. Return ONLY the finished story prose."
-                    )
-                    preserved_prefix = ""
-                    minimum_completion = 350
-
-                try:
-                    if story_contract_repair or completion_repair:
-                        # Structural/completion repairs are constrained edits, not creative resampling.
-                        retry_temperature = 0.15 if story_contract_repair else 0.20
-                        retry_top_p = 0.68 if story_contract_repair else 0.70
-                    else:
-                        retry_temperature = max(0.50, min(0.68, temperature - 0.08))
-                        retry_top_p = max(0.80, min(0.88, top_p - 0.04))
-                    repaired = self._chat_text(
-                        story_system,
-                        repair_user,
-                        minimum_completion=minimum_completion,
-                        temperature=retry_temperature,
-                        top_p=retry_top_p,
-                        call_name=(
-                            "ai_story_text_retry"
-                            if mode == AI_STORY_MODE
-                            else "expand_story_text_retry"
-                        ),
-                        max_completion=1800,
-                        disable_thinking=True,
-                    )
-                    if completion_repair and preserved_prefix:
-                        story = preserved_prefix + "\n\n" + str(repaired).strip()
-                    else:
-                        story = repaired
-                    story = self._validate_story_output_contracts(
-                        mode,
-                        user_input,
-                        story,
-                        source_character_names=source_character_names,
-                    )
-                    generated_story = True
-                except RuntimeError as retry_error:
-                    retry_error_text = str(retry_error)
-
-                    # Normalize topology first when Qwen returned the right prose with
-                    # an accidental paragraph-boundary defect. This never invents,
-                    # deletes, or paraphrases story content.
-                    if "exactly six paragraphs" in retry_error_text:
-                        fallback = self._coerce_story_to_six_paragraphs(story)
-                        if fallback != str(story).strip():
-                            story = fallback
-                            try:
-                                story = self._validate_story_output_contracts(
-                                    mode,
-                                    user_input,
-                                    story,
-                                    source_character_names=source_character_names,
-                                )
-                                generated_story = True
-                            except RuntimeError as fallback_error:
-                                retry_error_text = str(fallback_error)
-
-                    # The bounded retry can still undershoot the hard word-count
-                    # contract even after topology repair (as in a 394-word retry).
-                    # Give Qwen one final length-only surgical pass instead of
-                    # failing the whole production run. This is still a model-owned
-                    # prose edit: deterministic code does not pad, paraphrase, or
-                    # invent narrative content.
-                    if (
-                        not generated_story
-                        and "420 to 560 words" in retry_error_text
-                        and str(story).strip()
-                    ):
-                        base_story = self._coerce_story_to_six_paragraphs(story)
-                        current_word_count = len(
-                            re.findall(r"\b[\w'’-]+\b", str(base_story or ""))
-                        )
-                        length_repair_user = (
-                            "Perform one FINAL LENGTH-ONLY SURGICAL EDIT of the existing story. "
-                            "Preserve every existing character identity/name, relationship, setting, event, "
-                            "causal connection, planted detail, reversal, choice, quoted dialogue, and outcome. "
-                            "Do not rewrite the plot and do not introduce any new character, location, object, "
-                            "mystery, reveal, subplot, or future hook. The only job is to bring the story into "
-                            "the hard length/topology contract. "
-                            f"The current story is {current_word_count} words. "
-                            "Return the COMPLETE story in exactly six paragraphs separated by blank lines and "
-                            "450 to 520 words. Add the missing words only through concrete physical action, "
-                            "visible reaction, sensory specificity, relationship behavior, or causal connective "
-                            "tissue that is already implied by the existing story. Do not stop below 450 words. "
-                            "Keep the final paragraph at least 25 words and keep its existing consequence/aftermath "
-                            "meaning. The final sentence must remain a completed past-tense action in a settled place."
-                        )
-                        if mode == AI_STORY_MODE:
-                            length_repair_user += (
-                                " Keep the existing short direct spoken line(s) by established characters; "
-                                "do not add a new speaker merely to increase length."
-                            )
-                        else:
-                            length_repair_user += (
-                                " Dialogue remains optional; never invent a speaker merely to increase length."
-                            )
-                        if mode == EXPAND_USER_STORY_MODE:
-                            length_repair_user += (
-                                " Preserve source-grounded character identities and source-event fidelity exactly."
-                            )
-                        length_repair_user += (
-                            "\n\nEXISTING STORY:\n"
-                            + str(base_story).strip()
-                        )
-
+                topology_only_repair = (
+                    "exactly six paragraphs" in error_text
+                    and "420 to 560 words" not in error_text
+                )
+                if topology_only_repair and story.strip():
+                    # Paragraph topology is a deterministic formatting defect. Repair it
+                    # without spending another Qwen call or altering any story prose.
+                    fallback = self._coerce_story_to_six_paragraphs(story)
+                    if fallback != str(story).strip():
                         try:
-                            repaired_again = self._chat_text(
-                                story_system,
-                                length_repair_user,
-                                minimum_completion=600,
-                                temperature=0.12,
-                                top_p=0.68,
-                                call_name=(
-                                    "ai_story_text_length_retry"
-                                    if mode == AI_STORY_MODE
-                                    else "expand_story_text_length_retry"
-                                ),
-                                max_completion=1800,
-                                disable_thinking=True,
-                            )
-                            repaired_again = self._coerce_story_to_six_paragraphs(repaired_again)
                             story = self._validate_story_output_contracts(
                                 mode,
                                 user_input,
-                                repaired_again,
+                                fallback,
                                 source_character_names=source_character_names,
                             )
                             generated_story = True
-                        except RuntimeError as length_error:
-                            retry_error_text = str(length_error)
-
-                    if generated_story:
-                        pass
-                    else:
-                        raise RuntimeError(
-                            (
-                                "AI Story generation failed validation after the controlled retry: "
-                                if mode == AI_STORY_MODE
-                                else "Expand Story generation failed validation after the controlled retry: "
+                        except RuntimeError as topology_error:
+                            # Coercion can only repair paragraph topology. If validation
+                            # exposes another genuine contract defect, let the existing
+                            # bounded retry handle that defect below.
+                            error_text = str(topology_error)
+                            story_contract_repair = any(
+                                marker in error_text
+                                for marker in (
+                                    "exactly six paragraphs",
+                                    "420 to 560 words",
+                                )
                             )
-                            + retry_error_text
-                        ) from retry_error
+                            completion_repair = any(
+                                marker in error_text
+                                for marker in (
+                                    "unresolved future hook",
+                                    "underdeveloped final aftermath paragraph",
+                                    "does not end in a complete sentence",
+                                    "must contain at least one explicit quoted line",
+                                )
+                            )
+                            expand_cast_repair = (
+                                mode == EXPAND_USER_STORY_MODE
+                                and "Expand Story introduced unanchored" in error_text
+                            )
+                            cast_contract_details = (
+                                " For Expand Story, also remove or replace only unanchored character identities; "
+                                "preserve source-grounded names and relationships exactly."
+                                if expand_cast_repair
+                                else ""
+                            )
+
+                if not generated_story:
+                    if story_contract_repair and story.strip():
+                        # A word/paragraph failure is a format defect, not permission
+                        # to rewrite the narrative. Keep the generated causal chain,
+                        # identities, events, reversal, choice, dialogue, and ending
+                        # intact, and ask Qwen for a surgical structural/length edit.
+                        paragraphs = [
+                            part.strip()
+                            for part in re.split(r"\n\s*\n+", str(story).strip())
+                            if part.strip()
+                        ]
+                        word_matches = re.findall(r"\b[\w'’-]+\b", str(story or ""))
+                        current_word_count = len(word_matches)
+                        paragraph_counts = [
+                            len(re.findall(r"\b[\w'’-]+\b", paragraph))
+                            for paragraph in paragraphs
+                        ]
+                        target_range = "450 to 520 words"
+                        paragraph_guidance = "; ".join(
+                            f"P{index}={count} words"
+                            for index, count in enumerate(paragraph_counts, 1)
+                        ) or "no usable paragraph boundaries"
+                        if mode == AI_STORY_MODE:
+                            contract_details = (
+                                "Keep at least one short direct spoken line by an existing character. "
+                            )
+                        else:
+                            contract_details = "Dialogue remains optional; never invent a speaker merely to pad length. "
+                        repair_user = (
+                            "Perform a SURGICAL EDIT of the existing story. Do not rewrite it from scratch and do not "
+                            "change its plot. Preserve every existing character identity/name, relationship, setting, "
+                            "event, causal connection, planted detail, reversal, choice, consequence, quoted dialogue, "
+                            "and final outcome. "
+                            f"The current story has {current_word_count} words across {len(paragraphs)} paragraphs. "
+                            "Return the COMPLETE revised story, not an explanation. It must contain exactly six paragraphs "
+                            f"separated by blank lines and land in {target_range}; target roughly 70-90 words per paragraph. "
+                            "If the story is short, add only concrete physical action, visible reaction, sensory specificity, "
+                            "or causal connective tissue to events that already exist. If it is long, remove only redundant "
+                            "exposition or repetition. Do not add a new character, location, object, mystery, reveal, or "
+                            "future hook. Do not move events to another paragraph unless necessary to restore exactly six "
+                            "scene-sized beats. Keep the final paragraph at least 25 words and make it consequence/aftermath, "
+                            "not new plot. The final sentence must remain a completed past-tense action in a settled place. "
+                            + contract_details
+                            + cast_contract_details
+                            + "Current paragraph counts for guidance: "
+                            + paragraph_guidance
+                            + "\n\nEXISTING STORY:\n"
+                            + str(story).strip()
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 520
+                    elif completion_repair and story.strip():
+                        paragraphs = [
+                            part.strip()
+                            for part in re.split(r"\n\s*\n", str(story).strip())
+                            if part.strip()
+                        ]
+                        if paragraphs:
+                            final_paragraph = paragraphs[-1]
+                            sentence_matches = list(
+                                re.finditer(r"(?<=[.!?])\s+", final_paragraph)
+                            )
+                            if sentence_matches:
+                                split_at = sentence_matches[-1].end()
+                                preserved_final_body = final_paragraph[:split_at].strip()
+                            else:
+                                preserved_final_body = ""
+
+                            if preserved_final_body:
+                                preserved_prefix = "\n\n".join(paragraphs[:-1] + [preserved_final_body])
+                                repair_user = (
+                                    "Replace only the final sentence of the existing story. Keep every earlier sentence, "
+                                    "character, relationship, event, and established fact unchanged. Write one concrete "
+                                    "past-tense consequence that closes the conflict. Do not introduce anything new. "
+                                    "Do not use would, will, could, might, should, or a future intention. "
+                                    "End with what happened, not what the protagonist plans to do next."
+                                    + (
+                                        " Include one short direct spoken line by an existing character."
+                                        if "must contain at least one explicit quoted line" in error_text
+                                        else ""
+                                    )
+                                    + cast_contract_details
+                                    + " Return only the replacement sentence.\n\nSTORY:\n"
+                                    + str(story).strip()
+                                )
+                                minimum_completion = 24
+                            else:
+                                preserved_prefix = "\n\n".join(paragraphs[:-1])
+                                repair_user = (
+                                    "Replace only the final paragraph of the existing story. Preserve every earlier paragraph, "
+                                    "character, relationship, event, and established fact. Close the conflict with a concrete "
+                                    "past-tense consequence. Do not introduce anything new or future-oriented."
+                                    + cast_contract_details
+                                    + " Return only the replacement final paragraph.\n\nSTORY:\n" + str(story).strip()
+                                )
+                                minimum_completion = 60
+                        else:
+                            preserved_prefix = ""
+                            repair_user = (
+                                "Complete the existing story without changing its characters, relationships, or established events. "
+                                "End with a concrete past-tense consequence, not a future intention. Return only the finished story."
+                                + "\n\nSTORY:\n" + str(story).strip()
+                            )
+                            minimum_completion = 80
+                    elif expand_cast_repair and story.strip():
+                        preserved_prefix = ""
+                        repair_user = (
+                            "Perform a CAST-CORRECTION EDIT of the existing Expand Story. "
+                            "Preserve the plot, causal chain, setting, source-grounded characters, relationships, "
+                            "reversal, choice, consequence, dialogue, paragraph structure, and ending. "
+                            "Remove or replace only character identities that were invented without support from the source story. "
+                            "You may keep a relational character only when that relationship is explicitly grounded in the source. "
+                            "Do not add any new person. Return the complete revised story only. "
+                            "Keep exactly six paragraphs separated by blank lines and 420 to 560 words. "
+                            "Do not introduce a new plot thread or future hook.\n\nSOURCE STORY:\n"
+                            + str(user_input).strip()
+                            + "\n\nCURRENT EXPANSION:\n"
+                            + str(story).strip()
+                        )
+                        minimum_completion = 520
+                    else:
+                        if mode == AI_STORY_MODE:
+                            retry_requirements = (
+                                "Rewrite the story only as needed to satisfy the failed contract. Preserve every causally earned "
+                                "character and do not add a person merely to satisfy validation. "
+                            )
+                        else:
+                            retry_requirements = (
+                                "Rewrite only as needed to complete the expansion. The SOURCE CHARACTER ANCHORS are a hard safety "
+                                "reference, not a cast whitelist; preserve them and any additional character the story genuinely establishes. "
+                                "Do not invent a person merely to satisfy validation. "
+                            )
+                        repair_user = (
+                            story_user
+                            + "\n\n"
+                            + retry_requirements
+                            + "Prioritize causal coherence and a finished resolution over extra detail. Return ONLY the finished story prose."
+                        )
+                        preserved_prefix = ""
+                        minimum_completion = 350
+
+                    try:
+                        if story_contract_repair or completion_repair:
+                            # Structural/completion repairs are constrained edits, not creative resampling.
+                            retry_temperature = 0.15 if story_contract_repair else 0.20
+                            retry_top_p = 0.68 if story_contract_repair else 0.70
+                        else:
+                            retry_temperature = max(0.50, min(0.68, temperature - 0.08))
+                            retry_top_p = max(0.80, min(0.88, top_p - 0.04))
+                        repaired = self._chat_text(
+                            story_system,
+                            repair_user,
+                            minimum_completion=minimum_completion,
+                            temperature=retry_temperature,
+                            top_p=retry_top_p,
+                            call_name=(
+                                "ai_story_text_retry"
+                                if mode == AI_STORY_MODE
+                                else "expand_story_text_retry"
+                            ),
+                            max_completion=1800,
+                            disable_thinking=True,
+                        )
+                        if completion_repair and preserved_prefix:
+                            story = preserved_prefix + "\n\n" + str(repaired).strip()
+                        else:
+                            story = repaired
+                        story = self._validate_story_output_contracts(
+                            mode,
+                            user_input,
+                            story,
+                            source_character_names=source_character_names,
+                        )
+                        generated_story = True
+                    except RuntimeError as retry_error:
+                        retry_error_text = str(retry_error)
+                        if "exactly six paragraphs" in retry_error_text:
+                            # Last-resort topology adapter only after Qwen has had the
+                            # opportunity to repair the raw story. This adapter never
+                            # rewrites prose; it only merges/splits at existing boundaries.
+                            fallback = self._coerce_story_to_six_paragraphs(story)
+                            if fallback != str(story).strip():
+                                try:
+                                    story = self._validate_story_output_contracts(
+                                        mode,
+                                        user_input,
+                                        fallback,
+                                        source_character_names=source_character_names,
+                                    )
+                                    generated_story = True
+                                except RuntimeError as fallback_error:
+                                    retry_error_text = str(fallback_error)
+                                else:
+                                    pass
+                            if generated_story:
+                                # Topology fallback succeeded and the final story is validated.
+                                pass
+                            else:
+                                raise RuntimeError(
+                                    (
+                                        "AI Story generation failed validation after the controlled retry: "
+                                        if mode == AI_STORY_MODE
+                                        else "Expand Story generation failed validation after the controlled retry: "
+                                    )
+                                    + retry_error_text
+                                ) from retry_error
+                        else:
+                            raise RuntimeError(
+                                (
+                                    "AI Story generation failed validation after the controlled retry: "
+                                    if mode == AI_STORY_MODE
+                                    else "Expand Story generation failed validation after the controlled retry: "
+                                )
+                                + retry_error_text
+                            ) from retry_error
+
 
 
         # ----------------------------------------------------
