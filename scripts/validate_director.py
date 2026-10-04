@@ -500,17 +500,16 @@ def test_disabled_director_path():
 
 def test_story_token_budget_contract():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # The primary story pass is a single visible-prose generation. Hidden reasoning must not
-    # consume the minimum-token floor that exists to protect the 420-560 word story contract.
+    # The primary story pass remains a single visible-prose generation. The bounded
+    # token floor keeps natural EOS from producing a sub-420-word story, while staying
+    # close to the successful Sep 25 completion length.
     _assert(
-        "minimum_completion=400," in source,
-        "story pass must reserve a completion budget",
+        "minimum_completion=600," in source,
+        "story pass must reserve enough completion budget for the hard word contract",
     )
-    # A forced token floor above the model's natural story length (~600 tokens for a
-    # 450-word story) pushes it past its ending into repetition, so length is validated.
     _assert(
-        "minimum_output_tokens=0," in source and "minimum_output_tokens=700" not in source,
-        "story pass must not force a minimum token floor",
+        "minimum_output_tokens=600," in source and "minimum_output_tokens=700" not in source,
+        "story pass must use the bounded 600-token floor",
     )
     _assert(
         "max_completion=1500," in source,
