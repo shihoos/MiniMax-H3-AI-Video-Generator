@@ -386,66 +386,15 @@ class QwenDirector(
                 )
             )
 
-            try:
-                story = self._chat_text(
-                    story_system,
-                    story_user,
-                    # Story length is a visible-prose contract. Disable Qwen's hidden reasoning
-                    # stream so the minimum-token floor applies to the actual story instead of
-                    # being consumed by reasoning tokens.
-                    minimum_completion=700,
-                    minimum_output_tokens=700,
-                    temperature=temperature,
-                    top_p=top_p,
-                    call_name=(
-                        "ai_story_text_pass"
-                        if mode == AI_STORY_MODE
-                        else "expand_story_text_pass"
-                    ),
-                    max_completion=3200,
-                    disable_thinking=True,
-                )
-                story = self._validate_story_output_contracts(
-                    mode,
-                    user_input,
-                    story,
-                    source_character_names=source_character_names,
-                )
-                generated_story = True
-            except RuntimeError as first_error:
-                error_text = str(first_error)
-                topology_only_repair = (
-                    "exactly six paragraphs" in error_text
-                    and "420 to 560 words" not in error_text
-                )
-
-                if topology_only_repair and story.strip():
-                    # Paragraph topology is a deterministic formatting defect. Repair it
-                    # without spending another Qwen call or altering any story prose.
-                    fallback = self._coerce_story_to_six_paragraphs(story)
-                    if fallback != str(story).strip():
-                        try:
-                            story = self._validate_story_output_contracts(
-                                mode,
-                                user_input,
-                                fallback,
-                                source_character_names=source_character_names,
-                            )
-                            generated_story = True
-                        except RuntimeError as fallback_error:
-                            error_text = str(fallback_error)
-
-                if not generated_story:
-                    raise RuntimeError(
-                        (
-                            "AI Story generation failed validation: "
-                            if mode == AI_STORY_MODE
-                            else "Expand Story generation failed validation: "
-                        )
-                        + error_text
-                    ) from first_error
-
-
+            story, generated_story = self._generate_story_with_retries(
+                mode,
+                user_input,
+                story_system,
+                story_user,
+                temperature=temperature,
+                top_p=top_p,
+                source_character_names=source_character_names,
+            )
 
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
@@ -1386,6 +1335,167 @@ class QwenDirector(
                 "Expand Story introduced unanchored relational character(s): "
                 + ", ".join(extra_relations)
             )
+
+    # ------------------------------------------------------------------
+    # Story generation: bounded, seeded retries with runaway salvage
+    # ------------------------------------------------------------------
+    _STOCK_PHRASES = (
+        r"heart (?:pounded|raced|hammered)", r"little did", r"a testament to",
+        r"shivers? (?:ran )?down", r"the air (?:was|felt) (?:thick|heavy)",
+        r"time (?:stood|seemed to stand) still", r"unbeknownst", r"couldn'?t shake the feeling",
+        r"a mix of \w+ and \w+", r"sent a chill", r"breath (?:caught|hitched)",
+        r"the weight of", r"palpable", r"for what felt like (?:hours|an eternity)",
+    )
+
+    def _salvage_runaway_story(self, text: str) -> str:
+        """Recover a clean story from a draft that kept generating after it ended."""
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n+", str(text or "").replace("\r\n", "\n").strip())
+            if part.strip()
+        ]
+        seen: set[str] = set()
+        kept: list[str] = []
+        for part in paragraphs:
+            key = re.sub(r"\W+", " ", part.lower()).strip()[:160]
+            if key in seen:
+                break  # the loop starts here
+            seen.add(key)
+            kept.append(part)
+        kept = kept[:6]
+        while kept and not self._ends_cleanly(kept[-1]):
+            kept.pop()
+        return "\n\n".join(kept) if len(kept) >= 5 else ""
+
+    def _story_quality_issues(self, story: str) -> list[str]:
+        """Cheap deterministic craft checks; every issue is something a reader notices."""
+        text = str(story or "")
+        words = re.findall(r"[\w'’-]+", text.lower())
+        issues: list[str] = []
+        if not words:
+            return ["empty story"]
+        stock = [p for p in self._STOCK_PHRASES if re.search(p, text, flags=re.IGNORECASE)]
+        if len(stock) >= 2:
+            issues.append("stock phrases / clichés (" + ", ".join(stock[:3]) + ")")
+        trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
+        if trigrams and 1 - len(set(trigrams)) / len(trigrams) > 0.04:
+            issues.append("repeated phrasing")
+        if len(set(words)) / len(words) < 0.46:
+            issues.append("low vocabulary variety")
+        sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+        starts = [re.findall(r"[\w'’-]+", s.lower())[:1] for s in sentences]
+        run = 1
+        for i in range(1, len(starts)):
+            run = run + 1 if starts[i] and starts[i] == starts[i - 1] else 1
+            if run >= 3:
+                issues.append("three sentences in a row open with the same word")
+                break
+        lengths = [len(re.findall(r"[\w'’-]+", s)) for s in sentences]
+        if len(lengths) >= 8 and (max(lengths) - min(lengths)) < 9:
+            issues.append("monotone sentence rhythm")
+        return issues
+
+    def _generate_story_with_retries(
+        self,
+        mode: str,
+        user_input: str,
+        story_system: str,
+        story_user: str,
+        *,
+        temperature: float,
+        top_p: float,
+        source_character_names: list[str],
+    ) -> tuple[str, bool]:
+        from planner.qwen_director_runtime import StoryTruncated, DIRECTOR_VLLM_SEED
+
+        call_name = "ai_story_text_pass" if mode == AI_STORY_MODE else "expand_story_text_pass"
+        try:
+            # Project design: ONE primary Qwen story generation. Extra attempts are opt-in
+            # (H3_DIRECTOR_STORY_ATTEMPTS=2) and are never taken by default.
+            attempts = max(1, int(os.getenv("H3_DIRECTOR_STORY_ATTEMPTS", "1")))
+        except ValueError:
+            attempts = 1
+
+        best: tuple[int, str] | None = None
+        last_error: Exception | None = None
+        feedback = ""
+        for attempt in range(attempts):
+            raw = ""
+            try:
+                raw = self._chat_text(
+                    story_system,
+                    story_user + feedback,
+                    minimum_completion=400,
+                    # No forced token floor: a floor above the model's natural story length
+                    # pushes it past its ending and into repetition. Length is validated instead.
+                    minimum_output_tokens=0,
+                    temperature=temperature if attempt == 0 else max(0.55, temperature - 0.1),
+                    top_p=top_p,
+                    call_name=call_name,
+                    # 560 words is ~800 tokens; this cap bounds a runaway to ~30s.
+                    max_completion=1500,
+                    disable_thinking=True,
+                    seed=DIRECTOR_VLLM_SEED + attempt,
+                    creative=True,
+                )
+            except StoryTruncated as exc:
+                last_error = exc
+                raw = self._salvage_runaway_story(exc.partial)
+                if not raw:
+                    feedback = (
+                        "\n\nREVISION NOTE: the previous draft never ended. Write the complete story in "
+                        "exactly six paragraphs of 450-520 words, then stop after the final sentence."
+                    )
+                    continue
+
+            candidate = ""
+            try:
+                candidate = self._validate_story_output_contracts(
+                    mode, user_input, raw, source_character_names=source_character_names,
+                )
+            except RuntimeError as err:
+                last_error = err
+                error_text = str(err)
+                if "exactly six paragraphs" in error_text and "420 to 560 words" not in error_text:
+                    repaired = self._coerce_story_to_six_paragraphs(raw)
+                    try:
+                        candidate = self._validate_story_output_contracts(
+                            mode, user_input, repaired, source_character_names=source_character_names,
+                        )
+                    except RuntimeError as err2:
+                        last_error = err2
+                        error_text = str(err2)
+                if not candidate:
+                    feedback = (
+                        f"\n\nREVISION NOTE: the previous draft was rejected ({error_text}). "
+                        "Write a fresh complete story that fixes this: exactly six paragraphs, "
+                        "450-520 words, one clean ending, then stop."
+                    )
+                    continue
+
+            if attempt + 1 >= attempts:
+                return candidate, True
+            issues = self._story_quality_issues(candidate)
+            if best is None or len(issues) < best[0]:
+                best = (len(issues), candidate)
+            if not issues:
+                return candidate, True
+            feedback = (
+                "\n\nREVISION NOTE: keep the premise but rewrite with better craft. Fix: "
+                + "; ".join(issues)
+                + ". Still exactly six paragraphs, 450-520 words."
+            )
+
+        if best is not None:
+            return best[1], True
+        raise RuntimeError(
+            (
+                "AI Story generation failed validation: "
+                if mode == AI_STORY_MODE
+                else "Expand Story generation failed validation: "
+            )
+            + str(last_error)
+        ) from last_error
 
     @staticmethod
     def _coerce_story_to_six_paragraphs(text: str) -> str:
