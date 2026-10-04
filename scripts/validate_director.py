@@ -503,21 +503,52 @@ def test_story_token_budget_contract():
     # The primary story pass is a single visible-prose generation. Hidden reasoning must not
     # consume the minimum-token floor that exists to protect the 420-560 word story contract.
     _assert(
-        "minimum_completion=700," in source,
-        "primary story pass must reserve a 700-token completion budget",
+        "minimum_completion=400," in source,
+        "story pass must reserve a completion budget",
+    )
+    # A forced token floor above the model's natural story length (~600 tokens for a
+    # 450-word story) pushes it past its ending into repetition, so length is validated.
+    _assert(
+        "minimum_output_tokens=0," in source and "minimum_output_tokens=700" not in source,
+        "story pass must not force a minimum token floor",
     )
     _assert(
-        "minimum_output_tokens=700," in source,
-        "primary story pass must enforce a 700-token minimum output floor",
+        "max_completion=1500," in source,
+        "story pass must bound a runaway generation",
     )
     _assert(
-        "max_completion=3200,\n                    disable_thinking=True" in source,
-        "primary story pass must use the 3200-token visible-prose contract",
+        'H3_DIRECTOR_STORY_ATTEMPTS", "1"' in source,
+        "story generation must default to ONE primary Qwen pass",
+    )
+    _assert(
+        "seed=DIRECTOR_VLLM_SEED + attempt" in source,
+        "story retries must vary the sampling seed",
     )
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
     _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
     _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
     _assert("max_completion=1800" not in source, "obsolete story retry completion budget remains")
+
+def test_story_salvage_and_quality_gate():
+    from planner.qwen_director import QwenDirector
+
+    d = QwenDirector.__new__(QwenDirector)
+    paras = [f"Paragraph {i} walks the quiet harbour and ends cleanly." for i in range(6)]
+    looped = "\n\n".join(paras + paras[:3] + paras[:3])
+    out = d._salvage_runaway_story(looped)
+    _assert(out.count("\n\n") == 5, "salvage must keep exactly the first six paragraphs")
+    _assert(d._salvage_runaway_story("one\n\ntwo") == "", "too-short drafts must not be salvaged")
+    cliche = ("Her heart pounded. Little did she know. " * 3 + "She ran. " * 6)
+    _assert(d._story_quality_issues(cliche), "cliché/repetition must be flagged")
+    good = (
+        "Marta wedged the crowbar under the shutter and leaned until the rust gave. "
+        "Salt wind pushed through the gap, smelling of diesel and low tide. "
+        "\"Leave it,\" Joao said from the pier. She did not. "
+        "Inside, rows of crates sagged under tarpaulin, each stencilled with her father's initials. "
+        "A gull screamed. She dragged the nearest crate into the light, cut the cord, and counted the reels."
+    )
+    _assert(len(d._story_quality_issues(good)) == 0, f"clean prose flagged: {d._story_quality_issues(good)}")
+
 
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
     from planner.qwen_director import QwenDirector
@@ -1148,10 +1179,12 @@ def test_story_topology_fallback_is_last_resort_and_prose_preserving():
 
 def test_story_validation_precedes_topology_fallback():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    primary = source[source.index("story = self._chat_text("):source.index("except RuntimeError as first_error:")]
+    start = source.index("def _generate_story_with_retries")
+    primary = source[start:source.index("def _coerce_story_to_six_paragraphs", start)]
     _assert(
-        primary.index("self._validate_story_output_contracts") < primary.index("generated_story = True"),
-        "primary story flow must validate through the contract helper before completion",
+        primary.index("self._validate_story_output_contracts")
+        < primary.index("self._coerce_story_to_six_paragraphs(raw)"),
+        "story flow must validate raw output before any topology repair",
     )
     _assert(
         "story = self._coerce_story_to_six_paragraphs(story)" not in primary,
@@ -1310,6 +1343,7 @@ def main():
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
         test_story_token_budget_contract,
+        test_story_salvage_and_quality_gate,
         test_quoted_dialogue_speaker_comes_from_speech_tag,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
