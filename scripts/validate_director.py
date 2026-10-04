@@ -550,6 +550,34 @@ def test_story_salvage_and_quality_gate():
     _assert(len(d._story_quality_issues(good)) == 0, f"clean prose flagged: {d._story_quality_issues(good)}")
 
 
+def test_story_sampling_guards_are_story_only_and_warmup_matches():
+    source = Path(ROOT, "planner", "qwen_director_runtime.py").read_text(encoding="utf-8")
+    _assert('payload["top_k"] = 20' in source, "story top_k guard must be present")
+    _assert('if creative:' in source and 'payload["presence_penalty"]' in source, "presence penalty must be story-only")
+    _assert('warmup_payload' in source and '"top_k": 20' in source, "sampler warmup must cover story top-k path")
+    _assert('"chat_template_kwargs": {"enable_thinking": False}' in source, "warmup must use non-thinking chat template")
+
+
+def test_parallel_stage_copy_is_byte_exact():
+    import hashlib, tempfile
+    from planner import qwen_director_runtime as runtime
+
+    root = tempfile.mkdtemp()
+    for size in (5, 64 * 1024 * 1024 + 1):
+        src, dst = f"{root}/s{size}", f"{root}/d{size}"
+        with open(src, "wb") as handle:
+            handle.write(os.urandom(size))
+        runtime._parallel_copy_file(src, dst, workers=4)
+        digest = lambda path: hashlib.sha256(open(path, "rb").read()).hexdigest()
+        _assert(digest(src) == digest(dst), f"parallel copy corrupted a {size}-byte file")
+    previous = os.environ.pop("H3_DIRECTOR_STAGE_LOCAL", None)
+    try:
+        _assert(runtime._stage_mode() == "auto", "staging must default to filesystem-adaptive auto mode")
+    finally:
+        if previous is not None:
+            os.environ["H3_DIRECTOR_STAGE_LOCAL"] = previous
+
+
 def test_quoted_dialogue_speaker_comes_from_speech_tag():
     from planner.qwen_director import QwenDirector
     cases = (
@@ -1344,6 +1372,8 @@ def main():
         test_disabled_director_path,
         test_story_token_budget_contract,
         test_story_salvage_and_quality_gate,
+        test_story_sampling_guards_are_story_only_and_warmup_matches,
+        test_parallel_stage_copy_is_byte_exact,
         test_quoted_dialogue_speaker_comes_from_speech_tag,
         test_named_only_roster_skips_semantic_character_calls_safely,
         test_context_ir_capture_root,
