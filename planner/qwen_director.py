@@ -386,7 +386,7 @@ class QwenDirector(
                 )
             )
 
-            story, generated_story = self._generate_story_with_retries(
+            story, generated_story = self._generate_story_once(
                 mode,
                 user_input,
                 story_system,
@@ -565,7 +565,7 @@ class QwenDirector(
             ],
             character_names,
         )
-    
+
         if not scenes:
             raise RuntimeError(
                 "Deterministic base plan contains no canonical scenes."
@@ -1395,7 +1395,7 @@ class QwenDirector(
             issues.append("monotone sentence rhythm")
         return issues
 
-    def _generate_story_with_retries(
+    def _generate_story_once(
         self,
         mode: str,
         user_input: str,
@@ -1406,114 +1406,94 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
     ) -> tuple[str, bool]:
-        from planner.qwen_director_runtime import StoryTruncated, DIRECTOR_VLLM_SEED
+        from planner.qwen_director_runtime import (
+            DIRECTOR_VLLM_SEED,
+            StoryTruncated,
+        )
 
-        call_name = "ai_story_text_pass" if mode == AI_STORY_MODE else "expand_story_text_pass"
+        call_name = (
+            "ai_story_text_pass"
+            if mode == AI_STORY_MODE
+            else "expand_story_text_pass"
+        )
+
+        print(
+            "[QWEN] story_thinking=on story_max_tokens=3200",
+            flush=True,
+        )
+
         try:
-            # Project design: ONE primary Qwen story generation. Extra attempts are opt-in
-            # (H3_DIRECTOR_STORY_ATTEMPTS=2) and are never taken by default.
-            attempts = max(1, int(os.getenv("H3_DIRECTOR_STORY_ATTEMPTS", "1")))
-        except ValueError:
-            attempts = 1
-
-        best: tuple[int, str] | None = None
-        last_error: Exception | None = None
-        feedback = ""
-        for attempt in range(attempts):
-            raw = ""
-            try:
-                raw = self._chat_text(
-                    story_system,
-                    story_user + feedback,
-                    # Keep the visible story generation close to the proven Sep 25
-                    # completion length. The validator alone is too late: without a
-                    # token floor Qwen can legally emit EOS at ~300-350 words even
-                    # when the prompt asks for 420-560. A 600-token floor is just below
-                    # the Sep 25 successful 623-token story and leaves the 1500-token
-                    # runaway ceiling intact.
-                    minimum_completion=600,
-                    minimum_output_tokens=600,
-                    temperature=temperature if attempt == 0 else max(0.55, temperature - 0.1),
-                    top_p=top_p,
-                    call_name=call_name,
-                    # 560 words is ~800 tokens; this cap bounds a runaway to ~30s.
-                    max_completion=1500,
-                    disable_thinking=True,
-                    seed=DIRECTOR_VLLM_SEED + attempt,
-                    creative=True,
-                )
-            except StoryTruncated as exc:
-                last_error = exc
-                raw = self._salvage_runaway_story(exc.partial)
-                if not raw:
-                    feedback = (
-                        "\n\nREVISION NOTE: the previous draft never ended. Write the complete story in "
-                        "exactly six paragraphs of 450-520 words, then stop after the final sentence."
+            raw = self._chat_text(
+                story_system,
+                story_user,
+                # One primary story call only. In thinking mode the 3200-token ceiling
+                # is shared by reasoning and the final story; no explicit thinking-token
+                # boundary is imposed because this deployment also uses EAGLE3 speculation.
+                minimum_completion=600,
+                minimum_output_tokens=0,
+                temperature=temperature,
+                top_p=top_p,
+                call_name=call_name,
+                max_completion=3200,
+                disable_thinking=False,
+                seed=DIRECTOR_VLLM_SEED,
+                creative=True,
+            )
+        except StoryTruncated as exc:
+            raw = self._salvage_runaway_story(exc.partial)
+            if not raw:
+                raise RuntimeError(
+                    (
+                        "AI Story generation failed validation: "
+                        if mode == AI_STORY_MODE
+                        else "Expand Story generation failed validation: "
                     )
-                    continue
+                    + str(exc)
+                ) from exc
 
-            candidate = ""
-            try:
+        try:
+            candidate = self._validate_story_output_contracts(
+                mode,
+                user_input,
+                raw,
+                source_character_names=source_character_names,
+            )
+        except RuntimeError as err:
+            error_text = str(err)
+            # Deterministic topology repair only. Never invoke Qwen a second time
+            # and never rewrite the prose for craft reasons.
+            if (
+                "exactly six paragraphs" in error_text
+                and "420 to 560 words" not in error_text
+            ):
+                repaired = self._coerce_story_to_six_paragraphs(raw)
                 candidate = self._validate_story_output_contracts(
-                    mode, user_input, raw, source_character_names=source_character_names,
+                    mode,
+                    user_input,
+                    repaired,
+                    source_character_names=source_character_names,
                 )
-            except RuntimeError as err:
-                last_error = err
-                error_text = str(err)
-                if "exactly six paragraphs" in error_text and "420 to 560 words" not in error_text:
-                    repaired = self._coerce_story_to_six_paragraphs(raw)
-                    try:
-                        candidate = self._validate_story_output_contracts(
-                            mode, user_input, repaired, source_character_names=source_character_names,
-                        )
-                    except RuntimeError as err2:
-                        last_error = err2
-                        error_text = str(err2)
-                if not candidate:
-                    feedback = (
-                        f"\n\nREVISION NOTE: the previous draft was rejected ({error_text}). "
-                        "Write a fresh complete story that fixes this: exactly six paragraphs, "
-                        "450-520 words, one clean ending, then stop."
+            else:
+                raise RuntimeError(
+                    (
+                        "AI Story generation failed validation: "
+                        if mode == AI_STORY_MODE
+                        else "Expand Story generation failed validation: "
                     )
-                    continue
+                    + error_text
+                ) from err
 
-            # Always run the deterministic craft audit, including the default one-pass path.
-            # With one attempt it is an audit/telemetry gate only; it never invents a second
-            # Qwen call. With multiple opt-in attempts, its findings become feedback for the
-            # next seeded generation.
-            issues = self._story_quality_issues(candidate)
-            if best is None or len(issues) < best[0]:
-                best = (len(issues), candidate)
-
-            if not issues:
-                print("[QWEN] story_quality=PASS", flush=True)
-                return candidate, True
-
-            if attempt + 1 >= attempts:
-                print(
-                    "[QWEN] story_quality=ISSUES",
-                    "count=" + str(len(issues)),
-                    "issues=" + "; ".join(issues[:4]),
-                    flush=True,
-                )
-                return candidate, True
-
-            feedback = (
-                "\n\nREVISION NOTE: keep the premise but rewrite with better craft. Fix: "
-                + "; ".join(issues)
-                + ". Still exactly six paragraphs, 450-520 words."
+        issues = self._story_quality_issues(candidate)
+        if not issues:
+            print("[QWEN] story_quality=PASS", flush=True)
+        else:
+            print(
+                "[QWEN] story_quality=ISSUES",
+                "count=" + str(len(issues)),
+                "issues=" + "; ".join(issues[:4]),
+                flush=True,
             )
-
-        if best is not None:
-            return best[1], True
-        raise RuntimeError(
-            (
-                "AI Story generation failed validation: "
-                if mode == AI_STORY_MODE
-                else "Expand Story generation failed validation: "
-            )
-            + str(last_error)
-        ) from last_error
+        return candidate, True
 
     @staticmethod
     def _coerce_story_to_six_paragraphs(text: str) -> str:
@@ -2583,7 +2563,7 @@ class QwenDirector(
                         f"shot={shot_id} speaker={speaker!r} source={sorted(explicit_source_canonicals)!r}"
                     )
 
-                if bound and normalized_speaker not in bound:
+                if normalized_speaker not in bound:
                     # The speaker already resolved to a canonical identity. If Qwen
                     # omitted that identity from the shot binding, restore the existing
                     # canonical entity deterministically rather than deleting dialogue.
@@ -2680,7 +2660,7 @@ class QwenDirector(
                     raise RuntimeError(
                         f"Shot {shot_id} contains unknown dialogue speaker '{event.get('speaker', '')}'."
                     )
-                if bound and speaker not in bound:
+                if speaker not in bound:
                     raise RuntimeError(
                         f"Shot {shot_id} has dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
                     )
