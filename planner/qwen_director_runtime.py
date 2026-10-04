@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 import faulthandler
 import gc
 import hashlib
@@ -47,8 +48,64 @@ def _verbose() -> bool:
     return os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _stage_mode() -> str:
+    value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return "on"
+    if value in {"0", "false", "no", "off"}:
+        return "off"
+    if value in {"auto", "default", ""}:
+        return "auto"
+    raise RuntimeError(
+        "H3_DIRECTOR_STAGE_LOCAL must be one of: auto, 0, 1."
+    )
+
+
 def _stage_enabled() -> bool:
-    return os.getenv("H3_DIRECTOR_STAGE_LOCAL", "0").strip().lower() in {"1", "true", "yes", "on"}
+    return _stage_mode() == "on"
+
+
+def _filesystem_type(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "-c", "%T", str(path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        return result.stdout.strip().lower()
+    except Exception:
+        return ""
+
+
+def _should_stage_local(source_path: Path) -> bool:
+    mode = _stage_mode()
+    if mode == "off":
+        return False
+
+    try:
+        resolved = source_path.resolve()
+    except OSError:
+        resolved = source_path
+
+    try:
+        under_kaggle_input = (
+            Path("/kaggle/input").resolve() in resolved.parents
+            or str(resolved).startswith("/kaggle/input/")
+            or str(resolved) == "/kaggle/input"
+        )
+    except OSError:
+        under_kaggle_input = "/kaggle/input/" in str(resolved)
+
+    if not under_kaggle_input:
+        return False
+    if mode == "on":
+        return True
+
+    fs_type = _filesystem_type(resolved)
+    return fs_type.startswith(("nfs", "lustre", "s3fs", "gcsfuse", "fuse"))
 
 
 class StoryTruncated(RuntimeError):
@@ -72,6 +129,50 @@ _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
 _SHARED_VLLM_LOG_HANDLE = None
 _SHARED_VLLM_LOG_PATH: Path | None = None
 _SHARED_VLLM_TOKENIZER = None
+
+def _parallel_copy_file(src, dst, workers: int = 8, chunk_bytes: int = 64 * 1024 * 1024, progress=None) -> None:
+    """Copy one large file with several concurrent ranged reads.
+
+    A single sequential reader is latency-bound on network-mounted datasets; disjoint
+    byte ranges read in parallel (pread/pwrite, thread-safe) keep the link busy.
+    The destination is preallocated and its final size is verified.
+    """
+    src, dst = str(src), str(dst)
+    size = os.path.getsize(src)
+    with open(dst, "wb") as handle:
+        handle.truncate(size)
+    ranges = [(offset, min(chunk_bytes, size - offset)) for offset in range(0, size, chunk_bytes)]
+    io_block = 8 * 1024 * 1024
+
+    def copy_range(item):
+        offset, length = item
+        fd_src = os.open(src, os.O_RDONLY)
+        fd_dst = os.open(dst, os.O_WRONLY)
+        try:
+            done = 0
+            while done < length:
+                buf = os.pread(fd_src, min(io_block, length - done), offset + done)
+                if not buf:
+                    raise IOError(f"short read at byte {offset + done} of {src}")
+                written = 0
+                while written < len(buf):
+                    written += os.pwrite(fd_dst, buf[written:], offset + done + written)
+                done += len(buf)
+                if progress is not None:
+                    progress(len(buf))
+        finally:
+            os.close(fd_src)
+            os.close(fd_dst)
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="h3-stage-copy") as pool:
+        for _ in pool.map(copy_range, ranges):
+            pass
+    if os.path.getsize(dst) != size:
+        raise IOError(f"size mismatch after copy: {dst}")
+
+
+_STAGE_SPACE_LOCK = threading.Lock()
+_STAGE_RESERVED_BYTES = 0
 
 
 def _shutdown_shared_vllm_at_exit() -> None:
@@ -162,14 +263,11 @@ class QwenDirectorRuntimeMixin:
 
     @staticmethod
     def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
-        """Stage NFS-mounted Kaggle models to local NVMe scratch, publishing only after validation."""
-        # Default OFF: weights load straight from the attached Kaggle dataset. Copying
-        # ~13GB to local scratch cost ~4.5 minutes per cold start. Opt in with
-        # H3_DIRECTOR_STAGE_LOCAL=1 only if direct loading stalls on your mount.
-        stage_enabled = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "0").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if not stage_enabled:
+        """Stage network-mounted Kaggle models to transient local scratch when policy selects staging."""
+        # AUTO stages only when the dataset path is on a recognized network filesystem.
+        # Set H3_DIRECTOR_STAGE_LOCAL=0 to force direct dataset loading, or =1 to force
+        # local scratch staging. Scratch is /kaggle/tmp or /tmp, never /kaggle/working.
+        if not _should_stage_local(source_path):
             return source_path
 
         resolved = source_path.resolve()
@@ -294,6 +392,7 @@ class QwenDirectorRuntimeMixin:
                 print(f"[QWEN] Reusing locally staged {label} at {target_dir}", flush=True)
             return target_dir
 
+        reservation_bytes = 0
         try:
             stat = os.statvfs(scratch)
             avail_bytes = stat.f_bavail * stat.f_frsize
@@ -302,14 +401,19 @@ class QwenDirectorRuntimeMixin:
                 for path in resolved.rglob("*")
                 if path.is_file()
             )
-            if avail_bytes < source_size + 2 * (1024**3):
-                print(
-                    f"[QWEN] Insufficient scratch space to stage {label} "
-                    f"({avail_bytes / 1e9:.1f}GB free, {source_size / 1e9:.1f}GB needed). "
-                    "Using direct mount.",
-                    flush=True,
-                )
-                return source_path
+            reservation_bytes = source_size + 2 * (1024**3)
+            global _STAGE_RESERVED_BYTES
+            with _STAGE_SPACE_LOCK:
+                effective_free = avail_bytes - _STAGE_RESERVED_BYTES
+                if effective_free < reservation_bytes:
+                    print(
+                        f"[QWEN] Insufficient scratch space to stage {label} "
+                        f"({effective_free / 1e9:.1f}GB available, {source_size / 1e9:.1f}GB needed). "
+                        "Using direct mount.",
+                        flush=True,
+                    )
+                    return source_path
+                _STAGE_RESERVED_BYTES += reservation_bytes
         except Exception:
             print(
                 f"[QWEN] Could not verify scratch capacity for {label}; using direct mount.",
@@ -335,6 +439,20 @@ class QwenDirectorRuntimeMixin:
 
             def tracked_copy(src, dst, *, follow_symlinks=True):
                 """Chunked copy function to track and report staging progress."""
+                try:
+                    stage_workers = int(os.getenv("H3_DIRECTOR_STAGE_WORKERS", "8"))
+                except ValueError:
+                    stage_workers = 8
+                if stage_workers > 1 and os.path.getsize(src) >= 256 * 1024 * 1024:
+                    def _note(n):
+                        copied_bytes[0] += n
+                    try:
+                        _parallel_copy_file(src, dst, workers=stage_workers, progress=_note)
+                        shutil.copystat(src, dst, follow_symlinks=follow_symlinks)
+                        return dst
+                    except Exception as exc:  # fall back to the proven sequential path
+                        if _verbose():
+                            print(f"[QWEN] parallel copy failed ({exc}); retrying sequentially", flush=True)
                 length = 16 * 1024 * 1024
                 with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
                     while True:
@@ -360,6 +478,11 @@ class QwenDirectorRuntimeMixin:
                 encoding="utf-8",
             )
 
+            for _name, _size in source_fingerprint.get("files", {}).items():
+                _staged = tmp_target / _name
+                if not _staged.is_file() or _staged.stat().st_size != _size:
+                    raise RuntimeError(f"staged file size mismatch: {_name}")
+
             if not is_valid_checkpoint(tmp_target, source_fingerprint):
                 raise RuntimeError(
                     f"staged {label} checkpoint failed post-copy validation"
@@ -376,6 +499,10 @@ class QwenDirectorRuntimeMixin:
                 flush=True,
             )
             return source_path
+        finally:
+            if reservation_bytes:
+                with _STAGE_SPACE_LOCK:
+                    _STAGE_RESERVED_BYTES = max(0, _STAGE_RESERVED_BYTES - reservation_bytes)
 
         elapsed = time.perf_counter() - start_time
         if _verbose():
@@ -683,13 +810,6 @@ class QwenDirectorRuntimeMixin:
         explicit = os.getenv(DIRECTOR_MODEL_ENV, "").strip()
         candidates: list[Path] = []
 
-        local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
-        if _stage_enabled():
-            for prefix in (local_scratch / "staged_models", local_scratch):
-                staged = prefix / Path(DIRECTOR_MODEL_PATH).name
-                if staged.is_dir():
-                    candidates.append(staged)
-
         if explicit:
             candidates.append(Path(explicit).expanduser())
 
@@ -733,7 +853,7 @@ class QwenDirectorRuntimeMixin:
             if not path.is_dir():
                 continue
             if all((path / item).is_file() for item in required):
-                return self._stage_to_local_scratch(path, "Qwen3-14B-AWQ")
+                return path
 
         raise FileNotFoundError(
             "Qwen3-14B-AWQ director model was not found as a complete "
@@ -759,14 +879,7 @@ class QwenDirectorRuntimeMixin:
             else DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH
         )
 
-        local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
         candidates = [configured]
-        if _stage_enabled():
-            candidates = [
-                local_scratch / "staged_models" / configured.name,
-                local_scratch / configured.name,
-                configured,
-            ]
 
         if DIRECTOR_KAGGLE_INPUT_ROOT.is_dir():
             try:
@@ -835,10 +948,10 @@ class QwenDirectorRuntimeMixin:
                             "EAGLE-3 checkpoint is incomplete; missing indexed weight files: "
                             + ", ".join(missing)
                         )
-                return self._stage_to_local_scratch(candidate.resolve(), "Qwen3-14B EAGLE-3 speculator")
+                return candidate.resolve()
 
             if any(any(candidate.glob(pattern)) for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")):
-                return self._stage_to_local_scratch(candidate.resolve(), "Qwen3-14B EAGLE-3 speculator")
+                return candidate.resolve()
 
             raise RuntimeError(
                 f"EAGLE-3 checkpoint has config.json but no model weight files: {candidate}"
@@ -958,9 +1071,20 @@ class QwenDirectorRuntimeMixin:
 
             health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
             models_url = self._vllm_base_url() + "/models"
+            keep_alive = os.getenv("H3_DIRECTOR_VLLM_KEEP_ALIVE", "0").strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+            external_server = os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "0").strip().lower() in {
+                "1", "true", "yes", "on"
+            }
+            shared_process_alive = (
+                _SHARED_VLLM_PROCESS is not None
+                and _SHARED_VLLM_PROCESS.poll() is None
+            )
+            allow_port_reuse = shared_process_alive or keep_alive or external_server
             reuse_deadline = time.monotonic() + reuse_timeout
             last_error = ""
-            while time.monotonic() < reuse_deadline:
+            while allow_port_reuse and time.monotonic() < reuse_deadline:
                 try:
                     health = session.get(health_url, timeout=1.5)
                     if health.status_code == 200:
@@ -987,6 +1111,7 @@ class QwenDirectorRuntimeMixin:
                                     "[QWEN] vLLM Director reused",
                                     f"model={model_name}",
                                     f"pid={_SHARED_VLLM_PROCESS.pid if _SHARED_VLLM_PROCESS is not None else 'external'}",
+                                    f"reason={'shared-process' if shared_process_alive else 'keep-alive/external'}",
                                     flush=True,
                                 )
                                 return
@@ -994,9 +1119,7 @@ class QwenDirectorRuntimeMixin:
                     last_error = f"{type(exc).__name__}: {exc}"
                 time.sleep(0.5)
 
-            if os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "").strip().lower() in {
-                "1", "true", "yes", "on"
-            }:
+            if external_server:
                 try:
                     self._wait_for_vllm(session, None)
                 except Exception:
@@ -1053,7 +1176,21 @@ class QwenDirectorRuntimeMixin:
                 )
 
             try:
-                speculator_model = self._find_speculator_model()
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="h3-model-prep") as executor:
+                    model_future = executor.submit(
+                        self._stage_to_local_scratch,
+                        self._model_path,
+                        "Qwen3-14B-AWQ",
+                    )
+                    speculator_source_future = executor.submit(self._find_speculator_model)
+                    speculator_source = speculator_source_future.result()
+                    speculator_future = executor.submit(
+                        self._stage_to_local_scratch,
+                        speculator_source,
+                        "Qwen3-14B EAGLE-3 speculator",
+                    )
+                    self._model_path = model_future.result()
+                    speculator_model = speculator_future.result()
             except Exception:
                 session.close()
                 raise
@@ -1282,10 +1419,17 @@ class QwenDirectorRuntimeMixin:
                     warmup_url = self._vllm_base_url() + "/chat/completions"
                     warmup_payload = {
                         "model": model_name,
-                        "messages": [{"role": "user", "content": "Say OK."}],
+                        "messages": [{"role": "user", "content": "Say OK.\n/no_think"}],
                         "max_tokens": 2,
                         "temperature": float(DIRECTOR_TEMPERATURE if DIRECTOR_TEMPERATURE is not None else 0.7),
                         "top_p": float(DIRECTOR_TOP_P if DIRECTOR_TOP_P is not None else 0.9),
+                        # Match the story request's sampler path so the first real story call
+                        # does not discover a different top-k/penalty JIT path.
+                        "top_k": 20,
+                        "presence_penalty": float(
+                            os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "0.6")
+                        ),
+                        "chat_template_kwargs": {"enable_thinking": False},
                     }
                     try:
                         warmup_response = session.post(
@@ -1576,13 +1720,14 @@ class QwenDirectorRuntimeMixin:
             "top_p": float(top_p),
             "max_tokens": int(max_tokens),
             "seed": int(DIRECTOR_VLLM_SEED if seed is None else seed),
-            # Qwen3 recommends top_k=20; unbounded sampling plus a forced token floor is
-            # what lets quantized Qwen drift into endless repetition.
-            "top_k": 20,
-            # Non-thinking mode via the chat template, in addition to the /no_think suffix.
+            # Keep non-thinking mode explicit at the chat-template layer as well as via
+            # the /no_think suffix. This applies to every Director call.
             "chat_template_kwargs": {"enable_thinking": False},
         }
         if creative:
+            # Story-only anti-runaway sampling. Do not alter the structured JSON passes
+            # with a story-specific top-k or presence penalty.
+            payload["top_k"] = 20
             payload["presence_penalty"] = float(
                 os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "0.6")
             )
