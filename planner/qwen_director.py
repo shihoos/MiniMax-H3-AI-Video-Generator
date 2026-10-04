@@ -1473,13 +1473,27 @@ class QwenDirector(
                     )
                     continue
 
-            if attempt + 1 >= attempts:
-                return candidate, True
+            # Always run the deterministic craft audit, including the default one-pass path.
+            # With one attempt it is an audit/telemetry gate only; it never invents a second
+            # Qwen call. With multiple opt-in attempts, its findings become feedback for the
+            # next seeded generation.
             issues = self._story_quality_issues(candidate)
             if best is None or len(issues) < best[0]:
                 best = (len(issues), candidate)
+
             if not issues:
+                print("[QWEN] story_quality=PASS", flush=True)
                 return candidate, True
+
+            if attempt + 1 >= attempts:
+                print(
+                    "[QWEN] story_quality=ISSUES",
+                    "count=" + str(len(issues)),
+                    "issues=" + "; ".join(issues[:4]),
+                    flush=True,
+                )
+                return candidate, True
+
             feedback = (
                 "\n\nREVISION NOTE: keep the premise but rewrite with better craft. Fix: "
                 + "; ".join(issues)
