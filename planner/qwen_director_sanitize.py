@@ -1311,38 +1311,64 @@ class QwenDirectorSanitizeMixin:
         anchors.update(re.findall(r"\b\d+(?:[.,]\d+)?(?:%|[A-Za-z]+)?\b", value.lower()))
         return anchors
 
+    @staticmethod
+    def _premise_compare_token(token: str) -> str:
+        """Normalize a content token enough to recognize ordinary inflectional paraphrase."""
+        value = str(token or "").lower().strip()
+        if len(value) <= 5:
+            return value
+        for suffix in ("ingly", "edly", "ing", "ed", "es", "s"):
+            if value.endswith(suffix) and len(value) - len(suffix) >= 5:
+                return value[: -len(suffix)]
+        return value
+
     def _global_premise_coverage(
         self,
         source: str,
         result: str,
-        minimum_token_overlap: float = 0.40,
+        minimum_token_overlap: float = 0.15,
     ) -> tuple[float, list[str]]:
-        """Measure AI-Story premise coverage across the whole generated story.
+        """Measure premise preservation while allowing normal narrative paraphrase.
 
-        AI Story is allowed to distribute one compact premise across multiple
-        sentences. Sentence-level matching is therefore too brittle: valid
-        paraphrase can preserve the premise while moving its concepts apart.
-        Keep this deterministic by comparing each source sentence against the
-        complete result token set. Expand Story intentionally retains the
-        stricter sentence/event coverage check below.
+        AI Story may legitimately paraphrase verbs/adjectives and distribute the
+        supplied premise across several sentences. A 40% raw-token gate was too
+        brittle for Qwen3 thinking output and rejected valid rewrites. We therefore
+        use light inflection normalization and a lower deterministic lexical floor;
+        the story prompt separately requires all major concrete premise facts to
+        remain explicit. Expand Story keeps its stricter sentence/event check.
         """
         source_sentences = [
             sentence.strip()
             for sentence in re.split(r"[.!?]+", source)
             if sentence.strip()
         ]
-        result_tokens = self._meaningful_tokens(result)
+        result_tokens = {
+            self._premise_compare_token(token)
+            for token in self._meaningful_tokens(result)
+            if token
+        }
         if not source_sentences:
             return 1.0, []
 
         covered = 0
         missing: list[str] = []
         for sentence in source_sentences:
-            tokens = self._meaningful_tokens(sentence)
+            tokens = {
+                self._premise_compare_token(token)
+                for token in self._meaningful_tokens(sentence)
+                if token
+            }
             if not tokens:
                 continue
+            # Short premises need at least two preserved content tokens; longer
+            # premises use the configured lexical floor without demanding near-
+            # verbatim wording.
+            required_overlap = max(
+                float(minimum_token_overlap),
+                min(0.40, 2.0 / len(tokens)),
+            )
             overlap = len(tokens & result_tokens) / max(1, len(tokens))
-            if overlap >= minimum_token_overlap:
+            if overlap >= required_overlap:
                 covered += 1
             else:
                 missing.append(sentence[:140])
