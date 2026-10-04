@@ -1,12 +1,11 @@
 from __future__ import annotations
 import hashlib
+import importlib.metadata as importlib_metadata
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 import yaml
 ROOT = (
@@ -24,22 +23,6 @@ elif Path("/kaggle/input").is_dir():
     KAGGLE_INPUT = Path("/kaggle/input").resolve()
 else:
     KAGGLE_INPUT = (ROOT / "input").resolve()
-_KAGGLE_FILE_INDEX: dict[str, list[Path]] | None = None
-
-
-def _get_kaggle_input_index() -> dict[str, list[Path]]:
-    global _KAGGLE_FILE_INDEX
-    if _KAGGLE_FILE_INDEX is not None:
-        return _KAGGLE_FILE_INDEX
-    index: dict[str, list[Path]] = {}
-    if KAGGLE_INPUT.is_dir():
-        for path in KAGGLE_INPUT.rglob("*"):
-            if path.is_file():
-                index.setdefault(path.name.lower(), []).append(path)
-    _KAGGLE_FILE_INDEX = index
-    return index
-
-
 MODEL_MANIFEST = (
     ROOT
     / "configs"
@@ -55,467 +38,6 @@ RUNTIME_MANIFEST = (
     / "configs"
     / "runtime_versions.yaml"
 )
-
-# Bootstrap state/checkouts live outside the repository checkout so a
-# notebook-side project re-clone cannot destroy them. On Kaggle, prefer
-# /kaggle/working so repeated bootstrap invocations in the same notebook/session
-# can reuse the expensive ComfyUI/custom-node/Sage artifacts. A different
-# persistent location can still be supplied explicitly.
-if Path("/kaggle/working").is_dir():
-    _default_cache_parent = "/kaggle/working"
-elif Path("/kaggle/tmp").is_dir():
-    _default_cache_parent = "/kaggle/tmp"
-else:
-    _default_cache_parent = "/tmp"
-BOOTSTRAP_CACHE_ROOT = Path(
-    os.getenv(
-        "H3_BOOTSTRAP_CACHE_DIR",
-        str(Path(_default_cache_parent) / "minimax_h3_bootstrap_cache"),
-    )
-).expanduser().resolve()
-SAGE_PREBUILT_ROOT = Path(
-    os.getenv(
-        "H3_SAGE_PREBUILT_ROOT",
-        str(BOOTSTRAP_CACHE_ROOT / "artifacts"),
-    )
-).expanduser().resolve()
-BOOTSTRAP_CACHE_FILE = BOOTSTRAP_CACHE_ROOT / "bootstrap_state.json"
-BOOTSTRAP_CHECKOUT_ROOT = BOOTSTRAP_CACHE_ROOT / "checkouts"
-BOOTSTRAP_CACHE_SCHEMA = 3
-def _reuse_allowed() -> bool:
-    return os.getenv("H3_BOOTSTRAP_FORCE_REFRESH", "").strip().lower() not in {"1", "true", "yes"}
-
-
-def _safe_unlink_or_rmtree(path: Path) -> None:
-    if path.is_symlink() or path.is_file():
-        path.unlink(missing_ok=True)
-    elif path.is_dir():
-        shutil.rmtree(path)
-
-
-def _ensure_cached_comfyui_link() -> None:
-    """Keep the expensive ComfyUI checkout outside the freshly cloned project tree."""
-    cache_dir = BOOTSTRAP_CHECKOUT_ROOT / "ComfyUI"
-    BOOTSTRAP_CHECKOUT_ROOT.mkdir(parents=True, exist_ok=True)
-
-    # If this bootstrap is running after the outer notebook cloned a fresh
-    # project, move that one-time ComfyUI checkout into the persistent cache.
-    if COMFY.exists() and not COMFY.is_symlink() and (COMFY / ".git").is_dir():
-        if cache_dir.exists() and not (cache_dir / ".git").is_dir():
-            _safe_unlink_or_rmtree(cache_dir)
-        if not cache_dir.exists():
-            cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            COMFY.rename(cache_dir)
-        else:
-            # Keep the already-validated cached checkout; the fresh clone is disposable.
-            _safe_unlink_or_rmtree(COMFY)
-
-    if cache_dir.exists() and (cache_dir / ".git").is_dir():
-        if not COMFY.exists() and not COMFY.is_symlink():
-            COMFY.symlink_to(cache_dir, target_is_directory=True)
-
-def _sage_source_contract_valid(sage_dir: Path) -> bool:
-    kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
-    if not kernel.is_file():
-        return False
-    try:
-        source = kernel.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    required_markers = (
-        "H3-T4-SM75-KERNEL-FIX",
-        "constexpr int WARP_K_SM75 = 64;",
-        "H3-T4-SM75-PV-FRAGMENT-FIX",
-        "float o_scale_top = math::ptx_exp2(m_old[0] - m_i[0]);",
-        "float o_scale_bottom = math::ptx_exp2(m_old[1] - m_i[1]);",
-        "float l_rcp_top = (l_i[0] > 0.0f) ? math::ptx_rcp(l_i[0]) : 0.0f;",
-        "float l_rcp_bottom = (l_i[1] > 0.0f) ? math::ptx_rcp(l_i[1]) : 0.0f;",
-        "uint32_t thread_row1 = thread_row0 + 8;",
-        "uint32_t thread_row0 = o_start_row_warp + (lane_id / 4);",
-    )
-    return (
-        all(marker in source for marker in required_markers)
-        and "constexpr int WARP_K_SM75 = 16;" not in source
-        and bool(list(sage_dir.glob("sageattention/*.so")))
-    )
-
-
-def _sage_artifact_manifest_path(sage_dir: Path) -> Path:
-    return sage_dir / ".h3_sage_prebuilt.json"
-
-
-def _write_sage_artifact_manifest(runtime: dict, sage_dir: Path) -> None:
-    cfg = dict(runtime.get("sage_attention", {}) or {})
-    torch_cfg = dict(runtime.get("pytorch", {}) or {})
-    manifest = {
-        "schema": 1,
-        "repository": str(cfg.get("repository", "")).strip(),
-        "revision": str(cfg.get("revision", "")).strip(),
-        "version": str(cfg.get("version", "")).strip(),
-        "directory": str(cfg.get("directory", "")).strip(),
-        "torch": str(torch_cfg.get("version", "")).strip(),
-        "cuda": str(torch_cfg.get("cuda", "")).strip(),
-        "architecture": "sm75",
-        "built_by": "MiniMax H3 bootstrap",
-    }
-    _sage_artifact_manifest_path(sage_dir).write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-
-def _sage_artifact_manifest_matches(runtime: dict, sage_dir: Path) -> bool:
-    manifest_path = _sage_artifact_manifest_path(sage_dir)
-    if not manifest_path.is_file():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    cfg = dict(runtime.get("sage_attention", {}) or {})
-    torch_cfg = dict(runtime.get("pytorch", {}) or {})
-    expected = {
-        "schema": 1,
-        "revision": str(cfg.get("revision", "")).strip(),
-        "version": str(cfg.get("version", "")).strip(),
-        "directory": str(cfg.get("directory", "")).strip(),
-        "torch": str(torch_cfg.get("version", "")).strip(),
-        "cuda": str(torch_cfg.get("cuda", "")).strip(),
-        "architecture": "sm75",
-    }
-    return all(manifest.get(key) == value for key, value in expected.items())
-
-
-def _sage_prebuilt_candidates(runtime: dict) -> list[Path]:
-    directory = str(runtime.get("sage_attention", {}).get("directory", "SageAttention-T4")).strip()
-    candidates: list[Path] = []
-    configured = os.getenv("H3_SAGE_ARTIFACT_PATH", "").strip()
-    if configured:
-        candidates.append(Path(configured).expanduser())
-    candidates.append(SAGE_PREBUILT_ROOT / directory)
-    if KAGGLE_INPUT.is_dir():
-        # Avoid recursively scanning /kaggle/input: model datasets can be large.
-        # Support the common dataset layouts without turning artifact discovery
-        # itself into a startup bottleneck.
-        named = KAGGLE_INPUT / directory
-        candidates.append(named)
-        try:
-            for dataset_root in KAGGLE_INPUT.iterdir():
-                if not dataset_root.is_dir():
-                    continue
-                candidates.append(dataset_root / directory)
-                for child in dataset_root.iterdir():
-                    if child.is_dir() and child.name == directory:
-                        candidates.append(child)
-        except OSError:
-            pass
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        try:
-            resolved = candidate.expanduser().resolve()
-        except OSError:
-            continue
-        key = str(resolved)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(resolved)
-    return unique
-
-
-def _materialize_sage_prebuilt(runtime: dict, install_dir: Path) -> bool:
-    for candidate in _sage_prebuilt_candidates(runtime):
-        if not candidate.is_dir():
-            continue
-        if not _sage_artifact_manifest_matches(runtime, candidate):
-            continue
-        if not _sage_source_contract_valid(candidate):
-            continue
-        if install_dir.exists() or install_dir.is_symlink():
-            _safe_unlink_or_rmtree(install_dir)
-        install_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(
-            candidate,
-            install_dir,
-            symlinks=True,
-            ignore=shutil.ignore_patterns(
-                ".git", "build", "dist", "*.egg-info", "__pycache__",
-            ),
-        )
-        _install_sage_path_hook(install_dir)
-        print(f"[SAGE SM75 PREBUILT] restored artifact={candidate}")
-        return True
-    return False
-
-
-def _export_sage_prebuilt(runtime: dict, install_dir: Path) -> None:
-    if not _sage_source_contract_valid(install_dir):
-        return
-    target = SAGE_PREBUILT_ROOT / str(runtime["sage_attention"]["directory"]).strip()
-    if target.resolve() == install_dir.resolve():
-        _write_sage_artifact_manifest(runtime, install_dir)
-        return
-    if target.exists() or target.is_symlink():
-        _safe_unlink_or_rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(
-        install_dir,
-        target,
-        symlinks=True,
-        ignore=shutil.ignore_patterns(
-            ".git", "build", "dist", "*.egg-info", "__pycache__",
-        ),
-    )
-    _write_sage_artifact_manifest(runtime, target)
-    print(f"[SAGE SM75 PREBUILT] exported artifact={target}")
-
-
-def _install_sage_path_hook(install_dir: Path) -> None:
-    site_packages = _site_packages()
-    if not site_packages:
-        raise RuntimeError("Unable to locate Python site-packages for SageAttention path hook.")
-    hook = site_packages[0] / "minimax_h3_sageattention_t4.pth"
-    hook.write_text(str(install_dir.resolve()) + "\n", encoding="utf-8")
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _stable_text_sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-def _git_head(path: Path) -> str:
-    return subprocess.check_output(
-        ["git", "-C", str(path), "rev-parse", "HEAD"],
-        text=True,
-        stderr=subprocess.STDOUT,
-    ).strip()
-
-
-def _git_status_fingerprint(path: Path) -> str:
-    status = subprocess.check_output(
-        ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=all"],
-        text=True,
-        stderr=subprocess.STDOUT,
-    )
-    return _stable_text_sha256(status)
-
-
-def _probe_system_pytorch(runtime: dict) -> bool:
-    config = dict(runtime.get("pytorch", {}) or {})
-    version = str(config.get("version", "") or "").strip()
-    cuda = str(config.get("cuda", "") or "").strip().lower()
-    torchvision_version = str(config.get("torchvision_version", "") or "").strip()
-    torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
-    if not all((version, cuda, torchvision_version, torchaudio_version)):
-        return False
-    digits = cuda[2:] if cuda.startswith("cu") else ""
-    if len(digits) != 3 or not digits.isdigit():
-        return False
-    expected_torch = f"{version}+{cuda}"
-    expected_cuda = f"{digits[:2]}.{digits[2:]}"
-    code = (
-        "import torch, torchaudio, torchvision; "
-        f"assert torch.__version__ == {expected_torch!r}; "
-        f"assert torch.version.cuda == {expected_cuda!r}; "
-        f"assert torchvision.__version__ == {torchvision_version!r}; "
-        f"assert torchaudio.__version__ == {torchaudio_version!r}; "
-        "assert torch.cuda.is_available(); "
-        "assert torch.cuda.device_count() == 2; "
-        "assert torch.cuda.get_device_capability(0) == (7, 5); "
-        "assert torch.cuda.get_device_capability(1) == (7, 5)"
-    )
-    probe = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return probe.returncode == 0
-
-
-def _probe_pillow(expected_version: str) -> bool:
-    code = (
-        "from PIL import Image; from PIL._typing import _Ink; "
-        f"assert Image.__version__ == {expected_version!r}; "
-        "print(Image.__version__); print(_Ink)"
-    )
-    probe = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
-    return probe.returncode == 0
-
-
-def _probe_director_venv(runtime: dict, venv_python: Path) -> bool:
-    director = runtime.get("director", {}) or {}
-    vllm_version = str(director.get("vllm_version", "") or "").strip()
-    wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
-    tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
-    if not venv_python.is_file():
-        return False
-    code = (
-        "import inspect, torch, vllm, wrapt; "
-        "from vllm.config import SpeculativeConfig; "
-        f"assert vllm.__version__ == {vllm_version!r}; "
-        f"assert wrapt.__version__ == {wrapt_version!r}; "
-        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
-        "assert torch.cuda.is_available(); "
-        f"assert torch.cuda.device_count() == {tensor_parallel_size}; "
-        "assert torch.cuda.get_device_capability(0) == (7, 5)"
-    )
-    probe = subprocess.run([str(venv_python), "-c", code], capture_output=True, text=True, check=False)
-    return probe.returncode == 0
-
-
-def _requirements_hash(path: Path) -> str:
-    return _sha256_file(path) if path.is_file() else "missing"
-
-def _requirements_satisfied(path: Path, python_executable: Path | str = Path(sys.executable)) -> bool:
-    """Conservatively check whether ordinary requirements are already installed."""
-    if not path.is_file():
-        return False
-    try:
-        from packaging.requirements import Requirement
-        from packaging.markers import default_environment
-    except Exception:
-        return False
-    requirements = []
-    env = default_environment()
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("-"):
-            continue
-        if " #" in line:
-            line = line.split(" #", 1)[0].strip()
-        try:
-            req = Requirement(line)
-        except Exception:
-            return False
-        if req.url:
-            return False
-        if req.marker is not None and not req.marker.evaluate(env):
-            continue
-        requirements.append((req.name, str(req.specifier)))
-    if not requirements:
-        return True
-    import json as _json
-    script = r"""
-import importlib.metadata as m
-import json, sys
-from packaging.specifiers import SpecifierSet
-
-bad = []
-for name, spec in json.loads(sys.argv[1]):
-    try:
-        version = m.version(name)
-    except m.PackageNotFoundError:
-        bad.append((name, "missing"))
-        continue
-    if spec and version not in SpecifierSet(spec):
-        bad.append((name, version, spec))
-print(json.dumps(bad))
-"""
-    probe = subprocess.run(
-        [str(python_executable), "-c", script, _json.dumps(requirements)],
-        capture_output=True, text=True, check=False,
-    )
-    if probe.returncode != 0:
-        return False
-    try:
-        return not bool(_json.loads((probe.stdout or "[]").strip() or "[]"))
-    except Exception:
-        return False
-
-
-def _bootstrap_cache_inputs(runtime: dict) -> dict:
-    return {
-        "schema": BOOTSTRAP_CACHE_SCHEMA,
-        "bootstrap_sha256": _sha256_file(Path(__file__).resolve()),
-        "python_executable": str(Path(sys.executable).resolve()),
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "runtime_manifest_sha256": _sha256_file(RUNTIME_MANIFEST),
-        "node_manifest_sha256": _sha256_file(NODE_MANIFEST),
-        "model_manifest_sha256": _sha256_file(MODEL_MANIFEST),
-        "project_requirements_sha256": _requirements_hash(ROOT / "requirements.txt"),
-        "comfyui_revision": str(runtime["comfyui"]["revision"]).strip(),
-        "sage_revision": str(runtime["sage_attention"]["revision"]).strip(),
-        "h3_revision": str(runtime["h3_optimization"]["revision"]).strip(),
-    }
-
-
-def _save_bootstrap_cache(runtime: dict) -> None:
-    try:
-        BOOTSTRAP_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        state = _bootstrap_cache_inputs(runtime)
-        state.update({
-            "valid": True,
-            "pillow_version": str(runtime["storyboard"]["pillow_version"]).strip(),
-            "qwen_env": str(Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()),
-            "repo_state": {},
-            "sage_state": {},
-            "saved_at": time.time(),
-        })
-        repo_state = {}
-        if COMFY.is_dir() and (COMFY / ".git").is_dir():
-            repo_state["ComfyUI"] = {
-                "head": _git_head(COMFY),
-                "status": _git_status_fingerprint(COMFY),
-                "requirements": _requirements_hash(COMFY / "requirements.txt"),
-            }
-        manifest = load_yaml(NODE_MANIFEST)
-        for node in _ordered_custom_nodes(manifest):
-            name = str(node["name"])
-            path = CUSTOM / name
-            if path.is_dir() and (path / ".git").is_dir():
-                repo_state[name] = {
-                    "head": _git_head(path),
-                    "status": _git_status_fingerprint(path),
-                    "requirements": _requirements_hash(path / "requirements.txt"),
-                }
-        state["repo_state"] = repo_state
-        sage_dir = CUSTOM / str(runtime["sage_attention"]["directory"])
-        sage_kernel = sage_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
-        sage_so = sorted(str(path.relative_to(sage_dir)) for path in sage_dir.glob("sageattention/*.so")) if sage_dir.is_dir() else []
-        state["sage_state"] = {
-            "head": _git_head(sage_dir) if (sage_dir / ".git").is_dir() else "",
-            "kernel_sha256": _sha256_file(sage_kernel) if sage_kernel.is_file() else "",
-            "so_files": sage_so,
-            "so_sha256": {rel: _sha256_file(sage_dir / rel) for rel in sage_so},
-            "version": str(runtime["sage_attention"]["version"]).strip(),
-        }
-        tmp = BOOTSTRAP_CACHE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(BOOTSTRAP_CACHE_FILE)
-        print(f"[BOOTSTRAP CACHE] saved: {BOOTSTRAP_CACHE_FILE}")
-    except Exception as exc:
-        print(f"[BOOTSTRAP CACHE] save skipped: {exc}")
-
-
-def _warm_stage(message: str) -> None:
-    print(f"[BOOTSTRAP WARM] {message}")
-
-
-def _mark_cache_in_progress() -> None:
-    try:
-        if not BOOTSTRAP_CACHE_FILE.is_file():
-            return
-        state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
-        state["valid"] = False
-        state["run_started_at"] = time.time()
-        tmp = BOOTSTRAP_CACHE_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(BOOTSTRAP_CACHE_FILE)
-    except Exception as exc:
-        print(f"[BOOTSTRAP CACHE] could not mark previous cache in-progress: {exc}")
-
-
 def run(
     *args,
     env=None,
@@ -551,25 +73,6 @@ def load_yaml(
             f"Invalid YAML mapping: {path}"
         )
     return value
-def find_kaggle_file(
-    filename: str,
-) -> Path:
-    index = _get_kaggle_input_index()
-    matches = index.get(filename.lower(), [])
-    if not matches:
-        raise FileNotFoundError(
-            "Required Kaggle asset not found: "
-            f"{filename}"
-        )
-    if len(matches) > 1:
-        raise RuntimeError(
-            f"Multiple copies found for {filename}:\n"
-            + "\n".join(
-                str(path)
-                for path in matches
-            )
-        )
-    return matches[0]
 def link_model(
     source: Path,
     destination: Path,
@@ -592,6 +95,317 @@ def link_model(
             source,
             destination,
         )
+def find_kaggle_files(
+    filenames: tuple[str, ...],
+) -> dict[str, Path]:
+    """Resolve all requested Kaggle assets with one recursive traversal."""
+    requested = {name.lower(): name for name in filenames}
+    matches: dict[str, list[Path]] = {name: [] for name in requested}
+    for path in KAGGLE_INPUT.rglob("*"):
+        if not path.is_file():
+            continue
+        key = path.name.lower()
+        if key in matches:
+            matches[key].append(path)
+
+    resolved: dict[str, Path] = {}
+    for key, original_name in requested.items():
+        candidates = matches[key]
+        if not candidates:
+            raise FileNotFoundError(
+                "Required Kaggle asset not found: "
+                f"{original_name}"
+            )
+        if len(candidates) > 1:
+            raise RuntimeError(
+                f"Multiple copies found for {original_name}:\n"
+                + "\n".join(str(path) for path in candidates)
+            )
+        resolved[key] = candidates[0]
+    return resolved
+
+
+def _requirements_satisfied(requirements: Path) -> bool:
+    """Return True when every normal requirement is already satisfied.
+
+    Exact pins, unpinned packages, and standard version specifiers are checked
+    against the live environment. Direct URLs/editable/path requirements are
+    treated conservatively and force the normal pip install path.
+    """
+    if not requirements.is_file():
+        return False
+    try:
+        from packaging.requirements import Requirement
+    except Exception:
+        return False
+
+    for raw_line in requirements.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("-"):
+            return False
+        try:
+            requirement = Requirement(line)
+        except Exception:
+            return False
+        if requirement.marker is not None:
+            try:
+                if not requirement.marker.evaluate():
+                    continue
+            except Exception:
+                return False
+        if requirement.url:
+            return False
+        name = requirement.name
+        try:
+            installed = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            return False
+        if requirement.specifier and installed not in requirement.specifier:
+            return False
+    return True
+
+
+def _package_version_satisfied(package: str, expected: str) -> bool:
+    expected = str(expected or "").strip()
+    if not package or not expected:
+        return False
+    try:
+        return importlib_metadata.version(package) == expected
+    except importlib_metadata.PackageNotFoundError:
+        return False
+
+
+def _probe_pillow(expected_version: str) -> bool:
+    expected_version = str(expected_version or "").strip()
+    if not expected_version:
+        return False
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import PIL; from PIL import Image; from PIL._typing import _Ink; "
+                f"assert PIL.__version__ == {expected_version!r}; "
+                "assert Image.__version__ == PIL.__version__; "
+                "print(PIL.__version__)"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == expected_version
+
+
+def _git_head(path: Path) -> str:
+    return subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        text=True,
+        stderr=subprocess.STDOUT,
+    ).strip()
+
+
+def _git_exact_tag(path: Path) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(path), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return (result.stdout or "").strip()
+
+
+def _comfyui_checkout_is_locked(
+    revision: str,
+    expected_version: str,
+) -> bool:
+    if not COMFY.is_dir() or not (COMFY / ".git").is_dir():
+        return False
+    try:
+        head = _git_head(COMFY)
+        expected_head = subprocess.check_output(
+            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
+            text=True,
+            stderr=subprocess.STDOUT,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return False
+    if head != expected_head:
+        return False
+    if expected_version:
+        tagged = _git_exact_tag(COMFY)
+        if tagged not in {expected_version, f"v{expected_version}"}:
+            return False
+    return True
+
+
+def _normalize_torch_version(version: str, cuda: str) -> tuple[str, str]:
+    base = version.split("+", 1)[0].strip()
+    if not base:
+        raise RuntimeError("runtime_versions.yaml pytorch.version is required.")
+    return base, f"{base}+{cuda}"
+
+
+def _pytorch_runtime_is_locked(runtime: dict) -> bool:
+    config = dict(runtime.get("pytorch", {}) or {})
+    _, expected_torch = _normalize_torch_version(
+        str(config.get("version", "") or "").strip(),
+        str(config.get("cuda", "") or "").strip().lower(),
+    )
+    expected_cuda_tag = str(config.get("cuda", "") or "").strip().lower()
+    expected_tv = str(config.get("torchvision_version", "") or "").strip()
+    expected_ta = str(config.get("torchaudio_version", "") or "").strip()
+    if not expected_cuda_tag.startswith("cu") or not expected_cuda_tag[2:].isdigit():
+        return False
+    if not expected_tv or not expected_ta:
+        return False
+    cuda_digits = expected_cuda_tag[2:]
+    if len(cuda_digits) != 3:
+        return False
+    expected_cuda_runtime = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
+
+    if "torch" in sys.modules:
+        try:
+            torch_module = sys.modules["torch"]
+            if str(getattr(torch_module, "__version__", "")) != expected_torch:
+                return False
+            if str(getattr(getattr(torch_module, "version", None), "cuda", "")) != expected_cuda_runtime:
+                return False
+            if importlib_metadata.version("torchvision") != expected_tv:
+                return False
+            if importlib_metadata.version("torchaudio") != expected_ta:
+                return False
+            if not bool(torch_module.cuda.is_available()):
+                return False
+            device_count = int(torch_module.cuda.device_count())
+            if device_count < 1:
+                return False
+            return all(
+                torch_module.cuda.get_device_capability(i) == (7, 5)
+                for i in range(device_count)
+            )
+        except Exception:
+            return False
+
+    probe = (
+        "import importlib.metadata as md; import torch; "
+        f"assert torch.__version__ == {expected_torch!r}; "
+        f"assert torch.version.cuda == {expected_cuda_runtime!r}; "
+        f"assert md.version('torchvision') == {expected_tv!r}; "
+        f"assert md.version('torchaudio') == {expected_ta!r}; "
+        "assert torch.cuda.is_available(); "
+        "assert torch.cuda.device_count() >= 1; "
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
+        "print('PyTorch runtime lock: PASS')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
+    # The Director runtime is intentionally locked to the project's 2xT4/SM75
+    # topology. A different visible GPU count or architecture is treated as a
+    # non-reusable environment and will fall back to the normal install path.
+    director = dict(runtime.get("director", {}) or {})
+    vllm_version = str(director.get("vllm_version", "") or "").strip()
+    wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
+    tp_size = int(director.get("tensor_parallel_size", 0) or 0)
+    python = env_dir / "bin" / "python"
+    if not python.is_file() or not vllm_version or not wrapt_version or tp_size <= 0:
+        return False
+    code = (
+        "import inspect; import vllm; import torch; import wrapt; "
+        "from vllm.config import SpeculativeConfig; "
+        f"assert vllm.__version__ == {vllm_version!r}; "
+        f"assert wrapt.__version__ == {wrapt_version!r}; "
+        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
+        "assert torch.cuda.is_available(); "
+        f"assert torch.cuda.device_count() == {tp_size}; "
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
+        "print('Director runtime probe: PASS')"
+    )
+    result = subprocess.run(
+        [str(python), "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _sage_build_stamp_path(install_dir: Path) -> Path:
+    return install_dir / ".h3_t4_build_stamp.json"
+
+
+def _sage_build_stamp(runtime: dict) -> dict:
+    pytorch = dict(runtime.get("pytorch", {}) or {})
+    sage = dict(runtime.get("sage_attention", {}) or {})
+    return {
+        "schema": 1,
+        "sage_revision": str(sage.get("revision", "") or "").strip(),
+        "sage_version": str(sage.get("version", "") or "").strip(),
+        "torch_version": str(pytorch.get("version", "") or "").split("+", 1)[0].strip(),
+        "torch_cuda": str(pytorch.get("cuda", "") or "").strip().lower(),
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+    }
+
+
+def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
+    if not install_dir.is_dir() or not (install_dir / ".git").is_dir():
+        return False
+    stamp_path = _sage_build_stamp_path(install_dir)
+    kernel = install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
+    package_dir = install_dir / "sageattention"
+    if not stamp_path.is_file() or not kernel.is_file() or not package_dir.is_dir():
+        return False
+    try:
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+        if stamp != _sage_build_stamp(runtime):
+            return False
+        if _git_head(install_dir) != str(runtime.get("sage_attention", {}).get("revision", "")).strip():
+            return False
+        source = kernel.read_text(encoding="utf-8")
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        return False
+    required = (
+        "H3-T4-SM75-KERNEL-FIX",
+        "H3-T4-SM75-PV-FRAGMENT-FIX",
+        "constexpr int WARP_K_SM75 = 64;",
+        "uint32_t thread_row1 = thread_row0 + 8;",
+    )
+    if any(needle not in source for needle in required):
+        return False
+    if "constexpr int WARP_K_SM75 = 16;" in source:
+        return False
+    if not any(package_dir.rglob("*.so")):
+        return False
+    expected_version = str(runtime.get("sage_attention", {}).get("version", "") or "").strip()
+    library_dirs = _cuda_library_dirs(runtime)
+    if not library_dirs:
+        return False
+    env = _configure_cuda_environment(library_dirs)
+    env["CUDA_VISIBLE_DEVICES"] = "0"
+    probe = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sageattention; assert sageattention.__version__ == {expected_version!r}; print(sageattention.__version__)",
+        ],
+        env=env,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return probe.returncode == 0
+
 def _site_packages() -> list[Path]:
     result = subprocess.run(
         [
@@ -731,14 +545,24 @@ def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
 def install_base_requirements() -> None:
     requirements = ROOT / "requirements.txt"
     if not requirements.is_file():
-        raise RuntimeError(f"Repository dependency manifest is missing: {requirements}")
-    if _reuse_allowed() and _requirements_satisfied(requirements):
-        _warm_stage("reusing project requirements environment")
+        raise RuntimeError(
+            f"Repository dependency manifest is missing: {requirements}"
+        )
+    if _requirements_satisfied(requirements):
+        print("[BOOTSTRAP WARM] project requirements already satisfy requirements.txt")
         return
-    run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", requirements)
-
+    run(
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "-q",
+        "--disable-pip-version-check",
+        "-r",
+        requirements,
+    )
 def install_comfyui(runtime: dict) -> None:
-    """Install locked ComfyUI, reusing an already-correct checkout and dependencies."""
+    """Install the locked ComfyUI checkout and its dependencies."""
     config = dict(runtime.get("comfyui", {}) or {})
     repository = str(config.get("repository", "") or "").strip()
     revision = str(config.get("revision", "") or "").strip()
@@ -746,48 +570,44 @@ def install_comfyui(runtime: dict) -> None:
     if not repository or not revision:
         raise RuntimeError("runtime_versions.yaml comfyui.repository/revision are required.")
 
-    _ensure_cached_comfyui_link()
+    COMFY.parent.mkdir(parents=True, exist_ok=True)
+    if COMFY.exists() and not (COMFY / ".git").is_dir():
+        raise RuntimeError(f"ComfyUI path exists but is not a git checkout: {COMFY}")
+    if not COMFY.exists():
+        run("git", "clone", repository, COMFY)
 
-    def checkout_matches() -> bool:
-        if not _reuse_allowed():
-            return False
-        if not COMFY.is_dir() or not (COMFY / ".git").is_dir():
-            return False
-        try:
-            head = _git_head(COMFY)
-            expected_head = subprocess.check_output(["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True).strip()
-            tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
-            return head == expected_head and (not expected_version or tagged in {expected_version, f"v{expected_version}"})
-        except Exception:
-            return False
-
-    if not checkout_matches():
-        COMFY.parent.mkdir(parents=True, exist_ok=True)
-        if COMFY.exists() and not (COMFY / ".git").is_dir():
-            raise RuntimeError(f"ComfyUI path exists but is not a git checkout: {COMFY}")
-        cache_dir = BOOTSTRAP_CHECKOUT_ROOT / "ComfyUI"
-        if not cache_dir.exists():
-            run("git", "clone", repository, cache_dir)
-        if not COMFY.exists() and not COMFY.is_symlink():
-            COMFY.symlink_to(cache_dir, target_is_directory=True)
-        reachable = subprocess.run(["git", "-C", str(COMFY), "cat-file", "-e", f"{revision}^{{commit}}"], capture_output=True, text=True, check=False).returncode == 0
-        if not reachable:
-            run("git", "-C", COMFY, "fetch", "--no-tags", "origin", revision)
-        run("git", "-C", COMFY, "checkout", "--detach", revision)
-
-    if _reuse_allowed() and _requirements_satisfied(COMFY / "requirements.txt"):
-        _warm_stage("reusing ComfyUI requirements environment")
+    if _comfyui_checkout_is_locked(revision, expected_version):
+        print("[BOOTSTRAP WARM] reusing locked ComfyUI checkout")
     else:
-        run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", COMFY / "requirements.txt")
+        run("git", "-C", COMFY, "fetch", "--all", "--tags", "--prune")
+        run("git", "-C", COMFY, "checkout", "--detach", revision)
+    comfy_requirements = COMFY / "requirements.txt"
+    if _requirements_satisfied(comfy_requirements):
+        print("[BOOTSTRAP WARM] ComfyUI requirements already satisfied")
+    else:
+        run(
+            sys.executable, "-m", "pip", "install", "-q",
+            "--disable-pip-version-check", "-r", comfy_requirements,
+        )
 
-    head = _git_head(COMFY)
-    expected_head = subprocess.check_output(["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True).strip()
+    head = subprocess.check_output(
+        ["git", "-C", str(COMFY), "rev-parse", "HEAD"], text=True
+    ).strip()
+    expected_head = subprocess.check_output(
+        ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], text=True
+    ).strip()
     if head != expected_head:
         raise RuntimeError(f"ComfyUI checkout mismatch: expected={expected_head}, actual={head}")
-    tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+    tagged = subprocess.run(
+        ["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
     if expected_version and tagged not in {expected_version, f"v{expected_version}"}:
-        raise RuntimeError(f"ComfyUI release mismatch: expected={expected_version}, actual={tagged or 'untagged'}")
+        raise RuntimeError(
+            f"ComfyUI release mismatch: expected={expected_version}, actual={tagged or 'untagged'}"
+        )
     print(f"[COMFYUI] revision={head} version={tagged or 'untagged'}")
+
 
 def apply_embedded_h3_runtime_overlay() -> None:
     """Apply the project-owned H3 runtime patches without embedding full upstream source."""
@@ -959,10 +779,11 @@ def install_pytorch_runtime(runtime: dict) -> None:
             "runtime_versions.yaml pytorch.cuda must use a cuNNN wheel tag; "
             f"got {cuda!r}."
         )
-    if _reuse_allowed() and _probe_system_pytorch(runtime):
-        _warm_stage(f"reusing PyTorch={version}+{cuda} CUDA={cuda}")
+    base_version, expected_torch = _normalize_torch_version(version, cuda)
+    if _pytorch_runtime_is_locked(runtime):
+        print(f"[BOOTSTRAP WARM] reusing locked PyTorch={expected_torch}")
         return
-    print("[BOOTSTRAP REPAIR] PyTorch live probe failed; installing locked runtime")
+    version = base_version
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
@@ -980,7 +801,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
     cuda_digits = cuda[2:]
     if len(cuda_digits) != 3:
         raise RuntimeError(f"Unsupported PyTorch CUDA wheel tag: {cuda!r}")
-    expected_torch = f"{version}+{cuda}"
+    expected_torch = f"{version.split('+', 1)[0]}+{cuda}"
     expected_cuda = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
     verify = subprocess.run(
         [
@@ -1030,7 +851,7 @@ def _repair_loaded_pillow(expected_version: str) -> None:
     from PIL._typing import _Ink
     if str(PIL.__version__) != expected_version or _Ink != expected_ink:
         raise RuntimeError(f"Live-process Pillow repair failed: version={PIL.__version__!r}, _Ink={_Ink!r}")
-    print("[PILLOW CACHE] live-process Pillow cache: PASS")
+    print("[PILLOW CACHE] live-process Pillow reconciliation: PASS")
 def patch_h3_fp16_runtime(runtime: dict) -> None:
     """Apply narrow H3 FP16/T4 runtime corrections; never replace full ComfyUI files."""
     model = COMFY / "comfy/ldm/minimax/model.py"
@@ -1285,12 +1106,6 @@ def install_director_runtime(
     env_dir = Path(
         os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
     ).expanduser().resolve()
-    venv_python = env_dir / "bin" / "python"
-    if _reuse_allowed() and _probe_director_venv(runtime, venv_python):
-        _warm_stage(f"reusing Director vLLM environment={env_dir}")
-        print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
-        return
-    print("[BOOTSTRAP REPAIR] Director vLLM live probe failed; installing locked runtime")
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
@@ -1380,30 +1195,66 @@ def install_director_runtime(
             f"observed={observed_gpu_count}, configured tensor_parallel_size={tensor_parallel_size}."
         )
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
-def install_storyboard_runtime(runtime: dict) -> None:
+def install_storyboard_runtime(
+    runtime: dict,
+) -> None:
+    """Install storyboard UI dependencies from the project runtime lock.
+    Pillow is intentionally NOT verified here because later ComfyUI/custom-node
+    dependency installation may mutate the shared Kaggle Python environment.
+    Final Pillow enforcement/verification happens immediately before the final
+    runtime checks, after every package installer has completed.
+    """
     storyboard = runtime["storyboard"]
-    gradio_version = str(storyboard.get("gradio_version", "")).strip()
-    if not gradio_version:
-        return
-    probe = subprocess.run([sys.executable, "-c", f"import importlib.metadata as m; assert m.version('gradio') == {gradio_version!r}"], capture_output=True, text=True, check=False)
-    if _reuse_allowed() and probe.returncode == 0:
-        _warm_stage(f"reusing Gradio={gradio_version}")
-        return
-    run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", f"gradio=={gradio_version}")
-
+    gradio_version = str(
+        storyboard.get("gradio_version", "")
+    ).strip()
+    if gradio_version and _package_version_satisfied("gradio", gradio_version):
+        print("[BOOTSTRAP WARM] Gradio already locked", gradio_version)
+    elif gradio_version:
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--disable-pip-version-check",
+            f"gradio=={gradio_version}",
+        )
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
     pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
-    if not pillow_version: raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
-    if _reuse_allowed() and _probe_pillow(pillow_version):
-        _repair_loaded_pillow(pillow_version)
-        _warm_stage(f"reusing Pillow={pillow_version}")
-        return
-    print("[BOOTSTRAP REPAIR] Pillow live probe failed; installing locked runtime")
-    run(sys.executable, "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "-q", "--disable-pip-version-check", f"Pillow=={pillow_version}")
+    if not pillow_version:
+        raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
+    if _probe_pillow(pillow_version):
+        print("[BOOTSTRAP WARM] Pillow already locked", pillow_version)
+    else:
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-cache-dir",
+            "--force-reinstall",
+            "-q",
+            "--disable-pip-version-check",
+            f"Pillow=={pillow_version}",
+        )
     _repair_loaded_pillow(pillow_version)
-    verify = subprocess.run([sys.executable, "-c", "from PIL import Image; from PIL._typing import _Ink; print(Image.__version__); print(_Ink)"], capture_output=True, text=True, check=False)
+    verify = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from PIL import Image; from PIL._typing import _Ink; print(Image.__version__); print(_Ink)",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     if verify.returncode != 0 or pillow_version not in (verify.stdout or ""):
-        raise RuntimeError("Fresh-process Pillow verification failed.\n" + (verify.stdout or "") + (verify.stderr or ""))
+        raise RuntimeError(
+            "Fresh-process Pillow verification failed.\n"
+            + (verify.stdout or "")
+            + (verify.stderr or "")
+        )
     print("[PILLOW LIVE]", pillow_version, "_Ink=PASS")
 def remove_legacy_context_ir_node() -> None:
     """Remove the retired external Context-IR bridge from runtime custom_nodes."""
@@ -2616,42 +2467,118 @@ def _ordered_custom_nodes(manifest: dict) -> list[dict]:
 
 
 def install_nodes() -> None:
-    manifest = load_yaml(NODE_MANIFEST)
+    manifest = load_yaml(
+        NODE_MANIFEST
+    )
     policy = dict(manifest.get("policy", {}) or {})
-    if policy.get("clone_at_runtime") is not True or policy.get("pin_revisions") is not True:
-        raise RuntimeError("custom_nodes.yaml must enable clone_at_runtime and pin_revisions.")
-    if policy.get("vendor_source_code") is not False or policy.get("third_party_models") is not False:
-        raise RuntimeError("custom_nodes.yaml vendor/model policy is invalid for the locked bootstrap.")
-    CUSTOM.mkdir(parents=True, exist_ok=True)
+    if policy.get("clone_at_runtime") is not True:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.clone_at_runtime must be true for the locked Kaggle bootstrap."
+        )
+    if policy.get("pin_revisions") is not True:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.pin_revisions must be true for the locked Kaggle bootstrap."
+        )
+    if policy.get("vendor_source_code") is not False:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.vendor_source_code must be false for the locked bootstrap."
+        )
+    if policy.get("third_party_models") is not False:
+        raise RuntimeError(
+            "custom_nodes.yaml policy.third_party_models must be false for the locked bootstrap."
+        )
+    CUSTOM.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
     for node in _ordered_custom_nodes(manifest):
         name = str(node.get("name", "") or "").strip()
         repository = str(node.get("repository", "") or "").strip()
         revision = str(node.get("revision", "") or "").strip()
-        if not repository or len(revision) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in revision):
-            raise RuntimeError(f"Custom-node {name!r} repository/revision is invalid.")
-        destination = CUSTOM / name
-        current = _git_head(destination) if (destination / ".git").is_dir() else ""
-        if _reuse_allowed() and current == revision:
-            requirements = destination / "requirements.txt"
-            if not requirements.is_file() or _requirements_satisfied(requirements):
-                _warm_stage(f"reusing custom node={name} revision={revision}")
-                print("[NODE]", name)
-                continue
-        if destination.exists() and not (destination / ".git").is_dir():
-            raise RuntimeError(f"Custom-node path exists but is not a git checkout: {destination}")
+        if not repository or not revision:
+            raise RuntimeError(
+                f"Custom-node {name!r} must declare repository and pinned revision."
+            )
+        if len(revision) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in revision):
+            raise RuntimeError(
+                f"Custom-node {name!r} revision must be a full 40-character SHA: {revision!r}"
+            )
+        destination = (
+            CUSTOM
+            / node[
+                "name"
+            ]
+        )
         if not destination.exists():
-            run("git", "clone", repository, destination)
-        reachable = subprocess.run(["git", "-C", str(destination), "cat-file", "-e", f"{revision}^{{commit}}"], capture_output=True, text=True, check=False).returncode == 0
-        if not reachable:
-            run("git", "-C", destination, "fetch", "--no-tags", "origin", revision)
-        if name == "H3-Optimizations" and current != revision:
-            run("git", "-C", destination, "reset", "--hard")
-        run("git", "-C", destination, "checkout", "--detach", revision)
+            run(
+                "git",
+                "clone",
+                node[
+                    "repository"
+                ],
+                destination,
+            )
+            checkout_locked = False
+        elif not (destination / ".git").exists():
+            raise RuntimeError(
+                f"Custom-node path exists but is not a git checkout: {destination}"
+            )
+        else:
+            try:
+                checkout_locked = _git_head(destination) == revision
+            except (OSError, subprocess.CalledProcessError):
+                checkout_locked = False
+        if checkout_locked:
+            print("[BOOTSTRAP WARM] reusing locked node", node["name"])
+        else:
+            run(
+                "git",
+                "-C",
+                destination,
+                "fetch",
+                "--all",
+                "--tags",
+                "--prune",
+            )
+            if node["name"] == "H3-Optimizations":
+                run("git", "-C", destination, "reset", "--hard")
+            run(
+                "git",
+                "-C",
+                destination,
+                "checkout",
+                "--detach",
+                node[
+                    "revision"
+                ],
+            )
         requirements = destination / "requirements.txt"
-        if requirements.is_file() and not _requirements_satisfied(requirements):
-            run(sys.executable, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", requirements)
-            print("[NODE DEPS]", name)
-        print("[NODE]", name)
+        if requirements.is_file():
+            if _requirements_satisfied(requirements):
+                print("[BOOTSTRAP WARM] node requirements already satisfied", node["name"])
+            else:
+                run(
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-q",
+                    "--disable-pip-version-check",
+                    "-r",
+                    requirements,
+                )
+                print(
+                    "[NODE DEPS]",
+                    node[
+                        "name"
+                    ],
+                )
+        print(
+            "[NODE]",
+            node[
+                "name"
+            ],
+        )
 
 # Project-owned SageAttention SM75 correction recipe.
 # This is intentionally embedded here so the bootstrap is self-contained:
@@ -2779,7 +2706,7 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         uint32_t thread_col1 = thread_col0 + 1;
         uint32_t smem_row_base = o_start_row_warp;
 """
-    new = r"""        // H3-T4-SM75-STAGED-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
+    new = r"""        // H3-T4-SM75-PV-FRAGMENT-FIX: c0/c1 are row=r, c2/c3 are row=r+8.
         uint32_t thread_row0 = lane_id / 4;
         uint32_t thread_row1 = thread_row0 + 8;
         uint32_t thread_col0 = (lane_id % 4) * 2;
@@ -2823,7 +2750,7 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
         }
     }
 """
-    new = r"""        // H3-T4-SM75-DIRECT-FRAGMENT-FIX: SM75 fragment row mapping.
+    new = r"""        // Path B: Direct scattered write using the SM75 fragment row mapping.
         #pragma unroll
         for(int fk = 0; fk < NUM_N_V_TILES; ++fk) {
             uint32_t col_base = fk * MMA_SV_N_SM75;
@@ -2876,70 +2803,6 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
     return source
 
-def _warm_sage_smoke_check(
-    runtime: dict,
-    sage_dir: Path,
-    expected_version: str,
-    expected_revision: str,
-) -> bool:
-    """Reuse Sage when the locked source/binary/runtime are already valid.
-
-    The installation may be either the SHA-pinned git checkout built locally or
-    a prebuilt artifact carrying the same locked build manifest. This probe
-    deliberately does not depend on bootstrap_state.json.
-    """
-    if not _reuse_allowed():
-        return False
-    try:
-        if not sage_dir.is_dir():
-            return False
-        has_git_lock = (sage_dir / ".git").is_dir() and _git_head(sage_dir) == expected_revision
-        has_prebuilt_lock = _sage_artifact_manifest_matches(runtime, sage_dir)
-        if not (has_git_lock or has_prebuilt_lock):
-            return False
-        if not _sage_source_contract_valid(sage_dir):
-            return False
-        _install_sage_path_hook(sage_dir)
-        library_dirs = _cuda_library_dirs(runtime)
-        if not library_dirs:
-            return False
-        child_env = _configure_cuda_environment(library_dirs)
-        child_env["CUDA_VISIBLE_DEVICES"] = "0"
-        code = (
-            "import torch, sageattention; "
-            "from sageattention import sageattn; "
-            f"assert str(getattr(sageattention, '__version__', '')).strip() == {expected_version!r}; "
-            f"assert __import__('pathlib').Path(sageattention.__file__).resolve().is_relative_to(__import__('pathlib').Path({str(sage_dir)!r}).resolve() / 'sageattention'); "
-            "assert bool(getattr(sageattention, 'SM75_CUDA_ENABLED', False)); "
-            "from sageattention import _fused as _sage_fused; "
-            "assert torch.cuda.is_available(); "
-            "assert torch.cuda.get_device_capability(0) == (7, 5); "
-            "q=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
-            "k=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
-            "v=torch.randn((1,56,1024,128),device='cuda',dtype=torch.float16).contiguous(); "
-            "out=sageattn(q,k,v,tensor_layout='HND',is_causal=False,sm_scale=128**-0.5,smooth_k=True,qk_quant_gran='per_warp'); "
-            "torch.cuda.synchronize(); "
-            "assert tuple(out.shape)==tuple(q.shape); assert out.dtype==torch.float16; assert torch.isfinite(out).all().item(); "
-            "print('[SAGE WARM SMOKE] gpu=0 hd=128 smooth_k=True finite=PASS')"
-        )
-        verification = subprocess.run(
-            [sys.executable, "-c", code],
-            env=child_env,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if verification.stdout:
-            print(verification.stdout, end="")
-        if verification.stderr:
-            print(verification.stderr, end="")
-        return verification.returncode == 0
-    except Exception as exc:
-        print(f"[SAGE WARM SMOKE] failed closed: {exc}")
-        return False
-
-
 def install_sageattention_sm75(runtime: dict) -> None:
     """Clone, apply the proven SM75 fragment-mapping fix, build, and verify the pinned fork."""
     cfg = dict(runtime.get("sage_attention", {}) or {})
@@ -2954,22 +2817,6 @@ def install_sageattention_sm75(runtime: dict) -> None:
         raise RuntimeError("runtime_versions.yaml sage_attention.repository/revision are required and must be SHA-pinned.")
     if not expected_version:
         raise RuntimeError("runtime_versions.yaml sage_attention.version is required.")
-
-    sage_dir = CUSTOM / directory
-    if _warm_sage_smoke_check(runtime, sage_dir, expected_version, revision):
-        _warm_stage(f"reusing SageAttention revision={revision} version={expected_version}")
-        return
-
-    # Prefer a validated prebuilt SM75 artifact over cloning and compiling.
-    # The artifact is accepted only when it carries the exact locked Sage/Torch/CUDA
-    # manifest and the corrected SM75 source plus compiled extension are present.
-    if _reuse_allowed() and _materialize_sage_prebuilt(runtime, install_dir):
-        if _warm_sage_smoke_check(runtime, install_dir, expected_version, revision):
-            _warm_stage(
-                f"reusing prebuilt SageAttention revision={revision} version={expected_version}"
-            )
-            return
-        _safe_unlink_or_rmtree(install_dir)
 
     CUSTOM.mkdir(parents=True, exist_ok=True)
     if install_dir.exists() and not (install_dir / ".git").is_dir():
@@ -3328,9 +3175,11 @@ print(
                 f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
             )
 
-    _write_sage_artifact_manifest(runtime, install_dir)
-    _install_sage_path_hook(install_dir)
-    _export_sage_prebuilt(runtime, install_dir)
+    stamp = _sage_build_stamp(runtime)
+    _sage_build_stamp_path(install_dir).write_text(
+        json.dumps(stamp, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(
         f"[SAGE SM75] repository={repository} revision={actual_revision} "
         f"version={expected_version} build=PASS gpu0=PASS gpu1=PASS"
@@ -3338,33 +3187,22 @@ print(
 
 
 def install_models() -> None:
-    manifest = load_yaml(
-        MODEL_MANIFEST
-    )
-    for model in manifest[
-        "models"
-    ].values():
-        filename = model[
-            "filename"
-        ]
-        source = find_kaggle_file(
-            filename
+    manifest = load_yaml(MODEL_MANIFEST)
+    models = tuple(manifest["models"].values())
+    filenames = tuple(str(model["filename"]) for model in models)
+    normalized_filenames = tuple(name.lower() for name in filenames)
+    if len(set(normalized_filenames)) != len(normalized_filenames):
+        raise RuntimeError(
+            "Model manifest contains duplicate filenames (case-insensitive): "
+            + ", ".join(filenames)
         )
-        destination = (
-            MODELS
-            / model[
-                "directory"
-            ]
-            / filename
-        )
-        link_model(
-            source,
-            destination,
-        )
-        print(
-            "[MODEL]",
-            filename,
-        )
+    sources = find_kaggle_files(filenames)
+    for model in models:
+        filename = str(model["filename"])
+        source = sources[filename.lower()]
+        destination = MODELS / model["directory"] / filename
+        link_model(source, destination)
+        print("[MODEL]", filename)
 def _warn_if_torch_already_imported() -> None:
     """Warn when bootstrap is running in a process that already imported Torch."""
     if "torch" not in sys.modules:
@@ -3378,99 +3216,83 @@ def _warn_if_torch_already_imported() -> None:
     print("=" * 80)
 
 
-def _run_timed(label: str, fn, *args, **kwargs):
-    started = time.perf_counter()
-    result = fn(*args, **kwargs)
-    print(f"[BOOTSTRAP TIMER] {label}={time.perf_counter() - started:.2f}s")
-    return result
-
-
 def main():
     _enforce_no_restart()
     _warn_if_torch_already_imported()
     runtime = load_yaml(RUNTIME_MANIFEST)
-    reuse_enabled = _reuse_allowed()
-    if reuse_enabled and BOOTSTRAP_CACHE_FILE.is_file():
-        try:
-            state = json.loads(BOOTSTRAP_CACHE_FILE.read_text(encoding="utf-8"))
-            expected_inputs = _bootstrap_cache_inputs(runtime)
-            if all(state.get(key) == value for key, value in expected_inputs.items()):
-                print("[BOOTSTRAP WARM] STATE HINT: matching prior successful bootstrap")
-            else:
-                print("[BOOTSTRAP WARM] STATE HINT: stale; live probes remain authoritative")
-        except Exception as exc:
-            print(f"[BOOTSTRAP WARM] STATE HINT: unavailable ({exc}); live probes remain authoritative")
-    elif reuse_enabled:
-        print("[BOOTSTRAP WARM] STATE HINT: missing; live probes remain authoritative")
-    else:
-        print("[BOOTSTRAP WARM] FORCE_REFRESH: live reuse disabled")
-    _mark_cache_in_progress()
-
     pytorch_cuda = str(runtime["pytorch"]["cuda"])
     legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
     if legacy_runtime.exists():
         shutil.rmtree(legacy_runtime, ignore_errors=True)
-    _run_timed("kaggle_startup_wrapt", ensure_kaggle_startup_wrapt, runtime)
-    director_model = Path(os.getenv("H3_DIRECTOR_MODEL_PATH", str(runtime["director"]["model_path"]))).expanduser().resolve()
+    ensure_kaggle_startup_wrapt(runtime)
+    director_config = dict(runtime.get("director", {}) or {})
+    configured_model_path = str(director_config.get("model_path", "") or "").strip()
+    director_model_path = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip() or configured_model_path
+    if not director_model_path:
+        raise RuntimeError(
+            "runtime_versions.yaml director.model_path is required unless "
+            "H3_DIRECTOR_MODEL_PATH is set."
+        )
+    director_model = Path(director_model_path).expanduser().resolve()
     print("[DIRECTOR MODEL]", director_model)
 
-    director_future = None
     director_executor = None
-    director_env = Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", runtime["director"]["vllm_env_dir"])).expanduser().resolve()
-    director_ready = _reuse_allowed() and _probe_director_venv(runtime, director_env / "bin" / "python")
+    director_future = None
+    director_env = Path(
+        os.getenv(
+            "H3_DIRECTOR_VLLM_ENV_DIR",
+            str(runtime.get("director", {}).get("vllm_env_dir", "")),
+        )
+    ).expanduser().resolve()
+    director_ready = _probe_director_venv(runtime, director_env)
     if director_ready:
         print(f"[BOOTSTRAP WARM] reusing Director vLLM environment={director_env}")
-    else:
-        if shutil.which("uv") is not None:
-            from concurrent.futures import ThreadPoolExecutor
-            director_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-qwen-bootstrap")
-            director_future = director_executor.submit(install_director_runtime, runtime)
-            print("[BOOTSTRAP PARALLEL] Director vLLM install started")
+    elif shutil.which("uv") is not None:
+        from concurrent.futures import ThreadPoolExecutor
+        director_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-qwen-bootstrap")
+        director_future = director_executor.submit(install_director_runtime, runtime)
+        print("[BOOTSTRAP PARALLEL] Director vLLM install started")
 
-    sage_future = None
     sage_executor = None
-    sage_started = False
-    try:
-        _run_timed("comfyui", install_comfyui, runtime)
-        _run_timed("custom_nodes", install_nodes)
-        _run_timed("remove_legacy_context_ir", remove_legacy_context_ir_node)
-        _run_timed("project_requirements", install_base_requirements)
-        _run_timed("storyboard_runtime", install_storyboard_runtime, runtime)
-        _run_timed("pytorch", install_pytorch_runtime, runtime)
-        _run_timed("pillow", install_and_verify_pillow_runtime, runtime)
+    sage_future = None
+    sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "") or "")
 
-        sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", ""))
-        sage_cfg = runtime.get("sage_attention", {}) or {}
-        sage_ready = _warm_sage_smoke_check(runtime, sage_dir, str(sage_cfg.get("version", "")), str(sage_cfg.get("revision", "")))
-        if _reuse_allowed() and not sage_ready:
+    try:
+        install_comfyui(runtime)
+        install_nodes()
+        remove_legacy_context_ir_node()
+        install_base_requirements()
+        install_storyboard_runtime(runtime)
+        install_pytorch_runtime(runtime)
+        install_and_verify_pillow_runtime(runtime)
+
+        if _sage_install_is_reusable(runtime, sage_dir):
+            print(f"[BOOTSTRAP WARM] reusing SageAttention SM75 build={sage_dir}")
+        else:
             from concurrent.futures import ThreadPoolExecutor
             sage_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-sage-bootstrap")
             sage_future = sage_executor.submit(install_sageattention_sm75, runtime)
-            sage_started = True
             print("[BOOTSTRAP PARALLEL] SageAttention build started")
 
-        _run_timed("h3_source_lock", prepare_locked_h3_optimization_source, runtime)
-        _run_timed("h3_bounded_qkv", patch_h3_bounded_qkv, runtime)
-        _run_timed("h3_qkv_binding", patch_h3_qkv_binding_lifetime, runtime)
-        _run_timed("h3_sage_source", patch_h3_sage_attention, runtime)
-        _run_timed("h3_runtime_overlay", apply_embedded_h3_runtime_overlay)
-        _run_timed("h3_memory_compatibility", patch_h3_embedding_memory_compatibility, runtime)
+        prepare_locked_h3_optimization_source(runtime)
+        patch_h3_bounded_qkv(runtime)
+        patch_h3_qkv_binding_lifetime(runtime)
+        patch_h3_sage_attention(runtime)
+        apply_embedded_h3_runtime_overlay()
+        patch_h3_embedding_memory_compatibility(runtime)
 
         if sage_future is not None:
-            _run_timed("sage_wait", sage_future.result)
-        elif not sage_ready:
-            _run_timed("sage_runtime_install", install_sageattention_sm75, runtime)
+            sage_future.result()
 
         if director_future is not None:
-            _run_timed("director_wait", director_future.result)
+            director_future.result()
         elif not director_ready:
-            _run_timed("director_runtime", install_director_runtime, runtime)
+            install_director_runtime(runtime)
 
-        _run_timed("h3_runtime_verify", verify_h3_optimization_runtime, runtime)
-        _run_timed("models", install_models)
-        _run_timed("inventory", verify_inventory)
-        _run_timed("runtime_files", verify_runtime_files, runtime)
-        _save_bootstrap_cache(runtime)
+        verify_h3_optimization_runtime(runtime)
+        install_models()
+        verify_inventory()
+        verify_runtime_files(runtime)
         print("=" * 80)
         print("MiniMax H3 Kaggle bootstrap PASSED.")
     finally:
