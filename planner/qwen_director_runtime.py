@@ -1254,7 +1254,7 @@ class QwenDirectorRuntimeMixin:
                 "enforce_eager": eagle_enforce_eager,
             }, separators=(",", ":"))
 
-            max_batched_tokens = os.getenv("H3_DIRECTOR_VLLM_MAX_NUM_BATCHED_TOKENS", "4096").strip()
+            max_batched_tokens = os.getenv("H3_DIRECTOR_VLLM_MAX_NUM_BATCHED_TOKENS", "8192").strip()
 
             command = [
                 str(vllm_python),
