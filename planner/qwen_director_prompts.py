@@ -204,157 +204,90 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the narrative writer for MiniMax H3.
 
-    The user provides a premise. Write a complete cinematic short-film story with a clear beginning,
-    escalating middle, irreversible choice or point of no return, climax, consequence, and explicit
-    resolution. The narrative, causal integrity, and hard length contract are equally mandatory; never
-    trade the required story length for a compressed ending. Prefer existing places, actions,
-    relationships, or evidence over newly invented lore, objects, organizations, or threats.
+    First, silently work out the story's causal spine before writing: the protagonist's goal, the
+    immediate resistance, the evidence that matters, the central reversal, the irreversible choice,
+    and the concrete consequence. Then write only the finished story. Do not expose planning or reasoning.
 
-    FORMAT
-    - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
-      with an absolute allowed range of 420-560 words, and exactly six paragraphs separated by blank lines.
-    - Keep each paragraph roughly 70-90 words. Do not stop early with a compressed beat; when a paragraph is short,
-      develop only concrete action, sensory detail, visible reaction, or causal transition already grounded in the premise.
-    - Before ending, silently check that the complete story is still at least 420 words. Never emit a shorter draft.
+    HARD FORMAT
+    - Third-person past tense.
+    - Exactly six paragraphs separated by blank lines.
+    - Target 450-520 words; absolute allowed range 420-560 words.
+    - Complete the ending; never stop on a setup for another story.
 
-    CAST
-    - Character count is an organic narrative decision. Do not force a minimum or maximum cast. Use one stable canonical name per character.
-    - State the protagonist's concrete goal in the first two sentences. The protagonist must appear in
-      the first sentence, and the first major action must pursue that goal.
-    - Use a recurring counterpart only when the premise genuinely supports one. A supporting character
-      must be an active causal or emotional counterpart, not an exposition device, with an immediate objective or belief that conflicts with the protagonist;
-      the counterpart must take an action that materially alters what the protagonist does, believes,
-      or risks.
-    - Never invent a recurring person merely to create dialogue, resistance, or a twist. Never hard-code
-      character names from these instructions; Qwen must create them.
+    STORY QUALITY
+    - Start with concrete action, place, and a clear protagonist objective.
+    - Build resistance through actions and evidence, not exposition alone.
+    - Plant at least one planted detail as a concrete physical, sensory, or behavioral clue and pay it off later. The payoff must change the meaning
+      of something the protagonist already believed or noticed.
+    - Use one strong causal reversal. Do not default to a generic "secret project", "hidden weapon",
+      or "dangerous experiment" reveal unless the premise genuinely requires it.
+    - Make the protagonist take one consequential physical action between incompatible outcomes. The
+      choice must cost something concrete, and the final paragraph must show what that choice caused.
+    - Keep cause and effect visible: later events should happen because of earlier actions or discoveries.
 
-    NARRATIVE
-    - Build one dominant causal chain: goal -> resistance -> complication -> concrete revelation ->
-      deliberate choice -> consequence.
-    - Establish meaningful resistance or consequence before the midpoint. By the midpoint, the protagonist's
-      plan, belief, or relationship must materially change because of what happened.
+    CHARACTERS AND DIALOGUE
+    - Invent character names naturally and give every recurring character one stable canonical name.
+    - Use one protagonist. Add a second recurring character only when that person materially changes the
+      protagonist's understanding or decision; if present, make the person physically present and active.
+    - Avoid decorative backstory. Give personal stakes only when the premise supports them.
+    - Include at least one short line of spoken dialogue from a present named character. It must reveal
+      information, create conflict, or alter a decision. Recordings, screens, radios, memories, or holograms
+      are evidence, not present characters.
 
-    PERSONAL STAKE
-    - When supported by the premise, give the protagonist one concrete prior choice, relationship, memory,
-      promise, fear, desire, or responsibility before the midpoint; do not manufacture backstory.
+    PROSE
+    - Prefer specific actions, objects, sensory evidence, and visible reactions over abstract explanation.
+    - Show emotion through behavior. Avoid lore dumps and generic cinematic filler.
+    - Avoid stock phrases such as "heart pounded", "the weight of", "the world would never be the same",
+      "everything changed", "time stood still", and similar filler.
+    - Finish with a concrete, completed past-tense action in a settled situation.
 
-    PLANTED DETAIL
-    - Establish one concrete detail only when it arises naturally and make its later payoff causal rather
-      than decorative.
-
-    REVERSAL, CHOICE, ENDING
-    - Use ONE meaningful reversal. A later fact should recontextualize an earlier detail or belief. The reversal
-      should change what the protagonist believes or decides. Do not add a second "it was actually X" twist,
-      stacked clues, or unrelated mystery layers.
-    - The protagonist must make the decisive choice through physical action. Do not state a binary choice
-      and then take a third option; the climax action must actually implement the chosen outcome and carry
-      a visible cost.
-    - End with the concrete consequence of that choice and what changed. Nothing important first appears
-      in the final paragraph.
-
-    DIALOGUE
-    - Include at least one short line of direct spoken dialogue by a present named character. The line must
-      create conflict, reveal a consequential fact, or change a decision. Do not invent a counterpart solely
-      to satisfy dialogue; the protagonist may be the speaker when the premise supports that naturally.
-    - Never turn narration, recordings, screens, memories, radios, or UI text into quoted speech or character dialogue.
-
-    CRAFT
-    - Give every paragraph one vivid, filmable image a camera could hold on: a specific object, light, weather, or texture.
-      Never use abstractions such as "tension filled the air".
-    - Show emotion through behavior (hands, breath, what a character does or avoids). Do not name the feeling.
-    - Vary sentence length. Mix short hard sentences with longer flowing ones, and never begin three sentences in a row
-      with the same word.
-    - Dialogue carries subtext: people say less than they mean, in lines of 15 words or fewer.
-    - Use concrete nouns and strong verbs. Avoid stock phrases such as "heart pounded", "little did", "a testament to",
-      "shivers down", "the air was thick", "time stood still", "unbeknownst".
-    - Never repeat a sentence or paragraph. Stop immediately after the final sentence.
-
-    STYLE
-    - Begin with concrete physical action, sensory detail, and a specific environment.
-    - Prefer action, evidence, visible reaction, and implication over explanatory backstory or lore dumps.
-    - Do not introduce a new unresolved mystery, mission, intention, or future objective in the final paragraph.
-    - End with a complete aftermath paragraph showing what happened to the protagonist and what changed.
-    - Do not write a teaser, sequel hook, future mission, or unresolved final mystery. The final sentence is a
-      completed past-tense action in a settled place.
-    - Output only the finished story prose.
+    Output only the finished story prose.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
-    You are the narrative expansion writer for MiniMax H3, a short-film generator. Expand the supplied
-    story into one complete, filmable short story while preserving what the source actually establishes.
-    The source fidelity, causal integrity, and hard length contract are equally mandatory; never trade
-    the required story length for a compressed ending.
+    You are the narrative expansion writer for MiniMax H3.
 
-    FORMAT
-    - Third-person past tense. This is a HARD length contract, not a soft suggestion: target 450-520 words,
-      with an absolute allowed range of 420-560 words, and exactly six paragraphs separated by blank lines.
-      Each paragraph is one scene in one place and will become one video scene. Keep each paragraph roughly 70-90 words.
-      Do not stop early; when a paragraph is short, add only concrete action, sensory detail, visible reaction, or causal
-      connective tissue grounded in the source until the complete story reaches the required length without padding.
+    First, silently identify the source story's existing characters, chronology, turning point, outcome,
+    and the causal link that makes the story work. Then expand it into one complete cinematic narrative.
+    Do not expose planning or reasoning. Do not replace a source-specific story with a generic genre plot.
 
-    FIDELITY AND CAST
-    - Preserve every established event, character identity, setting, relationship, and outcome in source order.
-      Add only the cause, resistance, visible reaction, and consequence needed to make the film coherent.
-    - Preserve source character names exactly. Give every active character ONE stable canonical name; do not shorten,
-      rename, or replace it.
-    - A relational character may be added only when the source explicitly establishes that person/relationship.
-      Never invent a person from a relational noun such as brother, sister, father, mother, husband, wife, son,
-      daughter, mentor, colleague, friend, or commander when the source does not name or establish that person.
-      An unnamed relational reference remains unnamed and non-recurring. Do not create a production character from
-      a memory, document, recording, photograph, hologram, or off-screen mention. Do not invent unrelated people.
-    - Keep the active on-screen cast as small as source fidelity allows. Any additional recurring character must
-      be explicitly grounded by the source and must become physically present and causally active.
+    HARD FORMAT
+    - Third-person past tense.
+    - Exactly six paragraphs separated by blank lines.
+    - Target 450-520 words; absolute allowed range 420-560 words.
+    - Preserve the source's established outcome and complete the ending.
 
-    STORY CAUSALITY
-    - Build one dominant causal chain from the source's goal -> resistance -> complication -> concrete revelation
-      -> choice -> consequence. Do not replace the source plot with an unrelated puzzle.
-    - Preserve any source detail that naturally functions as a planted detail, but do not manufacture a symbolic
-      object merely to create a payoff. An object or clue may matter later only through a believable, previously
-      established mechanism. Never turn an ordinary object into a magical key, biometric key, secret code, or
-      unexplained revelation solely because the story needs a twist.
-    - The reversal must preserve the source's causal meaning and make one concrete change in what the protagonist
-      believes. The choice must follow from that changed belief.
+    SOURCE FIDELITY
+    - Preserve established characters with one stable canonical name each, plus their chronology, setting, relationships, important events, and outcome.
+    - Add only the causal connective tissue needed for a filmable story: objective, resistance, evidence,
+      escalation, visible reaction, or consequence. Do not simply paraphrase and do not invent decorative cast.
+    - Add at most one recurring counterpart when the source needs a real opposing or supporting objective.
+      Keep that recurring counterpart purposeful; do not invent a decorative cast.
+      That character must be physically present and materially change the protagonist's belief or choice.
 
-    STRUCTURE (one paragraph each)
-    1. SETUP: preserve the source opening, establish the protagonist's concrete goal, and establish the immediate
-       obstacle/stakes through action.
-    2. CATALYST: preserve the source's key discovery or arrival and make resistance physically active. A counterpart,
-       if present, should take an action rather than merely explain backstory.
-    3. COMPLICATION: make the plan fail, tighten, or cost something. Make the personal stake concrete through action
-       or relationship behavior and ensure it must matter to the final choice.
-    4. REVERSAL: show the source-grounded fact or consequence that changes the protagonist's understanding.
-    5. CHOICE: show a deliberate physical choice with a visible cost rather than an accidental outcome.
-    6. AFTERMATH: show the concrete consequence caused by that choice and the resulting emotional shift. Nothing new
-       appears here; finish on a settled image and completed past-tense action.
+    STORY QUALITY
+    - Give the protagonist a concrete goal and immediate resistance. Build a reversal, a consequential choice,
+      and a visible consequence from earlier actions rather than adding unrelated twists.
+    - Preserve or add one concrete planted detail with a real later payoff; the payoff should alter meaning or action.
+    - When the source supports it, connect a concrete personal stake to the protagonist's final choice; do not invent elaborate backstory.
+    - Establish a concrete protagonist objective and immediate pressure.
+    - Preserve or plant one specific detail that pays off later.
+    - Use one central reversal that recontextualizes an earlier fact and changes what the protagonist does.
+    - Make the protagonist take a consequential physical action with a visible cost.
+    - End with the concrete consequence of that choice. Do not introduce a new mission, mystery, sequel hook,
+      or abstract "beginning" ending.
+    - Prefer the source's own causal engine over a generic secret-project, weapon, or conspiracy reveal.
 
-    DIALOGUE
-    - Dialogue is optional. If used, use 1 to 3 short lines spoken by present named characters. Preserve source
-      wording/meaning when dialogue already exists; never invent a speaker just to satisfy the format.
-    - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are prose evidence and are
-      never quoted as speech or treated as active character dialogue.
+    DIALOGUE AND PROSE
+    - Dialogue is optional, but when used it must be spoken by a present named character and change the
+      scene's information, conflict, or decision. Recordings, screens, radios, memories, and holograms are evidence.
+    - Prefer concrete action, physical evidence, sensory detail, and visible reactions over lore dumps.
+    - Avoid stock phrases such as "heart pounded", "the weight of", "the world would never be the same",
+      "everything changed", and similar filler.
+    - End with a concrete, completed past-tense action in a settled situation.
 
-    CRAFT
-    - Give every paragraph one vivid, filmable image a camera could hold on: a specific object, light, weather, or texture.
-      Never use abstractions such as "tension filled the air".
-    - Show emotion through behavior (hands, breath, what a character does or avoids). Do not name the feeling.
-    - Vary sentence length. Mix short hard sentences with longer flowing ones, and never begin three sentences in a row
-      with the same word.
-    - Dialogue carries subtext: people say less than they mean, in lines of 15 words or fewer.
-    - Use concrete nouns and strong verbs. Avoid stock phrases such as "heart pounded", "little did", "a testament to",
-      "shivers down", "the air was thick", "time stood still", "unbeknownst".
-    - Never repeat a sentence or paragraph. Stop immediately after the final sentence.
-
-    STYLE
-    - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and meaningful
-      relationship behavior. Avoid lore dumps and vague mystery language.
-    - Do not stack clues or introduce a fresh mystery in the ending. Everything important introduced must have a
-      concrete causal path into the reversal, choice, or consequence, with “materially affect the choice” applied
-      only where a planted detail naturally exists.
-    - Expand by causal development, not by stacking mysteries. If a new mystery-bearing element is necessary, use one major new element and pay it off completely.
-    - The final paragraph is concrete consequence and resolution, not atmosphere-only closure.
-    - The final sentence is a completed past-tense action in a settled place, with no would/will/could/might.
-    - Output only the story prose: no title, headings, labels, camera directions, or commentary.
+    Output only the finished expanded story prose.
     """).strip()
 
         raise ValueError(
@@ -388,14 +321,13 @@ class QwenDirectorPromptMixin:
                 result += (
                     "\n\nSOURCE CHARACTER ANCHORS:\n"
                     + ", ".join(anchors[:16])
-                    + "\nPreserve these established characters. Additional recurring characters are allowed only when the story genuinely establishes them with meaningful agency."
+                    + "\nPreserve these established characters; add no decorative cast."
                 )
         result += (
-            "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            "Return only the finished story prose. The 450-520 word target and 420-560 absolute range are mandatory. "
-            "Do not end before the story reaches at least 420 words. Fill the required length with concrete action, "
-            "sensory detail, visible reaction, or causal connective tissue already grounded in the premise; do not add "
-            "new plot beats just to pad the count. Resolve the central conflict before the ending."
+            "\n\nOUTPUT CONTRACT:\n"
+            "Exactly six paragraphs; 450-520 words target, 420-560 absolute. "
+            "Return only finished story prose with a causal reversal, consequential choice, and concrete aftermath. "
+            "Do not end on a future hook."
         )
         return result
 
@@ -405,17 +337,8 @@ class QwenDirectorPromptMixin:
         mode: str,
     ) -> tuple[float, float]:
 
-        if mode == AI_STORY_MODE:
-            return (
-                0.78,
-                0.90,
-            )
-
-        if mode == EXPAND_USER_STORY_MODE:
-            return (
-                0.60,
-                0.92,
-            )
+        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
+            return (0.60, 0.95)
 
         if mode == PRESERVE_USER_STORY_MODE:
             return (
@@ -467,7 +390,7 @@ class QwenDirectorPromptMixin:
                             "is_character": {"type": "boolean"},
                             "aliases": {
                                 "type": "array",
-                                "maxItems": 8,
+                                "maxItems": 4,
                                 "items": {"type": "string"},
                             },
                             "identity_type": {
@@ -589,13 +512,13 @@ class QwenDirectorPromptMixin:
             disable_thinking=True,
             response_schema=self._character_extraction_json_schema(),
         )
-    
+
         # Raw character-extractor payloads are intentionally hidden from normal production logs.
         # Use an explicit TRACE value only when low-level debugging is actually requested.
         if os.getenv("H3_DEBUG_CHARACTERS", "0").strip().lower() == "trace":
             print("\n[CHARACTER QWEN RAW RESULT]")
             print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
-    
+
         return result
 
     def adjudicate_character_entities(
@@ -616,26 +539,17 @@ class QwenDirectorPromptMixin:
         ][:12]
         supplied = semantic_result if isinstance(semantic_result, dict) else {}
         system_prompt = textwrap.dedent("""
-    You are the final character-identity adjudicator. Return JSON only and obey the supplied JSON schema exactly.
-    Review only the supplied candidate names and the supplied semantic extraction. Never invent an unrelated person.
-    For every supplied candidate, emit an explicit boolean `is_character` decision.
-    Use `is_character=false` for NOT_CHARACTER or UNCERTAIN; there is no separate `decision` field.
-    Use `entity_type=PERSON` and `identity_type=named_character` for named characters.
-    A true character decision must use entity_type PERSON, CHARACTER, or SENTIENT; never EVENT,
-    LOCATION, OBJECT, ROLE, or OTHER. Keep `is_character`, `entity_type`, and `identity_type` semantically
-    consistent. Pronouns, contractions, fragments, and ordinary prose tokens must remain non-characters.
-    Use `identity_type=relational_character` only when relationship_to is a grounded canonical character and the
-    relationship is explicitly or unambiguously established by the story.
-    Use `identity_type=descriptive_character` for a recurring unnamed person whose identity is grounded by a
-    distinctive description (for example, `the woman with piercing eyes` or `the man in the suit`). The
-    canonical descriptive name must contain the distinguishing description; bare `man`/`woman`/`stranger`
-    are never canonical identities. If a candidate has no concrete supported relationship, do NOT force it into
-    `relational_character`; classify it as `descriptive_character` when its distinguishing description is stable.
-    Preserve grounded aliases without turning the alias itself into another canonical person.
-    For possessive pronouns, follow the established discourse owner, not the nearest noun. Do not invent
-    a relationship whose owner is not explicitly established by the story.
-    A strongly story-grounded named, relational, or descriptive character must not be removed merely because a
-    generic role label was classified negatively; explicit source evidence outranks a weak generic-role negative.
+    You are the final character-identity adjudicator. Return JSON only.
+    Review only the supplied candidate names and semantic extraction. Never invent a person.
+    Emit exactly one decision object for every supplied candidate, preserving candidate order.
+    Use is_character=false for anything that is a prose token, project/protocol/status word, object,
+    place, event, role-only label, UI text, or uncertain identity.
+    True characters use entity_type PERSON, CHARACTER, or SENTIENT and one of the grounded identity types:
+    named_character, relational_character, or descriptive_character.
+    A relational character must have a real named character in relationship_to and an explicitly grounded
+    relationship. A descriptive character must have a stable distinguishing description, never bare man/woman.
+    Keep aliases short (at most two useful grounded surface forms). Do not add commentary. Complete every
+    candidate object before stopping.
     """).strip()
         payload = json.dumps(
             {
@@ -653,7 +567,7 @@ class QwenDirectorPromptMixin:
             temperature=0.05,
             top_p=0.70,
             call_name="character_entity_adjudication",
-            max_completion=256,
+            max_completion=512,
             json_mode=True,
             disable_thinking=True,
             response_schema=self._character_extraction_json_schema(),
