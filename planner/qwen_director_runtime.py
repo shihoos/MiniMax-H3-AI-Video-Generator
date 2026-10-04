@@ -42,6 +42,22 @@ from planner.config import (
 
 NO_THINK_SUFFIX = "\n/no_think"
 
+
+def _verbose() -> bool:
+    return os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _stage_enabled() -> bool:
+    return os.getenv("H3_DIRECTOR_STAGE_LOCAL", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+class StoryTruncated(RuntimeError):
+    """Raised when a text pass stops on the token cap; carries the partial text."""
+
+    def __init__(self, message: str, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
 # Pin the Director sampling stream at the request layer as well as the server layer.
 # This removes run-to-run RNG-state drift while preserving the existing temperature/top-p profile.
 DIRECTOR_VLLM_SEED = int(os.getenv("H3_DIRECTOR_VLLM_SEED", "0"))
@@ -60,6 +76,11 @@ _SHARED_VLLM_TOKENIZER = None
 
 def _shutdown_shared_vllm_at_exit() -> None:
     global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_TOKENIZER
+    if os.getenv("H3_DIRECTOR_VLLM_KEEP_ALIVE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        # Leave the server running so the next cell/process attaches in seconds.
+        # Free the GPUs before rendering: pkill -f vllm.entrypoints
+        _SHARED_VLLM_PROCESS = None
+        return
     process = _SHARED_VLLM_PROCESS
     _SHARED_VLLM_PROCESS = None
     if process is not None:
@@ -142,7 +163,10 @@ class QwenDirectorRuntimeMixin:
     @staticmethod
     def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
         """Stage NFS-mounted Kaggle models to local NVMe scratch, publishing only after validation."""
-        stage_enabled = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "1").strip().lower() in {
+        # Default OFF: weights load straight from the attached Kaggle dataset. Copying
+        # ~13GB to local scratch cost ~4.5 minutes per cold start. Opt in with
+        # H3_DIRECTOR_STAGE_LOCAL=1 only if direct loading stalls on your mount.
+        stage_enabled = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "0").strip().lower() in {
             "1", "true", "yes", "on"
         }
         if not stage_enabled:
@@ -266,7 +290,8 @@ class QwenDirectorRuntimeMixin:
             return source_path
 
         if target_dir.is_dir() and is_valid_checkpoint(target_dir, source_fingerprint):
-            print(f"[QWEN] Reusing locally staged {label} at {target_dir}", flush=True)
+            if _verbose():
+                print(f"[QWEN] Reusing locally staged {label} at {target_dir}", flush=True)
             return target_dir
 
         try:
@@ -292,10 +317,11 @@ class QwenDirectorRuntimeMixin:
             )
             return source_path
 
-        print(
-            f"[QWEN] Staging {label} to local NVMe scratch ({target_dir}) to bypass NFS mmap stalls...",
-            flush=True,
-        )
+        if _verbose():
+            print(
+                f"[QWEN] Staging {label} to local scratch ({target_dir})...",
+                flush=True,
+            )
         start_time = time.perf_counter()
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         tmp_target = target_dir.with_name(f"{target_dir.name}.tmp_{os.getpid()}")
@@ -318,7 +344,7 @@ class QwenDirectorRuntimeMixin:
                         fdst.write(buf)
                         copied_bytes[0] += len(buf)
                         now = time.perf_counter()
-                        if now - last_print_time[0] > 5.0:
+                        if _verbose() and now - last_print_time[0] > 5.0:
                             print(
                                 f"[QWEN] Staging {label}: "
                                 f"{copied_bytes[0] / 1e9:.1f}GB / {source_size / 1e9:.1f}GB...",
@@ -352,7 +378,8 @@ class QwenDirectorRuntimeMixin:
             return source_path
 
         elapsed = time.perf_counter() - start_time
-        print(f"[QWEN] Staged {label} in {elapsed:.2f}s", flush=True)
+        if _verbose():
+            print(f"[QWEN] Staged {label} in {elapsed:.2f}s", flush=True)
         return target_dir
 
     def _record_qwen_call(
@@ -657,10 +684,11 @@ class QwenDirectorRuntimeMixin:
         candidates: list[Path] = []
 
         local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
-        for prefix in (local_scratch / "staged_models", local_scratch):
-            staged = prefix / Path(DIRECTOR_MODEL_PATH).name
-            if staged.is_dir():
-                candidates.append(staged)
+        if _stage_enabled():
+            for prefix in (local_scratch / "staged_models", local_scratch):
+                staged = prefix / Path(DIRECTOR_MODEL_PATH).name
+                if staged.is_dir():
+                    candidates.append(staged)
 
         if explicit:
             candidates.append(Path(explicit).expanduser())
@@ -732,11 +760,13 @@ class QwenDirectorRuntimeMixin:
         )
 
         local_scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
-        candidates = [
-            local_scratch / "staged_models" / configured.name,
-            local_scratch / configured.name,
-            configured,
-        ]
+        candidates = [configured]
+        if _stage_enabled():
+            candidates = [
+                local_scratch / "staged_models" / configured.name,
+                local_scratch / configured.name,
+                configured,
+            ]
 
         if DIRECTOR_KAGGLE_INPUT_ROOT.is_dir():
             try:
@@ -1086,6 +1116,7 @@ class QwenDirectorRuntimeMixin:
                 "--speculative-config",
                 speculative_config,
                 "--trust-remote-code",
+                "--disable-custom-all-reduce",
             ]
 
             enforce_eager_base_val = os.getenv("H3_DIRECTOR_VLLM_ENFORCE_EAGER", "0").strip().lower()
@@ -1204,7 +1235,8 @@ class QwenDirectorRuntimeMixin:
                 "1", "true", "yes", "on"
             }
 
-            print(
+            _startup_t0 = time.perf_counter()
+            if _verbose(): print(
                 "[QWEN] vLLM startup config",
                 f"cache_root={cache_path or 'default(/root/.cache/vllm)'}",
                 f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
@@ -1262,10 +1294,8 @@ class QwenDirectorRuntimeMixin:
                             timeout=60,
                         )
                         warmup_response.raise_for_status()
-                        print(
-                            "[QWEN] vLLM sampler-JIT warmup completed",
-                            flush=True,
-                        )
+                        if _verbose():
+                            print("[QWEN] vLLM sampler-JIT warmup completed", flush=True)
                     except Exception as exc:
                         raise RuntimeError(
                             "vLLM sampler-JIT warmup failed. Disable "
@@ -1287,6 +1317,7 @@ class QwenDirectorRuntimeMixin:
                     f"model={model_name}",
                     f"tp={DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE}",
                     f"context={DIRECTOR_VLLM_MAX_MODEL_LEN}",
+                    f"startup={time.perf_counter() - _startup_t0:.0f}s",
                     f"log={log_path}",
                     flush=True,
                 )
@@ -1532,6 +1563,8 @@ class QwenDirectorRuntimeMixin:
         max_tokens: int,
         response_format: dict | None = None,
         min_tokens: int = 0,
+        seed: int | None = None,
+        creative: bool = False,
     ) -> dict:
         if self._vllm_session is None:
             raise RuntimeError("Qwen director model is not loaded.")
@@ -1542,19 +1575,32 @@ class QwenDirectorRuntimeMixin:
             "temperature": float(temperature),
             "top_p": float(top_p),
             "max_tokens": int(max_tokens),
-            "seed": int(DIRECTOR_VLLM_SEED),
+            "seed": int(DIRECTOR_VLLM_SEED if seed is None else seed),
+            # Qwen3 recommends top_k=20; unbounded sampling plus a forced token floor is
+            # what lets quantized Qwen drift into endless repetition.
+            "top_k": 20,
+            # Non-thinking mode via the chat template, in addition to the /no_think suffix.
+            "chat_template_kwargs": {"enable_thinking": False},
         }
+        if creative:
+            payload["presence_penalty"] = float(
+                os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "0.6")
+            )
         if int(min_tokens or 0) > 0:
             payload["min_tokens"] = int(min_tokens)
         if response_format is not None:
             payload["response_format"] = response_format
 
         url = self._vllm_base_url() + "/chat/completions"
-        response = self._vllm_session.post(
-            url,
-            json=payload,
-            timeout=float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800")),
-        )
+        timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
+        response = self._vllm_session.post(url, json=payload, timeout=timeout)
+        if response.status_code == 400 and any(
+            key in response.text for key in ("presence_penalty", "top_k", "chat_template_kwargs")
+        ):
+            # Server rejected an optional sampling field: retry once with the base payload.
+            for key in ("presence_penalty", "top_k", "chat_template_kwargs"):
+                payload.pop(key, None)
+            response = self._vllm_session.post(url, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
             body = response.text[:4000]
@@ -1796,6 +1842,8 @@ class QwenDirectorRuntimeMixin:
         max_completion: int | None = None,
         disable_thinking: bool = True,
         minimum_output_tokens: int = 0,
+        seed: int | None = None,
+        creative: bool = False,
     ) -> str:
         if self._vllm_session is None:
             raise RuntimeError(
@@ -1856,6 +1904,8 @@ class QwenDirectorRuntimeMixin:
                 top_p=top_p,
                 max_tokens=max_tokens,
                 min_tokens=minimum_output_tokens,
+                seed=seed,
+                creative=creative,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -1934,8 +1984,9 @@ class QwenDirectorRuntimeMixin:
             ) from exc
 
         if finish_reason == "length":
-            raise RuntimeError(
-                f"Qwen text generation hit the completion limit for {call_name} before producing a complete response."
+            raise StoryTruncated(
+                f"Qwen text generation hit the completion limit for {call_name} before producing a complete response.",
+                partial=str(content or ""),
             )
 
         content = str(
