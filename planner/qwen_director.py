@@ -1425,10 +1425,14 @@ class QwenDirector(
                 raw = self._chat_text(
                     story_system,
                     story_user + feedback,
-                    minimum_completion=400,
-                    # No forced token floor: a floor above the model's natural story length
-                    # pushes it past its ending and into repetition. Length is validated instead.
-                    minimum_output_tokens=0,
+                    # Keep the visible story generation close to the proven Sep 25
+                    # completion length. The validator alone is too late: without a
+                    # token floor Qwen can legally emit EOS at ~300-350 words even
+                    # when the prompt asks for 420-560. A 600-token floor is just below
+                    # the Sep 25 successful 623-token story and leaves the 1500-token
+                    # runaway ceiling intact.
+                    minimum_completion=600,
+                    minimum_output_tokens=600,
                     temperature=temperature if attempt == 0 else max(0.55, temperature - 0.1),
                     top_p=top_p,
                     call_name=call_name,
