@@ -344,7 +344,7 @@ class ProductionPlanner:
         "There", "Here", "All", "Who", "What", "Which",
         "Why", "Where", "How", "Whom", "Whose", "Whether",
         "Someone", "Somebody", "Everyone", "Everybody", "Nobody", "Noone",
-        "Anyone", "Anybody", "Anything", "Something", "Nothing",
+        "Anyone", "Anybody", "Anything", "Something", "Nothing", "Everything",
         "Monday", "Tuesday", "Wednesday", "Thursday",
         "Friday", "Saturday", "Sunday",
         "January", "February", "March", "April", "May", "June",
@@ -3253,12 +3253,39 @@ class ProductionPlanner:
 
             except Exception as exc:
                 LOGGER.warning(
-                    "Semantic character extraction failed; using deterministic fallback: %s",
+                    "Semantic character extraction failed; using bounded deterministic fallback: %s",
                     exc,
                 )
                 semantic_result_final = None
                 semantic_roster_authoritative = False
-                descriptors = self._canonicalize_character_descriptors(descriptors)
+
+                # Never fall back to the raw capitalization detector wholesale.
+                # A malformed/truncated adjudication response can leave ordinary
+                # prose surfaces (for example ``Everything``) in `descriptors`.
+                # Keep only identities with independent deterministic evidence;
+                # grounded relational hints are restored by the safety floor below.
+                strong_relation_names = {
+                    EntityResolver.normalize(str(item.get("name", "") or ""))
+                    for item in relational_hints
+                    if item.get("strong") and item.get("name")
+                }
+                safe_descriptors = []
+                for name in descriptors:
+                    if not name:
+                        continue
+                    normalized_name = EntityResolver.normalize(name)
+                    if normalized_name in strong_relation_names:
+                        safe_descriptors.append(name)
+                        continue
+                    if self._hard_named_source_evidence(story, name):
+                        safe_descriptors.append(name)
+                        continue
+                    if self._descriptive_identity_is_grounded(story, name):
+                        safe_descriptors.append(name)
+                        continue
+                    if self._high_confidence_deterministic_character(story, name):
+                        safe_descriptors.append(name)
+                descriptors = self._canonicalize_character_descriptors(safe_descriptors)
 
         if not descriptors and not semantic_roster_authoritative:
             fallback = []
