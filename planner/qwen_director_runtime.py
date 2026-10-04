@@ -524,10 +524,14 @@ class QwenDirectorRuntimeMixin:
         finish_reason: str = "",
         cache_hit: bool = False,
         error: str = "",
+        thinking_enabled: bool = False,
+        thinking_token_budget: int | None = None,
+        reasoning_tokens: int = 0,
     ) -> None:
         """Record and print bounded runtime telemetry for one Qwen call."""
         prompt_tokens = max(0, int(prompt_tokens or 0))
         completion_tokens = max(0, int(completion_tokens or 0))
+        reasoning_tokens = max(0, int(reasoning_tokens or 0))
         elapsed = max(0.0, float(elapsed or 0.0))
 
         record = {
@@ -545,6 +549,13 @@ class QwenDirectorRuntimeMixin:
             "min_tokens": int(min_tokens or 0),
             "temperature": temperature,
             "top_p": top_p,
+            "thinking_enabled": bool(thinking_enabled),
+            "thinking_token_budget": (
+                int(thinking_token_budget)
+                if thinking_token_budget is not None
+                else None
+            ),
+            "reasoning_tokens": reasoning_tokens,
             "response_format": (
                 "json_schema"
                 if isinstance(response_format, dict)
@@ -578,6 +589,7 @@ class QwenDirectorRuntimeMixin:
             f"elapsed={elapsed:.2f}s",
             f"prompt_tokens={prompt_tokens}",
             f"completion_tokens={completion_tokens}",
+            f"reasoning_tokens={reasoning_tokens}" if reasoning_tokens else "",
             f"total_tokens={prompt_tokens + completion_tokens}",
             f"decode_tps={record['decode_tps']:.2f}",
             f"max_tokens={int(max_tokens or 0)}",
@@ -655,6 +667,29 @@ class QwenDirectorRuntimeMixin:
             except Exception:
                 raw_content = ""
 
+        reasoning_tokens = 0
+        safe_response = response
+        if isinstance(response, dict):
+            try:
+                usage = response.get("usage", {}) or {}
+                details = usage.get("completion_tokens_details", {}) or {}
+                reasoning_tokens = int(
+                    details.get("reasoning_tokens", 0)
+                    or details.get("reasoning", 0)
+                    or 0
+                )
+            except Exception:
+                reasoning_tokens = 0
+            try:
+                safe_response = deepcopy(response)
+                message = safe_response["choices"][0]["message"]
+                if isinstance(message, dict):
+                    # Never persist chain-of-thought in trace files.
+                    message.pop("reasoning_content", None)
+                    message.pop("reasoning", None)
+            except Exception:
+                safe_response = {"omitted": "raw_response_unavailable"}
+
         payload = {
             "call_name": call_name,
             "elapsed_seconds": elapsed,
@@ -663,17 +698,8 @@ class QwenDirectorRuntimeMixin:
             "system_prompt": system_prompt,
             "user_prompt": user_prompt,
             "raw_content": raw_content,
-            "reasoning_content": (
-                str(
-                    response["choices"][0]["message"].get(
-                        "reasoning_content"
-                    )
-                    or ""
-                )
-                if isinstance(response, dict)
-                else ""
-            ),
-            "raw_response": response,
+            "reasoning_tokens": reasoning_tokens,
+            "raw_response": safe_response,
         }
         digest = hashlib.sha256(
             (
@@ -713,6 +739,7 @@ class QwenDirectorRuntimeMixin:
         max_tokens: int,
         json_mode: bool,
         disable_thinking: bool,
+        thinking_token_budget: int | None = None,
     ) -> str:
         try:
             model_name = self._vllm_model_name()
@@ -732,6 +759,11 @@ class QwenDirectorRuntimeMixin:
                 "max_tokens": int(max_tokens),
                 "json_mode": bool(json_mode),
                 "disable_thinking": bool(disable_thinking),
+                "thinking_token_budget": (
+                    int(thinking_token_budget)
+                    if thinking_token_budget is not None
+                    else None
+                ),
                 "generation_config": str(DIRECTOR_VLLM_GENERATION_CONFIG),
                 "tensor_parallel": int(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE),
                 "max_model_len": int(DIRECTOR_VLLM_MAX_MODEL_LEN),
@@ -1250,6 +1282,8 @@ class QwenDirectorRuntimeMixin:
                 str(DIRECTOR_VLLM_SEED),
                 "--generation-config",
                 DIRECTOR_VLLM_GENERATION_CONFIG,
+                "--reasoning-parser",
+                "qwen3",
                 "--speculative-config",
                 speculative_config,
                 "--trust-remote-code",
@@ -1419,17 +1453,17 @@ class QwenDirectorRuntimeMixin:
                     warmup_url = self._vllm_base_url() + "/chat/completions"
                     warmup_payload = {
                         "model": model_name,
-                        "messages": [{"role": "user", "content": "Say OK.\n/no_think"}],
+                        "messages": [{"role": "user", "content": "Say OK."}],
                         "max_tokens": 2,
-                        "temperature": float(DIRECTOR_TEMPERATURE if DIRECTOR_TEMPERATURE is not None else 0.7),
-                        "top_p": float(DIRECTOR_TOP_P if DIRECTOR_TOP_P is not None else 0.9),
-                        # Match the story request's sampler path so the first real story call
-                        # does not discover a different top-k/penalty JIT path.
+                        "temperature": 0.6,
+                        "top_p": 0.95,
+                        # Match the story request's sampler/reasoning path so the first real
+                        # thinking-enabled story call does not discover a different JIT path.
                         "top_k": 20,
                         "presence_penalty": float(
-                            os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "0.6")
+                            os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "1.5")
                         ),
-                        "chat_template_kwargs": {"enable_thinking": False},
+                        "chat_template_kwargs": {"enable_thinking": True},
                     }
                     try:
                         warmup_response = session.post(
@@ -1709,6 +1743,8 @@ class QwenDirectorRuntimeMixin:
         min_tokens: int = 0,
         seed: int | None = None,
         creative: bool = False,
+        enable_thinking: bool = False,
+        thinking_token_budget: int | None = None,
     ) -> dict:
         if self._vllm_session is None:
             raise RuntimeError("Qwen director model is not loaded.")
@@ -1720,19 +1756,19 @@ class QwenDirectorRuntimeMixin:
             "top_p": float(top_p),
             "max_tokens": int(max_tokens),
             "seed": int(DIRECTOR_VLLM_SEED if seed is None else seed),
-            # Keep non-thinking mode explicit at the chat-template layer as well as via
-            # the /no_think suffix. This applies to every Director call.
-            "chat_template_kwargs": {"enable_thinking": False},
+            "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
         }
         if creative:
             # Story-only anti-runaway sampling. Do not alter the structured JSON passes
             # with a story-specific top-k or presence penalty.
             payload["top_k"] = 20
             payload["presence_penalty"] = float(
-                os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "0.6")
+                os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "1.5")
             )
         if int(min_tokens or 0) > 0:
             payload["min_tokens"] = int(min_tokens)
+        if thinking_token_budget is not None:
+            payload["thinking_token_budget"] = int(thinking_token_budget)
         if response_format is not None:
             payload["response_format"] = response_format
 
@@ -1740,10 +1776,11 @@ class QwenDirectorRuntimeMixin:
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
         response = self._vllm_session.post(url, json=payload, timeout=timeout)
         if response.status_code == 400 and any(
-            key in response.text for key in ("presence_penalty", "top_k", "chat_template_kwargs")
+            key in response.text for key in ("presence_penalty", "top_k")
         ):
-            # Server rejected an optional sampling field: retry once with the base payload.
-            for key in ("presence_penalty", "top_k", "chat_template_kwargs"):
+            # Sampling extras are optional. Never drop chat_template_kwargs or the reasoning
+            # budget on fallback: changing the thinking mode would silently change story quality.
+            for key in ("presence_penalty", "top_k"):
                 payload.pop(key, None)
             response = self._vllm_session.post(url, json=payload, timeout=timeout)
 
@@ -1878,6 +1915,7 @@ class QwenDirectorRuntimeMixin:
                 top_p=top_p,
                 max_tokens=max_tokens,
                 response_format=kwargs.get("response_format"),
+                enable_thinking=not disable_thinking,
             )
         except Exception as exc:
             error_text = (
@@ -1989,6 +2027,7 @@ class QwenDirectorRuntimeMixin:
         minimum_output_tokens: int = 0,
         seed: int | None = None,
         creative: bool = False,
+        thinking_token_budget: int | None = None,
     ) -> str:
         if self._vllm_session is None:
             raise RuntimeError(
@@ -2051,6 +2090,8 @@ class QwenDirectorRuntimeMixin:
                 min_tokens=minimum_output_tokens,
                 seed=seed,
                 creative=creative,
+                enable_thinking=not disable_thinking,
+                thinking_token_budget=thinking_token_budget,
             )
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
@@ -2075,6 +2116,13 @@ class QwenDirectorRuntimeMixin:
 
             prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
             completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            completion_details = usage.get("completion_tokens_details", {}) or {}
+            reasoning_tokens = int(
+                completion_details.get("reasoning_tokens", 0)
+                or completion_details.get("reasoning", 0)
+                or usage.get("reasoning_tokens", 0)
+                or 0
+            )
             finish_reason = ""
             if isinstance(response, dict):
                 try:
@@ -2095,6 +2143,9 @@ class QwenDirectorRuntimeMixin:
                 top_p=top_p,
                 response_format=None,
                 finish_reason=finish_reason,
+                thinking_enabled=not disable_thinking,
+                thinking_token_budget=thinking_token_budget,
+                reasoning_tokens=reasoning_tokens,
                 error=error_text,
             )
 
