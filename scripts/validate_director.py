@@ -44,10 +44,10 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
     ai = _mixin._story_text_system(AI_STORY_MODE)
     expand = _mixin._story_text_system(EXPAND_USER_STORY_MODE)
     for label, text in (("AI story", ai), ("Expand story", expand)):
-        _assert("exactly six paragraphs" in text, f"{label} prompt must produce six scene-sized paragraphs")
+        _assert("exactly six paragraphs" in text.lower(), f"{label} prompt must produce six scene-sized paragraphs")
         _assert(("420 to 560 words" in text) or ("420-560" in text), f"{label} prompt must state its word target")
-        _assert("HARD length contract" in text, f"{label} prompt must make the word budget operationally hard")
-        _assert("stable" in text.lower() and "canonical" in text.lower() and "name" in text.lower(), f"{label} prompt must require stable canonical character identity")
+        _assert("hard format" in text.lower() and "absolute allowed range 420-560" in text.lower(), f"{label} prompt must make the word budget operationally hard")
+        _assert("canonical" in text.lower() and "name" in text.lower(), f"{label} prompt must require canonical character identity")
         for concept in ("goal", "resistance", "reversal", "choice", "consequence"):
             _assert(concept in text.lower(), f"{label} prompt is missing the core {concept} concept")
         _assert(
@@ -58,13 +58,13 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
             "personal stake" in text.lower() and "choice" in text.lower(),
             f"{label} prompt must connect personal stake to a choice when supported",
         )
-        _assert("speech" in text.lower() and "recordings" in text.lower(), f"{label} prompt must keep non-spoken media out of dialogue")
-        _assert("completed" in text.lower() and "past-tense" in text.lower(), f"{label} prompt must require a completed final action")
+        _assert("dialogue" in text.lower() and "recordings" in text.lower(), f"{label} prompt must keep non-spoken media out of dialogue")
+        _assert("completed past-tense action" in text.lower(), f"{label} prompt must require a completed final action")
         _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
     _assert("short line" in ai.lower() and "spoken dialogue" in ai.lower(), "AI story prompt must keep dialogue compact and spoken")
-    _assert("Preserve source character names exactly" in expand, "Expand prompt must preserve source names")
-    _assert("relational character" in expand and "Do not invent unrelated people" in expand, "Expand prompt must allow only source-grounded relational additions")
-    _assert("Begin with concrete physical action" in ai, "AI story prompt must prioritize immediate filmable action")
+    _assert("stable canonical name" in expand.lower() and "preserve established characters" in expand.lower(), "Expand prompt must preserve source character identity")
+    _assert("recurring counterpart" in expand.lower() and "do not invent a decorative cast" in expand.lower(), "Expand prompt must keep additional cast bounded and purposeful")
+    _assert("concrete" in ai.lower() and "physical action" in ai.lower(), "AI story prompt must prioritize immediate filmable action")
     _assert("PLAN:" not in ai and "LEDGER:" not in ai, "AI story prompt must not expose a planning/checklist format")
     _assert("<option A>" not in ai and "<option B>" not in ai, "AI story prompt must not force a binary choice template")
     _assert("source_dialogue" in source, "shot prompt must receive an explicit source-dialogue whitelist")
@@ -107,10 +107,56 @@ def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
     )
 
 
+
+def test_malformed_adjudication_fallback_drops_prose_tokens():
+    planner = _planner()
+    story = (
+        "The polar systems engineer, Liora Venn, reached the Arctic station. "
+        "Everything had changed. Dr. Elias Kren had designed the vault and warned her."
+    )
+
+    def extractor(*_args):
+        return {"candidates": [
+            {"name": "Everything", "entity_type": "OTHER", "is_character": False, "aliases": [], "identity_type": "named_character"},
+            {"name": "Liora Venn", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
+            {"name": "Elias Kren", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
+        ]}
+
+    def truncated_adjudicator(*_args):
+        raise ValueError("truncated JSON")
+
+    names = [c.name for c in planner.create_characters(
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=truncated_adjudicator,
+    )]
+    _assert(names == ["Liora Venn", "Elias Kren"], f"malformed semantic fallback leaked prose tokens: {names}")
+
+
+def test_dialogue_speaker_is_bound_even_when_shot_starts_empty():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._recovery_events = []
+    director._qwen_telemetry = {"deterministic_recoveries": 0}
+    story = 'Eli faced the door. "Open it," Eli said.'
+    characters = [{"name": "Eli", "identity_type": "named_character", "semantic_aliases": []}]
+    scenes = [{"scene_id": "scene_001", "characters": []}]
+    shots = [{
+        "shot_id": "scene_001_shot_001",
+        "scene_id": "scene_001",
+        "characters": [],
+        "dialogue_events": [{"speaker": "Eli", "text": "Open it,"}],
+    }]
+    director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    _assert(shots[0]["characters"] == ["Eli"], f"empty shot lost its dialogue speaker binding: {shots[0]}")
+    _assert(scenes[0]["characters"] == ["Eli"], f"empty scene lost its dialogue speaker binding: {scenes[0]}")
+    director._validate_dialogue_speaker_contract(shots, characters)
+
+
 def test_semantic_named_surface_safety_boundary():
     from planner.production_planner import ProductionPlanner
     _assert(ProductionPlanner._semantic_named_surface_is_safe("Elara Voss"), "valid proper name was rejected")
-    for value in ("child with his sister's eyes", "father was", "her instead"):
+    for value in ("child with his sister's eyes", "father was", "her instead", "Everything"):
         _assert(
             not ProductionPlanner._semantic_named_surface_is_safe(value),
             f"non-name semantic surface was accepted: {value!r}",
@@ -499,34 +545,41 @@ def test_disabled_director_path():
 
 
 def test_story_token_budget_contract():
-    source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    # The primary story pass remains a single visible-prose generation. The bounded
-    # token floor keeps natural EOS from producing a sub-420-word story, while staying
-    # close to the successful Sep 25 completion length.
+    source = Path(ROOT, "planner/qwen_director.py").read_text(encoding="utf-8")
+    # Production story generation is intentionally locked to one Qwen3 thinking configuration.
     _assert(
         "minimum_completion=600," in source,
-        "story pass must reserve enough completion budget for the hard word contract",
+        "story pass must reserve enough completion budget for the context-length check",
     )
     _assert(
-        "minimum_output_tokens=600," in source and "minimum_output_tokens=700" not in source,
-        "story pass must use the bounded 600-token floor",
+        "minimum_output_tokens=0," in source,
+        "story pass must not force a visible-token floor that competes with reasoning",
     )
     _assert(
-        "max_completion=1500," in source,
-        "story pass must bound a runaway generation",
+        '"[QWEN] story_thinking=on story_max_tokens=3200"' in source,
+        "story pass must be locked to thinking mode with a 3200-token ceiling",
     )
     _assert(
-        'H3_DIRECTOR_STORY_ATTEMPTS", "1"' in source,
-        "story generation must default to ONE primary Qwen pass",
+        "max_completion=3200," in source and "disable_thinking=False," in source,
+        "story pass must route fixed thinking mode into Qwen3",
     )
     _assert(
-        "seed=DIRECTOR_VLLM_SEED + attempt" in source,
-        "story retries must vary the sampling seed",
+        "H3_DIRECTOR_STORY_THINKING" not in source,
+        "production story generation must not expose an A/B environment switch",
+    )
+    _assert(
+        "thinking_token_budget=1600," not in source,
+        "story pass must not impose an explicit thinking-token budget",
+    )
+    _assert(
+        "seed=DIRECTOR_VLLM_SEED," in source,
+        "story pass must remain deterministic without retry-dependent seed changes",
     )
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
     _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
     _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
-    _assert("max_completion=1800" not in source, "obsolete story retry completion budget remains")
+    _assert("H3_DIRECTOR_STORY_ATTEMPTS" not in source, "story generation must not expose a configurable retry loop")
+    _assert("max_completion=1500" not in source, "obsolete 1500-token story ceiling remains")
 
 def test_story_salvage_and_quality_gate():
     from planner.qwen_director import QwenDirector
@@ -550,11 +603,75 @@ def test_story_salvage_and_quality_gate():
 
 
 def test_story_sampling_guards_are_story_only_and_warmup_matches():
-    source = Path(ROOT, "planner", "qwen_director_runtime.py").read_text(encoding="utf-8")
+    source = Path(ROOT, "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
     _assert('payload["top_k"] = 20' in source, "story top_k guard must be present")
     _assert('if creative:' in source and 'payload["presence_penalty"]' in source, "presence penalty must be story-only")
     _assert('warmup_payload' in source and '"top_k": 20' in source, "sampler warmup must cover story top-k path")
-    _assert('"chat_template_kwargs": {"enable_thinking": False}' in source, "warmup must use non-thinking chat template")
+    _assert('"chat_template_kwargs": {"enable_thinking": True}' in source, "warmup must use the thinking chat template")
+    _assert('"--reasoning-parser",\n                "qwen3"' in source, "vLLM server must enable the Qwen3 reasoning parser")
+    _assert('"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}' in source, "runtime must explicitly control Qwen3 thinking mode")
+    _assert(
+        "any(\n            key in response.text for key in (\"presence_penalty\", \"top_k\")\n        )" in source,
+        "sampling fallback must remain scoped to optional extras",
+    )
+    _assert('payload.pop("chat_template_kwargs"' not in source and 'payload.pop("thinking_token_budget"' not in source, "fallback must never silently disable thinking")
+
+
+def test_story_thinking_arguments_reach_vllm_without_a_retry():
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+
+    runtime = QwenDirectorRuntimeMixin.__new__(QwenDirectorRuntimeMixin)
+    runtime._vllm_session = object()
+    runtime._qwen_telemetry = {
+        "calls": [],
+        "total_elapsed_seconds": 0.0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "retries": 0,
+        "cache_hits": 0,
+        "deterministic_recoveries": 0,
+    }
+    captured = {}
+
+    runtime._available_output_tokens = lambda *_args, **_kwargs: (None, 3200)
+
+    def fake_post_chat(**kwargs):
+        captured.update(kwargs)
+        return {
+            "choices": [{
+                "message": {"content": "A complete test story."},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 18,
+                "completion_tokens_details": {"reasoning_tokens": 7},
+            },
+        }
+
+    runtime._post_chat = fake_post_chat
+    runtime._trace_call = lambda *args, **kwargs: None
+
+    out = runtime._chat_text(
+        "system",
+        "user",
+        minimum_completion=600,
+        temperature=0.6,
+        top_p=0.95,
+        call_name="ai_story_text_pass",
+        max_completion=3200,
+        disable_thinking=False,
+        minimum_output_tokens=0,
+        seed=123,
+        creative=True,
+    )
+    _assert(out == "A complete test story.", "story test generation returned unexpected text")
+    _assert(captured.get("enable_thinking") is True, "story thinking mode did not reach _post_chat")
+    _assert("thinking_token_budget" not in captured or captured.get("thinking_token_budget") is None, "story path must not send an explicit thinking token budget")
+    _assert(captured.get("max_tokens") == 3200, "story max token budget did not reach _post_chat")
+    _assert(captured.get("creative") is True, "story creative sampling flag did not reach _post_chat")
+    _assert(captured.get("messages", [{}])[-1].get("content") == "user", "thinking story must not append /no_think")
+    _assert(runtime._qwen_telemetry["calls"][0]["reasoning_tokens"] == 7, "reasoning token telemetry was not captured")
 
 
 def test_parallel_stage_copy_is_byte_exact():
@@ -1206,7 +1323,7 @@ def test_story_topology_fallback_is_last_resort_and_prose_preserving():
 
 def test_story_validation_precedes_topology_fallback():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
-    start = source.index("def _generate_story_with_retries")
+    start = source.index("def _generate_story_once")
     primary = source[start:source.index("def _coerce_story_to_six_paragraphs", start)]
     _assert(
         primary.index("self._validate_story_output_contracts")
@@ -1361,6 +1478,7 @@ def main():
         test_semantic_named_surface_safety_boundary,
         test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
         test_semantic_empty_fallback,
+        test_malformed_adjudication_fallback_drops_prose_tokens,
         test_semantic_partial_positive_is_adjudicated,
         test_semantic_negative_does_not_destroy_strong_deterministic_roster,
         test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
@@ -1372,6 +1490,7 @@ def main():
         test_story_token_budget_contract,
         test_story_salvage_and_quality_gate,
         test_story_sampling_guards_are_story_only_and_warmup_matches,
+        test_story_thinking_arguments_reach_vllm_without_a_retry,
         test_parallel_stage_copy_is_byte_exact,
         test_quoted_dialogue_speaker_comes_from_speech_tag,
         test_named_only_roster_skips_semantic_character_calls_safely,
@@ -1381,6 +1500,7 @@ def main():
         test_unresolved_explicit_dialogue_fails_closed,
         test_wrong_shot_speaker_is_corrected_by_speech_tag,
         test_canonical_dialogue_speaker_is_rebound_into_shot_and_scene,
+        test_dialogue_speaker_is_bound_even_when_shot_starts_empty,
         test_downstream_production_preserves_dialogue_multiset,
         test_dialogue_scene_boundary_clears_stale_continuation,
         test_shot_prompt_requires_same_speaker_continuation_rule,
