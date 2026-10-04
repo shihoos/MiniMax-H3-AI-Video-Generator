@@ -258,6 +258,17 @@ class QwenDirectorPromptMixin:
       to satisfy dialogue; the protagonist may be the speaker when the premise supports that naturally.
     - Never turn narration, recordings, screens, memories, radios, or UI text into quoted speech or character dialogue.
 
+    CRAFT
+    - Give every paragraph one vivid, filmable image a camera could hold on: a specific object, light, weather, or texture.
+      Never use abstractions such as "tension filled the air".
+    - Show emotion through behavior (hands, breath, what a character does or avoids). Do not name the feeling.
+    - Vary sentence length. Mix short hard sentences with longer flowing ones, and never begin three sentences in a row
+      with the same word.
+    - Dialogue carries subtext: people say less than they mean, in lines of 15 words or fewer.
+    - Use concrete nouns and strong verbs. Avoid stock phrases such as "heart pounded", "little did", "a testament to",
+      "shivers down", "the air was thick", "time stood still", "unbeknownst".
+    - Never repeat a sentence or paragraph. Stop immediately after the final sentence.
+
     STYLE
     - Begin with concrete physical action, sensory detail, and a specific environment.
     - Prefer action, evidence, visible reaction, and implication over explanatory backstory or lore dumps.
@@ -322,6 +333,17 @@ class QwenDirectorPromptMixin:
       wording/meaning when dialogue already exists; never invent a speaker just to satisfy the format.
     - Machines, screens, speakers, recordings, radios, holograms, and remembered voices are prose evidence and are
       never quoted as speech or treated as active character dialogue.
+
+    CRAFT
+    - Give every paragraph one vivid, filmable image a camera could hold on: a specific object, light, weather, or texture.
+      Never use abstractions such as "tension filled the air".
+    - Show emotion through behavior (hands, breath, what a character does or avoids). Do not name the feeling.
+    - Vary sentence length. Mix short hard sentences with longer flowing ones, and never begin three sentences in a row
+      with the same word.
+    - Dialogue carries subtext: people say less than they mean, in lines of 15 words or fewer.
+    - Use concrete nouns and strong verbs. Avoid stock phrases such as "heart pounded", "little did", "a testament to",
+      "shivers down", "the air was thick", "time stood still", "unbeknownst".
+    - Never repeat a sentence or paragraph. Stop immediately after the final sentence.
 
     STYLE
     - Preserve the source while adding immediate physical action, sensory specificity, visible reactions, and meaningful
