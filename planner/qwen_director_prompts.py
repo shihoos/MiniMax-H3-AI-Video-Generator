@@ -392,9 +392,10 @@ class QwenDirectorPromptMixin:
                 )
         result += (
             "\n\nFINAL OUTPUT REQUIREMENTS:\n"
-            "Return only the finished story prose. Prioritize finishing the full narrative, including the resolution, over padding. "
-            "Do not create a plot beat merely to satisfy formatting. "
-            "Resolve the central conflict before the ending."
+            "Return only the finished story prose. The 450-520 word target and 420-560 absolute range are mandatory. "
+            "Do not end before the story reaches at least 420 words. Fill the required length with concrete action, "
+            "sensory detail, visible reaction, or causal connective tissue already grounded in the premise; do not add "
+            "new plot beats just to pad the count. Resolve the central conflict before the ending."
         )
         return result
 
