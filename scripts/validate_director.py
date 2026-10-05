@@ -1470,6 +1470,36 @@ def test_sentence_initial_common_words_never_skip_semantic_roster():
     )
 
 
+
+def test_ai_story_premise_paraphrase_uses_relaxed_global_coverage():
+    from planner.qwen_director import QwenDirector
+
+    source = (
+        "A polar systems engineer reaches an abandoned Arctic station during a violent storm "
+        "and discovers a sealed underground vault."
+    )
+    paraphrased = (
+        "A climate engineer reaches a deserted polar station in a blizzard and discovers a "
+        "sealed subterranean vault beneath the facility."
+    )
+    director = QwenDirector.__new__(QwenDirector)
+    coverage, missing = director._global_premise_coverage(
+        source,
+        paraphrased,
+        minimum_token_overlap=0.15,
+    )
+    _assert(coverage == 1.0, f"paraphrased premise was rejected: coverage={coverage:.2f}, missing={missing}")
+
+    source_code = Path(ROOT, "planner", "qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert(
+        "minimum_token_overlap=0.40" not in source_code,
+        "AI Story premise validation still contains the obsolete 0.40 lexical floor",
+    )
+    _assert(
+        "minimum_token_overlap=0.15" in source_code,
+        "AI Story premise validation must use the relaxed 0.15 lexical floor",
+    )
+
 def main():
     tests = [
         test_deterministic_character_regressions,
@@ -1488,6 +1518,7 @@ def main():
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
         test_story_token_budget_contract,
+        test_ai_story_premise_paraphrase_uses_relaxed_global_coverage,
         test_story_salvage_and_quality_gate,
         test_story_sampling_guards_are_story_only_and_warmup_matches,
         test_story_thinking_arguments_reach_vllm_without_a_retry,
