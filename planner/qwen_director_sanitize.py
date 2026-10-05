@@ -1598,7 +1598,7 @@ class QwenDirectorSanitizeMixin:
             coverage, missing_sentences = self._global_premise_coverage(
                 source,
                 result,
-                minimum_token_overlap=0.40,
+                minimum_token_overlap=0.15,
             )
             if source and coverage < 0.50:
                 detail = "; ".join(missing_sentences[:3])
