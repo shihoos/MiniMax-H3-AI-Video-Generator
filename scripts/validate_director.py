@@ -69,19 +69,33 @@ def test_characters_in_scene_does_not_bind_descriptive_by_article():
     from types import SimpleNamespace
 
     planner = _planner()
-    payload = {
+
+    descriptive = {
         "name": "the man in the grey coverall",
         "role": "story character",
         "identity_type": "descriptive_character",
         "semantic_aliases": [],
     }
-    character = SimpleNamespace(
-        **payload,
-        to_dict=lambda: dict(payload),
-    )
+    other = {
+        "name": "Eli",
+        "role": "story character",
+        "identity_type": "named_character",
+        "semantic_aliases": [],
+    }
+    characters = [
+        SimpleNamespace(
+            **descriptive,
+            to_dict=lambda: dict(descriptive),
+        ),
+        SimpleNamespace(
+            **other,
+            to_dict=lambda: dict(other),
+        ),
+    ]
+
     result = planner._characters_in_scene(
         "The door opened and the lights failed.",
-        [character],
+        characters,
     )
     _assert(
         "the man in the grey coverall" not in result,
