@@ -11,7 +11,6 @@ from planner.config import (
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
-    DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
     DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
     DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
@@ -63,10 +62,10 @@ DIALOGUE CONTRACT:
 - When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.
 - The user payload may include a `source_dialogue` whitelist containing exact source utterances. Treat it as authoritative: dialogue_events may use only those utterances (or exact contiguous pieces of them) and must never invent a new line from narrative prose. If the supplied scenes contain no applicable source utterance, return dialogue_events as an empty array.
 
-- speaking_characters must contain exactly the unique dialogue speakers, and speech_text must be the dialogue event texts joined in order.
+- `speaking_characters` and `speech_text` are derived from `dialogue_events`; focus on producing correct dialogue_events and do not invent independent values for those fields.
 - Do not put timestamps in the response.
 - Treat H3 shot duration as a hard production constraint: target roughly 4–6 seconds of spoken dialogue per shot when natural, leaving timing headroom.
-- When dialogue is present, set duration_seconds from the actual spoken duration plus a small legal margin; do not blindly emit the default short duration. Keep dialogue shots typically around 6–8.5 seconds when required, and never exceed the legal H3 maximum.
+- When dialogue is present, keep `duration_seconds` conservative enough to leave legal timing headroom; the compiler will finalize the exact legal duration.
 - Prefer one concise dialogue event per shot; use two only when the exchange genuinely needs both sides. Keep each spoken event short when the source permits, but never paraphrase or delete source dialogue.
 - If a source utterance is longer, split its exact contiguous text across adjacent shots with continues_to_next_shot/continues_from_previous_shot rather than forcing an overlong single shot.
 - A continuation edge is SAME-SPEAKER ONLY: if `continues_from_previous_shot` is true, the current speaker MUST be the same canonical character as the previous shot final dialogue speaker. If the speaker changes, both continuation flags at that boundary MUST be false and the new speaker starts a new dialogue turn.
@@ -534,63 +533,15 @@ PEOPLE
 
         return result
 
-    def adjudicate_character_entities(
-        self,
-        story: str,
-        deterministic_candidates: list[str] | None,
-        semantic_result,
-    ) -> dict:
-        """Legacy compatibility method; production Director no longer calls a second semantic pass."""
-        self._character_semantic_calls += 1
-        if self._character_semantic_calls > 1:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
-
-        candidates = [
-            str(value).strip()
-            for value in (deterministic_candidates or [])
-            if str(value).strip()
-        ][:12]
-        supplied = semantic_result if isinstance(semantic_result, dict) else {}
-        system_prompt = textwrap.dedent("""
-    You are the final character-identity adjudicator. Return JSON only.
-    Review only the supplied candidate names and semantic extraction. Never invent a person.
-    Emit exactly one decision object for every supplied candidate, preserving candidate order.
-    Use is_character=false for anything that is a prose token, project/protocol/status word, object,
-    place, event, role-only label, UI text, or uncertain identity.
-    True characters use entity_type PERSON, CHARACTER, or SENTIENT and one of the grounded identity types:
-    named_character, relational_character, or descriptive_character.
-    A relational character must have a real named character in relationship_to and an explicitly grounded
-    relationship. A descriptive character must have a stable distinguishing description, never bare man/woman.
-    Keep aliases short (at most two useful grounded surface forms). Do not add commentary. Complete every
-    candidate object before stopping.
-    """).strip()
-        payload = json.dumps(
-            {
-                "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_candidates": candidates,
-                "semantic_result": supplied,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return self._chat_json(
-            system_prompt,
-            payload,
-            minimum_completion=96,
-            temperature=0.05,
-            top_p=0.70,
-            call_name="character_entity_adjudication",
-            max_completion=512,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
-        )
-
-    @staticmethod
     def _shot_json_schema(
-        min_items: int = 2,
-        max_items: int = 2,
+        self,
+        min_items: int | None = None,
+        max_items: int | None = None,
     ) -> dict:
+        if min_items is None:
+            min_items = self.SHOTS_PER_SCENE
+        if max_items is None:
+            max_items = self.SHOTS_PER_SCENE
         shot_properties = {
             "shot_id": {"type": "string"},
             "scene_id": {"type": "string"},
@@ -599,7 +550,7 @@ PEOPLE
                 "type": "array",
                 "items": {"type": "string"},
             },
-            "location": {"type": "string"},
+            "location": {"type": "string", "minLength": 1},
             "action": {"type": "string"},
             "camera_shot": {"type": "string"},
             "camera_movement": {"type": "string"},
@@ -719,13 +670,14 @@ PEOPLE
             "additionalProperties": False,
         }
 
-    @staticmethod
     def _shot_batch_json_schema(
+        self,
         scene_count: int = 2,
     ) -> dict:
-        shot_schema = QwenDirectorPromptMixin._shot_json_schema()[
-            "properties"
-        ]["shots"]["items"]
+        shot_schema = self._shot_json_schema(
+            self.SHOTS_PER_SCENE,
+            self.SHOTS_PER_SCENE,
+        )["properties"]["shots"]["items"]
         return {
             "type": "object",
             "properties": {
@@ -739,8 +691,8 @@ PEOPLE
                             "scene_id": {"type": "string"},
                             "shots": {
                                 "type": "array",
-                                "minItems": DIRECTOR_SHOTS_PER_SCENE,
-                                "maxItems": DIRECTOR_SHOTS_PER_SCENE,
+                                "minItems": self.SHOTS_PER_SCENE,
+                                "maxItems": self.SHOTS_PER_SCENE,
                                 "items": shot_schema,
                             },
                         },
@@ -766,34 +718,67 @@ PEOPLE
 
     @staticmethod
     def _compact_story_context(story: str, max_chars: int = DIRECTOR_SHOT_STORY_CONTEXT_CHARS) -> str:
-        """Return a compact narrative spine for repeated shot-planning prompts."""
+        """Compact by paragraph so every narrative turn remains represented."""
         value = str(story or "").strip()
         if len(value) <= max_chars:
             return value
 
-        sentences = [
+        paragraphs = [
             part.strip()
-            for part in re.split(r"(?<=[.!?])\s+", value)
+            for part in re.split(r"\n\s*\n+", value)
             if part.strip()
         ]
-        if not sentences:
+        if not paragraphs:
             return value[:max_chars].rstrip() + "…"
 
-        if len(sentences) == 1:
-            return value[:max_chars].rstrip() + "…"
+        selected: list[str] = []
+        remaining = max_chars
+        separators_left = len(paragraphs) - 1
 
-        first = sentences[0]
-        last = sentences[-1]
-        if len(first) + len(last) + 1 <= max_chars:
-            return f"{first} {last}"
+        for index, paragraph in enumerate(paragraphs):
+            sentences = [
+                part.strip()
+                for part in re.split(r"(?<=[.!?])\s+", paragraph)
+                if part.strip()
+            ]
+            if not sentences:
+                continue
 
-        first_budget = max(220, int(max_chars * 0.60))
-        last_budget = max_chars - first_budget - 1
-        return (
-            first[:first_budget].rstrip()
-            + " "
-            + last[:max(120, last_budget)].rstrip()
-        ).strip()[:max_chars].rstrip() + "…"
+            first = sentences[0]
+            last = sentences[-1]
+            snippet = first if len(sentences) == 1 else f"{first} {last}"
+            prefix = f"P{index + 1}: " if len(paragraphs) <= 12 else ""
+            budget = max(40, (remaining - separators_left * 2) // max(1, len(paragraphs) - index))
+            available = max(20, budget - len(prefix))
+
+            if len(snippet) > available:
+                if len(sentences) == 1:
+                    snippet = snippet[: max(1, available - 1)].rstrip() + "…"
+                else:
+                    side = max(8, (available - 3) // 2)
+                    snippet = first[:side].rstrip() + " … " + last[-side:].lstrip()
+                    if len(snippet) > available:
+                        snippet = snippet[: max(1, available - 1)].rstrip() + "…"
+
+            candidate = prefix + snippet
+            separator = "\n\n" if selected else ""
+            needed = len(separator) + len(candidate)
+            if needed > remaining:
+                # The minimum budget should make this rare; still preserve a visible
+                # fragment for the paragraph instead of dropping it completely.
+                available = max(1, remaining - len(separator))
+                candidate = (prefix + snippet)[:available].rstrip()
+                if available > 1 and len(prefix + snippet) > available:
+                    candidate = candidate[:-1].rstrip() + "…"
+                needed = len(separator) + len(candidate)
+
+            selected.append(candidate)
+            remaining -= needed
+            separators_left = max(0, separators_left - 1)
+
+        compact = "\n\n".join(selected).strip()
+        return compact or (value[:max_chars].rstrip() + "…")
+
 
     def _shot_director_batch_user(
         self,
@@ -962,6 +947,10 @@ PEOPLE
                 if duplicate_value and description_key.startswith(duplicate_value[:120]):
                     scene_payload.pop(duplicate_key, None)
 
+            if not compact_characters:
+                raise RuntimeError(
+                    f"Scene {scene_payload.get('scene_id') or '<unknown>'} has no canonical character binding for shot planning."
+                )
             scene_payloads.append(scene_payload)
 
         visual_context = {}
@@ -987,9 +976,19 @@ PEOPLE
                     if isinstance(segment, dict)
                     and str(segment.get("display", "") or segment.get("text", "") or "").strip()
                 ]
-            except Exception:
+            except Exception as exc:
                 source_dialogue = []
-        source_dialogue = source_dialogue[:24]
+                recorder = getattr(self, "_record_recovery", None)
+                if callable(recorder):
+                    recorder(
+                        "shot_director_dialogue_extraction",
+                        f"source dialogue extraction failed: {exc}",
+                    )
+                else:
+                    print(
+                        f"[DIRECTOR] source dialogue extraction failed: {exc}",
+                        flush=True,
+                    )
 
         payload = {
             "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
