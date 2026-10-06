@@ -436,12 +436,127 @@ def test_story_dialogue_contract_uses_qwen_semantic_spans():
     _assert(unusual_verb and unusual_verb[0]["source_speakers"] == {"ines"}, "semantic dialogue must not depend on a speech-verb list")
 
 
+def test_semantic_dialogue_is_persisted_and_restored_across_resume():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert('"_semantic_spoken_dialogue": deepcopy(self._semantic_spoken_dialogue)' in source,
+            "director checkpoints must persist semantic spoken dialogue")
+    _assert('restored_semantic_dialogue = prior_director_plan.get("_semantic_spoken_dialogue", [])' in source,
+            "resume path must restore semantic spoken dialogue")
+    _assert('"_semantic_spoken_dialogue" not in prior_director_plan' in source,
+            "resume path must fail closed when the semantic dialogue field is absent")
+    _assert('"_semantic_spoken_dialogue" in creative' in source,
+            "enrich_plan must preserve the semantic dialogue payload")
+
+
+def test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert('qwen_character_extractor=None' in source,
+            "Preserve Story must keep its deterministic character roster")
+    _assert('_preserve_story_requires_semantic_dialogue' in source,
+            "Preserve Story must gate semantic Qwen use on quote-style prose dialogue")
+
+
+def test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally():
+    from planner.qwen_director import QwenDirector
+    semantic = [
+        {"text": "Stay here", "speaker": "Mara Voss"},
+        {"text": "Stay here", "speaker": "Tomas"},
+    ]
+    segments = QwenDirector._extract_story_spoken_segments(
+        'Mara: Stay here\nTomas: Stay here',
+        semantic,
+        allowed_speakers={"Mara Voss", "Tomas"},
+        speaker_aliases={"mara": "Mara Voss"},
+    )
+    _assert(len(segments) == 2, f"duplicate semantic dialogue lines were not preserved: {segments}")
+    _assert(segments[0]["source_speakers"] == {"mara voss"}, f"short speaker label did not resolve through roster alias: {segments}")
+    _assert(segments[1]["source_speakers"] == {"tomas"}, f"second duplicate line lost its semantic speaker: {segments}")
+
+
+def test_dialogue_normalizer_has_no_dead_tag_speaker_path():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("last_tag_speakers" not in source, "obsolete tag-speaker remapping path must be removed")
+    _assert("dialogue_speaker_tag_remap" not in source, "obsolete dialogue tag remap telemetry must be removed")
+
+
+def test_scene_cast_guard_checks_scene_payload_not_global_roster():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert('if not scene_payload.get("characters"):' in source,
+            "shot planning must reject a scene with no bound characters")
+
+
+def test_resume_never_repeats_semantic_qwen_call():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("_semantic_spoken_dialogue was not persisted" in source, "legacy semantic-dialogue checkpoints must fail closed")
+    resume_section = source[source.index("if resume_roster:"):source.index("else:\n            if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):")]
+    _assert("self.extract_character_entities(" not in resume_section, "resume path must not re-run semantic extraction")
+
+
+def test_qwen_prompt_imports_entity_resolver_for_shot_dialogue():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("from planner.entity_resolver import EntityResolver" in source,
+            "shot dialogue prompt builder must import EntityResolver explicitly")
+
+
+def test_dialogue_anchor_normalization_matches_terminal_punctuation_rules():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert(r"!?\.\-\s" in source,
+            "dialogue anchor key must normalize terminal periods consistently")
+
+def test_empty_character_extraction_result_keeps_dialogue_schema_contract():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert('return {"candidates": [], "spoken_dialogue": []}' in source,
+            "empty semantic extraction must return both schema fields")
+
+
+def test_preserve_dialogue_detection_uses_normalized_story():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("_preserve_story_requires_semantic_dialogue(story)" in source,
+            "Preserve semantic-dialogue detection must use the normalized story")
+
+
+def test_production_shot_error_message_tracks_instance_topology():
+    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert('f"Every scene must contain exactly {self.SHOTS_PER_SCENE} production shots."' in source,
+            "production shot validation message must track instance topology")
+
+def test_expand_semantic_dialogue_loss_is_telemetried():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert('"expand_semantic_dialogue_empty"' in source,
+            "Expand semantic dialogue loss must be visible in telemetry")
+
+
+def test_preserve_semantic_call_is_conditional():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("_preserve_story_requires_semantic_dialogue" in source, "Preserve mode semantic extraction must be conditional")
+
+
+def test_shot_dialogue_uses_roster_aliases():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("speaker_aliases=EntityResolver.build_character_alias_map(characters)" in source, "shot dialogue extraction must use roster aliases")
+
+
+def test_preserve_semantic_empty_dialogue_is_telemetried():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("preserve_semantic_dialogue_empty" in source, "Preserve semantic dialogue misses must be visible in telemetry")
+
+
+def test_shot_dialogue_extraction_degrades_deterministically():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
+
+
+def test_semantic_dialogue_requirement_has_require_contract():
+    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("def _require_semantic_spoken_dialogue(" in source, "semantic dialogue validator must use require-style contract")
+
+
 def test_character_semantic_schema_includes_spoken_dialogue():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     schema = QwenDirectorPromptMixin._character_extraction_json_schema()
     _assert("spoken_dialogue" in schema["properties"], "semantic character extraction schema lacks spoken_dialogue")
     _assert("spoken_dialogue" in schema["required"], "spoken_dialogue must be part of the single semantic extraction contract")
-    _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 32, "spoken dialogue schema is artificially capped")
+    _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 64, "spoken dialogue schema is artificially capped")
 
 
 def test_dialogue_attribution_has_no_english_word_lists():
@@ -582,7 +697,24 @@ def main():
         test_story_generation_is_single_call_fixed_seed_no_floor,
         test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
         test_story_contract_remains_six_paragraphs_420_560,
+        test_semantic_dialogue_is_persisted_and_restored_across_resume,
+        test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster,
+        test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally,
+        test_dialogue_normalizer_has_no_dead_tag_speaker_path,
+        test_scene_cast_guard_checks_scene_payload_not_global_roster,
         test_story_dialogue_contract_uses_qwen_semantic_spans,
+        test_resume_never_repeats_semantic_qwen_call,
+        test_preserve_semantic_call_is_conditional,
+        test_qwen_prompt_imports_entity_resolver_for_shot_dialogue,
+        test_dialogue_anchor_normalization_matches_terminal_punctuation_rules,
+        test_empty_character_extraction_result_keeps_dialogue_schema_contract,
+        test_preserve_dialogue_detection_uses_normalized_story,
+        test_production_shot_error_message_tracks_instance_topology,
+        test_expand_semantic_dialogue_loss_is_telemetried,
+        test_shot_dialogue_uses_roster_aliases,
+        test_preserve_semantic_empty_dialogue_is_telemetried,
+        test_shot_dialogue_extraction_degrades_deterministically,
+        test_semantic_dialogue_requirement_has_require_contract,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_dialogue_attribution_has_no_english_word_lists,
         test_shot_context_preserves_paragraph_boundaries,
