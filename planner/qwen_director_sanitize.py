@@ -1360,7 +1360,7 @@ class QwenDirectorSanitizeMixin:
         self,
         text: str,
         characters: list[dict] | None = None,
-    ) -> bool:
+    ) -> None:
         """Require Qwen's semantic dialogue contract to resolve at least one roster speaker."""
         extractor = getattr(self, "_extract_story_spoken_segments", None)
         if not callable(extractor):
@@ -1424,7 +1424,7 @@ class QwenDirectorSanitizeMixin:
                 "AI Story generation failed semantic validation: the final story contains no direct spoken "
                 "dialogue attributed to a canonical production character."
             )
-        return True
+        return None
 
     @staticmethod
     def _preserve_story_requires_semantic_dialogue(text: str) -> bool:
@@ -1900,9 +1900,10 @@ class QwenDirectorSanitizeMixin:
         completed_scene_ids: list[str],
         current_scene_id: str = "",
         error: str = "",
+        checkpoint_store: ProductionCheckpoint | None = None,
     ) -> dict:
 
-        checkpoint = ProductionCheckpoint(
+        checkpoint = checkpoint_store or ProductionCheckpoint(
             self.project_root
         )
 
