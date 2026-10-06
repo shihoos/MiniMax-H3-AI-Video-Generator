@@ -260,17 +260,16 @@ PEOPLE
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- Character count is determined by the story. Do not force one character, two characters, or any fixed cast size. "
-                "Introduce as many recurring named, relational, or descriptive characters as the narrative genuinely requires, and no more.\n"
-                "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. "
-                "Do not add a character merely to supply dialogue, exposition, or a twist.\n"
+                "- Qwen decides the consequential cast; there is no fixed cast size. When the premise can naturally support another present person, prefer a second consequential character whose goal, resistance, knowledge, or relationship changes what the protagonist does. "
+                "Do not force a second person into a premise that genuinely depends on isolation.\n"
+                "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. Do not add a character merely to supply dialogue, exposition, or a twist.\n"
                 "- Invent character names naturally when the story needs a new character. Give every recurring character one stable canonical name.\n"
-                "- AI STORY DIALOGUE CONTRACT: include at least one explicit line of direct spoken dialogue in quotation marks. "
-                "Make the line consequential to the story by advancing conflict, information, a decision, or the reversal. "
-                "The speaker must be physically present and must already be a consequential character in the story. "
-                "Do not add a character merely to create dialogue, and do not treat signs, screens, labels, messages, recordings, or internal thoughts as spoken dialogue.\n"
-                "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, "
-                "unless the story itself later establishes that person as physically present and consequential.\n\n"
+                "- AI STORY DIALOGUE CONTRACT: include at least one attributed line of direct spoken dialogue from a physically present human character. "
+                "The line must advance conflict, information, a decision, or the reversal. Prefer dialogue as an interaction between consequential present characters when the story contains more than one person. "
+                "A quoted log, recording, radio message, screen, label, announcement, alarm, or system output does not satisfy the dialogue contract. Do not add a character merely to create dialogue.\n"
+                "- When the premise supports more than one present person, let a person's action, choice, relationship, or spoken information—not a recording, facility status, or system alert—supply the central reversal.\n"
+                "- Avoid the generic solitary-facility sequence of entering a site, discovering a hidden chamber, reading a warning, triggering containment failure, and restoring a system unless the premise explicitly requires those exact events.\n"
+                "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, unless the story itself later establishes that person as physically present and consequential.\n\n"
                 "Output only the finished story prose."
             )
 
@@ -288,7 +287,8 @@ PEOPLE
                 "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
                 "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
                 "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
-                "- Use dialogue naturally among whichever characters the story actually contains. Never add a character solely to create dialogue.\n"
+                "- Use dialogue naturally among whichever characters the story actually contains. When the source supports more than one present person, prefer dialogue that exposes conflicting goals, changes a decision, or reveals a consequential relationship. Never add a character solely to create dialogue.\n"
+                "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the reversal rather than using a generic facility/system reveal.\n"
                 "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n\n"
                 "Output only the finished expanded story prose."
             )
@@ -328,8 +328,8 @@ PEOPLE
         result += (
             "\n\nOUTPUT CONTRACT:\n"
             "Exactly six paragraphs. Keep the complete story within the required 420-560 word contract. Do not stop while under 420 words; "
-            "if short, deepen existing beats with concrete action, consequences, sensory detail, or character decisions rather than filler or repetition. "
-            "Plain prose only. End on a completed consequence, not a future hook."
+            "if short, continue developing the existing causal beats with concrete action, consequences, sensory detail, character decisions, and a fully developed aftermath rather than filler or repetition. "
+            "Do not compress the final consequence into a brief summary. Plain prose only. End on a completed consequence, not a future hook."
         )
         return result
 
