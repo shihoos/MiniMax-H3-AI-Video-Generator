@@ -341,8 +341,19 @@ def test_expand_prompt_does_not_impose_cast_limit():
     expand = mixin._story_text_system(EXPAND_USER_STORY_MODE).lower()
     ai = mixin._story_text_system(AI_STORY_MODE).lower()
     for text, label in ((expand, "expand"), (ai, "ai story")):
-        _assert("no fixed cast size" in text or "no numeric cast limit" in text, f"{label} prompt still constrains cast size")
-        _assert("decorative character" in text or "decorative cast" in text, f"{label} prompt lacks anti-decorative-cast rule")
+        _assert(
+            ("no fixed cast size" in text
+             or "no numeric cast limit" in text
+             or "not a cast limit" in text
+             or "do not force one character, two characters, or any fixed cast size" in text),
+            f"{label} prompt still constrains cast size",
+        )
+        _assert(
+            "decorative character" in text
+            or "decorative cast" in text
+            or "do not add a character merely" in text,
+            f"{label} prompt lacks anti-decorative-cast rule",
+        )
     _assert("only named people allowed" not in expand, "Expand prompt still treats source anchors as a cast whitelist")
     _assert("exactly one" not in expand or "exactly one" in expand and "six paragraphs" in expand, "Expand prompt contains an unintended cast-count instruction")
 
