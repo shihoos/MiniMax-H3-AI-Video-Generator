@@ -549,6 +549,7 @@ def test_shot_dialogue_extraction_degrades_deterministically():
 def test_semantic_dialogue_requirement_has_require_contract():
     source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
     _assert("def _require_semantic_spoken_dialogue(" in source, "semantic dialogue validator must use require-style contract")
+    _assert("    ) -> None:" in source, "semantic dialogue requirement should use a requirement-style None return annotation")
 
 
 def test_character_semantic_schema_includes_spoken_dialogue():
