@@ -1188,8 +1188,6 @@ class QwenDirector(
             "shots": all_shots,
         }
 
-        self._print_qwen_summary("POST-GENERATION")
-
         if not os.getenv("H3_DIRECTOR_CRITIC", "1").strip().lower() in {"1", "true", "yes", "on"}:
             self._print_qwen_summary("FINAL")
 
@@ -1229,10 +1227,10 @@ class QwenDirector(
     ) -> str:
         """Validate the current story without rewriting its topology.
 
-        Qwen receives the first opportunity to repair contract defects. The deterministic
-        six-paragraph topology adapter is intentionally kept outside this validator as a
-        last-resort fallback, so raw model output is authoritative before any topology
-        normalization is applied.
+        Raw model output is authoritative: it is validated first, and every defect is
+        reported together in one error. The deterministic six-paragraph topology adapter
+        lives outside this validator and is applied only when paragraph count is the sole
+        defect. There is no second Qwen call.
         """
         working = self._normalize_story(story)
         errors: list[str] = []
@@ -1337,7 +1335,7 @@ class QwenDirector(
             )
 
     # ------------------------------------------------------------------
-    # Story generation: bounded, seeded retries with runaway salvage
+    # Story generation: ONE creative pass, fixed seed, runaway salvage, fail-closed validation
     # ------------------------------------------------------------------
     _STOCK_PHRASES = (
         r"heart (?:pounded|raced|hammered)", r"little did", r"a testament to",
@@ -1345,6 +1343,8 @@ class QwenDirector(
         r"time (?:stood|seemed to stand) still", r"unbeknownst", r"couldn'?t shake the feeling",
         r"a mix of \w+ and \w+", r"sent a chill", r"breath (?:caught|hitched)",
         r"the weight of", r"palpable", r"for what felt like (?:hours|an eternity)",
+        r"symphony of", r"silent promise", r"pulse (?:steadied|quickened|raced)",
+        r"\bsuddenly\b", r"everything changed", r"never be the same",
     )
 
     def _salvage_runaway_story(self, text: str) -> str:
@@ -1406,6 +1406,11 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
     ) -> tuple[str, bool]:
+        """ONE primary creative Qwen call. No retry, no reseed, no rewrite.
+
+        A pure paragraph-count miss is repaired deterministically (no model call).
+        Any other contract violation fails closed with every defect listed together.
+        """
         from planner.qwen_director_runtime import (
             DIRECTOR_VLLM_SEED,
             StoryTruncated,
@@ -1416,6 +1421,14 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "expand_story_text_pass"
         )
+        failure_prefix = (
+            "AI Story generation failed validation: "
+            if mode == AI_STORY_MODE
+            else "Expand Story generation failed validation: "
+        )
+        # Thinking shares the 3200-token ceiling with the story. The Expand floor stops the
+        # model from ending early with a short draft (the 407-word failure).
+        story_min_output_tokens = 1450 if mode == EXPAND_USER_STORY_MODE else 0
 
         print(
             "[QWEN] story_thinking=on story_max_tokens=3200",
@@ -1426,11 +1439,8 @@ class QwenDirector(
             raw = self._chat_text(
                 story_system,
                 story_user,
-                # One primary story call only. In thinking mode the 3200-token ceiling
-                # is shared by reasoning and the final story; no explicit thinking-token
-                # boundary is imposed because this deployment also uses EAGLE3 speculation.
                 minimum_completion=600,
-                minimum_output_tokens=0,
+                minimum_output_tokens=story_min_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 call_name=call_name,
@@ -1442,14 +1452,7 @@ class QwenDirector(
         except StoryTruncated as exc:
             raw = self._salvage_runaway_story(exc.partial)
             if not raw:
-                raise RuntimeError(
-                    (
-                        "AI Story generation failed validation: "
-                        if mode == AI_STORY_MODE
-                        else "Expand Story generation failed validation: "
-                    )
-                    + str(exc)
-                ) from exc
+                raise RuntimeError(failure_prefix + str(exc)) from exc
 
         try:
             candidate = self._validate_story_output_contracts(
@@ -1460,28 +1463,21 @@ class QwenDirector(
             )
         except RuntimeError as err:
             error_text = str(err)
-            # Deterministic topology repair only. Never invoke Qwen a second time
-            # and never rewrite the prose for craft reasons.
-            if (
-                "exactly six paragraphs" in error_text
-                and "420 to 560 words" not in error_text
-            ):
-                repaired = self._coerce_story_to_six_paragraphs(raw)
+            parts = [piece.strip() for piece in error_text.split(" | ") if piece.strip()]
+            topology_only = bool(parts) and all(
+                "exactly six paragraphs" in piece for piece in parts
+            )
+            if not topology_only:
+                raise RuntimeError(failure_prefix + error_text) from err
+            try:
                 candidate = self._validate_story_output_contracts(
                     mode,
                     user_input,
-                    repaired,
+                    self._coerce_story_to_six_paragraphs(raw),
                     source_character_names=source_character_names,
                 )
-            else:
-                raise RuntimeError(
-                    (
-                        "AI Story generation failed validation: "
-                        if mode == AI_STORY_MODE
-                        else "Expand Story generation failed validation: "
-                    )
-                    + error_text
-                ) from err
+            except RuntimeError as err2:
+                raise RuntimeError(failure_prefix + str(err2)) from err2
 
         issues = self._story_quality_issues(candidate)
         if not issues:
@@ -2201,6 +2197,15 @@ class QwenDirector(
         "adds|continued|insisted|insists|pleaded|pleads|growled|growls|hissed|hisses|"
         "gasped|gasps|stammered|stammers|announced|announces|ordered|orders"
     )
+    # Sounds, machines, and media are never speakers, even when a sentence is shaped like
+    # a speech tag ("Static answered.").
+    _NON_HUMAN_SPEECH_TAG_WORDS = frozenset({
+        "static", "silence", "alarm", "radio", "speaker", "intercom", "system",
+        "computer", "terminal", "monitor", "voice", "broadcast", "transmission",
+        "signal", "echo", "recording", "machine", "automated", "thunder", "wind",
+        "noise", "feedback", "interference", "hum", "speakers", "siren", "console",
+        "scanner", "door", "phone", "screen",
+    })
     _SPEECH_TAG_NAME = r"([A-Z][A-Za-z0-9'\u2019_-]*(?:\s+[A-Z][A-Za-z0-9'\u2019_-]*){0,2})"
 
     @classmethod
@@ -2228,6 +2233,8 @@ class QwenDirector(
             candidate = match.group(1).strip()
             first = candidate.split()[0].lower()
             if first in blocked:
+                continue
+            if len(candidate.split()) == 1 and first in cls._NON_HUMAN_SPEECH_TAG_WORDS:
                 continue
             found.append(EntityResolver.normalize(candidate))
             break
@@ -2793,7 +2800,9 @@ class QwenDirector(
     OUTPUT RULES
     - overall_score is 1 (unusable) to 10 (no defects).
     - status is "review" if there is at least one finding, otherwise "pass".
-    - Every finding names a shot_id or scene_id and says what is wrong in under 25 words.
+    - Report at most 6 findings and at most 3 shot_patches. Merge repeats of the same defect
+      (for example one bad roster name across many shots) into ONE finding.
+    - Every finding names a shot_id or scene_id and says what is wrong in under 20 words.
     - Add a shot_patch only for a defect in checks 2, 3, or 5, rewriting only that field in the same
       style and length. Never change ids, characters, timing, or continuity. If no concrete defect
       exists, return empty arrays.
