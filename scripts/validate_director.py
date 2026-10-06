@@ -32,6 +32,20 @@ def test_single_character_semantic_call_budget():
     source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
     _assert("if self._character_semantic_calls > 1:" in source, "character semantic budget must be one call")
     _assert("max 1" in source, "character semantic call limit must be one")
+    _assert("def adjudicate_character_entities" not in source, "dead second semantic pass must be removed")
+
+
+def test_shot_schema_tracks_instance_topology():
+    from planner.qwen_director import QwenDirector
+    class ProbeDirector(QwenDirector):
+        SHOTS_PER_SCENE = 3
+    probe = ProbeDirector.__new__(ProbeDirector)
+    shot_schema = probe._shot_json_schema()
+    batch_schema = probe._shot_batch_json_schema()
+    nested = batch_schema["properties"]["scene_shots"]["items"]["properties"]["shots"]
+    _assert(shot_schema["properties"]["shots"]["minItems"] == 3, "shot schema ignored instance SHOTS_PER_SCENE")
+    _assert(nested["minItems"] == 3 and nested["maxItems"] == 3, "batch schema ignored instance SHOTS_PER_SCENE")
+    _assert(shot_schema["properties"]["shots"]["items"]["properties"]["location"].get("minLength") == 1, "location schema must require a value")
 
 
 def test_reconcile_api_has_no_dead_deterministic_parameter():
@@ -394,16 +408,61 @@ def test_story_contract_remains_six_paragraphs_420_560():
     _assert("six paragraphs" in combined.lower(), "six-paragraph contract missing")
 
 
-def test_non_human_speech_tags_are_not_speakers():
+def test_story_dialogue_contract_uses_qwen_semantic_spans():
     from planner.qwen_director import QwenDirector
-    for text, expected in (
-        ('"Nobody goes up," Ines said. She held the chain.', {"ines"}),
-        ('"Access granted," the terminal said.', set()),
-        ('Static answered.', set()),
-    ):
-        segments = QwenDirector._extract_story_spoken_segments(text)
-        got = set().union(*[s.get("tag_speakers", set()) for s in segments]) if segments else set()
-        _assert(got == expected, f"speech-tag attribution wrong for {text!r}: {got}")
+    semantic = [
+        {"text": "We go now", "speaker": "Lena"},
+        {"text": "Nobody goes up", "speaker": "Ines"},
+    ]
+    human = QwenDirector._extract_story_spoken_segments(
+        '"We go now," Lena whispered. She opened the door.',
+        semantic,
+        allowed_speakers={"Lena"},
+    )
+    _assert(human and human[0]["source_speakers"] == {"lena"}, "semantic human dialogue was not reconciled")
+
+    machine = QwenDirector._extract_story_spoken_segments(
+        'The terminal displayed "Access granted."',
+        semantic,
+        allowed_speakers={"Lena", "Ines"},
+    )
+    _assert(not machine, "unblessed machine/system text must not become dialogue")
+
+    unusual_verb = QwenDirector._extract_story_spoken_segments(
+        '"Nobody goes up," Ines snapped.',
+        semantic,
+        allowed_speakers={"Ines"},
+    )
+    _assert(unusual_verb and unusual_verb[0]["source_speakers"] == {"ines"}, "semantic dialogue must not depend on a speech-verb list")
+
+
+def test_character_semantic_schema_includes_spoken_dialogue():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    schema = QwenDirectorPromptMixin._character_extraction_json_schema()
+    _assert("spoken_dialogue" in schema["properties"], "semantic character extraction schema lacks spoken_dialogue")
+    _assert("spoken_dialogue" in schema["required"], "spoken_dialogue must be part of the single semantic extraction contract")
+    _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 32, "spoken dialogue schema is artificially capped")
+
+
+def test_dialogue_attribution_has_no_english_word_lists():
+    from planner.qwen_director import QwenDirector
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("_SPEECH_TAG_VERBS" not in source, "speech-verb vocabulary list must not be used")
+    _assert("_NON_HUMAN_SPEECH_TAG_WORDS" not in source, "machine-word vocabulary list must not be used")
+    _assert("_LOWER_TOKEN_RE" not in sanitize, "generic lowercase-token attribution heuristic must not be used")
+    _assert("_WRITTEN_NOUNS" not in sanitize, "written-noun vocabulary list must not be used")
+    _assert("FORBIDDEN_CHARACTER_NAMES" not in sanitize, "character blacklist must not be used")
+
+
+def test_shot_context_preserves_paragraph_boundaries():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = "\n\n".join(
+        f"Paragraph {index} opens with the setup. Paragraph {index} ends with its decisive turn."
+        for index in range(1, 7)
+    )
+    compact = QwenDirectorPromptMixin._compact_story_context(story, 240)
+    _assert("P1:" in compact and "P6:" in compact, "compact story context dropped narrative endpoints")
 
 
 def test_sound_and_ui_words_are_not_deterministic_characters():
@@ -463,10 +522,46 @@ def test_no_deterministic_cast_floor_symbols_in_qwen_path():
     _assert("deterministic_descriptive" not in source, "Director must not maintain a deterministic descriptive cast floor")
 
 
+
+def test_sanitizer_has_no_character_blacklist_or_role_vocabulary():
+    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("FORBIDDEN_CHARACTER_NAMES" not in source, "sanitizer must not maintain a hard-coded character-name blacklist")
+    _assert("descriptive_roles" not in source, "sanitizer must not maintain a local descriptive-role vocabulary")
+
+
+def test_director_quality_diagnostics_are_structural_not_stock_word_lists():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("FORBIDDEN_CHARACTER_NAMES" not in source, "Director must not retain the obsolete deterministic character blacklist")
+    _assert("_STOCK_PHRASES" not in source, "Director must not maintain a stock-phrase blacklist")
+    _assert("repeated phrasing" in source, "Director should report repeated phrasing structurally")
+    _assert("low vocabulary variety" in source, "Director should report low vocabulary variety structurally")
+    _assert("monotone sentence rhythm" in source, "Director should report sentence-rhythm regressions")
+    _assert("target 70-90" not in source, "Director must not impose an arbitrary paragraph-word target")
+
+
+def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+    mixin = QwenDirectorPromptMixin()
+    for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+        text = mixin._story_text_system(mode).lower()
+        _assert("consequential counterpart" in text, f"{mode} prompt lacks consequential-counterpart guidance")
+        _assert("smallest consequential human counterpart" in text, f"{mode} prompt lacks bounded human-conflict guidance")
+        _assert("no fixed cast size" in text or "there is no fixed cast size" in text, f"{mode} prompt accidentally constrains cast size")
+        _assert("solitary-protagonist" in text, f"{mode} prompt lacks solitary-template guard")
+
+
+def test_story_prompt_has_no_artificial_subtargets():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("about 500 words" not in source.lower(), "story prompt must not reintroduce an artificial 500-word target")
+    _assert("six to eight sentences" not in source.lower(), "story prompt must not impose a per-paragraph sentence quota")
+    _assert("at least 60 words" not in source.lower(), "story prompt must not impose an artificial final-paragraph word floor")
+
 def main():
     tests = [
         test_qwen_is_the_only_creative_character_authority,
         test_single_character_semantic_call_budget,
+        test_shot_schema_tracks_instance_topology,
         test_reconcile_api_has_no_dead_deterministic_parameter,
         test_mention_only_matching_is_case_insensitive,
         test_sanitizer_deduplicates_normalized_identity_keys,
@@ -487,13 +582,20 @@ def main():
         test_story_generation_is_single_call_fixed_seed_no_floor,
         test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
         test_story_contract_remains_six_paragraphs_420_560,
-        test_non_human_speech_tags_are_not_speakers,
+        test_story_dialogue_contract_uses_qwen_semantic_spans,
+        test_character_semantic_schema_includes_spoken_dialogue,
+        test_dialogue_attribution_has_no_english_word_lists,
+        test_shot_context_preserves_paragraph_boundaries,
         test_sound_and_ui_words_are_not_deterministic_characters,
         test_descriptive_sanitizer_preserves_qualified_identity,
         test_descriptive_grounding_tolerates_minor_surface_variation,
         test_descriptive_hints_populate_metadata_without_adding_cast,
         test_mention_only_filter_can_fail_closed,
         test_no_deterministic_cast_floor_symbols_in_qwen_path,
+        test_sanitizer_has_no_character_blacklist_or_role_vocabulary,
+        test_director_quality_diagnostics_are_structural_not_stock_word_lists,
+        test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size,
+        test_story_prompt_has_no_artificial_subtargets,
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
