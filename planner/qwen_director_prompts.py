@@ -427,8 +427,21 @@ PEOPLE
                         "additionalProperties": False,
                     },
                 },
+                "spoken_dialogue": {
+                    "type": "array",
+                    "maxItems": 96,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "speaker": {"type": "string"},
+                        },
+                        "required": ["text", "speaker"],
+                        "additionalProperties": False,
+                    },
+                },
             },
-            "required": ["candidates"],
+            "required": ["candidates", "spoken_dialogue"],
             "additionalProperties": False,
         }
 
@@ -501,6 +514,18 @@ PEOPLE
     Source anchors are preservation requirements, not a whitelist of permitted identities.
     Do not promote a weak textual surface into a canonical character merely because it is capitalized.
     Recover every stable named, relational, and descriptive identity actually created by the story.
+
+    SPOKEN DIALOGUE SEMANTICS:
+    Also return `spoken_dialogue` for direct speech actually spoken by a physically present production
+    character in the supplied story. Each item must contain the exact spoken text and the speaker's
+    canonical character name (or the grounded character surface when the character is descriptive/relational).
+    Include quoted dialogue and explicit screenplay-style character lines only when they are genuinely spoken
+    by that person. Exclude logs, notes, signs, labels, photographs, recordings, transmissions, alarms,
+    terminal/computer output, narration, internal thoughts, remembered speech, and other text that is merely
+    displayed, transmitted, reported, or read. Quotation marks alone do not make text spoken dialogue.
+    Do not paraphrase, merge, split, or invent dialogue. The `text` field must match the source wording closely
+    enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
+    return an empty `spoken_dialogue` array.
     """).strip()
 
         user_payload = json.dumps(
@@ -530,6 +555,17 @@ PEOPLE
         if os.getenv("H3_DEBUG_CHARACTERS", "0").strip().lower() == "trace":
             print("\n[CHARACTER QWEN RAW RESULT]")
             print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
+
+        self._semantic_spoken_dialogue = [
+            {
+                "text": str(item.get("text", "") or "").strip(),
+                "speaker": str(item.get("speaker", "") or "").strip(),
+            }
+            for item in (result.get("spoken_dialogue", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("text", "") or "").strip()
+            and str(item.get("speaker", "") or "").strip()
+        ]
 
         return result
 
@@ -972,12 +1008,14 @@ PEOPLE
             try:
                 source_dialogue = [
                     str(segment.get("display", "") or segment.get("text", "") or "").strip()
-                    for segment in extract_dialogue(story)
+                    for segment in extract_dialogue(
+                        story,
+                        getattr(self, "_semantic_spoken_dialogue", None),
+                    )
                     if isinstance(segment, dict)
                     and str(segment.get("display", "") or segment.get("text", "") or "").strip()
                 ]
             except Exception as exc:
-                source_dialogue = []
                 recorder = getattr(self, "_record_recovery", None)
                 if callable(recorder):
                     recorder(
@@ -989,6 +1027,7 @@ PEOPLE
                         f"[DIRECTOR] source dialogue extraction failed: {exc}",
                         flush=True,
                     )
+                raise
 
         payload = {
             "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
