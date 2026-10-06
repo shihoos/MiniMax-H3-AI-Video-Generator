@@ -52,70 +52,6 @@ class QwenDirector(
     # fallbacks; no per-scene Qwen recovery is used.
     MAX_SHOT_BATCH_SCENES = 2
 
-    FORBIDDEN_CHARACTER_NAMES = {
-        "treat",
-        "develop",
-        "clarify",
-        "every",
-        "above",
-        "far",
-        "tone",
-        "visual",
-        "story",
-        "scene",
-        "scenes",
-        "shot",
-        "shots",
-        "camera",
-        "lighting",
-        "sound",
-        "soundscape",
-        "environment",
-        "action",
-        "continuity",
-        "mood",
-        "location",
-        "weather",
-        "dialogue",
-        "music",
-        "character",
-        "characters",
-        "the",
-        "a",
-        "an",
-        "he",
-        "she",
-        "his",
-        "her",
-        "it",
-        "they",
-        "them",
-        "this",
-        "that",
-        "these",
-        "those",
-        "when",
-        "while",
-        "after",
-        "before",
-        "finally",
-        "suddenly",
-        "meanwhile",
-        "developing",
-        "preserve",
-        "expand",
-        "generate",
-        "generation",
-        "priority",
-        "description",
-        "details",
-        "detail",
-        "camera_shot",
-        "camera_movement",
-        "negative_prompt",
-        "visual_prompt",
-    }
-
     _MODE_LABELS = {
         AI_STORY_MODE: "AI STORY MODE",
         EXPAND_USER_STORY_MODE: "EXPAND STORY MODE",
@@ -1248,16 +1184,6 @@ class QwenDirector(
     # ------------------------------------------------------------------
     # Story generation: ONE creative pass, fixed seed, runaway salvage, fail-closed validation
     # ------------------------------------------------------------------
-    _STOCK_PHRASES = (
-        r"heart (?:pounded|raced|hammered)", r"little did", r"a testament to",
-        r"shivers? (?:ran )?down", r"the air (?:was|felt) (?:thick|heavy)",
-        r"time (?:stood|seemed to stand) still", r"unbeknownst", r"couldn'?t shake the feeling",
-        r"a mix of \w+ and \w+", r"sent a chill", r"breath (?:caught|hitched)",
-        r"the weight of", r"palpable", r"for what felt like (?:hours|an eternity)",
-        r"symphony of", r"silent promise", r"pulse (?:steadied|quickened|raced)",
-        r"\bsuddenly\b", r"everything changed", r"never be the same",
-    )
-
     def _salvage_runaway_story(self, text: str) -> str:
         """Recover a clean story from a draft that kept generating after it ended."""
         paragraphs = [
@@ -1279,31 +1205,44 @@ class QwenDirector(
         return "\n\n".join(kept) if len(kept) >= 5 else ""
 
     def _story_quality_issues(self, story: str) -> list[str]:
-        """Cheap deterministic craft checks; every issue is something a reader notices."""
+        """Log-only structural craft diagnostics; never fail or rewrite the story."""
         text = str(story or "")
         words = re.findall(r"[\w'’-]+", text.lower())
-        issues: list[str] = []
         if not words:
             return ["empty story"]
-        stock = [p for p in self._STOCK_PHRASES if re.search(p, text, flags=re.IGNORECASE)]
-        if len(stock) >= 2:
-            issues.append("stock phrases / clichés (" + ", ".join(stock[:3]) + ")")
+
+        issues: list[str] = []
+
+        # Repetition metrics are intentionally structural: no stock-phrase or
+        # English vocabulary blacklist is used here.
         trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
-        if trigrams and 1 - len(set(trigrams)) / len(trigrams) > 0.04:
+        if trigrams and (1 - len(set(trigrams)) / len(trigrams)) > 0.08:
             issues.append("repeated phrasing")
-        if len(set(words)) / len(words) < 0.46:
+
+        vocabulary_ratio = len(set(words)) / len(words)
+        if len(words) >= 420 and vocabulary_ratio < 0.46:
             issues.append("low vocabulary variety")
-        sentences = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
-        starts = [re.findall(r"[\w'’-]+", s.lower())[:1] for s in sentences]
+
+        sentences = [
+            sentence
+            for sentence in re.split(r"(?<=[.!?])\s+", text)
+            if sentence.strip()
+        ]
+        starts = [
+            re.findall(r"[\w'’-]+", sentence.lower())[:1]
+            for sentence in sentences
+        ]
         run = 1
-        for i in range(1, len(starts)):
-            run = run + 1 if starts[i] and starts[i] == starts[i - 1] else 1
+        for index in range(1, len(starts)):
+            run = run + 1 if starts[index] and starts[index] == starts[index - 1] else 1
             if run >= 3:
                 issues.append("three sentences in a row open with the same word")
                 break
-        lengths = [len(re.findall(r"[\w'’-]+", s)) for s in sentences]
+
+        lengths = [len(re.findall(r"[\w'’-]+", sentence)) for sentence in sentences]
         if len(lengths) >= 8 and (max(lengths) - min(lengths)) < 9:
             issues.append("monotone sentence rhythm")
+
         return issues
 
     def _generate_story_once(
