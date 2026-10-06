@@ -189,12 +189,16 @@ class EntityResolver:
             if not tokens:
                 continue
 
-            first_map.setdefault(
-                tokens[0],
-                set(),
-            ).add(
-                canonical
-            )
+            if tokens[0] not in {
+                "the", "a", "an", "this", "that", "these", "those",
+                "his", "her", "their", "my", "our", "your",
+            }:
+                first_map.setdefault(
+                    tokens[0],
+                    set(),
+                ).add(
+                    canonical
+                )
 
             if len(tokens) >= 2:
 
