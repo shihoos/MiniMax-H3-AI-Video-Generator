@@ -55,15 +55,17 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
             f"{label} prompt must describe a causal planted-detail payoff",
         )
         _assert(
-            "personal stake" in text.lower() and "choice" in text.lower(),
-            f"{label} prompt must connect personal stake to a choice when supported",
+            "price" in text.lower() and "choice" in text.lower(),
+            f"{label} prompt must make the choice cost something concrete",
         )
+        _assert("no markdown" in text.lower(), f"{label} prompt must forbid markdown emphasis")
         _assert("dialogue" in text.lower() and "recordings" in text.lower(), f"{label} prompt must keep non-spoken media out of dialogue")
         _assert("completed past-tense action" in text.lower(), f"{label} prompt must require a completed final action")
         _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
-    _assert("short line" in ai.lower() and "spoken dialogue" in ai.lower(), "AI story prompt must keep dialogue compact and spoken")
+    _assert("short lines" in ai.lower() and "spoken dialogue" in ai.lower(), "AI story prompt must keep dialogue compact and spoken")
     _assert("stable canonical name" in expand.lower() and "preserve established characters" in expand.lower(), "Expand prompt must preserve source character identity")
-    _assert("recurring counterpart" in expand.lower() and "do not invent a decorative cast" in expand.lower(), "Expand prompt must keep additional cast bounded and purposeful")
+    _assert("do not invent any new named person" in expand.lower() and "relatives" in expand.lower(), "Expand prompt must forbid invented cast and relatives (matches the cast validator)")
+    _assert("exactly as given" in expand.lower(), "Expand prompt must keep anchor names verbatim")
     _assert("concrete" in ai.lower() and "physical action" in ai.lower(), "AI story prompt must prioritize immediate filmable action")
     _assert("PLAN:" not in ai and "LEDGER:" not in ai, "AI story prompt must not expose a planning/checklist format")
     _assert("<option A>" not in ai and "<option B>" not in ai, "AI story prompt must not force a binary choice template")
@@ -78,9 +80,8 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
 def test_expand_source_fallback_removed():
     source = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
     _assert("expand_story_source_fallback" not in source, "Expand Story must not silently fall back to preserve-story mode")
-    _assert("Expand Story generation failed validation:" in source, "Expand Story must fail closed after the primary pass")
-    _assert("ai_story_text_retry" not in source, "AI Story must not make a creative retry call")
-    _assert("expand_story_text_retry" not in source, "Expand Story must not make a creative retry call")
+    prompts = Path(ROOT, "planner", "qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("Expand Story generation failed validation: " in source, "Expand Story must still fail closed when no attempt is valid")
 
 
 def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
@@ -552,8 +553,8 @@ def test_story_token_budget_contract():
         "story pass must reserve enough completion budget for the context-length check",
     )
     _assert(
-        "minimum_output_tokens=0," in source,
-        "story pass must not force a visible-token floor that competes with reasoning",
+        "minimum_output_tokens=story_min_output_tokens," in source and "1450 if mode == EXPAND_USER_STORY_MODE else 0" in source,
+        "Expand story pass must keep the 1450 output floor; AI Story has none",
     )
     _assert(
         '"[QWEN] story_thinking=on story_max_tokens=3200"' in source,
@@ -578,7 +579,9 @@ def test_story_token_budget_contract():
     _assert("_extract_story_body" not in source, "story flow must not require a visible PLAN/STORY wrapper")
     _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
     _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
-    _assert("H3_DIRECTOR_STORY_ATTEMPTS" not in source, "story generation must not expose a configurable retry loop")
+    _assert("H3_DIRECTOR_STORY_ATTEMPTS" not in source and "H3_STORY_MAX_ATTEMPTS" not in source, "story generation must not expose a retry loop")
+    _san = Path(ROOT, "planner", "qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("minimum_token_overlap=0.40" not in _san, "AI Story premise gate must use the permissive default, not the 0.40 override")
     _assert("max_completion=1500" not in source, "obsolete 1500-token story ceiling remains")
 
 def test_story_salvage_and_quality_gate():
@@ -1470,35 +1473,83 @@ def test_sentence_initial_common_words_never_skip_semantic_roster():
     )
 
 
+def test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects():
+    """Regression: 5 paragraphs + short + invented 'Eli's brother' must fail closed after ONE call."""
+    from planner.qwen_director import QwenDirector
+    from planner.production_planner import ProductionPlanner
 
-def test_ai_story_premise_paraphrase_uses_relaxed_global_coverage():
+    source_text = Path(ROOT, "planner", "qwen_director.py").read_text(encoding="utf-8")
+    prompts = Path(ROOT, "planner", "qwen_director_prompts.py").read_text(encoding="utf-8")
+    body = source_text.split("def _generate_story_once")[1].split("def _coerce_story_to_six_paragraphs")[0]
+    _assert("H3_STORY_MAX_ATTEMPTS" not in source_text, "no configurable story retry may exist")
+    _assert("_retry" not in body and "for attempt" not in body, "no retry loop or retry call name")
+    _assert("PREVIOUS DRAFT FAILED" not in prompts, "no retry feedback prompt")
+    _assert("1450 if mode == EXPAND_USER_STORY_MODE else 0" in body, "Expand output floor 1450 must be restored")
+    _assert("minimum_output_tokens=story_min_output_tokens" in body, "floor must reach _chat_text")
+    _assert("seed=DIRECTOR_VLLM_SEED," in body, "story seed must be fixed")
+
+    director = QwenDirector.__new__(QwenDirector)
+    planner = ProductionPlanner(ROOT)
+    director._planner = lambda: planner
+    director._qwen_telemetry = {"retries": 0}
+    calls = []
+    bad = "\n\n".join(
+        ["Eli enters the abandoned station and finds a sealed vault. He follows his brother's coordinates and tests the vault door."] * 5
+    )
+
+    def fake_chat(system, user, **kwargs):
+        calls.append((kwargs["call_name"], kwargs["minimum_output_tokens"], kwargs["seed"]))
+        return bad
+
+    director._chat_text = fake_chat
+    source = "Eli enters the abandoned station and finds a sealed vault."
+    try:
+        director._generate_story_once(
+            "expand_user_story", source, "s",
+            director._story_text_user("expand_user_story", source, ["Eli"]),
+            temperature=0.6, top_p=0.95, source_character_names=["Eli"],
+        )
+        raise AssertionError("bad draft must fail closed")
+    except RuntimeError as exc:
+        text = str(exc).lower()
+        _assert(
+            "exactly six paragraphs" in text and "420 to 560 words" in text and "brother" in text,
+            f"paragraph-count, word-count and invented-relative defects must be reported together: {exc}",
+        )
+    _assert(len(calls) == 1, f"exactly ONE Qwen story call allowed: {calls}")
+    _assert(calls[0][1] == 1450, f"Expand floor must be 1450: {calls}")
+    _assert(director._qwen_telemetry["retries"] == 0, "no retries")
+
+    ai_premise = "A polar systems engineer reaches an abandoned Arctic station during a violent storm and discovers a sealed underground vault."
+    ai_story = "Elara Voss kicked snow from her boots inside the abandoned station while the storm howled. The sealed vault waited below."
+    coverage, _ = director._global_premise_coverage(ai_premise, ai_story)
+    _assert(coverage >= 0.5, f"permissive premise gate rejected a faithful AI story: {coverage}")
+
+
+def test_non_human_speech_tags_never_become_speakers():
     from planner.qwen_director import QwenDirector
 
-    source = (
-        "A polar systems engineer reaches an abandoned Arctic station during a violent storm "
-        "and discovers a sealed underground vault."
+    for tag in ("Static answered.", "Silence fell.", "The radio answered.", "Alarm called.", "Echo replied."):
+        speakers = QwenDirector._speech_tag_speakers('"Hello? Anyone?"', tag)
+        _assert(speakers == set(), f"{tag!r} produced speaker {speakers}")
+    _assert(
+        QwenDirector._speech_tag_speakers('"Run."', "Eli said.") == {"eli"},
+        "a real speech tag must still resolve its speaker",
     )
-    paraphrased = (
-        "A climate engineer reaches a deserted polar station in a blizzard and discovers a "
-        "sealed subterranean vault beneath the facility."
+    _assert(
+        QwenDirector._speech_tag_speakers('"Run."', "Elara Voss whispered.") == {"elara voss"},
+        "a full-name speech tag must still resolve its speaker",
     )
-    director = QwenDirector.__new__(QwenDirector)
-    coverage, missing = director._global_premise_coverage(
-        source,
-        paraphrased,
-        minimum_token_overlap=0.15,
-    )
-    _assert(coverage == 1.0, f"paraphrased premise was rejected: coverage={coverage:.2f}, missing={missing}")
 
-    source_code = Path(ROOT, "planner", "qwen_director_sanitize.py").read_text(encoding="utf-8")
-    _assert(
-        "minimum_token_overlap=0.40" not in source_code,
-        "AI Story premise validation still contains the obsolete 0.40 lexical floor",
+
+def test_sound_nouns_never_become_characters():
+    planner = _planner()
+    names = planner.detect_character_descriptors(
+        'Elara called out, "Anyone?" Static answered. Silence fell over the corridor. Elara Voss stepped back.'
     )
-    _assert(
-        "minimum_token_overlap=0.15" in source_code,
-        "AI Story premise validation must use the relaxed 0.15 lexical floor",
-    )
+    _assert("Static" not in names and "Silence" not in names, f"sound noun became a character: {names}")
+    _assert("Elara Voss" in names, f"real character lost: {names}")
+
 
 def main():
     tests = [
@@ -1518,7 +1569,6 @@ def main():
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
         test_story_token_budget_contract,
-        test_ai_story_premise_paraphrase_uses_relaxed_global_coverage,
         test_story_salvage_and_quality_gate,
         test_story_sampling_guards_are_story_only_and_warmup_matches,
         test_story_thinking_arguments_reach_vllm_without_a_retry,
@@ -1551,6 +1601,9 @@ def main():
         test_dialogue_source_occurrence_budget,
         test_source_contracts,
         test_sentence_initial_common_words_never_skip_semantic_roster,
+        test_sound_nouns_never_become_characters,
+        test_non_human_speech_tags_never_become_speakers,
+        test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects,
     ]
     for test in tests:
         test()
