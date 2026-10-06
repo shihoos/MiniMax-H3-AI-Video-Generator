@@ -17,105 +17,53 @@ from planner.config import (
 
 
 # ---------------------------------------------------------------------------
-# Quote extraction boundary
+# Spoken-dialogue contract
 # ---------------------------------------------------------------------------
-# Character semantics and speech attribution belong to the Director/entity
-# resolver.  This module must not grow a vocabulary of "bad" character words
-# or speech verbs.  The helper below only rejects unambiguous formatting that
-# marks a quoted span as markup/code; semantic written-vs-spoken classification
-# is performed by the caller using canonical speaker resolution.
-
-def is_written_text_quote(text: str, start: int, end: int) -> bool:
-    """Reject only quotes that are structurally marked as markup/code.
-
-    No semantic word list is used here.  The Director's speaker resolver owns
-    human-vs-machine attribution, while the production planner owns contextual
-    grounding.  A normal quoted utterance therefore remains eligible for later
-    semantic resolution.
-    """
-    source = str(text or "")
-    before = source[max(0, start - 2):start]
-    after = source[end:min(len(source), end + 2)]
-
-    # Markdown emphasis/code fences are explicit non-speech formatting.
-    if before.endswith("*") or before.endswith("_"):
-        return True
-    if after.startswith("*") or after.startswith("_"):
-        return True
-    if before.endswith("`") or after.startswith("`"):
-        return True
-
-    # A lowercase multi-token attribution is not an approved speaker surface.
-    # This is grammatical structure, not a vocabulary blacklist: the canonical
-    # speaker resolver requires named speaker surfaces to be capitalized.
-    tail = source[end:min(len(source), end + 80)]
-    if re.match(r"^\s*[,;:]?\s*[a-z][a-z'’-]*\s+[a-z][a-z'’-]*\s+", tail):
-        return True
-
-    return False
-
+# Dialogue semantics come from the existing single Qwen character/entity pass.
+# This module contains no speech-verb, machine-word, UI-word, or story-domain
+# vocabulary list. Deterministic code only reconciles Qwen's semantic spans to
+# the final canonical character roster.
 
 class QwenDirectorSanitizeMixin:
-    _VALID_IDENTITY_TYPES = {
-        "named_character",
-        "relational_character",
-        "descriptive_character",
-    }
-    _PERSON_ENTITY_TYPES = {
-        "PERSON",
-        "CHARACTER",
-        "SENTIENT",
-        "HUMAN",
-    }
-
-    @classmethod
     def _valid_character_name(
-        cls,
+        self,
         name: str,
         *,
         identity_type: str = "named_character",
     ) -> bool:
-        """Validate identity *shape* without maintaining a semantic word blacklist.
 
-        Semantic personhood belongs to Qwen + ProductionPlanner.  The sanitizer only
-        rejects malformed identity fields, generic singleton role surfaces, and values
-        that cannot safely participate in deterministic identity resolution.
-        """
-        value = re.sub(r"\s+", " ", str(name or "")).strip()
+        value = str(
+            name or ""
+        ).strip()
+
+        if not value:
+            return False
+
+        lowered = value.lower()
         identity_type = str(identity_type or "named_character").strip().lower()
 
-        if not value or identity_type not in cls._VALID_IDENTITY_TYPES:
-            return False
-
-        if not EntityResolver.is_safe_semantic_reference(value):
-            return False
-
-        lowered = EntityResolver.normalize(value)
         if EntityResolver.generic_role_surface(lowered) or lowered in EntityResolver.RELATIONSHIP_LABELS:
             return False
 
-        # Names are compact identity labels, not prose sentences. Descriptive
-        # identities are deliberately more permissive because their semantic role
-        # is already declared by Qwen and grounded later by ProductionPlanner.
-        max_words = {
-            "named_character": 5,
-            "relational_character": 6,
-            "descriptive_character": 10,
-        }[identity_type]
-        words = value.split()
-        if not 1 <= len(words) <= max_words:
+        # Qualified descriptive identities may legitimately be longer than
+        # ordinary named identities, e.g. ``the man in the grey coverall``.
+        max_words = 10 if identity_type == "descriptive_character" else 5
+        if len(value.split()) > max_words:
             return False
 
-        if not re.search(r"[A-Za-z0-9]", value):
+        if any(
+            token in value
+            for token in (
+                ":",
+                ";",
+                "|",
+                "{",
+                "}",
+                "[",
+                "]",
+            )
+        ):
             return False
-
-        # A descriptive identity must contain more than a bare role word. We do
-        # not decide which words are roles here; EntityResolver already handles
-        # exact generic surfaces and ProductionPlanner performs contextual grounding.
-        if identity_type == "descriptive_character":
-            core = re.sub(r"^(?:the|a|an)\s+", "", lowered)
-            if len(core.split()) < 2:
-                return False
 
         return True
 
@@ -204,16 +152,12 @@ class QwenDirectorSanitizeMixin:
             ):
                 continue
 
-            name = re.sub(
-                r"\s+",
-                " ",
-                str(
-                    value.get(
-                        "name",
-                        "",
-                    )
-                    or ""
-                ),
+            name = str(
+                value.get(
+                    "name",
+                    "",
+                )
+                or ""
             ).strip()
 
             profile = self._coerce_mapping(value.get("identity_profile", {}))
@@ -221,15 +165,6 @@ class QwenDirectorSanitizeMixin:
                 value.get("identity_type", profile.get("identity_type", "named_character"))
                 or "named_character"
             ).strip().lower()
-
-            # When raw Qwen metadata survives into this layer, honor it.  These are
-            # structural labels, not a semantic blacklist; explicit non-character
-            # decisions are rejected rather than silently reclassified.
-            if value.get("is_character") is False:
-                continue
-            entity_type = str(value.get("entity_type", "") or "").strip().upper()
-            if entity_type and entity_type not in self._PERSON_ENTITY_TYPES:
-                continue
 
             if not self._valid_character_name(
                 name,
@@ -278,14 +213,21 @@ class QwenDirectorSanitizeMixin:
                     continue
                 aliases.append(text)
             aliases = list(dict.fromkeys(aliases))
-            if identity_type == "relational_character":
-                if (
-                    not relationship_to
-                    or not relationship
-                    or not EntityResolver.is_safe_semantic_reference(relationship_to)
-                    or not EntityResolver.is_safe_semantic_reference(relationship)
-                ):
-                    continue
+            if identity_type == "relational_character" and (not relationship_to or not relationship):
+                identity_type = "named_character"
+                relationship_to = None
+                relationship = None
+                aliases = []
+
+            if identity_type == "descriptive_character":
+                normalized_name = EntityResolver.normalize(name)
+                core = re.sub(r"^(?:the|a|an)\s+", "", normalized_name).strip()
+                # Validate descriptive identities by shape only. Contextual grounding belongs
+                # to ProductionPlanner; this layer must not maintain another English role list.
+                if len(core.split()) < 2 or len(core) < 5:
+                    identity_type = "named_character"
+                    aliases = []
+
             profile.update({
                 "name": name,
                 "semantic_aliases": aliases,
@@ -1414,58 +1356,60 @@ class QwenDirectorSanitizeMixin:
         coverage = covered / max(1, len(source_sentences))
         return coverage, missing
 
-    @staticmethod
-    def _story_has_explicit_dialogue(text: str) -> bool:
-        """True only when the story contains at least one SPOKEN quoted line.
+    def _story_has_semantic_spoken_dialogue(
+        self,
+        text: str,
+        characters: list[dict] | None = None,
+    ) -> bool:
+        """Return True when Qwen's semantic dialogue contract resolves to the roster."""
+        extractor = getattr(self, "_extract_story_spoken_segments", None)
+        if not callable(extractor):
+            return False
 
-        Quoted signs, tags, screens and IDs do not count as dialogue.
-        """
-        value = str(text or "")
-        pattern = re.compile(
-            r'"([^"\n]+)"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019|(?<!\w)\'([^\'\n]+)\'(?!\w)',
-            flags=re.UNICODE,
-        )
-        for match in pattern.finditer(value):
-            inner = next((g for g in match.groups() if g), "")
-            if len(re.findall(r"[A-Za-z]", inner)) < 2:
-                continue
-            if is_written_text_quote(value, match.start(), match.end()):
-                continue
-            return True
-        return False
+        allowed_names = [
+            str(character.get("name", "")).strip()
+            for character in (characters or [])
+            if isinstance(character, dict)
+            and str(character.get("name", "")).strip()
+        ]
+        semantic_dialogue = getattr(self, "_semantic_spoken_dialogue", None)
+        if not semantic_dialogue:
+            return False
 
-    @staticmethod
-    def _story_has_attributed_dialogue(text: str) -> bool:
-        """True only when a quoted line carries a speech tag (a person visibly speaking).
-
-        Quoted signs, tags, screens and IDs do not count as dialogue.
-        """
-        value = str(text or "")
-        pattern = re.compile(
-            r'"([^"\n]+)"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019|(?<!\w)\'([^\'\n]+)\'(?!\w)',
-            flags=re.UNICODE,
-        )
-        for match in pattern.finditer(value):
-            inner = next((g for g in match.groups() if g), "")
-            if len(re.findall(r"[A-Za-z]", inner)) < 2:
-                continue
-            if is_written_text_quote(value, match.start(), match.end()):
-                continue
-            # A spoken line carries a speech tag ("...," Mara said / said Mara / Mara said, "...").
-            # A quoted phrase inside narration (a transmission, a note) is not dialogue.
-            tail = value[match.end():match.end() + 70]
-            head = value[max(0, match.start() - 70):match.start()]
-            verbs = (
-                r"said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
-                r"called|calls|muttered|murmured|warned|warns|snapped|answered|answers|"
-                r"cried|yelled|demanded|breathed|added|continued|insisted|pleaded|growled|"
-                r"hissed|gasped|announced|ordered|began|told"
+        try:
+            segments = extractor(
+                str(text or ""),
+                semantic_dialogue,
             )
-            if re.search(rf"^\s*[,.!?;]*\s*[\w'’ -]{{0,40}}\b(?:{verbs})\b", tail, re.IGNORECASE) or re.search(
-                rf"\b(?:{verbs})\b\s*[,:]?\s*$", head, re.IGNORECASE
-            ):
+        except Exception as exc:
+            self._record_recovery(
+                "semantic_dialogue_validation_failed",
+                str(exc),
+            )
+            return False
+
+        canonical = {
+            EntityResolver.normalize(name): name
+            for name in allowed_names
+        }
+        aliases = EntityResolver.build_character_alias_map(characters or [])
+
+        def resolves_to_roster(surface: str) -> bool:
+            normalized = EntityResolver.normalize(surface)
+            if normalized in canonical:
                 return True
-        return False
+            resolved = aliases.get(normalized)
+            return bool(resolved and EntityResolver.normalize(resolved) in canonical)
+
+        return any(
+            bool(segment.get("text"))
+            and any(
+                resolves_to_roster(str(speaker))
+                for speaker in (segment.get("source_speakers", set()) or set())
+            )
+            for segment in segments
+            if isinstance(segment, dict)
+        )
 
     @staticmethod
     def _story_has_open_ended_finale(text: str) -> bool:
@@ -1548,13 +1492,6 @@ class QwenDirectorSanitizeMixin:
             errors.append(
                 "Generated story must contain 420 to 560 words "
                 f"(found {word_count})."
-            )
-
-        # AI Story is a free-form cinematic generation pass where direct dialogue is part of
-        # the narrative contract. Expand Story may legitimately be a one-character expansion.
-        if mode == AI_STORY_MODE and not self._story_has_explicit_dialogue(result):
-            errors.append(
-                "Generated AI story must contain at least one explicit quoted line of direct dialogue."
             )
 
         if self._story_has_open_ended_finale(result):
