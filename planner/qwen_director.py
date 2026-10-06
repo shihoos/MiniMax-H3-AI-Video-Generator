@@ -479,13 +479,9 @@ class QwenDirector(
             if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
                 # Every creative story gets exactly one Qwen semantic character pass.
                 # Never bypass it because a deterministic scan appears "named-only".
-                required_source_characters = (
-                    source_character_names if mode == EXPAND_USER_STORY_MODE else None
-                )
                 canonical_characters = planner.create_characters(
                     canonical_source_story,
                     qwen_character_extractor=self.extract_character_entities,
-                    required_character_names=required_source_characters,
                 )
             else:
                 # Preserve mode remains source-of-truth deterministic.
