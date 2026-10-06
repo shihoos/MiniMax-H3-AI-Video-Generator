@@ -5,6 +5,8 @@ import os
 import re
 import textwrap
 
+from planner.entity_resolver import EntityResolver
+
 from planner.config import (
     DIRECTOR_STORY_CONTEXT_CHARS,
     AI_STORY_MODE,
@@ -429,7 +431,7 @@ PEOPLE
                 },
                 "spoken_dialogue": {
                     "type": "array",
-                    "maxItems": 96,
+                    "maxItems": 128,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -458,7 +460,7 @@ PEOPLE
         """
         story = str(story or "").strip()
         if not story:
-            return {"candidates": []}
+            return {"candidates": [], "spoken_dialogue": []}
 
         self._character_semantic_calls += 1
         if self._character_semantic_calls > 1:
@@ -983,7 +985,7 @@ PEOPLE
                 if duplicate_value and description_key.startswith(duplicate_value[:120]):
                     scene_payload.pop(duplicate_key, None)
 
-            if not compact_characters:
+            if not scene_payload.get("characters"):
                 raise RuntimeError(
                     f"Scene {scene_payload.get('scene_id') or '<unknown>'} has no canonical character binding for shot planning."
                 )
@@ -1011,6 +1013,12 @@ PEOPLE
                     for segment in extract_dialogue(
                         story,
                         getattr(self, "_semantic_spoken_dialogue", None),
+                        allowed_speakers=[
+                            str(c.get("name", "")).strip()
+                            for c in compact_characters
+                            if isinstance(c, dict) and str(c.get("name", "")).strip()
+                        ],
+                        speaker_aliases=EntityResolver.build_character_alias_map(characters),
                     )
                     if isinstance(segment, dict)
                     and str(segment.get("display", "") or segment.get("text", "") or "").strip()
@@ -1027,7 +1035,7 @@ PEOPLE
                         f"[DIRECTOR] source dialogue extraction failed: {exc}",
                         flush=True,
                     )
-                raise
+                source_dialogue = []
 
         payload = {
             "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
