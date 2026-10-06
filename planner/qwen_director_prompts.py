@@ -205,11 +205,14 @@ HARD FORMAT
   and is at least 420 words. If it is short, expand existing story beats with concrete action, consequences, sensory detail,
   or character decisions rather than adding filler or repetition. Do not pad the story merely to satisfy the word count,
   and do not truncate a necessary ending just to stay near an arbitrary target.
-- The sixth paragraph is a full settled aftermath of at least 60 words.
+- The sixth paragraph is a full settled aftermath, not a compressed summary.
 
 CAUSALITY (plan silently, then write)
 - The story is driven by what people DO and DECIDE, not by finding progressively stranger things.
   The protagonist must cause, choose, or misjudge something early on, and the later plot must follow from it.
+  When the premise can support another present person, prefer a consequential counterpart with a concrete goal, resistance,
+  relationship, knowledge gap, or competing decision that directly changes what the protagonist does. Do not make the
+  facility, machine, log, or environmental mystery the sole engine when a human causal conflict naturally fits the premise.
 - Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical action as the
   goal and meets an immediate obstacle. Include one precise sensory detail unique to this setting.
 - Paragraphs 2-3: the protagonist acts, and each action produces a result that makes the goal harder or
@@ -226,6 +229,8 @@ CAUSALITY (plan silently, then write)
   system that turns out to be alive, sentient, or watching; a containment failure; a secret experiment; a
   monster or creature; or "the protagonist had been here before". Unless the premise names one of these, do not use it.
 - Do not introduce any person only through a document, label, message, or memory. Every named person is on screen.
+- Do not default to a solitary-protagonist story merely because the setting is isolated. Solitude is appropriate only when
+  isolation itself is a meaningful source of conflict; otherwise create the smallest consequential human counterpart the premise needs.
 
 PROSE
 - Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
@@ -283,13 +288,14 @@ PEOPLE
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
                 "- Preserve every established source character that remains part of the story, the source setting, the source events in order, and the source outcome.\n"
-                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. Keep their canonical names stable.\n"
+                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. There is no fixed cast size. Keep their canonical names stable.\n"
                 "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
                 "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
                 "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
                 "- Use dialogue naturally among whichever characters the story actually contains. When the source supports more than one present person, prefer dialogue that exposes conflicting goals, changes a decision, or reveals a consequential relationship. Never add a character solely to create dialogue.\n"
                 "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the reversal rather than using a generic facility/system reveal.\n"
-                "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n\n"
+                "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n"
+                "- Do not write the expansion as a compressed six-paragraph synopsis. Each paragraph should develop a concrete scene beat with visible action and consequence. If the story reaches its apparent ending before the minimum length, deepen the existing causal beats and aftermath rather than stopping early or introducing a disconnected subplot.\n\n"
                 "Output only the finished expanded story prose."
             )
 
