@@ -1356,15 +1356,17 @@ class QwenDirectorSanitizeMixin:
         coverage = covered / max(1, len(source_sentences))
         return coverage, missing
 
-    def _story_has_semantic_spoken_dialogue(
+    def _require_semantic_spoken_dialogue(
         self,
         text: str,
         characters: list[dict] | None = None,
     ) -> bool:
-        """Return True when Qwen's semantic dialogue contract resolves to the roster."""
+        """Require Qwen's semantic dialogue contract to resolve at least one roster speaker."""
         extractor = getattr(self, "_extract_story_spoken_segments", None)
         if not callable(extractor):
-            return False
+            raise RuntimeError(
+                "AI Story generation failed semantic validation: semantic dialogue extraction is unavailable."
+            )
 
         allowed_names = [
             str(character.get("name", "")).strip()
@@ -1374,25 +1376,33 @@ class QwenDirectorSanitizeMixin:
         ]
         semantic_dialogue = getattr(self, "_semantic_spoken_dialogue", None)
         if not semantic_dialogue:
-            return False
-
-        try:
-            segments = extractor(
-                str(text or ""),
-                semantic_dialogue,
+            raise RuntimeError(
+                "AI Story generation failed semantic validation: the semantic dialogue contract returned no "
+                "direct spoken dialogue for the final story."
             )
-        except Exception as exc:
-            self._record_recovery(
-                "semantic_dialogue_validation_failed",
-                str(exc),
-            )
-            return False
 
         canonical = {
             EntityResolver.normalize(name): name
             for name in allowed_names
         }
         aliases = EntityResolver.build_character_alias_map(characters or [])
+
+        try:
+            segments = extractor(
+                str(text or ""),
+                semantic_dialogue,
+                allowed_speakers=allowed_names,
+                speaker_aliases=aliases,
+            )
+        except Exception as exc:
+            self._record_recovery(
+                "semantic_dialogue_validation_failed",
+                str(exc),
+            )
+            raise RuntimeError(
+                "Semantic dialogue validation failed while reconciling the Qwen dialogue contract: "
+                f"{exc}"
+            ) from exc
 
         def resolves_to_roster(surface: str) -> bool:
             normalized = EntityResolver.normalize(surface)
@@ -1401,17 +1411,32 @@ class QwenDirectorSanitizeMixin:
             resolved = aliases.get(normalized)
             return bool(resolved and EntityResolver.normalize(resolved) in canonical)
 
-        return any(
-            bool(segment.get("text"))
+        if not any(
+            isinstance(segment, dict)
+            and bool(segment.get("text"))
             and any(
                 resolves_to_roster(str(speaker))
                 for speaker in (segment.get("source_speakers", set()) or set())
             )
             for segment in segments
-            if isinstance(segment, dict)
-        )
+        ):
+            raise RuntimeError(
+                "AI Story generation failed semantic validation: the final story contains no direct spoken "
+                "dialogue attributed to a canonical production character."
+            )
+        return True
 
     @staticmethod
+    def _preserve_story_requires_semantic_dialogue(text: str) -> bool:
+        """Return True when Preserve Story contains quote-delimited prose that needs semantic attribution."""
+        value = str(text or "")
+        return bool(
+            re.search(r'"[^"\n]+"', value)
+            or re.search(r'“[^”\n]+”', value)
+            or re.search(r'‘[^’\n]+’', value)
+            or re.search(r"(?<!\w)'[^'\n]+'(?!\w)", value)
+        )
+
     def _story_has_open_ended_finale(text: str) -> bool:
         value = str(text or "").strip()
         if not value:
@@ -1859,7 +1884,9 @@ class QwenDirectorSanitizeMixin:
                     raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
 
         if any(count != self.SHOTS_PER_SCENE for count in scene_counts.values()):
-            raise RuntimeError("Every scene must contain exactly two production shots.")
+            raise RuntimeError(
+                f"Every scene must contain exactly {self.SHOTS_PER_SCENE} production shots."
+            )
 
     def _checkpoint_state(
         self,
