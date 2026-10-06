@@ -485,7 +485,6 @@ class QwenDirector(
                 canonical_characters = planner.create_characters(
                     canonical_source_story,
                     qwen_character_extractor=self.extract_character_entities,
-                    qwen_character_adjudicator=None,
                     required_character_names=required_source_characters,
                 )
             else:
@@ -493,7 +492,6 @@ class QwenDirector(
                 canonical_characters = planner.create_characters(
                     canonical_source_story,
                     qwen_character_extractor=None,
-                    qwen_character_adjudicator=None,
                 )
 
         character_payloads = []
