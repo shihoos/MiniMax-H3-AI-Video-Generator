@@ -1245,6 +1245,15 @@ class QwenDirectorSanitizeMixin:
         value = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", value)
         value = re.sub(r"(?<![\w*])\*([^*\n]+)\*(?![\w*])", r"\1", value)
 
+        # Emoji / pictographs are never part of the story prose; strip them and any
+        # orphaned " ." they leave behind.
+        value = re.sub(
+            "[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF\uFE0F\u200D]+",
+            "",
+            value,
+        )
+        value = re.sub(r"\s+\.(?=\s|$)", ".", value)
+
         paragraphs = []
         for paragraph in re.split(r"\n\s*\n+", value):
             normalized = re.sub(r"[ \t\n]+", " ", paragraph).strip()
@@ -1440,6 +1449,39 @@ class QwenDirectorSanitizeMixin:
             if is_written_text_quote(value, match.start(), match.end()):
                 continue
             return True
+        return False
+
+    @staticmethod
+    def _story_has_attributed_dialogue(text: str) -> bool:
+        """True only when a quoted line carries a speech tag (a person visibly speaking).
+
+        Quoted signs, tags, screens and IDs do not count as dialogue.
+        """
+        value = str(text or "")
+        pattern = re.compile(
+            r'"([^"\n]+)"|\u201c([^\u201d\n]+)\u201d|\u2018([^\u2019\n]+)\u2019|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        for match in pattern.finditer(value):
+            inner = next((g for g in match.groups() if g), "")
+            if len(re.findall(r"[A-Za-z]", inner)) < 2:
+                continue
+            if is_written_text_quote(value, match.start(), match.end()):
+                continue
+            # A spoken line carries a speech tag ("...," Mara said / said Mara / Mara said, "...").
+            # A quoted phrase inside narration (a transmission, a note) is not dialogue.
+            tail = value[match.end():match.end() + 70]
+            head = value[max(0, match.start() - 70):match.start()]
+            verbs = (
+                r"said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+                r"called|calls|muttered|murmured|warned|warns|snapped|answered|answers|"
+                r"cried|yelled|demanded|breathed|added|continued|insisted|pleaded|growled|"
+                r"hissed|gasped|announced|ordered|began|told"
+            )
+            if re.search(rf"^\s*[,.!?;]*\s*[\w'’ -]{{0,40}}\b(?:{verbs})\b", tail, re.IGNORECASE) or re.search(
+                rf"\b(?:{verbs})\b\s*[,:]?\s*$", head, re.IGNORECASE
+            ):
+                return True
         return False
 
     @staticmethod
