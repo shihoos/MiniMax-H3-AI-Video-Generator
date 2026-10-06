@@ -32,7 +32,7 @@ from planner.qwen_director_prompts import (
     QwenDirectorPromptMixin,
 )
 from planner.qwen_director_scene import QwenDirectorSceneMixin
-from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin, is_written_text_quote
+from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
 
 class QwenDirector(
@@ -82,6 +82,7 @@ class QwenDirector(
         self._entity_resolver = EntityResolver()
         self._reference_visual_context: dict[str, dict] = {}
         self._character_semantic_calls = 0
+        self._semantic_spoken_dialogue: list[dict] = []
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -125,6 +126,7 @@ class QwenDirector(
     ) -> dict:
 
         self._character_semantic_calls = 0
+        self._semantic_spoken_dialogue = []
         if not director_enabled():
 
             plan = deepcopy(base_plan)
@@ -457,6 +459,15 @@ class QwenDirector(
         if not character_names:
             raise RuntimeError(
                 "Canonical character extraction produced no usable names."
+            )
+
+        if mode == AI_STORY_MODE and not self._story_has_semantic_spoken_dialogue(
+            story,
+            characters,
+        ):
+            raise RuntimeError(
+                "AI Story generation failed semantic validation: the final story contains no direct spoken dialogue "
+                "attributed by the Qwen semantic extraction pass to a canonical physically present character."
             )
 
         canonical_scenes = planner.create_scenes(
@@ -1347,8 +1358,6 @@ class QwenDirector(
 
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
-        if not self._story_has_attributed_dialogue(candidate):
-            issues.append("no attributed spoken dialogue between people on screen")
         if not issues:
             print("[QWEN] story_quality=PASS", flush=True)
         else:
@@ -2099,125 +2108,94 @@ class QwenDirector(
         )
         return cleaned if keep_case else cleaned.lower()
 
-    _SPEECH_TAG_VERBS = (
-        "said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
-        "called|calls|muttered|mutters|murmured|murmurs|warned|warns|snapped|snaps|"
-        "answered|answers|cried|cries|yelled|yells|demanded|demands|breathed|added|"
-        "adds|continued|insisted|insists|pleaded|pleads|growled|growls|hissed|hisses|"
-        "gasped|gasps|stammered|stammers|announced|announces|ordered|orders"
-    )
-    # Sounds, machines, and media are never speakers, even when a sentence is shaped like
-    # a speech tag ("Static answered.").
-    _NON_HUMAN_SPEECH_TAG_WORDS = frozenset({
-        "static", "silence", "alarm", "radio", "speaker", "intercom", "system",
-        "computer", "terminal", "monitor", "voice", "broadcast", "transmission",
-        "signal", "echo", "recording", "machine", "automated", "thunder", "wind",
-        "noise", "feedback", "interference", "hum", "speakers", "siren", "console",
-        "scanner", "door", "phone", "screen",
-    })
-    _SPEECH_TAG_NAME = r"([A-Z][A-Za-z0-9'\u2019_-]*(?:\s+[A-Z][A-Za-z0-9'\u2019_-]*){0,2})"
+    @staticmethod
+    def _dialogue_anchor_key(value: str) -> str:
+        text = QwenDirector._normalize_dialogue_text(value)
+        text = re.sub(r"^[,;:!?\-\s]+|[,;:!?\-\s]+$", "", text)
+        return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
-    def _speech_tag_speakers(cls, before: str, after: str) -> set[str]:
-        """Return the speaker named by an adjacent speech tag, or an empty set.
+    def _extract_story_spoken_segments(
+        cls,
+        story: str,
+        semantic_spoken_dialogue: list[dict] | None = None,
+        allowed_speakers: set[str] | list[str] | None = None,
+    ) -> list[dict]:
+        """Extract direct spoken source segments from one semantic dialogue contract.
 
-        Recognises only unambiguous forms:
-            "...," Mara said.   "..." said Mara.   Mara said, "..."
-        Pronouns, articles and lowercase subjects ("the terminal said") never
-        produce a speaker, so machine voices and unresolved tags stay empty.
-        """
-        verbs = cls._SPEECH_TAG_VERBS
-        name = cls._SPEECH_TAG_NAME
-        blocked = set(EntityResolver.PRONOUNS) | {"the", "a", "an", "then", "and", "but"}
-        found: list[str] = []
-        patterns = (
-            (after, rf"^\s*[,;]?\s*(?:\u2014|-)?\s*{name}\s+(?:{verbs})\b"),
-            (after, rf"^\s*[,;]?\s*(?:{verbs})\s+{name}\b"),
-            (before, rf"{name}\s+(?:{verbs})(?:\s+[a-z]+ly)?\s*[,:]?\s*$"),
-        )
-        for window, pattern in patterns:
-            match = re.search(pattern, window)
-            if not match:
-                continue
-            candidate = match.group(1).strip()
-            first = candidate.split()[0].lower()
-            if first in blocked:
-                continue
-            if len(candidate.split()) == 1 and first in cls._NON_HUMAN_SPEECH_TAG_WORDS:
-                continue
-            found.append(EntityResolver.normalize(candidate))
-            break
-        return set(found)
-
-    @classmethod
-    def _extract_story_spoken_segments(cls, story: str) -> list[dict]:
-        """Extract ordered source-speech segments with exact occurrence boundaries.
-
-        Each quoted/scripted utterance is a finite source-text budget. The Director may
-        split one utterance across adjacent shots, but it must not duplicate an utterance
-        or turn narrative prose into speech.
+        Creative modes pass the `spoken_dialogue` field returned by the existing single Qwen
+        semantic extraction call. Deterministic parsing only reconciles those semantic spans to
+        exact source occurrences; it does not maintain a speech-verb, machine-word, or domain-word list.
+        When no semantic result is available (e.g. Preserve Story), only explicit screenplay-style
+        `Name: line` labels are accepted, which is deliberately conservative.
         """
         text = str(story or "")
         segments: list[dict] = []
-        quote_spans: list[tuple[int, int]] = []
+
+        semantic_items: list[dict] = []
+        for item in (semantic_spoken_dialogue or []):
+            if not isinstance(item, dict):
+                continue
+            spoken = str(item.get("text", "") or "").strip()
+            speaker = str(item.get("speaker", "") or "").strip()
+            key = cls._dialogue_anchor_key(spoken)
+            if not key or not speaker:
+                continue
+            semantic_items.append({"key": key, "speaker": EntityResolver.normalize(speaker)})
+
+        semantic_by_key: dict[str, set[str]] = {}
+        for item in semantic_items:
+            semantic_by_key.setdefault(item["key"], set()).add(item["speaker"])
+
+        allowed = {
+            EntityResolver.normalize(value)
+            for value in (allowed_speakers or [])
+            if str(value or "").strip()
+        }
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
             flags=re.UNICODE,
         )
-        screen_context = re.compile(
-            r"\b(?:on|from|across|over|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b|"
-            r"\b(?:screen|monitor|display|terminal)\b.{0,80}\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears|message|text)\b|"
-            r"\b(?:read|reads|show|shows|display|displayed|displays|flash|flashed|flashes|appear|appeared|appears)\b.{0,80}\b(?:screen|monitor|display|terminal)\b|"
-            r"\b(?:message|text|label|caption)\b.{0,80}\b(?:on|over|across|inside|appeared|displayed|flashed|read|shows|shown)\b.{0,40}\b(?:screen|monitor|display|terminal)\b",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        quote_spans: list[tuple[int, int]] = []
 
         for match in quote_pattern.finditer(text):
             value = next((part for part in match.groups() if part), "")
-            # Signs, tags, screens, IDs and markdown-emphasised text are written
-            # text, not speech: never let them become audio events.
-            if is_written_text_quote(text, match.start(), match.end()):
+            key = cls._dialogue_anchor_key(value)
+            if not key:
                 continue
+
+            speakers = set(semantic_by_key.get(key, set()))
+            # Without Qwen semantic dialogue, do not guess from generic English prose.
+            if not speakers:
+                continue
+
+            if allowed:
+                speakers = {speaker for speaker in speakers if speaker in allowed}
+                if not speakers:
+                    continue
+
             display = cls._normalize_dialogue_text(value, keep_case=True)
-            _ends_open = display.rstrip().endswith((",", ";", ":"))
             display = display.rstrip(",;: ").strip()
-            if _ends_open and display:
-                display += "."
-            normalized = display.lower()
-            if not normalized or len(re.findall(r"[A-Za-z]", normalized)) < 2:
-                continue
-
-            prefix_window = text[max(0, match.start() - 180):match.start()]
-            prefix = re.split(r"[.!?][\"”’]?\s+", prefix_window)[-1]
-            suffix_window = text[match.end():match.end() + 100]
-            suffix = re.split(r"[.!?]\s+", suffix_window, maxsplit=1)[0]
-            suffix_context = re.sub(r"^[,;:\s]+", "", suffix)
-
-            if screen_context.search(prefix) or re.search(
-                r"^(?:is|was|were|appears|appeared|appearing|shows|showed|display|displayed|displays|displaying|reads|read|flashed|flashes|shown|showing)\b.{0,80}\b(?:on|in|across|inside)\s+(?:the\s+)?(?:screen|monitor|display|terminal)\b",
-                suffix_context,
-                flags=re.IGNORECASE | re.DOTALL,
-            ):
+            if not display or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
 
             segments.append({
-                "text": normalized,
+                "text": key,
                 "display": display,
-                "source_speakers": set(),
-                "tag_speakers": cls._speech_tag_speakers(
-                    text[max(0, match.start() - 90):match.start()],
-                    text[match.end():match.end() + 90],
-                ),
+                "source_speakers": speakers,
                 "start": match.start(),
                 "end": match.end(),
+                "semantic": True,
             })
             quote_spans.append((match.start(), match.end()))
 
+        # Explicit screenplay/script labels can be recovered deterministically even when a
+        # semantic payload is unavailable. This path uses only the speaker surface, not a
+        # hand-maintained speech vocabulary.
         label_pattern = re.compile(
             r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
         )
-
         for match in label_pattern.finditer(text):
             if any(
                 start <= match.start() < end
@@ -2225,33 +2203,49 @@ class QwenDirector(
                 for start, end in quote_spans
             ):
                 continue
-
-            speaker = match.group(1).strip()
-            spoken = match.group(2).strip()
-            display = cls._normalize_dialogue_text(spoken, keep_case=True).rstrip(",;: ").strip()
-            normalized = display.lower()
-            if not speaker or not normalized:
+            speaker = EntityResolver.normalize(match.group(1).strip())
+            if allowed and speaker not in allowed:
                 continue
-
+            display = cls._normalize_dialogue_text(match.group(2), keep_case=True).rstrip(",;: ").strip()
+            key = cls._dialogue_anchor_key(display)
+            if not key or len(re.findall(r"[A-Za-z]", display)) < 2:
+                continue
+            semantic_speakers = set(semantic_by_key.get(key, set()))
+            if semantic_speakers:
+                # The explicit screenplay label and Qwen's semantic speaker must agree.
+                # This prevents a malformed model response from reassigning a source line.
+                if speaker not in semantic_speakers:
+                    continue
+                speaker_set = {speaker}
+            elif semantic_items:
+                # A semantic payload exists and did not bless this line, so do not override Qwen.
+                continue
+            else:
+                speaker_set = {speaker}
             segments.append({
-                "text": normalized,
+                "text": key,
                 "display": display,
-                "source_speakers": {EntityResolver.normalize(speaker)},
+                "source_speakers": speaker_set,
                 "start": match.start(),
                 "end": match.end(),
+                "semantic": bool(semantic_speakers),
             })
 
-        segments.sort(key=lambda item: (item["start"], item["end"]))
+        segments.sort(key=lambda item: (item.get("start", 0), item.get("end", 0)))
         for segment in segments:
             segment.pop("start", None)
             segment.pop("end", None)
         return segments
 
     @classmethod
-    def _extract_story_spoken_texts(cls, story: str) -> dict[str, set[str]]:
+    def _extract_story_spoken_texts(
+        cls,
+        story: str,
+        semantic_spoken_dialogue: list[dict] | None = None,
+    ) -> dict[str, set[str]]:
         """Return source dialogue anchors for compatibility with existing callers."""
         anchors: dict[str, set[str]] = {}
-        for segment in cls._extract_story_spoken_segments(story):
+        for segment in cls._extract_story_spoken_segments(story, semantic_spoken_dialogue):
             anchor = str(segment.get("text", "") or "").strip()
             if not anchor:
                 continue
@@ -2287,7 +2281,10 @@ class QwenDirector(
 
         canonical_by_norm = {name.lower(): name for name in allowed_names}
         aliases = EntityResolver.build_character_alias_map(characters)
-        spoken_segments = self._extract_story_spoken_segments(story)
+        spoken_segments = self._extract_story_spoken_segments(
+            story,
+            getattr(self, "_semantic_spoken_dialogue", None),
+        )
         segment_progress = [0 for _ in spoken_segments]
 
         last_tag_speakers: set[str] = set()
