@@ -262,6 +262,9 @@ class QwenDirector(
             "deterministic_recoveries": 0,
         }
         if resuming:
+            # For AI Story / Expand, the single semantic extraction call is required before resume.
+            # Preserve Story may legitimately have used zero calls when its text contained no
+            # quote-delimited prose dialogue; the checkpoint still records its exact call count.
             try:
                 self._character_semantic_calls = max(
                     0,
@@ -269,6 +272,19 @@ class QwenDirector(
                 )
             except (TypeError, ValueError):
                 self._character_semantic_calls = 0
+
+            restored_semantic_dialogue = prior_director_plan.get("_semantic_spoken_dialogue", [])
+            if isinstance(restored_semantic_dialogue, list):
+                self._semantic_spoken_dialogue = [
+                    {
+                        "text": str(item.get("text", "") or "").strip(),
+                        "speaker": str(item.get("speaker", "") or "").strip(),
+                    }
+                    for item in restored_semantic_dialogue
+                    if isinstance(item, dict)
+                    and str(item.get("text", "") or "").strip()
+                    and str(item.get("speaker", "") or "").strip()
+                ]
 
         temperature, top_p = (
             self._sampling_for_mode(
@@ -387,7 +403,8 @@ class QwenDirector(
         # roster and scene topology must then be derived from THAT final story.
         #
         # Preserve Story:
-        # the supplied user story remains the source of truth.
+        # the supplied user story remains the character/story source of truth;
+        # the single semantic Qwen pass is used only for dialogue attribution.
         #
         # Qwen owns semantic character identity. ProductionPlanner performs
         # only bounded validation/canonicalization before production binding.
@@ -413,6 +430,15 @@ class QwenDirector(
             canonical_characters = []
             for item in resume_roster:
                 canonical_characters.append(Character.from_dict(deepcopy(item)))
+
+            # The semantic dialogue contract is checkpoint state. Never re-run the semantic
+            # Qwen extraction during resume: doing so would make checkpoint continuation
+            # nondeterministic and could disagree with the roster already used by earlier shots.
+            if "_semantic_spoken_dialogue" not in prior_director_plan:
+                raise RuntimeError(
+                    "Director checkpoint is incompatible with the semantic dialogue contract: "
+                    "_semantic_spoken_dialogue was not persisted. Restart from the narrative stage."
+                )
         else:
             if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
                 # Every creative story gets exactly one Qwen semantic character pass.
@@ -422,11 +448,29 @@ class QwenDirector(
                     qwen_character_extractor=self.extract_character_entities,
                 )
             else:
-                # Preserve mode remains source-of-truth deterministic.
+                # Preserve mode keeps the deterministic user-story roster as source of truth.
+                # Use the single semantic Qwen pass only when quote-delimited prose dialogue exists;
+                # explicit screenplay-style speaker labels remain fully deterministic. This preserves
+                # the zero-inference fast path for stories that contain no quote-style dialogue.
                 canonical_characters = planner.create_characters(
                     canonical_source_story,
                     qwen_character_extractor=None,
                 )
+                if self._preserve_story_requires_semantic_dialogue(story):
+                    preserve_hints = [
+                        str(character.name).strip()
+                        for character in canonical_characters
+                        if character is not None and str(getattr(character, "name", "")).strip()
+                    ]
+                    self.extract_character_entities(
+                        story,
+                        deterministic_candidates=preserve_hints,
+                    )
+                    if not self._semantic_spoken_dialogue:
+                        self._record_recovery(
+                            "preserve_semantic_dialogue_empty",
+                            "Preserve Story contains quote-delimited prose but the semantic extraction returned no spoken dialogue items.",
+                        )
 
         character_payloads = []
         for character in canonical_characters:
@@ -461,13 +505,10 @@ class QwenDirector(
                 "Canonical character extraction produced no usable names."
             )
 
-        if mode == AI_STORY_MODE and not self._story_has_semantic_spoken_dialogue(
-            story,
-            characters,
-        ):
-            raise RuntimeError(
-                "AI Story generation failed semantic validation: the final story contains no direct spoken dialogue "
-                "attributed by the Qwen semantic extraction pass to a canonical physically present character."
+        if mode == AI_STORY_MODE:
+            self._require_semantic_spoken_dialogue(
+                story,
+                characters,
             )
 
         canonical_scenes = planner.create_scenes(
@@ -513,6 +554,7 @@ class QwenDirector(
             # character metadata from the creative response.
             "_canonical_character_roster_verified": True,
             "_character_semantic_calls_used": int(self._character_semantic_calls),
+            "_semantic_spoken_dialogue": deepcopy(self._semantic_spoken_dialogue),
             "scenes": deepcopy(scenes),
             "shots": prior_shots,
         }
@@ -848,6 +890,7 @@ class QwenDirector(
 
         except Exception as exc:
 
+            scene_id = locals().get("scene_id", "")
             director_plan["shots"] = deepcopy(
                 all_shots
             )
@@ -864,7 +907,7 @@ class QwenDirector(
                     "failed",
                     "shots",
                     completed_scene_ids,
-                    scene_id if 'scene_id' in locals() else "",
+                    scene_id,
                     str(exc),
                 ),
             )
@@ -1013,6 +1056,18 @@ class QwenDirector(
             characters,
         )
 
+        if mode == EXPAND_USER_STORY_MODE and self._semantic_spoken_dialogue:
+            final_dialogue_count = sum(
+                len(shot.get("dialogue_events", []) or [])
+                for shot in all_shots
+                if isinstance(shot, dict)
+            )
+            if final_dialogue_count == 0:
+                self._record_recovery(
+                    "expand_semantic_dialogue_empty",
+                    "Expand Story semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
+                )
+
         # Dialogue speaker normalization may remove or replace events. That can
         # change which event is actually at a shot boundary, so continuation
         # flags must be canonicalized again against the FINAL dialogue event
@@ -1102,6 +1157,8 @@ class QwenDirector(
             # back to its pre-director roster, which is empty for AI_STORY
             # before Qwen has generated the final narrative.
             "_canonical_character_roster_verified": True,
+            "_character_semantic_calls_used": int(self._character_semantic_calls),
+            "_semantic_spoken_dialogue": deepcopy(self._semantic_spoken_dialogue),
             "scenes": scenes,
             "shots": all_shots,
         }
@@ -2111,7 +2168,7 @@ class QwenDirector(
     @staticmethod
     def _dialogue_anchor_key(value: str) -> str:
         text = QwenDirector._normalize_dialogue_text(value)
-        text = re.sub(r"^[,;:!?\-\s]+|[,;:!?\-\s]+$", "", text)
+        text = re.sub(r"^[,;:!?\.\-\s]+|[,;:!?\.\-\s]+$", "", text)
         return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
@@ -2120,17 +2177,28 @@ class QwenDirector(
         story: str,
         semantic_spoken_dialogue: list[dict] | None = None,
         allowed_speakers: set[str] | list[str] | None = None,
+        speaker_aliases: dict[str, str] | None = None,
     ) -> list[dict]:
         """Extract direct spoken source segments from one semantic dialogue contract.
 
         Creative modes pass the `spoken_dialogue` field returned by the existing single Qwen
         semantic extraction call. Deterministic parsing only reconciles those semantic spans to
         exact source occurrences; it does not maintain a speech-verb, machine-word, or domain-word list.
-        When no semantic result is available (e.g. Preserve Story), only explicit screenplay-style
-        `Name: line` labels are accepted, which is deliberately conservative.
+        When no semantic result is available (for example, a legacy caller or checkpoint), only
+        explicit screenplay-style `Name: line` labels are accepted, which is deliberately conservative.
         """
         text = str(story or "")
         segments: list[dict] = []
+
+        alias_map = {
+            EntityResolver.normalize(str(key)): EntityResolver.normalize(str(value))
+            for key, value in (speaker_aliases or {}).items()
+            if str(key or "").strip() and str(value or "").strip()
+        }
+
+        def canonicalize_speaker(surface: str) -> str:
+            normalized = EntityResolver.normalize(surface)
+            return alias_map.get(normalized, normalized)
 
         semantic_items: list[dict] = []
         for item in (semantic_spoken_dialogue or []):
@@ -2141,17 +2209,26 @@ class QwenDirector(
             key = cls._dialogue_anchor_key(spoken)
             if not key or not speaker:
                 continue
-            semantic_items.append({"key": key, "speaker": EntityResolver.normalize(speaker)})
-
-        semantic_by_key: dict[str, set[str]] = {}
-        for item in semantic_items:
-            semantic_by_key.setdefault(item["key"], set()).add(item["speaker"])
+            semantic_items.append({
+                "key": key,
+                "speaker": canonicalize_speaker(speaker),
+            })
 
         allowed = {
             EntityResolver.normalize(value)
             for value in (allowed_speakers or [])
             if str(value or "").strip()
         }
+
+        semantic_consumed: set[int] = set()
+
+        def consume_semantic_speaker(key: str) -> set[str]:
+            for index, item in enumerate(semantic_items):
+                if index in semantic_consumed or item["key"] != key:
+                    continue
+                semantic_consumed.add(index)
+                return {item["speaker"]}
+            return set()
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
@@ -2165,7 +2242,7 @@ class QwenDirector(
             if not key:
                 continue
 
-            speakers = set(semantic_by_key.get(key, set()))
+            speakers = consume_semantic_speaker(key)
             # Without Qwen semantic dialogue, do not guess from generic English prose.
             if not speakers:
                 continue
@@ -2203,14 +2280,14 @@ class QwenDirector(
                 for start, end in quote_spans
             ):
                 continue
-            speaker = EntityResolver.normalize(match.group(1).strip())
+            speaker = canonicalize_speaker(match.group(1).strip())
             if allowed and speaker not in allowed:
                 continue
             display = cls._normalize_dialogue_text(match.group(2), keep_case=True).rstrip(",;: ").strip()
             key = cls._dialogue_anchor_key(display)
             if not key or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
-            semantic_speakers = set(semantic_by_key.get(key, set()))
+            semantic_speakers = consume_semantic_speaker(key)
             if semantic_speakers:
                 # The explicit screenplay label and Qwen's semantic speaker must agree.
                 # This prevents a malformed model response from reassigning a source line.
@@ -2284,14 +2361,14 @@ class QwenDirector(
         spoken_segments = self._extract_story_spoken_segments(
             story,
             getattr(self, "_semantic_spoken_dialogue", None),
+            allowed_speakers=allowed_names,
+            speaker_aliases=aliases,
         )
         segment_progress = [0 for _ in spoken_segments]
 
-        last_tag_speakers: set[str] = set()
         last_display: list[str] = [""]
 
         def _consume_source_dialogue(normalized_text: str):
-            last_tag_speakers.clear()
             last_display[0] = ""
             if not normalized_text:
                 return None
@@ -2323,7 +2400,6 @@ class QwenDirector(
                     display_text = str(segment.get("display", "") or "")
                     if len(display_text) == len(source_text):
                         last_display[0] = display_text[progress:segment_progress[index]].strip()
-                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
                 if remaining_key.startswith(candidate_key):
@@ -2334,7 +2410,6 @@ class QwenDirector(
                     display_text = str(segment.get("display", "") or "")
                     if len(display_text) == len(source_text):
                         last_display[0] = display_text[progress:segment_progress[index]].strip()
-                    last_tag_speakers.update(segment.get("tag_speakers", set()) or set())
                     return set(segment.get("source_speakers", set()) or set())
 
             return None
@@ -2444,23 +2519,6 @@ class QwenDirector(
                         "Explicit dialogue source speaker could not be resolved: "
                         f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}"
                     )
-
-                if not explicit_source_canonicals and last_tag_speakers:
-                    # The prose names who spoke ("..." Mara said). That tag is
-                    # stronger than the shot model's guess, so correct the
-                    # speaker instead of trusting or failing on it.
-                    tagged = {
-                        resolved.lower()
-                        for tag in last_tag_speakers
-                        if (resolved := _resolve(tag)) is not None
-                    }
-                    if len(tagged) == 1 and canonical.lower() not in tagged:
-                        remapped = canonical_by_norm[next(iter(tagged))]
-                        self._record_recovery(
-                            "dialogue_speaker_tag_remap",
-                            f"shot={shot_id} from={canonical!r} to={remapped!r}",
-                        )
-                        canonical = remapped
 
                 normalized_speaker = canonical.lower()
                 if explicit_source_canonicals and normalized_speaker not in explicit_source_canonicals:
@@ -2977,6 +3035,15 @@ class QwenDirector(
         merged["_canonical_character_roster_verified"] = (
             creative.get("_canonical_character_roster_verified") is True
         )
+
+        if "_character_semantic_calls_used" in creative:
+            merged["_character_semantic_calls_used"] = int(
+                creative.get("_character_semantic_calls_used", 0) or 0
+            )
+        if "_semantic_spoken_dialogue" in creative:
+            merged["_semantic_spoken_dialogue"] = deepcopy(
+                creative.get("_semantic_spoken_dialogue", []) or []
+            )
 
         # Canonical scene topology defaults to the premise-derived base
         # plan, but a verified director pass (generate() succeeded and
