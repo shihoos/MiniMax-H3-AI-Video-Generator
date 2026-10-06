@@ -1473,6 +1473,10 @@ class QwenDirectorSanitizeMixin:
             r"\bready to uncover\b",
             r"\b(?:walked|stepped|headed|disappeared|went) into the unknown\b",
             r"\bset something in motion that could never be undone\b",
+            r"\buntil (?:the|it|they|he|she|something|someone)\b.{0,40}\b(?:returned|came back|woke|stirred|found|rose|called)\b",
+            r"\byet to come\b",
+            r"\bonce more\b.{0,30}\buntil\b",
+            r"\bfirst step of\b",
         )
 
         return any(
@@ -1507,36 +1511,39 @@ class QwenDirectorSanitizeMixin:
             for part in re.split(r"\n\s*\n+", str(result or "").strip())
             if part.strip()
         ]
+        # Collect every defect so the single fail-closed error reports all of them together.
+        errors: list[str] = []
         if len(paragraphs) != 6:
-            raise RuntimeError(
+            errors.append(
                 f"Generated story must contain exactly six paragraphs (found {len(paragraphs)})."
             )
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
         if not 420 <= word_count <= 560:
-            raise RuntimeError(
+            errors.append(
                 "Generated story must contain 420 to 560 words "
                 f"(found {word_count})."
             )
 
         # AI Story is a free-form cinematic generation pass where direct dialogue is part of
-        # the narrative contract. Expand Story may legitimately be a one-character expansion,
-        # so requiring spoken dialogue can itself cause the model to invent an unwanted character
-        # and trigger an avoidable second creative pass.
+        # the narrative contract. Expand Story may legitimately be a one-character expansion.
         if mode == AI_STORY_MODE and not self._story_has_explicit_dialogue(result):
-            raise RuntimeError(
+            errors.append(
                 "Generated AI story must contain at least one explicit quoted line of direct dialogue."
             )
 
         if self._story_has_open_ended_finale(result):
-            raise RuntimeError(
+            errors.append(
                 "Generated story ends on an unresolved future hook rather than a completed consequence."
             )
 
         if self._final_paragraph_word_count(result) < 25:
-            raise RuntimeError(
+            errors.append(
                 "Generated story has an underdeveloped final aftermath paragraph."
             )
+
+        if errors:
+            raise RuntimeError(" | ".join(errors))
 
     def _validate_mode_output(
         self,
@@ -1598,7 +1605,6 @@ class QwenDirectorSanitizeMixin:
             coverage, missing_sentences = self._global_premise_coverage(
                 source,
                 result,
-                minimum_token_overlap=0.15,
             )
             if source and coverage < 0.50:
                 detail = "; ".join(missing_sentences[:3])
