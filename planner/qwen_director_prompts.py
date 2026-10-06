@@ -203,31 +203,34 @@ HARD FORMAT
   Target 450-520 words in total (absolute allowed range 420-560 words, so never write short).
 - The sixth paragraph is a full settled aftermath of at least 60 words.
 
-CRAFT (plan silently, then write)
-- Paragraph 1: open mid-action in a specific place with a concrete physical action as the objective and an immediate obstacle.
-  Name one precise sensory detail that is unique to this setting (not generic cold, dust, or dark).
-- Plant one small physical object or habit (the planted detail) in paragraphs 1-2 (a worn tool, a dented flask,
-  a number on a label). Its payoff must return in paragraph 5 or 6 and change what the protagonist does or understands.
-- Paragraphs 2-3: escalate through actions and evidence the protagonist handles with their hands.
-  Each paragraph must end on a different new fact or complication, never on a restated mood.
-- Paragraph 4: one reversal that recontextualizes something the protagonist already saw or believed,
-  so that an earlier detail now means something else. Cause it by an earlier action, not by luck.
-- Paragraph 5: a forced choice between two outcomes that cannot both be kept. The protagonist acts
-  physically and pays a concrete, visible price (a lost tool, an injury, a destroyed thing, a person left behind).
-- Paragraph 6: the direct, visible consequence of that choice, ending on one completed past-tense action
-  in a settled situation. Nothing is left pending: no "until", no "yet to come", no next mission, no looming return.
-- Avoid the default sci-fi reveal (secret experiment, containment leak, monster in a vault, ancient weapon)
-  unless the premise explicitly demands it. Prefer a human, mechanical, or environmental cause that is
-  surprising but fair in hindsight.
+CAUSALITY (plan silently, then write)
+- The story is driven by what people DO and DECIDE, not by finding progressively stranger things.
+  The protagonist must cause, choose, or misjudge something early on, and the later plot must follow from it.
+- Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical action as the
+  goal and meets an immediate obstacle. Include one precise sensory detail unique to this setting.
+- Paragraphs 2-3: the protagonist acts, and each action produces a result that makes the goal harder or
+  changes what they believe. Every paragraph ends on a new fact, never on a restated mood.
+- Paragraph 4: one reversal. It must come from something already established (an earlier action, a
+  relationship, a physical state of the place, or what another person says or does) and must overturn what the
+  protagonist believed about the central problem. State it plainly, in an action or a spoken line.
+  It must be consistent with every earlier paragraph.
+- Paragraph 5: a forced choice between two outcomes that cannot both be kept, caused by that reversal.
+  The protagonist acts physically and pays a concrete, visible price.
+- Paragraph 6: the direct, visible consequence of that choice, ending on one completed past-tense action in a
+  settled situation. Nothing is left pending: no "until", no "yet to come", no next mission, no looming return.
+- The reversal must NOT be: a hidden object, journal, recording, log, or message revealing a secret; a machine or
+  system that turns out to be alive, sentient, or watching; a containment failure; a secret experiment; a
+  monster or creature; or "the protagonist had been here before". Unless the premise names one of these, do not use it.
+- Do not introduce any person only through a document, label, message, or memory. Every named person is on screen.
 
 PROSE
 - Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
 - Do not begin more than two sentences in a row with the same word.
 - Show emotion through what hands, eyes, breath, and posture do. Never name the emotion as a mood word.
-- Banned filler: "heart pounded/raced", "the weight of", "a testament to", "shiver down", "time stood still",
-  "breath hitched/caught", "sent a chill", "palpable", "symphony of", "silent promise", "everything changed",
-  "the world would never be the same", "little did".
-- Do not use the word "suddenly".
+- Avoid cliches such as "heart pounded", "the weight of", "pulse steadied", "a testament to", "shiver down",
+  "sent a chill", "palpable", and the word "suddenly".
+- Plain prose means plain text: no emoji, symbols, or decorative characters anywhere.
+- Stop after the sixth paragraph. Write nothing after the story ends.
 
 PEOPLE
 - Every named person must be physically present in at least one scene and must act or speak there.
@@ -253,13 +256,15 @@ PEOPLE
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- One protagonist with a full name. Add at most one second recurring character, and only if that "
-                "person is physically present, wants something different from the protagonist, and changes the "
-                "protagonist's belief or choice.\n"
-                "- Include two to four short lines of spoken dialogue between people who are in the same room. "
-                "Each line must reveal information, create conflict, or alter a decision. "
-                "If the story has only one person present, use one quoted line the protagonist says aloud to something concrete.\n"
-                "- Invent no relatives, mentors, or colleagues who are not on screen.\n\n"
+                "- Character count is determined by the story. Do not force one character, two characters, or any fixed cast size. "
+                "Introduce as many recurring named, relational, or descriptive characters as the narrative genuinely requires, and no more.\n"
+                "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. "
+                "Do not add a character merely to supply dialogue, exposition, or a twist.\n"
+                "- Invent character names naturally when the story needs a new character. Give every recurring character one stable canonical name.\n"
+                "- Use spoken dialogue when it naturally advances conflict, information, or a decision. Do not invent dialogue merely to satisfy a count. "
+                "Every named speaker must be physically present in the story and must act or speak there.\n"
+                "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, "
+                "unless the story itself later establishes that person as physically present and consequential.\n\n"
                 "Output only the finished story prose."
             )
 
@@ -272,17 +277,13 @@ PEOPLE
                 "Output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
-                "- Preserve established characters, the source setting, the source events in order, and the source outcome.\n"
-                "- The only named people allowed are the SOURCE CHARACTER ANCHORS, written exactly as given "
-                "(never add a surname, title, or nickname to an anchor). Do not invent any new named person, "
-                "and do not mention relatives, siblings, parents, partners, mentors, colleagues, or friends, "
-                "not even as backstory or in a note, voice, or message. If the source has one character, "
-                "the story is a one-person story: the opposing force is the place, a machine, the weather, or "
-                "the protagonist's own earlier mistake.\n"
-                "- Add only cause, resistance, evidence, escalation, and consequence that the source implies. "
-                "Do not swap in a different genre plot.\n"
-                "- Dialogue is allowed only between source characters who are physically present together. "
-                "A lone protagonist may speak at most one short line aloud to a thing, and may also have none.\n\n"
+                "- Preserve every established source character that remains part of the story, the source setting, the source events in order, and the source outcome.\n"
+                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. Keep their canonical names stable.\n"
+                "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
+                "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
+                "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
+                "- Use dialogue naturally among whichever characters the story actually contains. Never add a character solely to create dialogue.\n"
+                "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n\n"
                 "Output only the finished expanded story prose."
             )
 
@@ -315,7 +316,7 @@ PEOPLE
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (the only named people allowed):\n"
+                    "\n\nSOURCE CHARACTER ANCHORS (established characters to preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
         result += (
@@ -422,25 +423,25 @@ PEOPLE
     def extract_character_entities(
         self,
         story: str,
-        deterministic_candidates: list[str] | None = None,
+        required_character_names: list[str] | None = None,
     ) -> dict:
         """Use the loaded Qwen model as the semantic character authority.
 
-        The planner performs only bounded production-safety validation and
-        canonicalization after this call. No lower layer may call Qwen for
-        character identity or alias semantics.
+        Qwen reads the completed story and returns the production character roster.
+        The planner does only bounded validation/canonicalization afterward; it does
+        not discover or invent additional characters from regex/prose heuristics.
         """
         story = str(story or "").strip()
         if not story:
             return {"candidates": []}
 
         self._character_semantic_calls += 1
-        if self._character_semantic_calls > 2:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
+        if self._character_semantic_calls > 1:
+            raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
 
-        candidate_hints = [
+        required_names = [
             str(value).strip()
-            for value in (deterministic_candidates or [])
+            for value in (required_character_names or [])
             if str(value).strip()
         ]
 
@@ -454,6 +455,12 @@ PEOPLE
        character and a concrete grounded relationship, expressed as a canonical relational identity.
     3) descriptive_character: a persistent unnamed person whose identity is grounded by a distinctive,
        recurring description, such as "the man in the suit" or "the woman with piercing eyes".
+
+    CHARACTER COUNT IS OPEN. Return every recurring production character actually created by the story,
+    whether the final cast contains one person, two people, or many. Do not impose a numeric cast limit.
+    For a newly created AI Story, invent and return the canonical names the story itself uses. For Expand Story,
+    preserve every supplied source anchor and also return any new character that the expanded narrative genuinely
+    introduces and makes consequential. Do not suppress a valid new character merely because it was not in the source.
 
     Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
     "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a canonical
@@ -479,16 +486,15 @@ PEOPLE
     name on a container/document/photograph, or other backstory-only identity is NOT a production character
     unless that person is physically present in the story and takes meaningful action.
     Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
-    For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
-    them as an object label, historical/backstory reference, interrogative word, or other non-present identity.
+    Source anchors are preservation requirements, not a whitelist of permitted identities.
     Do not promote a weak textual surface into a canonical character merely because it is capitalized.
-    Recover stable named, relational, and descriptive identities that the deterministic scan may not have named yet.
+    Recover every stable named, relational, and descriptive identity actually created by the story.
     """).strip()
 
         user_payload = json.dumps(
             {
                 "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_candidates": candidate_hints[:32],
+                "required_source_characters": required_names[:16],
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -521,10 +527,10 @@ PEOPLE
         deterministic_candidates: list[str] | None,
         semantic_result,
     ) -> dict:
-        """Run the single bounded semantic adjudication pass when extraction disagrees with safety evidence."""
+        """Legacy compatibility method; production Director no longer calls a second semantic pass."""
         self._character_semantic_calls += 1
-        if self._character_semantic_calls > 2:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 2).")
+        if self._character_semantic_calls > 1:
+            raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
 
         candidates = [
             str(value).strip()
