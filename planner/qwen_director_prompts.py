@@ -256,34 +256,41 @@ PEOPLE
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- Character count is determined by the story. Do not force one character, two characters, or any fixed cast size. "
-                "Introduce as many recurring named, relational, or descriptive characters as the narrative genuinely requires, and no more.\n"
-                "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. "
-                "Do not add a character merely to supply dialogue, exposition, or a twist.\n"
-                "- Invent character names naturally when the story needs a new character. Give every recurring character one stable canonical name.\n"
-                "- Use spoken dialogue when it naturally advances conflict, information, or a decision. Do not invent dialogue merely to satisfy a count. "
-                "Every named speaker must be physically present in the story and must act or speak there.\n"
-                "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, "
-                "unless the story itself later establishes that person as physically present and consequential.\n\n"
+                "- Qwen decides the number of consequential characters the story requires. There is no fixed cast size. "
+                "Use as many recurring people as the causal story genuinely needs, and no decorative cast. "
+                "A character may be named, relational, or descriptively identified when the story establishes that identity.\n"
+                "- Do not invent people merely to satisfy a dialogue quota. Dialogue may involve any established characters "
+                "who are physically present; every speaker must be a real production character in the generated story.\n"
+                "- A person mentioned only in a document, recording, memory, label, historical incident, or past disappearance "
+                "is evidence rather than a production character unless the story subsequently establishes that person as present and consequential.\n\n"
                 "Output only the finished story prose."
             )
 
         if mode == EXPAND_USER_STORY_MODE:
             return (
                 "You are the story editor-writer for MiniMax H3. You expand a short source story into a complete, "
-                "film-ready cinematic story without changing who it is about or what happened. "
-                "First identify silently the source's characters, setting, events, and outcome, then build the causal "
-                "spine around them (goal, resistance, evidence, reversal, costly choice, consequence). "
+                "film-ready cinematic story while preserving its established characters, setting, important events, "
+                "causal meaning, and outcome. First identify silently the source's causal spine, then develop it into "
+                "a richer narrative. Qwen decides the resulting consequential cast; there is no fixed character count. "
                 "Output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
-                "- Preserve every established source character that remains part of the story, the source setting, the source events in order, and the source outcome.\n"
-                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. Keep their canonical names stable.\n"
-                "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
-                "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
-                "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
-                "- Use dialogue naturally among whichever characters the story actually contains. Never add a character solely to create dialogue.\n"
-                "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n\n"
+                "- Preserve every established source character accurately. SOURCE CHARACTER ANCHORS are preservation "
+                "anchors, not a cast whitelist. Keep their canonical identities stable.\n"
+                "- Qwen may introduce additional named, relational, or descriptive characters when the expanded story "
+                "genuinely requires them for action, conflict, information, relationship, or consequence. There is no "
+                "numeric cast limit and no requirement to add a counterpart.\n"
+                "- Never introduce a decorative character merely to satisfy a dialogue quota. Every recurring person must "
+                "matter to the causal story.\n"
+                "- A person mentioned only through a document, recording, photograph, memory, label, historical incident, "
+                "or past disappearance is not a present production character unless the story itself establishes that "
+                "person as present and consequential.\n"
+                "- Preserve the source's setting, core events, turning point, and outcome while adding only meaningful "
+                "cause, resistance, evidence, escalation, choice, and consequence. Do not replace the source with a "
+                "generic genre plot.\n\n"
+                "CAST AND DIALOGUE\n"
+                "- Dialogue may involve any established characters who are physically present. Do not invent people solely "
+                "to create dialogue. Keep dialogue short and functional when it advances conflict, information, or choice.\n\n"
                 "Output only the finished expanded story prose."
             )
 
@@ -316,7 +323,7 @@ PEOPLE
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (established characters to preserve; not a cast limit):\n"
+                    "\n\nSOURCE CHARACTER ANCHORS (preserve these established identities; they are not a cast whitelist):\n"
                     + ", ".join(anchors[:16])
                 )
         result += (
@@ -362,7 +369,7 @@ PEOPLE
             "properties": {
                 "candidates": {
                     "type": "array",
-                    "maxItems": 32,
+                    "maxItems": 128,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -423,13 +430,13 @@ PEOPLE
     def extract_character_entities(
         self,
         story: str,
-        required_character_names: list[str] | None = None,
+        deterministic_candidates: list[str] | None = None,
     ) -> dict:
         """Use the loaded Qwen model as the semantic character authority.
 
-        Qwen reads the completed story and returns the production character roster.
-        The planner does only bounded validation/canonicalization afterward; it does
-        not discover or invent additional characters from regex/prose heuristics.
+        The planner performs only bounded production-safety validation and
+        canonicalization after this call. No lower layer may call Qwen for
+        character identity or alias semantics.
         """
         story = str(story or "").strip()
         if not story:
@@ -439,9 +446,9 @@ PEOPLE
         if self._character_semantic_calls > 1:
             raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
 
-        required_names = [
+        candidate_hints = [
             str(value).strip()
-            for value in (required_character_names or [])
+            for value in (deterministic_candidates or [])
             if str(value).strip()
         ]
 
@@ -455,12 +462,6 @@ PEOPLE
        character and a concrete grounded relationship, expressed as a canonical relational identity.
     3) descriptive_character: a persistent unnamed person whose identity is grounded by a distinctive,
        recurring description, such as "the man in the suit" or "the woman with piercing eyes".
-
-    CHARACTER COUNT IS OPEN. Return every recurring production character actually created by the story,
-    whether the final cast contains one person, two people, or many. Do not impose a numeric cast limit.
-    For a newly created AI Story, invent and return the canonical names the story itself uses. For Expand Story,
-    preserve every supplied source anchor and also return any new character that the expanded narrative genuinely
-    introduces and makes consequential. Do not suppress a valid new character merely because it was not in the source.
 
     Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
     "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a canonical
@@ -486,15 +487,16 @@ PEOPLE
     name on a container/document/photograph, or other backstory-only identity is NOT a production character
     unless that person is physically present in the story and takes meaningful action.
     Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
-    Source anchors are preservation requirements, not a whitelist of permitted identities.
+    For deterministic candidates, explicitly classify them, but reject them when local story evidence identifies
+    them as an object label, historical/backstory reference, interrogative word, or other non-present identity.
     Do not promote a weak textual surface into a canonical character merely because it is capitalized.
-    Recover every stable named, relational, and descriptive identity actually created by the story.
+    Recover stable named, relational, and descriptive identities that the deterministic scan may not have named yet.
     """).strip()
 
         user_payload = json.dumps(
             {
                 "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "required_source_characters": required_names[:16],
+                "deterministic_candidates": candidate_hints[:32],
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -520,58 +522,6 @@ PEOPLE
             print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
 
         return result
-
-    def adjudicate_character_entities(
-        self,
-        story: str,
-        deterministic_candidates: list[str] | None,
-        semantic_result,
-    ) -> dict:
-        """Legacy compatibility method; production Director no longer calls a second semantic pass."""
-        self._character_semantic_calls += 1
-        if self._character_semantic_calls > 1:
-            raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
-
-        candidates = [
-            str(value).strip()
-            for value in (deterministic_candidates or [])
-            if str(value).strip()
-        ][:12]
-        supplied = semantic_result if isinstance(semantic_result, dict) else {}
-        system_prompt = textwrap.dedent("""
-    You are the final character-identity adjudicator. Return JSON only.
-    Review only the supplied candidate names and semantic extraction. Never invent a person.
-    Emit exactly one decision object for every supplied candidate, preserving candidate order.
-    Use is_character=false for anything that is a prose token, project/protocol/status word, object,
-    place, event, role-only label, UI text, or uncertain identity.
-    True characters use entity_type PERSON, CHARACTER, or SENTIENT and one of the grounded identity types:
-    named_character, relational_character, or descriptive_character.
-    A relational character must have a real named character in relationship_to and an explicitly grounded
-    relationship. A descriptive character must have a stable distinguishing description, never bare man/woman.
-    Keep aliases short (at most two useful grounded surface forms). Do not add commentary. Complete every
-    candidate object before stopping.
-    """).strip()
-        payload = json.dumps(
-            {
-                "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_candidates": candidates,
-                "semantic_result": supplied,
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return self._chat_json(
-            system_prompt,
-            payload,
-            minimum_completion=96,
-            temperature=0.05,
-            top_p=0.70,
-            call_name="character_entity_adjudication",
-            max_completion=512,
-            json_mode=True,
-            disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
-        )
 
     @staticmethod
     def _shot_json_schema(
