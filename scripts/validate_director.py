@@ -51,8 +51,8 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
         for concept in ("goal", "resistance", "reversal", "choice", "consequence"):
             _assert(concept in text.lower(), f"{label} prompt is missing the core {concept} concept")
         _assert(
-            "planted detail" in text.lower() and "payoff" in text.lower(),
-            f"{label} prompt must describe a causal planted-detail payoff",
+            "cause, choose, or misjudge" in text.lower() and "must not be" in text.lower() and "sentient" in text.lower(),
+            f"{label} prompt must make the reversal action-driven and ban the generic hidden-object/sentient-system reveal",
         )
         _assert(
             "price" in text.lower() and "choice" in text.lower(),
@@ -64,8 +64,9 @@ def test_story_prompt_restores_successful_compact_narrative_contract():
         _assert("organism" not in text.lower(), f"{label} prompt must not prime hook imagery")
     _assert("short lines" in ai.lower() and "spoken dialogue" in ai.lower(), "AI story prompt must keep dialogue compact and spoken")
     _assert("stable canonical name" in expand.lower() and "preserve established characters" in expand.lower(), "Expand prompt must preserve source character identity")
-    _assert("do not invent any new named person" in expand.lower() and "relatives" in expand.lower(), "Expand prompt must forbid invented cast and relatives (matches the cast validator)")
-    _assert("exactly as given" in expand.lower(), "Expand prompt must keep anchor names verbatim")
+    _assert("add additional named, relational, or descriptive recurring characters" in expand.lower(), "Expand prompt must allow Qwen to create additional consequential characters")
+    _assert("not a cast limit" in expand.lower(), "Expand source anchors must not become a cast whitelist")
+    _assert("exactly as given" not in expand.lower(), "Expand prompt must not over-constrain source names with an artificial exact-only cast rule")
     _assert("concrete" in ai.lower() and "physical action" in ai.lower(), "AI story prompt must prioritize immediate filmable action")
     _assert("PLAN:" not in ai and "LEDGER:" not in ai, "AI story prompt must not expose a planning/checklist format")
     _assert("<option A>" not in ai and "<option B>" not in ai, "AI story prompt must not force a binary choice template")
@@ -109,29 +110,23 @@ def test_logged_story_rosters_are_not_poisoned_by_prose_surfaces():
 
 
 
-def test_malformed_adjudication_fallback_drops_prose_tokens():
+def test_malformed_qwen_character_roster_fails_closed_without_adjudication():
     planner = _planner()
-    story = (
-        "The polar systems engineer, Liora Venn, reached the Arctic station. "
-        "Everything had changed. Dr. Elias Kren had designed the vault and warned her."
-    )
+    story = "Liora Venn reached the Arctic station. Everything had changed. Elias Kren waited beside the vault."
 
     def extractor(*_args):
-        return {"candidates": [
-            {"name": "Everything", "entity_type": "OTHER", "is_character": False, "aliases": [], "identity_type": "named_character"},
-            {"name": "Liora Venn", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
-            {"name": "Elias Kren", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
-        ]}
+        raise ValueError("malformed character JSON")
 
-    def truncated_adjudicator(*_args):
-        raise ValueError("truncated JSON")
-
-    names = [c.name for c in planner.create_characters(
-        story,
-        qwen_character_extractor=extractor,
-        qwen_character_adjudicator=truncated_adjudicator,
-    )]
-    _assert(names == ["Liora Venn", "Elias Kren"], f"malformed semantic fallback leaked prose tokens: {names}")
+    try:
+        planner.create_characters(
+            story,
+            qwen_character_extractor=extractor,
+            qwen_character_adjudicator=None,
+        )
+    except ValueError as exc:
+        _assert("malformed character JSON" in str(exc), f"wrong failure from Qwen character pass: {exc}")
+    else:
+        raise AssertionError("malformed Qwen character output must fail closed; deterministic roster discovery must not take over")
 
 
 def test_dialogue_speaker_is_bound_even_when_shot_starts_empty():
@@ -169,261 +164,138 @@ def test_semantic_named_surface_safety_boundary():
     )
 
 
-def test_semantic_empty_fallback():
+def test_qwen_character_roster_is_authoritative_and_filters_noncharacters():
     planner = _planner()
-    story = "Elias Kade entered the vault and Lin Mei followed him. Elias looked at Lin."
-
-    calls = []
-    def extractor(*_args):
-        calls.append("extract")
-        return {"candidates": []}
-
-    def adjudicator(*_args):
-        calls.append("adjudicate")
-        return {"candidates": []}
-
-    names = [c.name for c in planner.create_characters(
-        story,
-        qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
-    )]
-    _assert(names == ["Elias Kade", "Lin Mei"], f"empty semantic responses must fall back deterministically: {names}")
-    _assert(calls == ["extract", "adjudicate"], f"empty extraction must trigger adjudication: {calls}")
-
-
-def test_semantic_partial_positive_is_adjudicated():
-    planner = _planner()
-    story = "Elias Kade entered the vault and Lin Mei followed him. Elias looked at Lin."
+    story = "Elias Kade entered the vault and Lin Mei followed him. Access appeared on the monitor."
     calls = []
 
-    def extractor(*_args):
-        calls.append("extract")
-        return {"candidates": [{
-            "name": "Elias Kade",
-            "entity_type": "PERSON",
-            "is_character": True,
-            "aliases": [],
-            "identity_type": "named_character",
-        }]}
-
-    def adjudicator(*_args):
-        calls.append("adjudicate")
+    def extractor(_story, required):
+        calls.append(("extract", list(required)))
         return {"candidates": [
-            {
-                "name": "Elias Kade",
-                "entity_type": "PERSON",
-                "is_character": True,
-                "aliases": [],
-                "identity_type": "named_character",
-            },
-            {
-                "name": "Lin Mei",
-                "entity_type": "PERSON",
-                "is_character": True,
-                "aliases": [],
-                "identity_type": "named_character",
-            },
+            {"name": "Elias Kade", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Lin Mei", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Access", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
         ]}
 
     names = [c.name for c in planner.create_characters(
         story,
         qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
+        qwen_character_adjudicator=None,
     )]
-    _assert(names == ["Elias Kade", "Lin Mei"], f"partial extractor result lost a deterministic character: {names}")
-    _assert(calls == ["extract", "adjudicate"], f"partial extractor result must be adjudicated: {calls}")
+    _assert(names == ["Elias Kade", "Lin Mei"], f"planner failed to bounded-filter the Qwen roster: {names}")
+    _assert(len(calls) == 1, f"creative roster must use exactly one Qwen character pass: {calls}")
 
 
-def test_semantic_negative_does_not_destroy_strong_deterministic_roster():
+def test_qwen_character_roster_can_introduce_new_characters_without_source_whitelist():
     planner = _planner()
-    story = "Elias Kade entered the vault and Lin Mei followed him. Elias looked at Lin."
+    story = "Elias Kade entered the vault. Lin Mei followed him. Mara Venn locked the door behind them."
 
-    def extractor(*_args):
-        return {"candidates": [{
-            "name": "Elias Kade",
-            "entity_type": "PERSON",
-            "is_character": False,
-            "aliases": [],
-            "identity_type": "named_character",
-        }]}
-
-    def empty_adjudicator(*_args):
-        return {"candidates": []}
+    def extractor(_story, required):
+        _assert(required == [], f"AI Story must not receive an artificial source-cast whitelist: {required}")
+        return {"candidates": [
+            {"name": "Elias Kade", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Lin Mei", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Mara Venn", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+        ]}
 
     names = [c.name for c in planner.create_characters(
         story,
         qwen_character_extractor=extractor,
-        qwen_character_adjudicator=empty_adjudicator,
+        qwen_character_adjudicator=None,
     )]
-    _assert("Elias Kade" in names and "Lin Mei" in names, f"strong deterministic identities were erased: {names}")
+    _assert(names == ["Elias Kade", "Lin Mei", "Mara Venn"], f"Qwen-created character was incorrectly filtered by source whitelist: {names}")
 
 
-def test_explicit_adjudicated_negative_is_respected_when_other_characters_remain():
+def test_qwen_negative_character_decision_is_respected():
     planner = _planner()
     story = "Elias Kade entered the vault and Lin Mei followed him."
 
     def extractor(*_args):
-        return {"candidates": [{
-            "name": "Elias Kade",
-            "entity_type": "PERSON",
-            "is_character": False,
-            "aliases": [],
-            "identity_type": "named_character",
-        }]}
-
-    def adjudicator(*_args):
         return {"candidates": [
-            {
-                "name": "Elias Kade",
-                "entity_type": "PERSON",
-                "is_character": False,
-                "aliases": [],
-                "identity_type": "named_character",
-            },
-            {
-                "name": "Lin Mei",
-                "entity_type": "PERSON",
-                "is_character": True,
-                "aliases": [],
-                "identity_type": "named_character",
-            },
+            {"name": "Elias Kade", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Lin Mei", "entity_type": "PERSON", "is_character": False, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
         ]}
 
     names = [c.name for c in planner.create_characters(
         story,
         qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
+        qwen_character_adjudicator=None,
     )]
-    _assert(names == ["Lin Mei"], f"complete adjudicator negative was not respected: {names}")
+    _assert(names == ["Elias Kade"], f"planner overrode Qwen's explicit negative character decision: {names}")
 
 
-def test_expand_long_distance_relational_character_recovery():
-    """Regression for Expand Story discourse-distance recovery (e.g. `Eli ... his father`)."""
+def test_expand_qwen_roster_preserves_source_and_allows_new_characters():
+    planner = _planner()
+    story = "Eli entered the station. His father waited by the door. Mara Venn checked the generator."
+
+    def extractor(_story, required):
+        _assert(required == ["Eli"], f"Expand should pass only established source anchors: {required}")
+        return {"candidates": [
+            {"name": "Eli", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Eli's father", "entity_type": "PERSON", "is_character": True, "aliases": ["his father"], "identity_type": "relational_character", "relationship_to": "Eli", "relationship": "father"},
+            {"name": "Mara Venn", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+        ]}
+
+    names = [c.name for c in planner.create_characters(
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=None,
+        required_character_names=["Eli"],
+    )]
+    _assert(names == ["Eli", "Eli's father", "Mara Venn"], f"Expand cast was incorrectly source-locked: {names}")
+
+
+def test_expand_qwen_relational_character_is_accepted_without_adjudication():
     planner = _planner()
     story = (
-        "Eli stepped cautiously through the rusted gates of the abandoned train station, "
-        "the air thick with dust and the scent of decay. The flickering light from his "
-        "flashlight cast long shadows on the cracked tiles, each step echoing in the "
-        "cavernous silence. He had come here for a reason—whispers of a sealed vault "
-        "buried beneath the station, a relic from the city's forgotten past. His fingers "
-        "brushed against the cold metal of a door marked with faded engravings. "
-        "The door was sealed, but not locked. A faint hum of power pulsed through the air "
-        "as Eli pressed his palm against the surface. A memory surfaced—his father, "
-        "standing over a similar case, his face pale and drawn."
+        "Eli stepped through the station. His father stood beside the vault and watched him. "
+        "Mara Venn checked the generator before the lights failed."
     )
 
-    descriptors = planner.detect_character_descriptors(story)
-    _assert(
-        descriptors == ["Eli"],
-        f"long Expand Story fixture polluted the deterministic named roster: {descriptors}",
-    )
-
-    hints = planner._extract_relational_character_hints(story, descriptors)
-    names = [item.get("name") for item in hints]
-    _assert(
-        names == ["Eli's father"],
-        f"long-distance possessive relation was not recovered: {hints}",
-    )
-
-    # Verify the hint reaches the bounded semantic adjudication contract rather than
-    # being merely detectable by the helper.
-    calls = []
-
-    def extractor(*_args):
-        calls.append("extract")
-        return {"candidates": [{
-            "name": "Eli",
-            "entity_type": "PERSON",
-            "is_character": True,
-            "aliases": [],
-            "identity_type": "named_character",
-            "relationship_to": "",
-            "relationship": "",
-        }]}
-
-    def adjudicator(_story, hints_payload, _semantic):
-        calls.append("adjudicate")
-        _assert(
-            "Eli's father" in hints_payload,
-            f"long-distance relational hint was not supplied to adjudication: {hints_payload}",
-        )
+    def extractor(_story, required):
+        _assert(required == ["Eli"], f"unexpected Expand source anchors: {required}")
         return {"candidates": [
-            {
-                "name": "Eli",
-                "entity_type": "PERSON",
-                "is_character": True,
-                "aliases": [],
-                "identity_type": "named_character",
-                "relationship_to": "",
-                "relationship": "",
-            },
-            {
-                "name": "Eli's father",
-                "entity_type": "CHARACTER",
-                "is_character": False,
-                "aliases": ["his father", "father", "man"],
-                "identity_type": "relational_character",
-                "relationship_to": "Eli",
-                "relationship": "father",
-            },
+            {"name": "Eli", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Eli's father", "entity_type": "CHARACTER", "is_character": True, "aliases": ["his father"], "identity_type": "relational_character", "relationship_to": "Eli", "relationship": "father"},
+            {"name": "Mara Venn", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
         ]}
 
     characters = planner.create_characters(
         story,
         qwen_character_extractor=extractor,
-        qwen_character_adjudicator=adjudicator,
+        qwen_character_adjudicator=None,
+        required_character_names=["Eli"],
     )
-    names = [character.name for character in characters]
-    _assert(
-        "Eli" in names and "Eli's father" in names,
-        f"Expand Story relational character was lost during canonicalization: {names}",
-    )
-    _assert(
-        calls == ["extract", "adjudicate"],
-        f"long-distance relational recovery took an unexpected semantic path: {calls}",
-    )
+    names = [c.name for c in characters]
+    _assert(names == ["Eli", "Eli's father", "Mara Venn"], f"relational/new Qwen roster was not preserved: {names}")
 
 
-def test_relational_character_survives_generic_negative_and_resolves_dialogue():
-    from planner.production_planner import ProductionPlanner
+def test_relational_character_survives_qwen_roster_and_resolves_dialogue():
     from planner.qwen_director import QwenDirector
 
     story = (
         "Eli entered the vault. His father had disappeared years ago. "
-        "A voice said, \"You should not be here.\" Eli turned and saw an older man. "
-        "The man stepped forward, revealing his father's face. "
-        "\"I was trying to protect you.\""
+        "An older man stepped forward and said, \"You should not be here.\""
     )
-    planner = ProductionPlanner(ROOT)
+    planner = _planner()
 
     def extractor(*_args):
-        return {"candidates": [{
-            "name": "Eli", "entity_type": "PERSON", "is_character": True,
-            "aliases": [], "identity_type": "named_character",
-            "relationship_to": "", "relationship": "",
-        }, {
-            "name": "Eli's father", "entity_type": "CHARACTER", "is_character": False,
-            "aliases": ["his father", "man"], "identity_type": "relational_character",
-            "relationship_to": "Eli", "relationship": "father",
-        }]}
-
-    def adjudicator(*_args):
-        return {"candidates": [{
-            "name": "Eli", "entity_type": "PERSON", "is_character": True,
-            "aliases": [], "identity_type": "named_character",
-            "relationship_to": "", "relationship": "",
-        }, {
-            "name": "Eli's father", "entity_type": "CHARACTER", "is_character": False,
-            "aliases": ["his father", "man"], "identity_type": "relational_character",
-            "relationship_to": "Eli", "relationship": "father",
-        }]}
+        return {"candidates": [
+            {"name": "Eli", "entity_type": "PERSON", "is_character": True,
+             "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Eli's father", "entity_type": "CHARACTER", "is_character": True,
+             "aliases": ["his father", "man"], "identity_type": "relational_character",
+             "relationship_to": "Eli", "relationship": "father"},
+        ]}
 
     characters = planner.create_characters(
-        story, qwen_character_extractor=extractor, qwen_character_adjudicator=adjudicator
+        story,
+        qwen_character_extractor=extractor,
+        qwen_character_adjudicator=None,
     )
     names = [c.name for c in characters]
     _assert("Eli's father" in names and "man" not in names and "All" not in names,
-            f"generic role leaked into canonical roster or relational identity was lost: {names}")
+            f"generic role leaked into Qwen canonical roster: {names}")
 
     payload = [c.to_dict() for c in characters]
     director = QwenDirector.__new__(QwenDirector)
@@ -553,8 +425,8 @@ def test_story_token_budget_contract():
         "story pass must reserve enough completion budget for the context-length check",
     )
     _assert(
-        "minimum_output_tokens=story_min_output_tokens," in source and "1450 if mode == EXPAND_USER_STORY_MODE else 0" in source,
-        "Expand story pass must keep the 1450 output floor; AI Story has none",
+        "minimum_output_tokens=story_min_output_tokens," in source and "story_min_output_tokens = 0" in source,
+        "story pass must NOT use a min_tokens floor: it suppresses EOS and forces padding after a finished story",
     )
     _assert(
         '"[QWEN] story_thinking=on story_max_tokens=3200"' in source,
@@ -580,6 +452,8 @@ def test_story_token_budget_contract():
     _assert("ai_story_text_retry" not in source, "story generation must not contain a second Qwen creative pass")
     _assert("expand_story_text_retry" not in source, "expand story generation must not contain a second Qwen creative pass")
     _assert("H3_DIRECTOR_STORY_ATTEMPTS" not in source and "H3_STORY_MAX_ATTEMPTS" not in source, "story generation must not expose a retry loop")
+    _assert("qwen_character_extractor=self.extract_character_entities" in source, "creative story path must always resolve characters through Qwen semantic extraction")
+    _assert("qwen_character_adjudicator=None" in source, "creative story path must not perform a second character adjudication call")
     _san = Path(ROOT, "planner", "qwen_director_sanitize.py").read_text(encoding="utf-8")
     _assert("minimum_token_overlap=0.40" not in _san, "AI Story premise gate must use the permissive default, not the 0.40 override")
     _assert("max_completion=1500" not in source, "obsolete 1500-token story ceiling remains")
@@ -711,21 +585,26 @@ def test_quoted_dialogue_speaker_comes_from_speech_tag():
         got = set().union(*[s.get("tag_speakers", set()) for s in segments]) if segments else set()
         _assert(got == expected, f"speech-tag attribution wrong for {text!r}: {got} != {expected}")
 
-def test_named_only_roster_skips_semantic_character_calls_safely():
-    from planner.production_planner import ProductionPlanner
+def test_creative_named_only_story_still_calls_qwen_character_extractor():
+    planner = _planner()
+    story = "Elias Kade entered the Arctic station. Lin Mei followed him into the vault."
+    calls = []
 
-    planner = ProductionPlanner(ROOT)
-    story = (
-        "Elias Kade entered the Arctic station. "
-        "Dr. Lin Mei stood in the doorway and warned him about the vault."
-    )
-    characters = planner.create_characters(
+    def extractor(_story, required):
+        calls.append("extract")
+        _assert(required == [], f"AI Story received an artificial cast limit: {required}")
+        return {"candidates": [
+            {"name": "Elias Kade", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+            {"name": "Lin Mei", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character", "relationship_to": "", "relationship": ""},
+        ]}
+
+    names = [c.name for c in planner.create_characters(
         story,
-        qwen_character_extractor=None,
+        qwen_character_extractor=extractor,
         qwen_character_adjudicator=None,
-    )
-    names = [character.name for character in characters]
-    _assert(names == ["Elias Kade", "Lin Mei"], f"bare honorific leaked into roster: {names}")
+    )]
+    _assert(names == ["Elias Kade", "Lin Mei"], f"Qwen roster changed unexpectedly: {names}")
+    _assert(calls == ["extract"], f"creative roster must always use the Qwen character pass: {calls}")
 
 def test_context_ir_capture_root():
     from pipeline.context_ir import H3ContextIRCompiler
@@ -1473,7 +1352,7 @@ def test_sentence_initial_common_words_never_skip_semantic_roster():
     )
 
 
-def test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects():
+def test_story_is_single_call_fixed_seed_no_floor_and_all_defects():
     """Regression: 5 paragraphs + short + invented 'Eli's brother' must fail closed after ONE call."""
     from planner.qwen_director import QwenDirector
     from planner.production_planner import ProductionPlanner
@@ -1484,7 +1363,7 @@ def test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects():
     _assert("H3_STORY_MAX_ATTEMPTS" not in source_text, "no configurable story retry may exist")
     _assert("_retry" not in body and "for attempt" not in body, "no retry loop or retry call name")
     _assert("PREVIOUS DRAFT FAILED" not in prompts, "no retry feedback prompt")
-    _assert("1450 if mode == EXPAND_USER_STORY_MODE else 0" in body, "Expand output floor 1450 must be restored")
+    _assert("story_min_output_tokens = 0" in body and "1450" not in body, "no min_tokens floor: it forces filler after the story ends")
     _assert("minimum_output_tokens=story_min_output_tokens" in body, "floor must reach _chat_text")
     _assert("seed=DIRECTOR_VLLM_SEED," in body, "story seed must be fixed")
 
@@ -1517,7 +1396,7 @@ def test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects():
             f"paragraph-count, word-count and invented-relative defects must be reported together: {exc}",
         )
     _assert(len(calls) == 1, f"exactly ONE Qwen story call allowed: {calls}")
-    _assert(calls[0][1] == 1450, f"Expand floor must be 1450: {calls}")
+    _assert(calls[0][1] == 0, f"story call must not set a min_tokens floor: {calls}")
     _assert(director._qwen_telemetry["retries"] == 0, "no retries")
 
     ai_premise = "A polar systems engineer reaches an abandoned Arctic station during a violent storm and discovers a sealed underground vault."
@@ -1542,6 +1421,105 @@ def test_non_human_speech_tags_never_become_speakers():
     )
 
 
+def test_runaway_tail_after_a_complete_story_is_trimmed_and_emoji_stripped():
+    """Regression from a live run: valid 6 paragraphs / 469 words, then 5 padding paragraphs of
+    repetition ending in an emoji (caused by a min_tokens floor)."""
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    body = (
+        "Eli pried the sealed vault hatch while the damp concrete of the abandoned station dripped onto his collar and "
+        "the crowbar bit into the rusted seam until the metal finally shrieked and moved under his boots again today. "
+        "He wiped his sleeve across his brow, shouldered the hatch, and held the flashlight steady on the dark gap "
+        "while water ran along the tiles, pooled against the pillar, and carried a thin line of rust toward the tracks."
+    )
+    paragraphs = [body] * 6
+    tail = ["The flask stayed with him, its dents a quiet record of the night. \U0001F311."] * 5
+    raw = "\n\n".join(paragraphs + tail)
+    trimmed = director._trim_runaway_tail(raw)
+    parts = [p for p in trimmed.split("\n\n") if p.strip()]
+    _assert(len(parts) == 6, f"runaway tail must be cut back to six paragraphs: {len(parts)}")
+    _assert("\U0001F311" not in director._normalize_story("Done \U0001F311."), "emoji must be stripped")
+    short = "\n\n".join(["Too short."] * 8)
+    _assert(director._trim_runaway_tail(short) == short, "an out-of-range head must never be trimmed into validity")
+
+
+def test_attributed_dialogue_and_signage_words():
+    from planner.qwen_director import QwenDirector
+    from planner.production_planner import ProductionPlanner
+
+    _assert(QwenDirector._story_has_attributed_dialogue('"Stop," Mara said. He froze.'), "tagged line is dialogue")
+    _assert(QwenDirector._story_has_attributed_dialogue('Mara said, "Stop right there."'), "leading tag is dialogue")
+    _assert(
+        not QwenDirector._story_has_attributed_dialogue("Kovac had vanished during the thaw, his last transmission citing \u201cunstable core readings.\u201d Her hand trembled as she opened the container."),
+        "a quoted phrase inside narration is not attributed dialogue",
+    )
+    planner = ProductionPlanner(ROOT)
+    names = planner.detect_character_descriptors("Lena Voss read the pad. Access granted to L. Voss. Lena Voss stepped back.")
+    _assert("Access" not in names, f"signage word became a character: {names}")
+
+
+def test_expand_cast_is_not_count_restricted():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._planner = lambda: _planner()
+    source = "Eli enters the station and finds a sealed vault."
+    generated = (
+        "Eli entered the station and met Mara Venn by the vault. "
+        "His father appeared in the control room and warned them to leave. "
+        "Mara ignored him and Eli shut the vault before dawn."
+    )
+    director._validate_expand_story_cast(source, generated, source_character_names=["Eli"])
+
+
+def test_mention_only_people_never_enter_the_roster():
+    """Regression from live runs: 'Kovac' (a name on a container + 'had vanished'), 'Access' (on-screen
+    'Access granted') and 'Renn' (a radio message) became characters because a regex produced the roster
+    and the Qwen extraction call was skipped."""
+    from planner.production_planner import ProductionPlanner
+
+    planner = ProductionPlanner(ROOT)
+    story = (
+        "Lena Voss crouched beside the vault and pried at the hatch. A data pad blinked: Access granted to L. Voss, 2018. "
+        "Her fingers brushed a name etched into the metal: Kovac. She knew that name\u2014Kovac had vanished during the 2017 thaw, "
+        "his last transmission citing unstable readings. Lena Voss slammed the switch and walked out, "
+        "leaving Kovac\u2019s secrets beneath the ice. A message was from Dr. Renn, the station biologist."
+    )
+    _assert(planner._is_mention_only_identity(story, "Kovac"), "Kovac is evidence, not a character")
+    _assert(planner._is_mention_only_identity(story, "Access"), "UI text is not a character")
+    _assert(planner._is_mention_only_identity(story, "Renn"), "a message sender who never appears is not a character")
+    _assert(not planner._is_mention_only_identity(story, "Lena Voss"), "the protagonist must stay")
+    _assert(
+        planner._drop_mention_only_identities(story, ["Lena Voss", "Kovac", "Access", "Renn"]) == ["Lena Voss"],
+        "roster filter must keep only people who are actually present",
+    )
+    present = 'Mira followed Arun into the hall. "Wait," Arun said. Kovac had vanished years ago, but Kovac turned and spoke: Kovac said, "Run."'
+    _assert(not planner._is_mention_only_identity(present, "Kovac"), "a name that later speaks or acts is a real character")
+    _assert(
+        planner._drop_mention_only_identities("Kovac had vanished.", ["Kovac"]) == ["Kovac"],
+        "the filter must never empty a roster",
+    )
+    characters = planner.create_characters(story)
+    names = [getattr(c, "name", "") for c in characters]
+    _assert(names == ["Lena Voss"], f"create_characters must not re-add mention-only names: {names}")
+
+
+def test_craft_diagnostics_are_logged_not_fatal():
+    from planner.qwen_director import QwenDirector
+    from planner.production_planner import ProductionPlanner
+
+    director = QwenDirector.__new__(QwenDirector)
+    planner = ProductionPlanner(ROOT)
+    director._planner = lambda: planner
+    story = "\n\n".join(
+        ["Lena Voss opened the hatch."] * 5
+        + ["The system was alive. Kovac had vanished long ago, and a name etched into the wall said Kovac."]
+    )
+    issues = director._story_craft_issues(story)
+    joined = " | ".join(issues)
+    _assert("paragraph" in joined and "reveal" in joined, f"short paragraph and generic reveal must be reported: {issues}")
+
+
 def test_sound_nouns_never_become_characters():
     planner = _planner()
     names = planner.detect_character_descriptors(
@@ -1551,6 +1529,16 @@ def test_sound_nouns_never_become_characters():
     _assert("Elara Voss" in names, f"real character lost: {names}")
 
 
+
+def test_story_prompt_has_no_numeric_cast_contract():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("Do not force one character, two characters, or any fixed cast size." in source,
+            "AI Story prompt must leave character count to Qwen")
+    _assert("not a cast limit" in source,
+            "Expand Story source anchors must not become a cast whitelist")
+    _assert("exactly ONE unnamed counterpart" not in source,
+            "Expand Story must not force exactly one new character")
+
 def main():
     tests = [
         test_deterministic_character_regressions,
@@ -1558,13 +1546,13 @@ def main():
         test_expand_source_fallback_removed,
         test_semantic_named_surface_safety_boundary,
         test_logged_story_rosters_are_not_poisoned_by_prose_surfaces,
-        test_semantic_empty_fallback,
-        test_malformed_adjudication_fallback_drops_prose_tokens,
-        test_semantic_partial_positive_is_adjudicated,
-        test_semantic_negative_does_not_destroy_strong_deterministic_roster,
-        test_explicit_adjudicated_negative_is_respected_when_other_characters_remain,
-        test_expand_long_distance_relational_character_recovery,
-        test_relational_character_survives_generic_negative_and_resolves_dialogue,
+        test_qwen_character_roster_is_authoritative_and_filters_noncharacters,
+        test_malformed_qwen_character_roster_fails_closed_without_adjudication,
+        test_qwen_character_roster_can_introduce_new_characters_without_source_whitelist,
+        test_qwen_negative_character_decision_is_respected,
+        test_expand_qwen_roster_preserves_source_and_allows_new_characters,
+        test_expand_qwen_relational_character_is_accepted_without_adjudication,
+        test_relational_character_survives_qwen_roster_and_resolves_dialogue,
         test_sanitizer_identity_contract,
         test_qwen_cache_generation_contract,
         test_disabled_director_path,
@@ -1574,7 +1562,8 @@ def main():
         test_story_thinking_arguments_reach_vllm_without_a_retry,
         test_parallel_stage_copy_is_byte_exact,
         test_quoted_dialogue_speaker_comes_from_speech_tag,
-        test_named_only_roster_skips_semantic_character_calls_safely,
+        test_creative_named_only_story_still_calls_qwen_character_extractor,
+        test_story_prompt_has_no_numeric_cast_contract,
         test_context_ir_capture_root,
         test_checkpoint_digest_excludes_runtime_outputs,
         test_job_state_clears_stale_completion,
@@ -1602,8 +1591,13 @@ def main():
         test_source_contracts,
         test_sentence_initial_common_words_never_skip_semantic_roster,
         test_sound_nouns_never_become_characters,
+        test_mention_only_people_never_enter_the_roster,
+        test_craft_diagnostics_are_logged_not_fatal,
+        test_expand_cast_is_not_count_restricted,
+        test_runaway_tail_after_a_complete_story_is_trimmed_and_emoji_stripped,
+        test_attributed_dialogue_and_signage_words,
         test_non_human_speech_tags_never_become_speakers,
-        test_story_is_single_call_fixed_seed_with_expand_floor_and_all_defects,
+        test_story_is_single_call_fixed_seed_no_floor_and_all_defects,
     ]
     for test in tests:
         test()
