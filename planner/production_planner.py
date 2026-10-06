@@ -953,6 +953,14 @@ class ProductionPlanner:
             "weapon", "map", "letter", "message", "phone", "alarm", "machine",
             "system", "engine", "device", "night", "morning", "dawn", "sunset",
             "evening", "afternoon", "midnight",
+            # Sound, weather, and substance nouns that start sentences as
+            # subjects ("Static answered.", "Silence fell.") but are never people.
+            "static", "silence", "echo", "echoes", "noise", "thunder", "hum",
+            "frost", "ice", "snow", "dust", "smoke", "steam", "fog", "mist",
+            "metal", "steel", "glass", "concrete", "debris", "ash", "blood",
+            "heat", "cold", "power", "electricity", "emergency", "red",
+            "nothing", "darkness", "gas", "air", "sound", "voice", "feedback",
+            "interference", "data", "footage", "recording",
         }
 
         # Common verbs that appear frequently in short-story prose but were not
