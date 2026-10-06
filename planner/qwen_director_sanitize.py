@@ -17,127 +17,105 @@ from planner.config import (
 
 
 # ---------------------------------------------------------------------------
-# Written-text vs. spoken-text discrimination
+# Quote extraction boundary
 # ---------------------------------------------------------------------------
-# Quoted strings in a story are not always speech: signs, tags, labels, screens,
-# notes and project IDs are routinely quoted ("*"Vault Access"*"). Treating those
-# as dialogue produces fake lip-sync/TTS events (a character "speaking" a warning
-# tag) and also lets a story satisfy the "has dialogue" contract without any
-# real spoken line. This helper is the single authority for that decision.
-_WRITTEN_NOUNS = (
-    "tag|label|sign|signage|placard|plaque|inscription|engraving|stencil|sticker|poster|banner|"
-    "note|memo|letter|page|screen|monitor|display|terminal|readout|caption|nameplate|keypad|"
-    "panel|logbook|journal|diary|file|folder|marker|canister|crate|door|wall|casing|id|stamp|"
-    "stamped|etched|engraved|printed|scrawled|scribbled|painted|stenciled|lettering|text|words"
-)
-_WRITTEN_PREFIX_RE = re.compile(
-    rf"\b(?:{_WRITTEN_NOUNS})\b[^.!?\n]{{0,60}}$|"
-    r"\b(?:read|reads|reading|spelled|spelling|printed|etched|engraved|scrawled|stamped|labeled|labelled|"
-    r"flashed|flashing|blinked|blinking|glowed|glowing|displayed|displaying)\b[^.!?\n]{0,25}$",
-    flags=re.IGNORECASE,
-)
-_SPEECH_VERB_RE = (
-    r"said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|called|calls|"
-    r"muttered|mutters|murmured|murmurs|warned|warns|snapped|snaps|answered|answers|cried|cries|"
-    r"yelled|yells|demanded|demands|breathed|added|adds|continued|insisted|insists|pleaded|pleads|"
-    r"growled|growls|hissed|hisses|gasped|gasps|stammered|stammers|announced|announces|ordered|orders|"
-    r"told|tells|began|begins|spoke|speaks|offered|offers|admitted|admits|confessed|confesses"
-)
-
+# Character semantics and speech attribution belong to the Director/entity
+# resolver.  This module must not grow a vocabulary of "bad" character words
+# or speech verbs.  The helper below only rejects unambiguous formatting that
+# marks a quoted span as markup/code; semantic written-vs-spoken classification
+# is performed by the caller using canonical speaker resolution.
 
 def is_written_text_quote(text: str, start: int, end: int) -> bool:
-    """Return True when text[start:end] (a quoted span) is written/UI text, not speech.
+    """Reject only quotes that are structurally marked as markup/code.
 
-    A quote is speech when a speech-tag verb sits next to it ("...," he said / Mara said, "...")
-    or when it is a plain quoted utterance not introduced by a written-text cue. A quote is written
-    text when it is wrapped in markdown emphasis, or is introduced/followed by a sign/tag/screen cue and
-    carries no speech tag.
+    No semantic word list is used here.  The Director's speaker resolver owns
+    human-vs-machine attribution, while the production planner owns contextual
+    grounding.  A normal quoted utterance therefore remains eligible for later
+    semantic resolution.
     """
     source = str(text or "")
-    before_char = source[start - 1] if start > 0 else ""
-    after_char = source[end] if end < len(source) else ""
-    if before_char in {"*", "_"} or after_char in {"*", "_"}:
+    before = source[max(0, start - 2):start]
+    after = source[end:min(len(source), end + 2)]
+
+    # Markdown emphasis/code fences are explicit non-speech formatting.
+    if before.endswith("*") or before.endswith("_"):
+        return True
+    if after.startswith("*") or after.startswith("_"):
+        return True
+    if before.endswith("`") or after.startswith("`"):
         return True
 
-    prefix_window = source[max(0, start - 120):start]
-    prefix = re.split(r"[.!?][\"\u201d\u2019]?\s+", prefix_window)[-1]
-    suffix = source[end:end + 80]
-    suffix_clause = re.split(r"[.!?]\s+", suffix, maxsplit=1)[0]
-
-    has_speech_tag = bool(
-        re.match(rf"^\s*[,;]?\s*(?:\u2014|-)?\s*(?:[A-Z][\w'\u2019.-]*(?:\s+[A-Z][\w'\u2019.-]*){{0,2}}|he|she|they|I|we)\s+(?:{_SPEECH_VERB_RE})\b", suffix_clause)
-        or re.match(rf"^\s*[,;]?\s*(?:{_SPEECH_VERB_RE})\s+[A-Z]", suffix_clause)
-        or re.search(rf"(?:[A-Z][\w'\u2019.-]*|he|she|they)\s+(?:{_SPEECH_VERB_RE})(?:\s+[a-z]+ly)?\s*[,:]?\s*$", prefix)
-    )
-    if has_speech_tag:
-        return False
-
-    machine_or_written_context = re.compile(
-        r"\b(?:terminal|computer|system|intercom|radio|recording|recorded voice|speaker|announcement|automated voice|machine|alarm|voice)\b",
-        flags=re.IGNORECASE,
-    )
-    context_window = source[max(0, start - 100):start] + " " + source[end:min(len(source), end + 80)]
-    if machine_or_written_context.search(context_window) and not re.search(
-        rf"(?:[A-Z][\w'\u2019.-]*|he|she|they)\s+(?:{_SPEECH_VERB_RE})\b",
-        prefix + " " + suffix_clause,
-        flags=re.IGNORECASE,
-    ):
+    # A lowercase multi-token attribution is not an approved speaker surface.
+    # This is grammatical structure, not a vocabulary blacklist: the canonical
+    # speaker resolver requires named speaker surfaces to be capitalized.
+    tail = source[end:min(len(source), end + 80)]
+    if re.match(r"^\s*[,;:]?\s*[a-z][a-z'’-]*\s+[a-z][a-z'’-]*\s+", tail):
         return True
 
-    # Quote that is a short Title-Case/ALL-CAPS label with no sentence punctuation inside a written cue.
-    if _WRITTEN_PREFIX_RE.search(prefix):
-        return True
-    inner = source[start + 1:end - 1].strip()
-    if inner and inner.upper() == inner and len(inner.split()) <= 8 and re.search(r"[A-Z]", inner):
-        return True
     return False
 
 
 class QwenDirectorSanitizeMixin:
+    _VALID_IDENTITY_TYPES = {
+        "named_character",
+        "relational_character",
+        "descriptive_character",
+    }
+    _PERSON_ENTITY_TYPES = {
+        "PERSON",
+        "CHARACTER",
+        "SENTIENT",
+        "HUMAN",
+    }
+
+    @classmethod
     def _valid_character_name(
-        self,
+        cls,
         name: str,
         *,
         identity_type: str = "named_character",
     ) -> bool:
+        """Validate identity *shape* without maintaining a semantic word blacklist.
 
-        value = str(
-            name or ""
-        ).strip()
-
-        if not value:
-            return False
-
-        lowered = value.lower()
+        Semantic personhood belongs to Qwen + ProductionPlanner.  The sanitizer only
+        rejects malformed identity fields, generic singleton role surfaces, and values
+        that cannot safely participate in deterministic identity resolution.
+        """
+        value = re.sub(r"\s+", " ", str(name or "")).strip()
         identity_type = str(identity_type or "named_character").strip().lower()
 
-        if lowered in (
-            self.FORBIDDEN_CHARACTER_NAMES
-        ):
+        if not value or identity_type not in cls._VALID_IDENTITY_TYPES:
             return False
 
+        if not EntityResolver.is_safe_semantic_reference(value):
+            return False
+
+        lowered = EntityResolver.normalize(value)
         if EntityResolver.generic_role_surface(lowered) or lowered in EntityResolver.RELATIONSHIP_LABELS:
             return False
 
-        # Qualified descriptive identities may legitimately be longer than
-        # ordinary named identities, e.g. ``the man in the grey coverall``.
-        max_words = 10 if identity_type == "descriptive_character" else 5
-        if len(value.split()) > max_words:
+        # Names are compact identity labels, not prose sentences. Descriptive
+        # identities are deliberately more permissive because their semantic role
+        # is already declared by Qwen and grounded later by ProductionPlanner.
+        max_words = {
+            "named_character": 5,
+            "relational_character": 6,
+            "descriptive_character": 10,
+        }[identity_type]
+        words = value.split()
+        if not 1 <= len(words) <= max_words:
             return False
 
-        if any(
-            token in value
-            for token in (
-                ":",
-                ";",
-                "|",
-                "{",
-                "}",
-                "[",
-                "]",
-            )
-        ):
+        if not re.search(r"[A-Za-z0-9]", value):
             return False
+
+        # A descriptive identity must contain more than a bare role word. We do
+        # not decide which words are roles here; EntityResolver already handles
+        # exact generic surfaces and ProductionPlanner performs contextual grounding.
+        if identity_type == "descriptive_character":
+            core = re.sub(r"^(?:the|a|an)\s+", "", lowered)
+            if len(core.split()) < 2:
+                return False
 
         return True
 
@@ -226,12 +204,16 @@ class QwenDirectorSanitizeMixin:
             ):
                 continue
 
-            name = str(
-                value.get(
-                    "name",
-                    "",
-                )
-                or ""
+            name = re.sub(
+                r"\s+",
+                " ",
+                str(
+                    value.get(
+                        "name",
+                        "",
+                    )
+                    or ""
+                ),
             ).strip()
 
             profile = self._coerce_mapping(value.get("identity_profile", {}))
@@ -239,6 +221,15 @@ class QwenDirectorSanitizeMixin:
                 value.get("identity_type", profile.get("identity_type", "named_character"))
                 or "named_character"
             ).strip().lower()
+
+            # When raw Qwen metadata survives into this layer, honor it.  These are
+            # structural labels, not a semantic blacklist; explicit non-character
+            # decisions are rejected rather than silently reclassified.
+            if value.get("is_character") is False:
+                continue
+            entity_type = str(value.get("entity_type", "") or "").strip().upper()
+            if entity_type and entity_type not in self._PERSON_ENTITY_TYPES:
+                continue
 
             if not self._valid_character_name(
                 name,
@@ -287,32 +278,14 @@ class QwenDirectorSanitizeMixin:
                     continue
                 aliases.append(text)
             aliases = list(dict.fromkeys(aliases))
-            if identity_type == "relational_character" and (not relationship_to or not relationship):
-                identity_type = "named_character"
-                relationship_to = None
-                relationship = None
-                aliases = []
-
-            if identity_type == "descriptive_character":
-                normalized_name = EntityResolver.normalize(name)
-                descriptive_roles = {
-                    "man", "woman", "boy", "girl", "person", "child",
-                    "detective", "scientist", "soldier", "warrior", "king", "queen",
-                    "robot", "android", "pilot", "doctor", "guard", "officer",
-                    "stranger", "captain", "commander", "engineer", "teacher",
-                    "nurse", "driver", "explorer", "hero", "heroine",
-                }
-                core = normalized_name
-                for article in ("the ", "a ", "an "):
-                    if core.startswith(article):
-                        core = core[len(article):]
+            if identity_type == "relational_character":
                 if (
-                    len(core.split()) < 2
-                    or not any(token in descriptive_roles for token in core.split())
-                    or core in descriptive_roles
+                    not relationship_to
+                    or not relationship
+                    or not EntityResolver.is_safe_semantic_reference(relationship_to)
+                    or not EntityResolver.is_safe_semantic_reference(relationship)
                 ):
-                    identity_type = "named_character"
-                    aliases = []
+                    continue
             profile.update({
                 "name": name,
                 "semantic_aliases": aliases,
