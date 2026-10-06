@@ -395,21 +395,6 @@ class ProductionPlanner:
         "station", "facility", "mission", "module", "unit", "version",
     }
 
-    # Qwen-owned roster safety filter. These are unambiguous production non-person
-    # surfaces; this filter may reject a Qwen candidate, but it never creates one.
-    QWEN_NON_PERSON_TOKENS = {
-        "access", "warning", "danger", "caution", "error", "alert", "authorized",
-        "restricted", "denied", "granted", "status", "protocol", "override",
-        "locked", "unlocked", "confirmed", "initiated", "activated", "unknown",
-        "station", "vault", "chamber", "corridor", "terminal", "system", "network",
-        "project", "experiment", "operation", "mission", "module", "unit", "version",
-        "static", "silence", "echo", "noise", "thunder", "hum", "frost", "ice",
-        "snow", "dust", "smoke", "steam", "fog", "mist", "recording", "message",
-        "signal", "broadcast", "transmission", "radio", "screen", "computer",
-        "photograph", "photo", "portrait", "image", "map", "journal", "log", "entry",
-    }
-
-
 
     TIME_WORDS = {
         "sunrise": "sunrise",
@@ -2494,9 +2479,7 @@ class ProductionPlanner:
     _ABSENT_AFTER = re.compile(
         r"^\s*(?:had|has|have)\s+(?:\w+\s+)?(?:vanished|disappeared|died|perished|been\s+(?:missing|dead|lost|killed|gone)|"
         r"gone\s+missing|abandoned|left\s+behind|written|recorded|warned|noted|logged|signed|sent)\b"
-        r"|^\s*,?\s*(?:was|were)\s+(?:missing|dead|killed|lost|gone|presumed|last\s+seen)\b"
-        r"|^\s+(?:granted|denied|required|restricted|confirmed|accepted|rejected|detected|initiated|activated|"
-        r"unlocked|locked|override|authorized|level|code|panel)\b",
+        r"|^\s*,?\s*(?:was|were)\s+(?:missing|dead|killed|lost|gone|presumed|last\s+seen)\b",
         flags=re.IGNORECASE,
     )
     _SPEECH_AFTER = re.compile(
@@ -3184,8 +3167,6 @@ class ProductionPlanner:
 
         def safe_non_person(name: str) -> bool:
             normalized = EntityResolver.normalize(name)
-            if normalized in cls.QWEN_NON_PERSON_TOKENS:
-                return True
             tokens = normalized.split()
             if not tokens:
                 return True
