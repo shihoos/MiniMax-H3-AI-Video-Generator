@@ -327,7 +327,7 @@ class QwenDirector(
             try:
                 self._character_semantic_calls = max(
                     0,
-                    min(2, int(prior_director_plan.get("_character_semantic_calls_used", 0) or 0)),
+                    min(1, int(prior_director_plan.get("_character_semantic_calls_used", 0) or 0)),
                 )
             except (TypeError, ValueError):
                 self._character_semantic_calls = 0
@@ -400,9 +400,9 @@ class QwenDirector(
         # PASS 1B: deterministic production foundation
         # ----------------------------------------------------
         #
-        # The ProductionPlanner owns the canonical production roster and scene
-        # topology. Qwen supplies the final narrative and creative shot direction;
-        # it does not regenerate deterministic production identity here.
+        # Qwen supplies the final creative narrative AND semantic character roster.
+        # ProductionPlanner performs only bounded safety validation/canonicalization
+        # before binding those Qwen identities into scenes and shots.
         story = self._normalize_story(story)
         if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and not generated_story:
             # Resume/checkpoint safety only: generated stories have already passed the
@@ -476,48 +476,25 @@ class QwenDirector(
             for item in resume_roster:
                 canonical_characters.append(Character.from_dict(deepcopy(item)))
         else:
-            # Named-only stories have a deterministic canonical roster already:
-            # every identity is strongly grounded, no relational/descriptive
-            # identity needs semantic adjudication, so avoid two redundant Qwen
-            # calls. Ambiguous/relational/descriptive stories still use the
-            # bounded semantic extraction + adjudication path.
-            deterministic_descriptors = planner._canonicalize_character_descriptors(
-                [
-                    *planner.detect_character_descriptors(canonical_source_story),
-                    *planner._explicit_source_character_names(canonical_source_story),
-                ]
-            )
-            title_tokens = {
-                "dr", "doctor", "prof", "professor", "mr", "mrs", "ms", "miss",
-                "captain", "commander", "detective", "agent",
-            }
-            deterministic_descriptors = [
-                name for name in deterministic_descriptors
-                if str(name).strip().lower().rstrip(".") not in title_tokens
-            ]
-            relational_hints = planner._extract_relational_character_hints(
-                canonical_source_story,
-                deterministic_descriptors,
-            )
-            has_descriptive_identity = any(
-                planner._descriptive_identity_is_grounded(
-                    canonical_source_story,
-                    name,
+            if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+                # Every creative story gets exactly one Qwen semantic character pass.
+                # Never bypass it because a deterministic scan appears "named-only".
+                required_source_characters = (
+                    source_character_names if mode == EXPAND_USER_STORY_MODE else None
                 )
-                for name in deterministic_descriptors
-            )
-            named_only_deterministic = bool(deterministic_descriptors) and not relational_hints and not has_descriptive_identity and all(
-                planner._high_confidence_deterministic_character(
+                canonical_characters = planner.create_characters(
                     canonical_source_story,
-                    name,
+                    qwen_character_extractor=self.extract_character_entities,
+                    qwen_character_adjudicator=None,
+                    required_character_names=required_source_characters,
                 )
-                for name in deterministic_descriptors
-            )
-            canonical_characters = planner.create_characters(
-                canonical_source_story,
-                qwen_character_extractor=None if named_only_deterministic else self.extract_character_entities,
-                qwen_character_adjudicator=None if named_only_deterministic else self.adjudicate_character_entities,
-            )
+            else:
+                # Preserve mode remains source-of-truth deterministic.
+                canonical_characters = planner.create_characters(
+                    canonical_source_story,
+                    qwen_character_extractor=None,
+                    qwen_character_adjudicator=None,
+                )
 
         character_payloads = []
         for character in canonical_characters:
@@ -1240,16 +1217,6 @@ class QwenDirector(
         except RuntimeError as exc:
             errors.append(str(exc))
 
-        if mode == EXPAND_USER_STORY_MODE:
-            try:
-                self._validate_expand_story_cast(
-                    user_input,
-                    working,
-                    source_character_names=source_character_names,
-                )
-            except RuntimeError as exc:
-                errors.append(str(exc))
-
         if errors:
             raise RuntimeError(" | ".join(errors))
         return working
@@ -1260,78 +1227,28 @@ class QwenDirector(
         generated_story: str,
         source_character_names: list[str] | None = None,
     ) -> None:
-        """Keep Expand Story identities grounded in the source narrative."""
-        planner = self._planner()
+        """Compatibility check: established source anchors must survive Expand.
 
-        source_descriptors = planner._canonicalize_character_descriptors(
-            [
-                *planner.detect_character_descriptors(source_story),
-                *planner._explicit_source_character_names(source_story),
-            ]
-        )
-        allowed = {
-            EntityResolver.normalize(str(name).strip())
+        New character identity is intentionally NOT restricted here. Qwen semantic
+        extraction owns the final cast; this helper only checks source-anchor continuity.
+        """
+        required = [
+            str(name).strip()
             for name in (source_character_names or [])
             if str(name).strip()
-        }
-        allowed.update(
-            EntityResolver.normalize(str(name).strip())
-            for name in source_descriptors
-            if str(name).strip()
-        )
-
-        # Source-grounded relations such as "Eli's father" are legitimate even
-        # when the base production roster contains only "Eli". They must be
-        # derived from the SOURCE, not accepted merely because Qwen invented them.
-        source_relations = planner._extract_relational_character_hints(
-            source_story,
-            source_descriptors,
-        )
-        allowed.update(
-            EntityResolver.normalize(str(item.get("name", "")).strip())
-            for item in source_relations
-            if item.get("strong") and str(item.get("name", "")).strip()
-        )
-
-        generated_descriptors = planner._canonicalize_character_descriptors(
-            [
-                *planner.detect_character_descriptors(generated_story),
-                *planner._explicit_source_character_names(generated_story),
-            ]
-        )
-        generated_named = {
-            EntityResolver.normalize(str(name).strip())
-            for name in generated_descriptors
-            if str(name).strip()
-            and planner._high_confidence_deterministic_character(
-                generated_story,
-                str(name).strip(),
-            )
-        }
-        extra_named = sorted(name for name in generated_named if name not in allowed)
-        if extra_named:
+        ]
+        if not required:
+            return
+        planner = self._planner()
+        missing = [
+            name
+            for name in required
+            if not planner._story_has_character_name(generated_story, name)
+        ]
+        if missing:
             raise RuntimeError(
-                "Expand Story introduced unanchored character(s): "
-                + ", ".join(extra_named)
-            )
-
-        generated_relations = planner._extract_relational_character_hints(
-            generated_story,
-            generated_descriptors,
-        )
-        extra_relations = sorted(
-            {
-                str(item.get("name", "")).strip()
-                for item in generated_relations
-                if item.get("strong")
-                and str(item.get("name", "")).strip()
-                and EntityResolver.normalize(str(item.get("name", "")).strip()) not in allowed
-            }
-        )
-        if extra_relations:
-            raise RuntimeError(
-                "Expand Story introduced unanchored relational character(s): "
-                + ", ".join(extra_relations)
+                "Expand Story omitted established source character(s): "
+                + ", ".join(missing)
             )
 
     # ------------------------------------------------------------------
@@ -1426,9 +1343,11 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "Expand Story generation failed validation: "
         )
-        # Thinking shares the 3200-token ceiling with the story. The Expand floor stops the
-        # model from ending early with a short draft (the 407-word failure).
-        story_min_output_tokens = 1450 if mode == EXPAND_USER_STORY_MODE else 0
+        # No minimum-token floor: vLLM min_tokens suppresses end-of-sequence, so a floor forces
+        # the model to keep writing filler after the story is finished (observed: a valid
+        # 6-paragraph, 469-word story followed by 5 padding paragraphs of emoji and repetition).
+        # Length is enforced by the prompt contract and the validator, never by token padding.
+        story_min_output_tokens = 0
 
         print(
             "[QWEN] story_thinking=on story_max_tokens=3200",
@@ -1467,19 +1386,36 @@ class QwenDirector(
             topology_only = bool(parts) and all(
                 "exactly six paragraphs" in piece for piece in parts
             )
-            if not topology_only:
+            trimmed = self._trim_runaway_tail(raw)
+            if trimmed != raw:
+                # The model finished a valid six-paragraph story and then kept writing.
+                # Dropping the surplus trailing paragraphs is topology repair, not a rewrite.
+                try:
+                    candidate = self._validate_story_output_contracts(
+                        mode,
+                        user_input,
+                        trimmed,
+                        source_character_names=source_character_names,
+                    )
+                except RuntimeError as err3:
+                    raise RuntimeError(failure_prefix + str(err3)) from err3
+            elif not topology_only:
                 raise RuntimeError(failure_prefix + error_text) from err
-            try:
-                candidate = self._validate_story_output_contracts(
-                    mode,
-                    user_input,
-                    self._coerce_story_to_six_paragraphs(raw),
-                    source_character_names=source_character_names,
-                )
-            except RuntimeError as err2:
-                raise RuntimeError(failure_prefix + str(err2)) from err2
+            else:
+                try:
+                    candidate = self._validate_story_output_contracts(
+                        mode,
+                        user_input,
+                        self._coerce_story_to_six_paragraphs(raw),
+                        source_character_names=source_character_names,
+                    )
+                except RuntimeError as err2:
+                    raise RuntimeError(failure_prefix + str(err2)) from err2
 
         issues = self._story_quality_issues(candidate)
+        issues.extend(self._story_craft_issues(candidate))
+        if not self._story_has_attributed_dialogue(candidate):
+            issues.append("no attributed spoken dialogue between people on screen")
         if not issues:
             print("[QWEN] story_quality=PASS", flush=True)
         else:
@@ -1490,6 +1426,52 @@ class QwenDirector(
                 flush=True,
             )
         return candidate, True
+
+    _GENERIC_REVEAL_PATTERNS = (
+        r"\b(?:system|facility|station|ai|machine|computer)\b[^.]{0,30}\b(?:was|is|were)\s+(?:alive|sentient|aware|awake|watching)\b",
+        r"\bcontainment\b[^.]{0,30}\b(?:failed|failing|breach|breached|unit|field)\b",
+        r"\bsecret experiment\b",
+        r"\bthey(?:'|\u2019)re still (?:inside|down there|here)\b",
+        r"\b(?:had|has) been here before\b|\bbeen here before\b",
+        r"\b(?:final|last) entry read\b",
+    )
+
+    def _story_craft_issues(self, story: str) -> list[str]:
+        """Log-only craft diagnostics. They never fail the run (single-call, fail-closed contract
+        is reserved for hard defects) but they make quality regressions visible in the log."""
+        issues: list[str] = []
+        paragraphs = [p for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
+        for index, paragraph in enumerate(paragraphs, start=1):
+            words = len(re.findall(r"\b[\w'’-]+\b", paragraph))
+            if words < 55 or words > 110:
+                issues.append(f"paragraph {index} has {words} words (target 70-90)")
+        if any(re.search(pattern, story, flags=re.IGNORECASE) for pattern in self._GENERIC_REVEAL_PATTERNS):
+            issues.append("generic mystery/sci-fi reveal pattern")
+        try:
+            planner = self._planner()
+            named = planner.detect_character_descriptors(story)
+            absent = [name for name in named if planner._is_mention_only_identity(story, name)]
+        except Exception:
+            absent = []
+        if absent:
+            issues.append("named people who are never on screen: " + ", ".join(absent[:3]))
+        return issues
+
+    def _trim_runaway_tail(self, raw: str) -> str:
+        """Return the first six paragraphs when they are a complete in-range story and the
+        model kept writing afterwards; otherwise return `raw` unchanged."""
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n+", self._normalize_story(raw))
+            if part.strip()
+        ]
+        if len(paragraphs) <= 6:
+            return raw
+        head = paragraphs[:6]
+        words = len(re.findall(r"\b[\w'’-]+\b", " ".join(head)))
+        if not 420 <= words <= 560:
+            return raw
+        return "\n\n".join(head)
 
     @staticmethod
     def _coerce_story_to_six_paragraphs(text: str) -> str:
