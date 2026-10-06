@@ -1,6 +1,7 @@
 from pathlib import Path
 import re
 import sys
+import ast
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -24,11 +25,11 @@ def test_qwen_is_the_only_creative_character_authority():
     _assert("_high_confidence_deterministic_character" not in source, "Director must not protect a deterministic character over Qwen")
     _assert("qwen_character_extractor=self.extract_character_entities" in source, "creative path must call Qwen character extraction")
     _assert("qwen_character_adjudicator" not in source, "creative Director path must not expose a dead adjudicator call")
-    _assert("Qwen owns semantic character identity" in planner_source, "planner must document Qwen roster authority")
+    _assert("Qwen is the sole semantic authority" in planner_source, "planner must document Qwen roster authority")
 
 
 def test_single_character_semantic_call_budget():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
     _assert("if self._character_semantic_calls > 1:" in source, "character semantic budget must be one call")
     _assert("max 1" in source, "character semantic call limit must be one")
 
@@ -37,7 +38,7 @@ def test_reconcile_api_has_no_dead_deterministic_parameter():
     import inspect
     from planner.production_planner import ProductionPlanner
     parameters = list(inspect.signature(ProductionPlanner._reconcile_semantic_characters).parameters)
-    _assert(parameters == ["cls", "story", "semantic_result"], f"dead deterministic reconciliation parameter remains: {parameters}")
+    _assert(parameters == ["story", "semantic_result"], f"unexpected reconciliation API parameters: {parameters}")
 
 
 def test_mention_only_matching_is_case_insensitive():
@@ -259,6 +260,40 @@ def test_relational_character_survives_with_qwen_owner():
     _assert(characters[1].identity_type == "relational_character", "relational identity type was lost")
 
 
+def test_director_create_characters_keywords_match_planner_signature():
+    import inspect
+    from planner.production_planner import ProductionPlanner
+
+    planner_params = set(inspect.signature(ProductionPlanner.create_characters).parameters)
+    planner_params.discard("self")
+    planner_params.discard("story")
+
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "create_characters"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "planner"
+        ):
+            calls.append(node)
+
+    _assert(calls, "qwen_director must call planner.create_characters")
+    for call in calls:
+        for keyword in call.keywords:
+            _assert(
+                keyword.arg in planner_params,
+                f"qwen_director calls create_characters with unknown keyword {keyword.arg!r}; "
+                f"planner accepts {sorted(planner_params)}",
+            )
+
+
 def test_no_adjudication_call_even_when_extractor_is_partial():
     planner = _planner()
     story = "Elias Kade entered the vault and Lin Mei followed him."
@@ -296,7 +331,7 @@ def test_expand_is_open_cast_but_preserves_source_anchors():
         director._validate_expand_story_cast(source, missing, source_character_names=["Eli"])
         raise AssertionError("dropping an established source anchor must fail")
     except RuntimeError as exc:
-        _assert("dropped established source character" in str(exc), f"wrong source-anchor error: {exc}")
+        _assert("omitted established source character" in str(exc), f"wrong source-anchor error: {exc}")
 
 
 def test_expand_prompt_does_not_impose_cast_limit():
@@ -341,10 +376,11 @@ def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
 
 
 def test_story_contract_remains_six_paragraphs_420_560():
-    from planner.qwen_director import QwenDirector
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("420 to 560 words" in source or "420-560" in source, "story word contract missing")
-    _assert("six paragraphs" in source.lower(), "six-paragraph contract missing")
+    prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    sanitize_source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    combined = prompt_source + "\n" + sanitize_source
+    _assert("420 to 560 words" in combined or "420-560" in combined, "story word contract missing")
+    _assert("six paragraphs" in combined.lower(), "six-paragraph contract missing")
 
 
 def test_non_human_speech_tags_are_not_speakers():
@@ -433,6 +469,7 @@ def main():
         test_relational_owner_must_be_qwen_approved,
         test_relational_character_survives_with_qwen_owner,
         test_no_adjudication_call_even_when_extractor_is_partial,
+        test_director_create_characters_keywords_match_planner_signature,
         test_expand_is_open_cast_but_preserves_source_anchors,
         test_expand_prompt_does_not_impose_cast_limit,
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
