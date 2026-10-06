@@ -961,6 +961,10 @@ class ProductionPlanner:
             "heat", "cold", "power", "electricity", "emergency", "red",
             "nothing", "darkness", "gas", "air", "sound", "voice", "feedback",
             "interference", "data", "footage", "recording",
+            # On-screen / signage words that open a sentence ("Access granted...", "Warning: ...").
+            "access", "warning", "danger", "caution", "error", "alert", "authorized",
+            "restricted", "denied", "granted", "status", "protocol", "override",
+            "locked", "unlocked", "confirmed", "initiated", "activated", "unknown",
         }
 
         # Common verbs that appear frequently in short-story prose but were not
@@ -2457,6 +2461,77 @@ class ProductionPlanner:
                 return True  # vocative inside dialogue: "Eli, run!"
         return False
 
+    # ------------------------------------------------------------------
+    # Mention-only identities: people who are named but never on screen
+    # ------------------------------------------------------------------
+    _ABSENT_DOC_NOUNS = (
+        r"(?:last|final|first|old|own|earlier|previous)?\s*(?:transmissions?|journals?|logs?|notes?|messages?|"
+        r"recordings?|diary|diaries|signature|research|files?|data|secrets?|work|reports?|voice|"
+        r"memory|memories|legacy|body|grave|death|name|badge|initials|handwriting|findings|"
+        r"experiments?|project|theory|warning|words|final entry)"
+    )
+    _ABSENT_BEFORE = re.compile(
+        r"\b(?:name|names|labell?ed|marked|etched|engraved|stamped|inscribed|signed|printed|scrawled|"
+        r"scratched|written|listed|tagged|badge|nameplate|plaque)\b[^.!?\n]{0,50}$"
+        r"|\b(?:message|transmission|voice|recording|signal|broadcast|note|letter|call|log|entry|report)s?\b"
+        r"[^.!?\n]{0,30}\bfrom\s+(?:(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Captain|Commander|Agent)\.?\s+)?$",
+        flags=re.IGNORECASE,
+    )
+    _ABSENT_AFTER = re.compile(
+        r"^\s*(?:had|has|have)\s+(?:\w+\s+)?(?:vanished|disappeared|died|perished|been\s+(?:missing|dead|lost|killed|gone)|"
+        r"gone\s+missing|abandoned|left\s+behind|written|recorded|warned|noted|logged|signed|sent)\b"
+        r"|^\s*,?\s*(?:was|were)\s+(?:missing|dead|killed|lost|gone|presumed|last\s+seen)\b"
+        r"|^\s+(?:granted|denied|required|restricted|confirmed|accepted|rejected|detected|initiated|activated|"
+        r"unlocked|locked|override|authorized|level|code|panel)\b",
+        flags=re.IGNORECASE,
+    )
+    _SPEECH_AFTER = re.compile(
+        r"^\s*[,.]?\s*(?:said|says|asked|replied|whispered|shouted|called|muttered|answered|warned|told|"
+        r"snapped|murmured|cried|yelled|demanded|insisted)\b",
+        flags=re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_mention_only_identity(cls, story: str, name: str) -> bool:
+        """True when EVERY occurrence of a name is evidence, not presence.
+
+        Evidence means: a label/etching/nameplate ("a name etched into the metal: Kovac"),
+        a past-perfect disappearance ("Kovac had vanished"), a possessive of a document or
+        secret ("Kovac's journal"), a message "from" the person, or on-screen UI text
+        ("Access granted"). A name that ever speaks or acts in the present scene is kept.
+        """
+        text = str(story or "")
+        name = str(name or "").strip()
+        if not text or not name:
+            return False
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9'_-])" + re.escape(name) + r"(?![A-Za-z0-9_-])"
+        )
+        found = False
+        for match in pattern.finditer(text):
+            found = True
+            before = text[max(0, match.start() - 80):match.start()]
+            after = text[match.end():match.end() + 90]
+            if cls._SPEECH_AFTER.search(after):
+                return False
+            possessive_doc = re.match(
+                r"^[\u2019']s\s+" + cls._ABSENT_DOC_NOUNS + r"\b", after, flags=re.IGNORECASE
+            )
+            if (
+                cls._ABSENT_BEFORE.search(before)
+                or cls._ABSENT_AFTER.search(after)
+                or possessive_doc
+            ):
+                continue
+            return False
+        return found
+
+    @classmethod
+    def _drop_mention_only_identities(cls, story: str, names: list[str]) -> list[str]:
+        """Remove mention-only names. Never returns an empty list for a non-empty input."""
+        kept = [name for name in names if not cls._is_mention_only_identity(story, name)]
+        return kept if kept else list(names)
+
     @classmethod
     def _high_confidence_deterministic_character(
         cls,
@@ -2975,45 +3050,56 @@ class ProductionPlanner:
     def _reconcile_semantic_characters(
         cls,
         story: str,
-        deterministic: list[str],
+        required_character_names: list[str] | None,
         semantic_result,
     ) -> list[str]:
-        """Canonicalize the semantic roster with deterministic safety guards."""
+        """Treat Qwen's character roster as authoritative, with bounded safety validation only."""
         if not isinstance(semantic_result, dict):
-            return cls._canonicalize_character_descriptors(deterministic or [])
+            return []
 
         semantic_candidates = list(semantic_result.get("candidates", []) or [])
         if not semantic_candidates:
             semantic_candidates = list(semantic_result.get("characters", []) or [])
 
+        required = cls._canonicalize_character_descriptors(required_character_names or [])
+        # Build a validation-only name set from Qwen's own named-character decisions so
+        # relational identities can point to another Qwen-created character in the same response.
+        qwen_named_names: list[str] = []
+        for raw in semantic_candidates:
+            if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
+                continue
+            identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
+            if identity_type != "named_character":
+                continue
+            name = str(raw.get("name", "") or "").strip()
+            entity_type = str(raw.get("entity_type", "") or "").strip().upper()
+            if (
+                name
+                and entity_type in {"PERSON", "CHARACTER", "SENTIENT"}
+                and cls._semantic_named_surface_is_safe(name)
+                and name.lower() not in cls.GENERIC_PERSON_LABELS
+                and name.lower() not in cls.RELATIONSHIP_TERMS
+                and any(cls._story_has_character_name(story, surface) for surface in [name, *(raw.get("aliases", []) or [])] if str(surface).strip())
+            ):
+                qwen_named_names.append(name)
+
+        known_names = cls._canonicalize_character_descriptors([*required, *qwen_named_names])
         normalized: list[str] = []
-        known_names = cls._canonicalize_character_descriptors(deterministic or [])
 
         for raw in semantic_candidates:
-            if isinstance(raw, str):
-                raw = {
-                    "name": raw,
-                    "entity_type": "CHARACTER",
-                    "is_character": True,
-                    "aliases": [],
-                    "identity_type": "named_character",
-                }
             if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
                 continue
 
             identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
             entity_type = str(raw.get("entity_type", "") or "").strip().upper()
+            name = str(raw.get("name", "") or "").strip()
+            aliases = [
+                str(alias or "").strip()
+                for alias in (raw.get("aliases", []) or [])
+                if str(alias or "").strip()
+            ]
 
-            if identity_type == "descriptive_character":
-                name = str(raw.get("name", "") or "").strip()
-                aliases = [
-                    str(alias or "").strip()
-                    for alias in (raw.get("aliases", []) or [])
-                    if str(alias or "").strip()
-                ]
-                candidate = name or (aliases[0] if aliases else "")
-                if candidate and cls._descriptive_identity_is_grounded(story, candidate):
-                    normalized.append(candidate)
+            if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"}:
                 continue
 
             if identity_type == "relational_character":
@@ -3026,28 +3112,19 @@ class ProductionPlanner:
                     normalized.append(canonical)
                 continue
 
-            name = str(raw.get("name", "") or "").strip()
-            if not name:
-                continue
-            if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"} and not any(
-                EntityResolver.normalize(name) == EntityResolver.normalize(value)
-                for value in known_names
-            ):
-                continue
-            lowered = name.lower()
-            if lowered in cls.GENERIC_PERSON_LABELS or lowered in cls.RELATIONSHIP_TERMS:
-                continue
-            if not cls._semantic_named_surface_is_safe(name):
+            if identity_type == "descriptive_character":
+                candidate = name or (aliases[0] if aliases else "")
+                if candidate and cls._descriptive_identity_is_grounded(story, candidate):
+                    normalized.append(candidate)
                 continue
 
-            aliases = [
-                str(alias or "").strip()
-                for alias in (raw.get("aliases", []) or [])
-                if str(alias or "").strip()
-            ]
-            if not any(
-                cls._story_has_character_name(story, surface)
-                for surface in [name, *aliases]
+            if not name:
+                continue
+            if (
+                not cls._semantic_named_surface_is_safe(name)
+                or name.lower() in cls.GENERIC_PERSON_LABELS
+                or name.lower() in cls.RELATIONSHIP_TERMS
+                or not any(cls._story_has_character_name(story, surface) for surface in [name, *aliases] if surface)
             ):
                 continue
 
@@ -3068,293 +3145,78 @@ class ProductionPlanner:
         *,
         qwen_character_extractor=None,
         qwen_character_adjudicator=None,
+        required_character_names: list[str] | None = None,
     ) -> list[Character]:
-        # Per-invocation semantic metadata is carried out-of-band through the
-        # existing Character.identity_profile path by QwenDirector. No schema
-        # expansion is required.
-        self._semantic_character_metadata_cache = {}
+        """Create the canonical production roster.
 
-        descriptors = self._canonicalize_character_descriptors(
-            [
-                *self.detect_character_descriptors(story),
-                *self._explicit_source_character_names(story),
-            ]
-        )
-        relational_hints = self._extract_relational_character_hints(
-            story,
-            descriptors,
-        )
-        deterministic_hard_named = [
-            name for name in descriptors
-            if self._hard_named_source_evidence(story, name)
-        ]
-        deterministic_descriptive = [
-            name for name in descriptors
-            if self._descriptive_identity_is_grounded(story, name)
-        ]
-        semantic_roster_authoritative = False
+        For Director-generated AI/Expand stories, Qwen is the semantic owner of character
+        identity. ProductionPlanner only validates/filter-canonicalizes Qwen's roster and
+        requires established source anchors to survive in Expand. It does not discover new
+        characters with regex heuristics.
+        """
+        self._semantic_character_metadata_cache = {}
+        story = str(story or "").strip()
+        required = self._canonicalize_character_descriptors(required_character_names or [])
+
         semantic_result_final = None
+        descriptors: list[str] = []
+        relation_hints: list[dict] = []
+        descriptive_hints: list[str] = []
 
         if qwen_character_extractor is not None:
-            try:
-                semantic_hints = list(dict.fromkeys(
-                    [*descriptors]
-                    + [item["name"] for item in relational_hints if item.get("name")]
-                ))[:32]
-                semantic_result = qwen_character_extractor(
-                    story,
-                    semantic_hints,
-                )
-                semantic_result_final = semantic_result
-
-                def _semantic_candidates(payload):
-                    if not isinstance(payload, dict):
-                        return []
-                    values = payload.get("candidates")
-                    if not isinstance(values, list):
-                        values = payload.get("characters")
-                    return list(values) if isinstance(values, list) else []
-
-                def _semantic_decision_map(payload):
-                    decisions = {}
-                    values = _semantic_candidates(payload)
-                    for value in values:
-                        if isinstance(value, str) and value.strip():
-                            key = EntityResolver.normalize(value)
-                            decisions[key] = True
-                            continue
-                        if not isinstance(value, dict):
-                            continue
-                        name = str(value.get("name", "") or "").strip()
-                        if not name or not isinstance(value.get("is_character"), bool):
-                            continue
-                        decisions[EntityResolver.normalize(name)] = bool(value.get("is_character"))
-                    return decisions
-
-                semantic_candidates = _semantic_candidates(semantic_result)
-                extractor_decisions = _semantic_decision_map(semantic_result)
-                semantic_has_decision = bool(extractor_decisions)
-                semantic_has_positive = any(extractor_decisions.values())
-
-                invalid_positive = False
-                semantic_names = set()
-                for raw in semantic_candidates:
-                    if isinstance(raw, str):
-                        raw = {
-                            "name": raw,
-                            "entity_type": "CHARACTER",
-                            "is_character": True,
-                            "aliases": [],
-                            "identity_type": "named_character",
-                        }
-                    if not isinstance(raw, dict) or not bool(raw.get("is_character", False)):
-                        continue
-                    identity_type = str(raw.get("identity_type", "named_character") or "named_character").strip().lower()
-                    entity_type = str(raw.get("entity_type", "") or "").strip().upper()
-                    if identity_type == "relational_character":
-                        valid, canonical, _ = self._relational_candidate_is_grounded(
-                            story, raw, descriptors,
-                        )
-                        if valid and canonical:
-                            semantic_names.add(EntityResolver.normalize(canonical))
-                        else:
-                            invalid_positive = True
-                        continue
-                    name = str(raw.get("name", "") or "").strip()
-                    aliases = [
-                        str(a or "").strip()
-                        for a in (raw.get("aliases", []) or [])
-                        if str(a or "").strip()
-                    ]
-                    valid_named = (
-                        entity_type in {"PERSON", "CHARACTER", "SENTIENT"}
-                        and bool(name)
-                        and self._semantic_named_surface_is_safe(name)
-                        and name.lower() not in self.GENERIC_PERSON_LABELS
-                        and name.lower() not in self.RELATIONSHIP_TERMS
-                        and any(self._story_has_character_name(story, surface) for surface in [name, *aliases] if surface)
-                    )
-                    if valid_named:
-                        semantic_names.add(EntityResolver.normalize(name))
-                    else:
-                        invalid_positive = True
-
-                deterministic_high_confidence = [
-                    name for name in descriptors
-                    if self._high_confidence_deterministic_character(story, name)
-                ]
-                deterministic_high_confidence_norm = {
-                    EntityResolver.normalize(name) for name in deterministic_high_confidence
-                }
-                relation_norms = {
-                    EntityResolver.normalize(str(item.get("name", "") or ""))
-                    for item in relational_hints
-                    if item.get("strong") and item.get("name")
-                }
-                strong_relation_missing = bool(relation_norms - set(extractor_decisions))
-                strong_character_missing = bool(deterministic_high_confidence_norm - set(extractor_decisions))
-                reconciled_preview = self._reconcile_semantic_characters(
-                    story, descriptors, semantic_result,
-                ) if semantic_has_decision else []
-
-                # Extractor output is only final when it explicitly addresses every
-                # strong deterministic candidate and produces at least one safely
-                # grounded canonical character. Any partial/empty/unusable semantic
-                # result must go through the bounded adjudication call or fall back to
-                # deterministic identity evidence. This prevents a model false-negative
-                # from erasing the canonical roster.
-                needs_adjudication = (
-                    not semantic_has_decision
-                    or invalid_positive
-                    or strong_relation_missing
-                    or strong_character_missing
-                    or (bool(descriptors) and not reconciled_preview)
-                )
-
-                semantic_roster_authoritative = bool(
-                    semantic_has_decision
-                    and not needs_adjudication
-                    and bool(reconciled_preview)
-                )
-
-                if needs_adjudication and qwen_character_adjudicator is not None:
-                    adjudication_hints = list(dict.fromkeys(
-                        [*descriptors]
-                        + [item["name"] for item in relational_hints if item.get("name")]
-                    ))[:24]
-                    adjudicated = qwen_character_adjudicator(
-                        story,
-                        adjudication_hints,
-                        semantic_result,
-                    )
-                    adjudicator_decisions = _semantic_decision_map(adjudicated)
-                    required = deterministic_high_confidence_norm | relation_norms
-                    adjudication_complete = bool(adjudicator_decisions) and (
-                        not required or required.issubset(adjudicator_decisions)
-                    )
-                    adjudicated_roster = (
-                        self._reconcile_semantic_characters(
-                            story, descriptors, adjudicated,
-                        )
-                        if adjudication_complete else []
-                    )
-                    if adjudication_complete and adjudicated_roster:
-                        semantic_result_final = adjudicated
-                        semantic_roster_authoritative = True
-                    else:
-                        # An empty/incomplete adjudication is not a semantic veto.
-                        # Keep the deterministic roster so the production contract
-                        # cannot collapse to an empty character set.
-                        semantic_roster_authoritative = False
-
-                if semantic_roster_authoritative:
-                    reconciled = self._reconcile_semantic_characters(
-                        story, descriptors, semantic_result_final,
-                    )
-                    if reconciled:
-                        descriptors = reconciled
-                    else:
-                        semantic_roster_authoritative = False
-                        descriptors = self._canonicalize_character_descriptors(descriptors)
-                else:
-                    descriptors = self._canonicalize_character_descriptors(descriptors)
-
-            except Exception as exc:
-                LOGGER.warning(
-                    "Semantic character extraction failed; using bounded deterministic fallback: %s",
-                    exc,
-                )
-                semantic_result_final = None
-                semantic_roster_authoritative = False
-
-                # Never fall back to the raw capitalization detector wholesale.
-                # A malformed/truncated adjudication response can leave ordinary
-                # prose surfaces (for example ``Everything``) in `descriptors`.
-                # Keep only identities with independent deterministic evidence;
-                # grounded relational hints are restored by the safety floor below.
-                strong_relation_names = {
-                    EntityResolver.normalize(str(item.get("name", "") or ""))
-                    for item in relational_hints
-                    if item.get("strong") and item.get("name")
-                }
-                safe_descriptors = []
-                for name in descriptors:
-                    if not name:
-                        continue
-                    normalized_name = EntityResolver.normalize(name)
-                    if normalized_name in strong_relation_names:
-                        safe_descriptors.append(name)
-                        continue
-                    if self._hard_named_source_evidence(story, name):
-                        safe_descriptors.append(name)
-                        continue
-                    if self._descriptive_identity_is_grounded(story, name):
-                        safe_descriptors.append(name)
-                        continue
-                    if self._high_confidence_deterministic_character(story, name):
-                        safe_descriptors.append(name)
-                descriptors = self._canonicalize_character_descriptors(safe_descriptors)
-
-        if not descriptors and not semantic_roster_authoritative:
-            fallback = []
-            appositive_pattern = re.compile(
-                r"\b(?:"
-                r"(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|"
-                r"Captain|Commander|Detective|Agent)\.?\s+"
-                r")?"
-                r"([A-Z][A-Za-z0-9'_-]+"
-                r"(?:\s+[A-Z][A-Za-z0-9'_-]+){0,2})"
-                r",\s*"
-                r"(?=(?:a|an|the|his|her|their|my|our|whose)\b)",
+            semantic_result = qwen_character_extractor(story, required)
+            reconciled = self._reconcile_semantic_characters(
+                story,
+                required,
+                semantic_result,
             )
-            for match in appositive_pattern.finditer(story or ""):
-                name = match.group(1).strip()
-                if name and name not in self.COMMON_PROPER_WORDS and name not in self.NARRATIVE_SUBJECT_EXCLUSIONS:
-                    fallback.append(name)
-            descriptors = self._canonicalize_character_descriptors(fallback)
+            if not reconciled:
+                raise RuntimeError(
+                    "Qwen character extraction produced no validated production characters."
+                )
 
-        # Strongly grounded relational identities are additive safety facts, not
-        # optional Qwen decorations. A complete named-character adjudication may
-        # legitimately exclude a weak/non-person candidate, but it must not erase
-        # a story-grounded relational person that is explicitly established by
-        # the source story (for example, ``Eli's father``) and may later speak as
-        # ``the man``, ``his father``, or ``father``. Named-character semantic
-        # negatives remain authoritative through the normal reconciliation path;
-        # relational hints are preserved here as a separate deterministic floor.
-        relation_by_norm = {
-            EntityResolver.normalize(str(item.get("name", "") or "")): item
-            for item in relational_hints
-            if item.get("strong") and item.get("name")
-        }
-        existing_norms = {EntityResolver.normalize(value) for value in descriptors}
-        for key, item in relation_by_norm.items():
-            canonical = str(item.get("name", "") or "").strip()
-            if canonical and key not in existing_norms:
-                descriptors.append(canonical)
-                existing_norms.add(key)
+            required_norm = {EntityResolver.normalize(value) for value in required if value}
+            reconciled_norm = {EntityResolver.normalize(value) for value in reconciled if value}
+            missing_required = [
+                value for value in required
+                if EntityResolver.normalize(value) not in reconciled_norm
+            ]
+            if missing_required:
+                raise RuntimeError(
+                    "Qwen character extraction omitted established source character(s): "
+                    + ", ".join(missing_required)
+                )
 
-        for canonical in [*deterministic_hard_named, *deterministic_descriptive]:
-            key = EntityResolver.normalize(canonical)
-            if canonical and key not in existing_norms:
-                descriptors.append(canonical)
-                existing_norms.add(key)
+            descriptors = reconciled
+            semantic_result_final = semantic_result
+            relation_hints = self._extract_relational_character_hints(story, descriptors)
+            descriptive_hints = [
+                name for name in descriptors
+                if self._descriptive_identity_is_grounded(story, name)
+            ]
+        else:
+            # Preserve/base-plan compatibility path: deterministic extraction is allowed
+            # here because no creative Director story is being generated in this call.
+            descriptors = self._canonicalize_character_descriptors(
+                [
+                    *self.detect_character_descriptors(story),
+                    *self._explicit_source_character_names(story),
+                ]
+            )
+            descriptors = self._drop_mention_only_identities(story, descriptors)
+            relation_hints = self._extract_relational_character_hints(story, descriptors)
+            for item in relation_hints:
+                name = str(item.get("name", "") or "").strip()
+                if item.get("strong") and name and EntityResolver.normalize(name) not in {
+                    EntityResolver.normalize(value) for value in descriptors
+                }:
+                    descriptors.append(name)
+            descriptors = self._canonicalize_character_descriptors(descriptors)
+            descriptive_hints = [
+                name for name in descriptors
+                if self._descriptive_identity_is_grounded(story, name)
+            ]
 
-        descriptive_hints = [
-            name for name in descriptors
-            if self._descriptive_identity_is_grounded(story, name)
-        ]
-        hard_named = [
-            name for name in descriptors
-            if self._hard_named_source_evidence(story, name)
-        ]
-        existing_norms = {EntityResolver.normalize(value) for value in descriptors}
-        for canonical in [*descriptive_hints, *hard_named]:
-            key = EntityResolver.normalize(canonical)
-            if key and key not in existing_norms:
-                descriptors.append(canonical)
-                existing_norms.add(key)
-
-        descriptors = self._canonicalize_character_descriptors(descriptors)
         if not descriptors:
             return []
 
@@ -3362,7 +3224,7 @@ class ProductionPlanner:
             story,
             descriptors,
             semantic_result_final,
-            relational_hints,
+            relation_hints,
             descriptive_hints,
         )
         self._semantic_character_metadata_cache = metadata
@@ -3382,37 +3244,37 @@ class ProductionPlanner:
                     for value in (info.get("semantic_aliases", []) or [])
                     if str(value).strip()
                 ]
-                character.identity_type = identity_type if identity_type in {"named_character", "relational_character", "descriptive_character"} else "named_character"
+                character.identity_type = identity_type if identity_type in {
+                    "named_character", "relational_character", "descriptive_character"
+                } else "named_character"
                 character.relationship_to = str(info.get("relationship_to", "") or "").strip() or None
                 character.relationship = str(info.get("relationship", "") or "").strip() or None
                 character.semantic_aliases = list(dict.fromkeys(aliases))
-            elif EntityResolver.normalize(descriptor) in {EntityResolver.normalize(value) for value in descriptive_hints}:
+            elif EntityResolver.normalize(descriptor) in {
+                EntityResolver.normalize(value) for value in descriptive_hints
+            }:
                 character.identity_type = "descriptive_character"
                 core = descriptor.strip()
                 for article in ("the ", "a ", "an "):
                     if core.lower().startswith(article):
                         core = core[len(article):]
                         break
-                role_alias = next((token for token in core.lower().split() if token in self.DESCRIPTIVE_IDENTITY_ROLES), "")
+                role_alias = next(
+                    (token for token in core.lower().split() if token in self.DESCRIPTIVE_IDENTITY_ROLES),
+                    "",
+                )
                 character.semantic_aliases = [role_alias] if role_alias else []
                 character.relationship_to = None
                 character.relationship = None
-            if character.identity_type == "relational_character" and (not character.relationship_to or not character.relationship):
-                # A malformed semantic candidate never becomes a relational identity.
-                character.identity_type = "named_character"
-                character.relationship_to = None
-                character.relationship = None
-                character.semantic_aliases = []
-            if character.identity_type == "descriptive_character" and not self._descriptive_identity_is_grounded(story, descriptor):
-                character.identity_type = "named_character"
-                character.relationship_to = None
-                character.relationship = None
-                character.semantic_aliases = []
-            character.build_identity_profile()
-            characters.append(character)
 
-        self.references.resolve_characters(characters)
-        self.references.validate(characters, require_images=False)
+            if character.identity_type == "relational_character" and (
+                not character.relationship_to or not character.relationship
+            ):
+                raise RuntimeError(
+                    f"Invalid relational character metadata for {descriptor!r}."
+                )
+
+            characters.append(character)
         return characters
 
     # ============================================================
