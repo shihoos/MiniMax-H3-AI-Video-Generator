@@ -97,6 +97,8 @@ class QwenDirectorSanitizeMixin:
     def _valid_character_name(
         self,
         name: str,
+        *,
+        identity_type: str = "named_character",
     ) -> bool:
 
         value = str(
@@ -107,6 +109,7 @@ class QwenDirectorSanitizeMixin:
             return False
 
         lowered = value.lower()
+        identity_type = str(identity_type or "named_character").strip().lower()
 
         if lowered in (
             self.FORBIDDEN_CHARACTER_NAMES
@@ -116,9 +119,10 @@ class QwenDirectorSanitizeMixin:
         if EntityResolver.generic_role_surface(lowered) or lowered in EntityResolver.RELATIONSHIP_LABELS:
             return False
 
-        if len(
-            value.split()
-        ) > 5:
+        # Qualified descriptive identities may legitimately be longer than
+        # ordinary named identities, e.g. ``the man in the grey coverall``.
+        max_words = 10 if identity_type == "descriptive_character" else 5
+        if len(value.split()) > max_words:
             return False
 
         if any(
@@ -230,12 +234,19 @@ class QwenDirectorSanitizeMixin:
                 or ""
             ).strip()
 
+            profile = self._coerce_mapping(value.get("identity_profile", {}))
+            identity_type = str(
+                value.get("identity_type", profile.get("identity_type", "named_character"))
+                or "named_character"
+            ).strip().lower()
+
             if not self._valid_character_name(
-                name
+                name,
+                identity_type=identity_type,
             ):
                 continue
 
-            key = name.lower()
+            key = EntityResolver.normalize(name)
 
             if key in seen:
                 continue
@@ -258,11 +269,6 @@ class QwenDirectorSanitizeMixin:
                     f"char_{self._slug(name)}"
                 )
 
-            profile = self._coerce_mapping(value.get("identity_profile", {}))
-            identity_type = str(
-                value.get("identity_type", profile.get("identity_type", "named_character"))
-                or "named_character"
-            ).strip().lower()
             relationship_to = str(
                 value.get("relationship_to", profile.get("relationship_to", "")) or ""
             ).strip() or None
@@ -488,10 +494,14 @@ class QwenDirectorSanitizeMixin:
             if not tokens:
                 continue
 
-            first_candidates.setdefault(
-                tokens[0],
-                set(),
-            ).add(canonical)
+            if tokens[0] not in {
+                "the", "a", "an", "this", "that", "these", "those",
+                "his", "her", "their", "my", "our", "your",
+            }:
+                first_candidates.setdefault(
+                    tokens[0],
+                    set(),
+                ).add(canonical)
 
             if len(tokens) >= 2:
 
