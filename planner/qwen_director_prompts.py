@@ -5,8 +5,6 @@ import os
 import re
 import textwrap
 
-from planner.entity_resolver import EntityResolver
-
 from planner.config import (
     DIRECTOR_STORY_CONTEXT_CHARS,
     AI_STORY_MODE,
@@ -20,6 +18,7 @@ from planner.config import (
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
 )
+from planner.entity_resolver import EntityResolver
 
 
 SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = """
