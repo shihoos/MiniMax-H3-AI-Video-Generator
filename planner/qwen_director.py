@@ -1370,14 +1370,8 @@ class QwenDirector(
     )
 
     def _story_craft_issues(self, story: str) -> list[str]:
-        """Log-only craft diagnostics. They never fail the run (single-call, fail-closed contract
-        is reserved for hard defects) but they make quality regressions visible in the log."""
+        """Log-only craft diagnostics; hard contract defects remain separate."""
         issues: list[str] = []
-        paragraphs = [p for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
-        for index, paragraph in enumerate(paragraphs, start=1):
-            words = len(re.findall(r"\b[\w'’-]+\b", paragraph))
-            if words < 55 or words > 110:
-                issues.append(f"paragraph {index} has {words} words (target 70-90)")
         if any(re.search(pattern, story, flags=re.IGNORECASE) for pattern in self._GENERIC_REVEAL_PATTERNS):
             issues.append("generic mystery/sci-fi reveal pattern")
         try:
