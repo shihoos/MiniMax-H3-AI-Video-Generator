@@ -357,20 +357,17 @@ def test_expand_prompt_does_not_impose_cast_limit():
     for text, label in ((expand, "expand"), (ai, "ai story")):
         _assert(
             ("no fixed cast size" in text
+             or "no target size" in text
              or "no numeric cast limit" in text
-             or "not a cast limit" in text
-             or "do not force one character, two characters, or any fixed cast size" in text),
+             or "not a cast limit" in text),
             f"{label} prompt still constrains cast size",
         )
         _assert(
-            "decorative character" in text
-            or "decorative cast" in text
-            or "do not add a character merely" in text,
-            f"{label} prompt lacks anti-decorative-cast rule",
+            "materially affect" in text,
+            f"{label} prompt lacks the rule that every recurring character must matter to the causal story",
         )
-    _assert("only named people allowed" not in expand, "Expand prompt still treats source anchors as a cast whitelist")
+    _assert("only named people allowed" not in expand, "Expand prompt treats source anchors as a cast whitelist")
     _assert("exactly one" not in expand or "exactly one" in expand and "six paragraphs" in expand, "Expand prompt contains an unintended cast-count instruction")
-
 
 def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
     from planner.qwen_director import QwenDirector
@@ -394,11 +391,17 @@ def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
-        _assert("goal" in text and "resistance" in text and "reversal" in text and "choice" in text and "consequence" in text, "causal spine incomplete")
-        _assert("cause, choose, or misjudge" in text, "reversal is not explicitly action-driven")
-        _assert("sentient" in text, "generic sentient-system reveal guard missing")
-        _assert("completed past-tense action" in text, "settled aftermath requirement missing")
-
+        for line in ("want:", "resistance:", "cast:", "setup:", "turn (reversal):", "choice:", "result:"):
+            _assert(line in text, f"{mode} story plan is missing the {line!r} line")
+        _assert("in your reasoning" in text, f"{mode} prompt does not place the plan in the reasoning pass")
+        _assert("causes, chooses, or misjudges" in text, f"{mode} reversal is not explicitly action-driven")
+        _assert("completed past-tense action" in text, f"{mode} settled-aftermath requirement missing")
+        _assert("hold the turn until" in text, f"{mode} prompt lacks the late-turn rule")
+        _assert("first consequential attempt" in text and "meets resistance" in text, f"{mode} prompt lacks the setback rhythm")
+        _assert("forces the protagonist to decide or act" in text, f"{mode} prompt does not require the turn to force a decision")
+        # Positive guidance only: the prompt must not name the failure modes it is trying to avoid.
+        for word in ("mystery", "containment", "facility", "smallest cast"):
+            _assert(word not in text, f"{mode} prompt names a failure mode ({word!r}) instead of describing the target")
 
 def test_story_contract_remains_six_paragraphs_420_560():
     prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
@@ -546,18 +549,10 @@ def test_shot_dialogue_extraction_degrades_deterministically():
     _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
 
 
-def test_no_orphan_semantic_dialogue_helper_remains():
-    sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
-    _assert("def _semantic_dialogue_resolves_to_roster(" not in sanitize,
-            "orphaned semantic-dialogue helper should not remain after removing the hard gate")
-
-
-def test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor():
-    sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
-    director = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("def _require_semantic_spoken_dialogue(" not in sanitize, "semantic dialogue must not remain a hard story gate")
-    _assert("_require_semantic_spoken_dialogue(" not in director, "Director must not force dialogue as an AI Story acceptance rule")
-    _assert("ai_story_semantic_dialogue_empty" in director, "AI Story semantic-dialogue misses must remain visible in telemetry")
+def test_semantic_dialogue_requirement_has_require_contract():
+    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("def _require_semantic_spoken_dialogue(" in source, "semantic dialogue validator must use require-style contract")
+    _assert("    ) -> None:" in source, "semantic dialogue requirement should use a requirement-style None return annotation")
 
 
 def test_character_semantic_schema_includes_spoken_dialogue():
@@ -669,38 +664,12 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
-        _assert(
-            "another character may create pressure" in text
-            or "present counterpart" in text
-            or "another present person" in text
-            or "relationship" in text and "causal story" in text,
-            f"{mode} prompt lacks consequential-interpersonal guidance",
-        )
-        _assert(
-            "no fixed cast size" in text
-            or "there is no fixed cast size" in text
-            or "there is no target size" in text,
-            f"{mode} prompt accidentally constrains cast size",
-        )
-        _assert(
-            "solitary story" in text
-            or "one person" in text
-            or "isolation" in text,
-            f"{mode} prompt lacks valid solitary-story guidance",
-        )
-        _assert(
-            "one person, two people, or any larger number" in text
-            or "one person, two, or many" in text
-            or "cast may contain one person, two people" in text,
-            f"{mode} prompt does not explicitly preserve Qwen-selected cast size",
-        )
-        _assert(
-            "do not add someone merely to create dialogue" in text
-            or "never add a speaker merely to satisfy a dialogue requirement" in text
-            or "do not add a character merely" in text,
-            f"{mode} prompt still risks forcing dialogue/cast",
-        )
-
+        _assert("include another person whenever their goal, action, or knowledge would change" in text, f"{mode} prompt lacks the open counterpart question")
+        _assert("one, two, or several" in text, f"{mode} prompt does not leave cast size to Qwen")
+        _assert("a solitary story is right when" in text, f"{mode} prompt does not keep solitary stories valid")
+        _assert("dialogue is optional" in text, f"{mode} prompt makes dialogue mandatory")
+        _assert("smallest" not in text, f"{mode} prompt biases the cast toward the smallest size")
+        _assert("let them speak" not in text and "must speak" not in text, f"{mode} prompt forces dialogue")
 
 def test_story_prompt_has_no_artificial_subtargets():
     source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
@@ -750,8 +719,7 @@ def main():
         test_shot_dialogue_uses_roster_aliases,
         test_preserve_semantic_empty_dialogue_is_telemetried,
         test_shot_dialogue_extraction_degrades_deterministically,
-        test_no_orphan_semantic_dialogue_helper_remains,
-        test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor,
+        test_semantic_dialogue_requirement_has_require_contract,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_dialogue_attribution_has_no_english_word_lists,
         test_shot_context_preserves_paragraph_boundaries,
