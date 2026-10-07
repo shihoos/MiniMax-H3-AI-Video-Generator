@@ -238,6 +238,16 @@ PROSE
 - Show emotion through what hands, eyes, breath, and posture do. Never name the emotion as a mood word.
 - Avoid cliches such as "heart pounded", "the weight of", "pulse steadied", "a testament to", "shiver down",
   "sent a chill", "palpable", and the word "suddenly".
+- Keep the prose filmable: convey private thoughts, fears, memories, and realizations through visible action,
+  physical objects, or spoken lines rather than naming the internal state. Keep backstory brief and subordinate to the present action.
+- When an object, tool, skill, or physical limitation is established early and remains relevant, pay it off through a later action
+  instead of introducing a convenient new solution at the climax.
+- When dialogue is used, keep lines concise and purposeful. Give speaking characters distinct immediate objectives;
+  use refusal, interruption, deflection, or a lie to create conflict rather than having characters explain the plot to one another.
+- Prefer a final physical image that echoes or transforms an important concrete detail from the opening when the story naturally supports it.
+- The sixth paragraph stays in one place and one moment and shows two or three concrete actions ending on the last completed one; it is not a summary of later years or of what the wider world did afterwards.
+- Write spoken lines in straight double quotes with a plain attribution or action beat so the speaker is unmistakable.
+- The cost of the protagonist's choice should be a visible, concrete loss rather than a named feeling.
 - Plain prose means plain text: no emoji, symbols, or decorative characters anywhere.
 - Stop after the sixth paragraph. Write nothing after the story ends.
 
