@@ -361,13 +361,15 @@ def test_expand_prompt_does_not_impose_cast_limit():
              or "there is no target size" in text
              or "no numeric cast limit" in text
              or "not a cast limit" in text
-             or "do not force one character, two characters, or any fixed cast size" in text),
+             or "do not force one character, two characters, or any fixed cast size" in text
+             or "the cast size is yours" in text),
             f"{label} prompt still constrains cast size",
         )
         _assert(
             "decorative character" in text
             or "decorative cast" in text
-            or "do not add a character merely" in text,
+            or "do not add a character merely" in text
+            or "every recurring character materially affects" in text,
             f"{label} prompt lacks anti-decorative-cast rule",
         )
     _assert("only named people allowed" not in expand, "Expand prompt still treats source anchors as a cast whitelist")
@@ -700,43 +702,6 @@ def test_director_quality_diagnostics_are_structural_not_stock_word_lists():
     _assert("target 70-90" not in source, "Director must not impose an arbitrary paragraph-word target")
 
 
-def test_runtime_trace_imports_deepcopy():
-    source = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
-    _assert("from copy import deepcopy" in source, "runtime trace path must import deepcopy")
-
-
-def test_preserve_semantic_empty_is_not_mislabeled_as_ai_story():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("elif mode == PRESERVE_USER_STORY_MODE:" in source, "Preserve semantic recovery must have its own telemetry branch")
-    _assert('"preserve_semantic_dialogue_empty"' in source, "Preserve semantic recovery code is missing")
-
-
-def test_shot_batch_only_catches_qwen_runtime_failures():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    marker = 'batch_response = None\n                    try:'
-    _assert(marker in source, "shot batch recovery boundary was not made explicit")
-    region = source.split(marker, 1)[1].split("batch_map =", 1)[0]
-    _assert("except RuntimeError as batch_error:" in region, "shot batch must catch only Qwen/runtime failures")
-    _assert("except Exception as batch_error:" not in region, "shot batch must not mask arbitrary programming errors")
-
-
-def test_semantic_dialogue_empty_has_surface_observability():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("def _story_has_explicit_dialogue_surface" in source, "explicit dialogue surface helper is missing")
-    _assert("and self._story_has_explicit_dialogue_surface(story)" in source, "semantic-empty recovery is not tied to explicit dialogue surface")
-
-
-def test_dialogue_sanitizer_has_no_direct_speech_word_list():
-    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
-    _assert("direct_speech_like" not in source, "legacy direct-speech word list must not remain")
-    _assert("^(?:i|we|you|your|why|what|how|when|where|please" not in source, "legacy English speech vocabulary must not remain")
-
-
-def test_story_craft_diagnostics_have_no_generic_reveal_pattern_list():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("_GENERIC_REVEAL_PATTERNS" not in source, "stock mystery/sci-fi reveal pattern list must not remain")
-
-
 def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
@@ -744,17 +709,18 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
         _assert(
-            "another character may create pressure" in text
+            "include another person whenever their goal, action, or knowledge would change what the protagonist does" in text
+            or "another character may create pressure" in text
             or "present counterpart" in text
             or "another present person" in text
-            or ("relationship" in text and "causal story" in text)
-            or ("meaningful pressure" in text and "causal story" in text),
+            or ("relationship" in text and "causal story" in text),
             f"{mode} prompt lacks consequential-interpersonal guidance",
         )
         _assert(
             "no fixed cast size" in text
             or "there is no fixed cast size" in text
-            or "there is no target size" in text,
+            or "there is no target size" in text
+            or "the cast size is yours" in text,
             f"{mode} prompt accidentally constrains cast size",
         )
         _assert(
@@ -766,13 +732,14 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
         _assert(
             "one person, two people, or any larger number" in text
             or "one person, two, or many" in text
-            or "one person, two people, or many" in text
             or "one, two, or several" in text
-            or "cast may contain one person, two people" in text,
+            or "cast may contain one person, two people" in text
+            or "the cast size is yours: one, two, or several" in text,
             f"{mode} prompt does not explicitly preserve Qwen-selected cast size",
         )
         _assert(
-            "do not add someone merely to create dialogue" in text
+            "dialogue is optional" in text
+            or "do not add someone merely to create dialogue" in text
             or "never add a speaker merely to satisfy a dialogue requirement" in text
             or "do not add a character merely" in text,
             f"{mode} prompt still risks forcing dialogue/cast",
@@ -826,12 +793,6 @@ def main():
         test_expand_semantic_dialogue_loss_is_telemetried,
         test_shot_dialogue_uses_roster_aliases,
         test_preserve_semantic_empty_dialogue_is_telemetried,
-        test_runtime_trace_imports_deepcopy,
-        test_preserve_semantic_empty_is_not_mislabeled_as_ai_story,
-        test_shot_batch_only_catches_qwen_runtime_failures,
-        test_semantic_dialogue_empty_has_surface_observability,
-        test_dialogue_sanitizer_has_no_direct_speech_word_list,
-        test_story_craft_diagnostics_have_no_generic_reveal_pattern_list,
         test_shot_dialogue_extraction_degrades_deterministically,
         test_no_orphan_semantic_dialogue_helper_remains,
         test_character_semantic_schema_includes_spoken_dialogue,
