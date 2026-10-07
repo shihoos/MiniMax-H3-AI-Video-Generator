@@ -1356,59 +1356,6 @@ class QwenDirectorSanitizeMixin:
         coverage = covered / max(1, len(source_sentences))
         return coverage, missing
 
-    def _semantic_dialogue_resolves_to_roster(
-        self,
-        text: str,
-        characters: list[dict] | None = None,
-    ) -> bool:
-        """Return whether any Qwen-blessed spoken span resolves to a canonical roster speaker.
-
-        This is advisory validation only. It never imposes a cast size or dialogue requirement:
-        Qwen may legitimately choose one character, multiple characters, or any other causal cast.
-        """
-        extractor = getattr(self, "_extract_story_spoken_segments", None)
-        semantic_dialogue = getattr(self, "_semantic_spoken_dialogue", None)
-        if not callable(extractor) or not semantic_dialogue:
-            return False
-
-        allowed_names = [
-            str(character.get("name", "")).strip()
-            for character in (characters or [])
-            if isinstance(character, dict) and str(character.get("name", "")).strip()
-        ]
-        aliases = EntityResolver.build_character_alias_map(characters or [])
-        try:
-            segments = extractor(
-                str(text or ""),
-                semantic_dialogue,
-                allowed_speakers=allowed_names,
-                speaker_aliases=aliases,
-            )
-        except Exception as exc:
-            recorder = getattr(self, "_record_recovery", None)
-            if callable(recorder):
-                recorder("semantic_dialogue_validation_failed", str(exc))
-            return False
-
-        canonical = {EntityResolver.normalize(name) for name in allowed_names}
-
-        def resolves_to_roster(surface: str) -> bool:
-            normalized = EntityResolver.normalize(surface)
-            if normalized in canonical:
-                return True
-            resolved = aliases.get(normalized)
-            return bool(resolved and EntityResolver.normalize(resolved) in canonical)
-
-        return any(
-            isinstance(segment, dict)
-            and bool(segment.get("text"))
-            and any(
-                resolves_to_roster(str(speaker))
-                for speaker in (segment.get("source_speakers", set()) or set())
-            )
-            for segment in segments
-        )
-
     @staticmethod
     def _preserve_story_requires_semantic_dialogue(text: str) -> bool:
         """Return True when Preserve Story contains quote-delimited prose that needs semantic attribution."""
