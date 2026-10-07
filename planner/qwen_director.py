@@ -505,12 +505,6 @@ class QwenDirector(
                 "Canonical character extraction produced no usable names."
             )
 
-        if mode == AI_STORY_MODE:
-            self._require_semantic_spoken_dialogue(
-                story,
-                characters,
-            )
-
         canonical_scenes = planner.create_scenes(
             canonical_source_story,
             canonical_characters,
@@ -600,6 +594,7 @@ class QwenDirector(
                     completed_scene_ids[-1]
                     if completed_scene_ids
                     else "",
+                    checkpoint_store=checkpoint_store,
                 ),
             )
 
@@ -616,6 +611,8 @@ class QwenDirector(
 
         all_shots: list[dict] = []
         shot_temperature, shot_top_p = self._shot_sampling()
+
+        scene_id = ""
 
         try:
 
@@ -881,6 +878,7 @@ class QwenDirector(
                             "shots",
                             completed_scene_ids,
                             last_scene_id,
+                            checkpoint_store=checkpoint_store,
                         ),
                     )
 
@@ -890,7 +888,6 @@ class QwenDirector(
 
         except Exception as exc:
 
-            scene_id = locals().get("scene_id", "")
             director_plan["shots"] = deepcopy(
                 all_shots
             )
@@ -909,6 +906,7 @@ class QwenDirector(
                     completed_scene_ids,
                     scene_id,
                     str(exc),
+                    checkpoint_store=checkpoint_store,
                 ),
             )
 
@@ -1056,16 +1054,21 @@ class QwenDirector(
             characters,
         )
 
-        if mode == EXPAND_USER_STORY_MODE and self._semantic_spoken_dialogue:
+        if self._semantic_spoken_dialogue:
             final_dialogue_count = sum(
                 len(shot.get("dialogue_events", []) or [])
                 for shot in all_shots
                 if isinstance(shot, dict)
             )
             if final_dialogue_count == 0:
+                recovery_code = (
+                    "expand_semantic_dialogue_empty"
+                    if mode == EXPAND_USER_STORY_MODE
+                    else "ai_story_semantic_dialogue_empty"
+                )
                 self._record_recovery(
-                    "expand_semantic_dialogue_empty",
-                    "Expand Story semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
+                    recovery_code,
+                    "Semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
                 )
 
         # Dialogue speaker normalization may remove or replace events. That can
@@ -1184,6 +1187,7 @@ class QwenDirector(
                 ],
                 "",
                 "",
+                checkpoint_store=checkpoint_store,
             ),
         )
 
