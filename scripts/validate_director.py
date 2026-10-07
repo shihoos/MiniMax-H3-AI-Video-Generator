@@ -766,6 +766,7 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
         _assert(
             "one person, two people, or any larger number" in text
             or "one person, two, or many" in text
+            or "one person, two people, or many" in text
             or "one, two, or several" in text
             or "cast may contain one person, two people" in text,
             f"{mode} prompt does not explicitly preserve Qwen-selected cast size",
