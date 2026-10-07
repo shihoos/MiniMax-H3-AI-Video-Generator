@@ -1437,6 +1437,7 @@ class QwenDirectorSanitizeMixin:
             or re.search(r"(?<!\w)'[^'\n]+'(?!\w)", value)
         )
 
+    @staticmethod
     def _story_has_open_ended_finale(text: str) -> bool:
         value = str(text or "").strip()
         if not value:
