@@ -207,17 +207,27 @@ HARD FORMAT
   and do not truncate a necessary ending just to stay near an arbitrary target.
 - The sixth paragraph is a full settled aftermath, not a compressed summary.
 
-CAUSALITY (plan silently, then write)
-- Before writing, silently determine: the protagonist's immediate goal; what resists it; the action, relationship, fact, or physical constraint that will matter later; what changes the protagonist's understanding; what choice becomes unavoidable; and what concrete result follows. These are planning questions, not a rigid six-step template.
-- Choose the cast that best serves that causal chain. One person, two people, or several are all valid. When another present person would materially change the goal, resistance, reversal, choice, or consequence, include that person; when no additional person is needed, do not add one merely for dialogue or decoration. A solitary story is valid when isolation, duty, or a physical constraint is genuinely the opposing force.
-- The story should progress because something happens that changes what a character can do, knows, wants, or must choose. Avoid a sequence of increasingly strange discoveries. When new information appears, make it alter an existing goal, relationship, constraint, or decision rather than simply adding another mystery.
-- Paragraph 1: open in a specific place with a concrete immediate objective, pressure, or problem. Establish only the details that matter to what follows.
-- Paragraphs 2-3: develop actions and consequences. At least one earlier action, relationship, fact, object, skill, or physical limitation should acquire greater importance later when the story naturally supports it. Do not end paragraphs merely to introduce a new unexplained clue.
-- Paragraph 4: deliver a grounded reversal that changes what the protagonist believes or must do. It must arise from something already established in the story and may come through action, a relationship, a physical consequence, or spoken information. It must change the decision, not merely reveal another secret.
-- Paragraph 5: make the protagonist choose between outcomes that cannot both be kept. The choice must follow from the reversal and carry a concrete, visible cost. Use earlier established resources, relationships, knowledge, or constraints where they naturally matter; do not invent a convenient solution solely for the climax.
-- Paragraph 6: show the direct consequence of the choice in a settled situation. Use concrete action and a final image or detail that resolves the story rather than opening another mystery, mission, threat, or future hook.
-- Keep causality grounded in the premise. People, relationships, physical processes, technical conditions, and environmental pressures may all create the problem; what matters is that the story clearly shows how the protagonist's actions and decisions shape what happens next.
-- Every named person is on screen and materially part of the story. Someone known only through a document, label, message, recording, or memory is evidence, not a production character.
+STORY PLAN (write these seven lines in your reasoning before drafting; never in the output)
+WANT: what the protagonist is trying to do right now, and where.
+RESISTANCE: what or who stands in the way, why, and how the protagonist's first attempt meets resistance.
+CAST: who is physically present and what each person wants. The cast size is yours: one, two, or several. Include another person whenever their goal, action, or knowledge would change what the protagonist does. A solitary story is right when isolation or the environment is itself the pressure.
+SETUP: a fact, object, skill, relationship, or constraint shown early that will matter later, if the story calls for one.
+TURN (reversal): what the protagonist learns or sees that changes what they must do. It grows out of something already shown. New information is a turn only when it forces the protagonist to decide or act differently.
+CHOICE: two outcomes that cannot both be kept, and the price paid for the one chosen. The price is real; the result may be bittersweet or bleak as well as hopeful.
+RESULT: the concrete, settled situation after the choice.
+
+STRUCTURE (one beat per paragraph; each beat is shown by what people do)
+- Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical goal and meets an immediate obstacle. Use sensory detail that belongs to this setting and serves the action.
+- Paragraph 2: the protagonist makes the first consequential attempt, and it meets resistance: it fails, succeeds at a cost, or succeeds and exposes a new problem. Either way the situation changes.
+- Paragraph 3: the situation, or another person, answers that attempt. The protagonist adapts or is forced to, and the pressure rises. End on the consequence of what just happened.
+- Paragraph 4: hold the TURN until here; paragraphs 1-3 build the pressure it overturns. Deliver it through action, evidence, another person's deeds or words, or a physical consequence, consistent with every earlier paragraph.
+- Paragraph 5: the CHOICE, made through physical action, with its price made visible. Use what the story has already established, so that the way out comes from earlier paragraphs.
+- Paragraph 6: one place, one moment. Two or three concrete actions show the direct result of the choice and end on a completed past-tense action in a settled situation. Nothing is left pending: no 'until', no 'yet to come', no next mission, no looming return.
+- The protagonist causes, chooses, or misjudges something early enough that later events follow from that action or its consequence. Characters act, choose, refuse, misjudge, cooperate, deceive, or react to concrete consequences, and the protagonist makes meaningful decisions under pressure, whether it comes from another person or from the environment. Nothing important happens without a cause the story has shown.
+- Establish facts, objects, relationships, and constraints before relying on them, and pay them off where the story naturally calls for it.
+- Every named person is on screen. Someone known only through a document, label, message, or memory is evidence, not a character.
+
+CHECK (in your reasoning, after drafting and before output): six paragraphs; at least 420 words; each paragraph's event follows from an earlier one; the turn rests on something shown earlier; the price is visible; the last sentence reports something that has already happened.
 
 PROSE
 - Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
@@ -227,10 +237,6 @@ PROSE
   "sent a chill", "palpable", and the word "suddenly".
 - Keep the prose filmable: convey private thoughts, fears, memories, and realizations through visible action,
   physical objects, or spoken lines rather than naming the internal state. Keep backstory brief and subordinate to the present action.
-- When an object, tool, skill, or physical limitation is established early and remains relevant, pay it off through a later action
-  instead of introducing a convenient new solution at the climax.
-- When dialogue is used, keep lines concise and purposeful. Give speaking characters distinct immediate objectives;
-  use refusal, interruption, deflection, or a lie to create conflict rather than having characters explain the plot to one another.
 - Prefer a final physical image that echoes or transforms an important concrete detail from the opening when the story naturally supports it.
 - Plain prose means plain text: no emoji, symbols, or decorative characters anywhere.
 - Stop after the sixth paragraph. Write nothing after the story ends.
@@ -251,18 +257,16 @@ PEOPLE
             return (
                 "You are the screenwriter of short cinematic stories for MiniMax H3. "
                 "You write one complete, original, film-ready story from the premise. "
-                "Plan the causal spine silently (goal, resistance, evidence, reversal, costly choice, consequence) "
-                "and output only the finished prose.\n\n"
+                "Before drafting, write the STORY PLAN lines below in your reasoning, then output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nPREMISE FIDELITY\n"
                 "- Every concrete fact in the premise (the protagonist's profession, the place, the weather, "
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- You decide the cast. There is no target size: one person, two, or many are all valid. Choose only characters who materially affect the causal story. Another character may create pressure through action, refusal, cooperation, deception, information, or a different objective; do not add someone merely to create dialogue.\n"
-                "- Every recurring character materially affects the protagonist's goal, resistance, reversal, choice, or consequence. Give each one a stable canonical name and visible action on screen. Distinct wants are useful when they naturally create conflict, but do not manufacture conflict where the premise does not support it.\n"
-                "- Dialogue is optional. Use direct spoken dialogue when it naturally carries conflict, information, refusal, deception, negotiation, or relationship. Do not add dialogue merely because multiple characters exist. If the story is solitary, do not invent a voice just to satisfy a dialogue rule.\n"
-                "- A log, recording, radio, screen, label, or alarm is evidence, never a speaking character, and never substitutes for a character's own consequential action or decision.\n\n"
+                "- You decide the cast; there is no target size. Use the CAST line of your plan. Every recurring character materially affects the protagonist's goal, resistance, turn, choice, or consequence, wants something of their own, has one stable canonical name, and acts on screen. A character may change the story through action alone.\n"
+                "- Dialogue is optional. Use short lines of direct speech in straight double quotes with a clear speaker only where speech carries conflict, information, refusal, deception, negotiation, or a relationship. Speakers want different things and interrupt, deflect, or lie instead of explaining the plot. Never add dialogue merely because several characters are present, and never invent a voice for a solitary story.\n"
+                "- A log, recording, radio, screen, label, or alarm is evidence, never a speaking character, and never replaces a character's own action or decision.\n\n"
                 "Output only the finished story prose."
             )
 
@@ -271,7 +275,7 @@ PEOPLE
                 "You are the story editor-writer for MiniMax H3. You expand a short source story into a complete, "
                 "film-ready cinematic story without changing who it is about or what happened. "
                 "First identify silently the source's characters, setting, events, and outcome, then build the causal "
-                "spine around them (goal, resistance, evidence, reversal, costly choice, consequence). "
+                "spine around them with the STORY PLAN lines below, written in your reasoning before drafting. "
                 "Output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
@@ -280,8 +284,8 @@ PEOPLE
                 "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
                 "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
                 "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
-                "- Dialogue is optional. When a present character naturally speaks, use short direct lines in straight double quotes with a clear speaker. Let spoken lines carry conflict, information, refusal, deception, negotiation, or relationship when appropriate; never add a speaker merely to satisfy a dialogue requirement.\n"
-                "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the reversal rather than using a generic facility/system reveal.\n"
+                "- Dialogue is optional. Use short lines of direct speech in straight double quotes with a clear speaker only where speech carries conflict, information, refusal, deception, or a relationship. A character may change the story through action alone. Never add a character or a line of dialogue solely to create speech; a story with one person needs none.\n"
+                "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the turn.\n"
                 "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n"
                 "- Do not write the expansion as a compressed six-paragraph synopsis. Each paragraph should develop a concrete scene beat with visible action and consequence. If the story reaches its apparent ending before the minimum length, deepen the existing causal beats and aftermath rather than stopping early or introducing a disconnected subplot.\n\n"
                 "Output only the finished expanded story prose."
@@ -506,15 +510,18 @@ PEOPLE
 
     SPOKEN DIALOGUE SEMANTICS:
     Also return `spoken_dialogue` for direct speech actually spoken by a physically present production
-    character in the supplied story. Each item must contain the exact spoken text and the speaker's canonical
-    character name (or the grounded character surface when the character is descriptive/relational).
-    Include only speech that the prose clearly presents as being spoken by that person. Quotation marks,
-    punctuation, or a character name by themselves are not enough: use the surrounding sentence context to
-    distinguish spoken words from quoted documents, signs, labels, recordings, transmissions, alarms,
-    terminal/computer output, recalled text, narration, internal thoughts, and other displayed or reported language.
-    Do not paraphrase, merge, split, invent, or reinterpret dialogue. The `text` field must match the source wording
-    closely enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
-    return an empty `spoken_dialogue` array. When uncertain whether a passage is actually spoken, exclude it.
+    character in the supplied story. Each item must contain the exact spoken text and the speaker's
+    canonical character name (or the grounded character surface when the character is descriptive/relational).
+    Include quoted dialogue and explicit screenplay-style character lines only when they are genuinely spoken
+    by that person. Exclude logs, notes, signs, labels, photographs, recordings, transmissions, alarms,
+    terminal/computer output, narration, internal thoughts, remembered speech, and other text that is merely
+    displayed, transmitted, reported, or read. Quotation marks alone do not make text spoken dialogue.
+    Do not paraphrase, merge, split, or invent dialogue. The `text` field must match the source wording closely
+    enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
+    return an empty `spoken_dialogue` array.
+    Every `spoken_dialogue` item must be text that sits inside quotation marks in the story or on an explicit
+    `Name: line` screenplay label. Narration, description, and action sentences are never dialogue, even when a
+    character is the subject. If the story has no quotation marks and no labelled lines, `spoken_dialogue` must be empty.
     """).strip()
 
         user_payload = json.dumps(
@@ -571,10 +578,9 @@ PEOPLE
         """Keep only semantic dialogue items anchored to real speech in the story.
 
         An item is anchored when its text equals a quote-delimited span or an explicit
-        `Name: line` label. This is an exact-span safeguard shared with later reconciliation:
-        it removes narration that the extractor mislabels as speech before it can trigger a
-        false recovery. The semantic extractor remains responsible for deciding whether an
-        anchored span is actually spoken; this helper does not try to classify quoted text.
+        `Name: line` label. This is the same exact-span test the dialogue reconciler applies
+        later, so no valid dialogue is lost; unanchored narration sentences that the
+        extractor mislabelled as speech are dropped before they can trigger a recovery.
         No word lists are used.
         """
         text = str(story or "")
