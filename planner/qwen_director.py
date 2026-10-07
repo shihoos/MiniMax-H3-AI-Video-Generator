@@ -744,6 +744,7 @@ class QwenDirector(
                         for item in batch_scenes
                     ]
 
+                    batch_response = None
                     try:
                         batch_response = self._chat_json(
                             self._shot_director_batch_system(),
@@ -764,7 +765,16 @@ class QwenDirector(
                                 scene_count=len(batch_scenes),
                             ),
                         )
+                    except RuntimeError as batch_error:
+                        self._record_recovery(
+                            "shot_batch_deterministic_fallback",
+                            str(batch_error),
+                        )
 
+                    # Model/runtime failure is the only recovery boundary here. Parsing,
+                    # sanitization and invariant errors are intentionally outside the catch so
+                    # programmer defects cannot be misclassified as an ordinary Qwen fallback.
+                    if batch_response is not None:
                         batch_map = self._normalize_batch_shot_response(
                             batch_response
                         )
@@ -787,12 +797,6 @@ class QwenDirector(
                                 generated_by_scene[target_id] = candidate[
                                     : self.SHOTS_PER_SCENE
                                 ]
-
-                    except Exception as batch_error:
-                        self._record_recovery(
-                            "shot_batch_deterministic_fallback",
-                            str(batch_error),
-                        )
 
                 # The deterministic repair pass after the loop owns missing
                 # shots. Never launch another Qwen request here.
@@ -1054,22 +1058,35 @@ class QwenDirector(
             characters,
         )
 
-        if self._semantic_spoken_dialogue:
-            final_dialogue_count = sum(
-                len(shot.get("dialogue_events", []) or [])
-                for shot in all_shots
-                if isinstance(shot, dict)
+        final_dialogue_count = sum(
+            len(shot.get("dialogue_events", []) or [])
+            for shot in all_shots
+            if isinstance(shot, dict)
+        )
+        if self._semantic_spoken_dialogue and final_dialogue_count == 0:
+            if mode == EXPAND_USER_STORY_MODE:
+                recovery_code = "expand_semantic_dialogue_empty"
+            elif mode == PRESERVE_USER_STORY_MODE:
+                recovery_code = "preserve_semantic_dialogue_empty"
+            else:
+                recovery_code = "ai_story_semantic_dialogue_empty"
+            self._record_recovery(
+                recovery_code,
+                "Semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
             )
-            if final_dialogue_count == 0:
-                recovery_code = (
-                    "expand_semantic_dialogue_empty"
-                    if mode == EXPAND_USER_STORY_MODE
-                    else "ai_story_semantic_dialogue_empty"
-                )
-                self._record_recovery(
-                    recovery_code,
-                    "Semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
-                )
+        elif (
+            mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE)
+            and not self._semantic_spoken_dialogue
+            and self._story_has_explicit_dialogue_surface(story)
+        ):
+            if mode == EXPAND_USER_STORY_MODE:
+                recovery_code = "expand_semantic_dialogue_empty"
+            else:
+                recovery_code = "ai_story_semantic_dialogue_empty"
+            self._record_recovery(
+                recovery_code,
+                "Story contains explicit dialogue surface, but the single semantic extraction returned no spoken dialogue items.",
+            )
 
         # Dialogue speaker normalization may remove or replace events. That can
         # change which event is actually at a shot boundary, so continuation
@@ -1430,20 +1447,9 @@ class QwenDirector(
             )
         return candidate, True
 
-    _GENERIC_REVEAL_PATTERNS = (
-        r"\b(?:system|facility|station|ai|machine|computer)\b[^.]{0,30}\b(?:was|is|were)\s+(?:alive|sentient|aware|awake|watching)\b",
-        r"\bcontainment\b[^.]{0,30}\b(?:failed|failing|breach|breached|unit|field)\b",
-        r"\bsecret experiment\b",
-        r"\bthey(?:'|\u2019)re still (?:inside|down there|here)\b",
-        r"\b(?:had|has) been here before\b|\bbeen here before\b",
-        r"\b(?:final|last) entry read\b",
-    )
-
     def _story_craft_issues(self, story: str) -> list[str]:
         """Log-only craft diagnostics; hard contract defects remain separate."""
         issues: list[str] = []
-        if any(re.search(pattern, story, flags=re.IGNORECASE) for pattern in self._GENERIC_REVEAL_PATTERNS):
-            issues.append("generic mystery/sci-fi reveal pattern")
         try:
             planner = self._planner()
             named = planner.detect_character_descriptors(story)
@@ -2174,6 +2180,31 @@ class QwenDirector(
         text = QwenDirector._normalize_dialogue_text(value)
         text = re.sub(r"^[,;:!?\.\-\s]+|[,;:!?\.\-\s]+$", "", text)
         return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def _story_has_explicit_dialogue_surface(story: str) -> bool:
+        """Return whether the story contains an explicit surface that can carry spoken dialogue.
+
+        This is intentionally syntax-only: it recognizes quotation-delimited text and explicit
+        screenplay-style speaker labels, but it never infers dialogue from English vocabulary.
+        """
+        text = str(story or "")
+        if not text.strip():
+            return False
+        quote_pattern = re.compile(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        if any(
+            str(value or "").strip()
+            for match in quote_pattern.finditer(text)
+            for value in match.groups()
+        ):
+            return True
+        label_pattern = re.compile(
+            r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
+        )
+        return any(str(match.group(2) or "").strip() for match in label_pattern.finditer(text))
 
     @classmethod
     def _extract_story_spoken_segments(
