@@ -546,10 +546,12 @@ def test_shot_dialogue_extraction_degrades_deterministically():
     _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
 
 
-def test_semantic_dialogue_requirement_has_require_contract():
-    source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
-    _assert("def _require_semantic_spoken_dialogue(" in source, "semantic dialogue validator must use require-style contract")
-    _assert("    ) -> None:" in source, "semantic dialogue requirement should use a requirement-style None return annotation")
+def test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor():
+    sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    director = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("def _require_semantic_spoken_dialogue(" not in sanitize, "semantic dialogue must not remain a hard story gate")
+    _assert("_require_semantic_spoken_dialogue(" not in director, "Director must not force dialogue as an AI Story acceptance rule")
+    _assert("ai_story_semantic_dialogue_empty" in director, "AI Story semantic-dialogue misses must remain visible in telemetry")
 
 
 def test_character_semantic_schema_includes_spoken_dialogue():
@@ -665,6 +667,13 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
         _assert("smallest consequential human counterpart" in text, f"{mode} prompt lacks bounded human-conflict guidance")
         _assert("no fixed cast size" in text or "there is no fixed cast size" in text, f"{mode} prompt accidentally constrains cast size")
         _assert("solitary-protagonist" in text, f"{mode} prompt lacks solitary-template guard")
+        _assert("one person, two people, or any larger number" in text or "cast may contain one person, two people" in text, f"{mode} prompt does not explicitly preserve Qwen-selected cast size")
+        _assert(
+            "do not force a solitary protagonist" in text
+            or "do not invent a speaker" in text
+            or "never force a character, counterpart, or speaker" in text,
+            f"{mode} prompt still risks forcing dialogue/cast",
+        )
 
 
 def test_story_prompt_has_no_artificial_subtargets():
@@ -715,7 +724,7 @@ def main():
         test_shot_dialogue_uses_roster_aliases,
         test_preserve_semantic_empty_dialogue_is_telemetried,
         test_shot_dialogue_extraction_degrades_deterministically,
-        test_semantic_dialogue_requirement_has_require_contract,
+        test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_dialogue_attribution_has_no_english_word_lists,
         test_shot_context_preserves_paragraph_boundaries,
