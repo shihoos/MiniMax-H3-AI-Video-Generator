@@ -1356,37 +1356,27 @@ class QwenDirectorSanitizeMixin:
         coverage = covered / max(1, len(source_sentences))
         return coverage, missing
 
-    def _require_semantic_spoken_dialogue(
+    def _semantic_dialogue_resolves_to_roster(
         self,
         text: str,
         characters: list[dict] | None = None,
-    ) -> None:
-        """Require Qwen's semantic dialogue contract to resolve at least one roster speaker."""
+    ) -> bool:
+        """Return whether any Qwen-blessed spoken span resolves to a canonical roster speaker.
+
+        This is advisory validation only. It never imposes a cast size or dialogue requirement:
+        Qwen may legitimately choose one character, multiple characters, or any other causal cast.
+        """
         extractor = getattr(self, "_extract_story_spoken_segments", None)
-        if not callable(extractor):
-            raise RuntimeError(
-                "AI Story generation failed semantic validation: semantic dialogue extraction is unavailable."
-            )
+        semantic_dialogue = getattr(self, "_semantic_spoken_dialogue", None)
+        if not callable(extractor) or not semantic_dialogue:
+            return False
 
         allowed_names = [
             str(character.get("name", "")).strip()
             for character in (characters or [])
-            if isinstance(character, dict)
-            and str(character.get("name", "")).strip()
+            if isinstance(character, dict) and str(character.get("name", "")).strip()
         ]
-        semantic_dialogue = getattr(self, "_semantic_spoken_dialogue", None)
-        if not semantic_dialogue:
-            raise RuntimeError(
-                "AI Story generation failed semantic validation: the semantic dialogue contract returned no "
-                "direct spoken dialogue for the final story."
-            )
-
-        canonical = {
-            EntityResolver.normalize(name): name
-            for name in allowed_names
-        }
         aliases = EntityResolver.build_character_alias_map(characters or [])
-
         try:
             segments = extractor(
                 str(text or ""),
@@ -1395,14 +1385,12 @@ class QwenDirectorSanitizeMixin:
                 speaker_aliases=aliases,
             )
         except Exception as exc:
-            self._record_recovery(
-                "semantic_dialogue_validation_failed",
-                str(exc),
-            )
-            raise RuntimeError(
-                "Semantic dialogue validation failed while reconciling the Qwen dialogue contract: "
-                f"{exc}"
-            ) from exc
+            recorder = getattr(self, "_record_recovery", None)
+            if callable(recorder):
+                recorder("semantic_dialogue_validation_failed", str(exc))
+            return False
+
+        canonical = {EntityResolver.normalize(name) for name in allowed_names}
 
         def resolves_to_roster(surface: str) -> bool:
             normalized = EntityResolver.normalize(surface)
@@ -1411,7 +1399,7 @@ class QwenDirectorSanitizeMixin:
             resolved = aliases.get(normalized)
             return bool(resolved and EntityResolver.normalize(resolved) in canonical)
 
-        if not any(
+        return any(
             isinstance(segment, dict)
             and bool(segment.get("text"))
             and any(
@@ -1419,12 +1407,7 @@ class QwenDirectorSanitizeMixin:
                 for speaker in (segment.get("source_speakers", set()) or set())
             )
             for segment in segments
-        ):
-            raise RuntimeError(
-                "AI Story generation failed semantic validation: the final story contains no direct spoken "
-                "dialogue attributed to a canonical production character."
-            )
-        return None
+        )
 
     @staticmethod
     def _preserve_story_requires_semantic_dialogue(text: str) -> bool:
