@@ -245,13 +245,11 @@ PROSE
 - When dialogue is used, keep lines concise and purposeful. Give speaking characters distinct immediate objectives;
   use refusal, interruption, deflection, or a lie to create conflict rather than having characters explain the plot to one another.
 - Prefer a final physical image that echoes or transforms an important concrete detail from the opening when the story naturally supports it.
-- The sixth paragraph stays in one place and one moment and shows two or three concrete actions ending on the last completed one; it is not a summary of later years or of what the wider world did afterwards.
-- Write spoken lines in straight double quotes with a plain attribution or action beat so the speaker is unmistakable.
-- The cost of the protagonist's choice should be a visible, concrete loss rather than a named feeling.
 - Plain prose means plain text: no emoji, symbols, or decorative characters anywhere.
 - Stop after the sixth paragraph. Write nothing after the story ends.
 
 PEOPLE
+- Never force a character, counterpart, or speaker merely to satisfy a dialogue or cast expectation. Let the causal premise determine whether the story has one person or many.
 - Every named person must be physically present in at least one scene and must act or speak there.
   Recordings, radios, screens, notes, memories, and holograms are evidence only: they never carry a character name and
   never count as a speaking character. Do not name a sound or machine as if it were a person.
@@ -275,15 +273,13 @@ PEOPLE
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- Qwen decides the consequential cast; there is no fixed cast size. When the premise can naturally support another present person, prefer a second consequential character whose goal, resistance, knowledge, or relationship changes what the protagonist does. "
-                "Do not force a second person into a premise that genuinely depends on isolation.\n"
+                "- Qwen decides the consequential cast; there is no fixed cast size. The cast may contain one person, two people, or any larger number when that is the strongest causal choice. Do not force a solitary protagonist, a counterpart, or any numeric cast size. When another present person naturally changes the goal, resistance, knowledge, relationship, reversal, choice, or consequence, include that consequential character; otherwise do not add one.\n"
                 "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. Do not add a character merely to supply dialogue, exposition, or a twist.\n"
                 "- Invent character names naturally when the story needs a new character. Give every recurring character one stable canonical name.\n"
-                "- AI STORY DIALOGUE CONTRACT: include at least one attributed line of direct spoken dialogue from a physically present human character. "
-                "The line must advance conflict, information, a decision, or the reversal. Prefer dialogue as an interaction between consequential present characters when the story contains more than one person. "
-                "A quoted log, recording, radio message, screen, label, announcement, alarm, or system output does not satisfy the dialogue contract. Do not add a character merely to create dialogue.\n"
-                "- When the premise supports more than one present person, let a person's action, choice, relationship, or spoken information—not a recording, facility status, or system alert—supply the central reversal.\n"
-                "- Avoid the generic solitary-facility sequence of entering a site, discovering a hidden chamber, reading a warning, triggering containment failure, and restoring a system unless the premise explicitly requires those exact events.\n"
+                "- DIALOGUE QUALITY: when the chosen cast contains multiple consequential characters, prefer at least one brief exchange of direct spoken dialogue when it naturally advances conflicting goals, a decision, information, or the reversal. When Qwen chooses one character, or when isolation is genuinely essential to the premise, do not invent a speaker, counterpart, recording, system voice, or artificial dialogue merely to satisfy a rule.\n"
+                "- A quoted log, recording, radio message, screen, label, announcement, alarm, or system output is evidence, not character dialogue, and must never be used as a substitute for interpersonal conflict.\n"
+                "- When the premise supports more than one present person, let a person's action, choice, relationship, or spoken information—not a recording, facility status, or system alert—supply the central reversal. When the story is genuinely solitary, let the protagonist's own action, misjudgment, discovery, or irreversible choice drive the reversal.\n"
+                "- Do not default to a generic facility/station mystery in which an isolated protagonist enters a site, discovers a hidden chamber, reads a warning, triggers containment failure, and restores a system. If an institutional or technical threat is truly part of the premise, make the reversal depend on a specific character choice, relationship, action, or consequence rather than on the facility merely revealing a secret.\n"
                 "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, unless the story itself later establishes that person as physically present and consequential.\n\n"
                 "Output only the finished story prose."
             )
@@ -298,7 +294,7 @@ PEOPLE
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
                 "- Preserve every established source character that remains part of the story, the source setting, the source events in order, and the source outcome.\n"
-                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. There is no fixed cast size. Keep their canonical names stable.\n"
+                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. There is no fixed cast size. The expanded cast may contain one person, two people, or any larger number according to Qwen's causal judgment. Keep established canonical names stable.\n"
                 "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
                 "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
                 "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
