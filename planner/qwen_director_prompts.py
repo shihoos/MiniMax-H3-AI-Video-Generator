@@ -208,29 +208,16 @@ HARD FORMAT
 - The sixth paragraph is a full settled aftermath, not a compressed summary.
 
 CAUSALITY (plan silently, then write)
-- The story is driven by what people DO and DECIDE, not by finding progressively stranger things.
-  The protagonist must cause, choose, or misjudge something early on, and the later plot must follow from it.
-  When the premise can support another present person, prefer a consequential counterpart with a concrete goal, resistance,
-  relationship, knowledge gap, or competing decision that directly changes what the protagonist does. Do not make the
-  facility, machine, log, or environmental mystery the sole engine when a human causal conflict naturally fits the premise.
-- Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical action as the
-  goal and meets an immediate obstacle. Include one precise sensory detail unique to this setting.
-- Paragraphs 2-3: the protagonist acts, and each action produces a result that makes the goal harder or
-  changes what they believe. Every paragraph ends on a new fact, never on a restated mood.
-- Paragraph 4: one reversal. It must come from something already established (an earlier action, a
-  relationship, a physical state of the place, or what another person says or does) and must overturn what the
-  protagonist believed about the central problem. State it plainly, in an action or a spoken line.
-  It must be consistent with every earlier paragraph.
-- Paragraph 5: a forced choice between two outcomes that cannot both be kept, caused by that reversal.
-  The protagonist acts physically and pays a concrete, visible price.
-- Paragraph 6: the direct, visible consequence of that choice, ending on one completed past-tense action in a
-  settled situation. Nothing is left pending: no "until", no "yet to come", no next mission, no looming return.
-- The reversal must NOT be: a hidden object, journal, recording, log, or message revealing a secret; a machine or
-  system that turns out to be alive, sentient, or watching; a containment failure; a secret experiment; a
-  monster or creature; or "the protagonist had been here before". Unless the premise names one of these, do not use it.
-- Do not introduce any person only through a document, label, message, or memory. Every named person is on screen.
-- Do not default to a solitary-protagonist story merely because the setting is isolated. Solitude is appropriate only when
-  isolation itself is a meaningful source of conflict; otherwise create the smallest consequential human counterpart the premise needs.
+- Before writing, silently determine: the protagonist's immediate goal; what resists it; the action, relationship, fact, or physical constraint that will matter later; what changes the protagonist's understanding; what choice becomes unavoidable; and what concrete result follows. These are planning questions, not a rigid six-step template.
+- Choose the cast that best serves that causal chain. One person, two people, or several are all valid. When another present person would materially change the goal, resistance, reversal, choice, or consequence, include that person; when no additional person is needed, do not add one merely for dialogue or decoration. A solitary story is valid when isolation, duty, or a physical constraint is genuinely the opposing force.
+- The story should progress because something happens that changes what a character can do, knows, wants, or must choose. Avoid a sequence of increasingly strange discoveries. When new information appears, make it alter an existing goal, relationship, constraint, or decision rather than simply adding another mystery.
+- Paragraph 1: open in a specific place with a concrete immediate objective, pressure, or problem. Establish only the details that matter to what follows.
+- Paragraphs 2-3: develop actions and consequences. At least one earlier action, relationship, fact, object, skill, or physical limitation should acquire greater importance later when the story naturally supports it. Do not end paragraphs merely to introduce a new unexplained clue.
+- Paragraph 4: deliver a grounded reversal that changes what the protagonist believes or must do. It must arise from something already established in the story and may come through action, a relationship, a physical consequence, or spoken information. It must change the decision, not merely reveal another secret.
+- Paragraph 5: make the protagonist choose between outcomes that cannot both be kept. The choice must follow from the reversal and carry a concrete, visible cost. Use earlier established resources, relationships, knowledge, or constraints where they naturally matter; do not invent a convenient solution solely for the climax.
+- Paragraph 6: show the direct consequence of the choice in a settled situation. Use concrete action and a final image or detail that resolves the story rather than opening another mystery, mission, threat, or future hook.
+- Keep causality grounded in the premise. People, relationships, physical processes, technical conditions, and environmental pressures may all create the problem; what matters is that the story clearly shows how the protagonist's actions and decisions shape what happens next.
+- Every named person is on screen and materially part of the story. Someone known only through a document, label, message, recording, or memory is evidence, not a production character.
 
 PROSE
 - Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
@@ -249,7 +236,6 @@ PROSE
 - Stop after the sixth paragraph. Write nothing after the story ends.
 
 PEOPLE
-- Never force a character, counterpart, or speaker merely to satisfy a dialogue or cast expectation. Let the causal premise determine whether the story has one person or many.
 - Every named person must be physically present in at least one scene and must act or speak there.
   Recordings, radios, screens, notes, memories, and holograms are evidence only: they never carry a character name and
   never count as a speaking character. Do not name a sound or machine as if it were a person.
@@ -273,14 +259,10 @@ PEOPLE
                 "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
                 "Show the profession through skilled actions the protagonist performs.\n\n"
                 "CAST AND DIALOGUE\n"
-                "- Qwen decides the consequential cast; there is no fixed cast size. The cast may contain one person, two people, or any larger number when that is the strongest causal choice. Do not force a solitary protagonist, a counterpart, or any numeric cast size. When another present person naturally changes the goal, resistance, knowledge, relationship, reversal, choice, or consequence, include that consequential character; otherwise do not add one.\n"
-                "- Every recurring character must materially affect the protagonist's goal, resistance, reversal, choice, or consequence. Do not add a character merely to supply dialogue, exposition, or a twist.\n"
-                "- Invent character names naturally when the story needs a new character. Give every recurring character one stable canonical name.\n"
-                "- DIALOGUE QUALITY: when the chosen cast contains multiple consequential characters, prefer at least one brief exchange of direct spoken dialogue when it naturally advances conflicting goals, a decision, information, or the reversal. When Qwen chooses one character, or when isolation is genuinely essential to the premise, do not invent a speaker, counterpart, recording, system voice, or artificial dialogue merely to satisfy a rule.\n"
-                "- A quoted log, recording, radio message, screen, label, announcement, alarm, or system output is evidence, not character dialogue, and must never be used as a substitute for interpersonal conflict.\n"
-                "- When the premise supports more than one present person, let a person's action, choice, relationship, or spoken information—not a recording, facility status, or system alert—supply the central reversal. When the story is genuinely solitary, let the protagonist's own action, misjudgment, discovery, or irreversible choice drive the reversal.\n"
-                "- Do not default to a generic facility/station mystery in which an isolated protagonist enters a site, discovers a hidden chamber, reads a warning, triggers containment failure, and restores a system. If an institutional or technical threat is truly part of the premise, make the reversal depend on a specific character choice, relationship, action, or consequence rather than on the facility merely revealing a secret.\n"
-                "- A person mentioned only through a dead/missing report, recording, document, label, photograph, or memory is evidence, not a production character, unless the story itself later establishes that person as physically present and consequential.\n\n"
+                "- You decide the cast. There is no target size: one person, two, or many are all valid. Choose only characters who materially affect the causal story. Another character may create pressure through action, refusal, cooperation, deception, information, or a different objective; do not add someone merely to create dialogue.\n"
+                "- Every recurring character materially affects the protagonist's goal, resistance, reversal, choice, or consequence. Give each one a stable canonical name and visible action on screen. Distinct wants are useful when they naturally create conflict, but do not manufacture conflict where the premise does not support it.\n"
+                "- Dialogue is optional. Use direct spoken dialogue when it naturally carries conflict, information, refusal, deception, negotiation, or relationship. Do not add dialogue merely because multiple characters exist. If the story is solitary, do not invent a voice just to satisfy a dialogue rule.\n"
+                "- A log, recording, radio, screen, label, or alarm is evidence, never a speaking character, and never substitutes for a character's own consequential action or decision.\n\n"
                 "Output only the finished story prose."
             )
 
@@ -298,7 +280,7 @@ PEOPLE
                 "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
                 "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
                 "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
-                "- Use dialogue naturally among whichever characters the story actually contains. When the source supports more than one present person, prefer dialogue that exposes conflicting goals, changes a decision, or reveals a consequential relationship. Never add a character solely to create dialogue.\n"
+                "- Dialogue is optional. When a present character naturally speaks, use short direct lines in straight double quotes with a clear speaker. Let spoken lines carry conflict, information, refusal, deception, negotiation, or relationship when appropriate; never add a speaker merely to satisfy a dialogue requirement.\n"
                 "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the reversal rather than using a generic facility/system reveal.\n"
                 "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n"
                 "- Do not write the expansion as a compressed six-paragraph synopsis. Each paragraph should develop a concrete scene beat with visible action and consequence. If the story reaches its apparent ending before the minimum length, deepen the existing causal beats and aftermath rather than stopping early or introducing a disconnected subplot.\n\n"
@@ -524,15 +506,15 @@ PEOPLE
 
     SPOKEN DIALOGUE SEMANTICS:
     Also return `spoken_dialogue` for direct speech actually spoken by a physically present production
-    character in the supplied story. Each item must contain the exact spoken text and the speaker's
-    canonical character name (or the grounded character surface when the character is descriptive/relational).
-    Include quoted dialogue and explicit screenplay-style character lines only when they are genuinely spoken
-    by that person. Exclude logs, notes, signs, labels, photographs, recordings, transmissions, alarms,
-    terminal/computer output, narration, internal thoughts, remembered speech, and other text that is merely
-    displayed, transmitted, reported, or read. Quotation marks alone do not make text spoken dialogue.
-    Do not paraphrase, merge, split, or invent dialogue. The `text` field must match the source wording closely
-    enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
-    return an empty `spoken_dialogue` array.
+    character in the supplied story. Each item must contain the exact spoken text and the speaker's canonical
+    character name (or the grounded character surface when the character is descriptive/relational).
+    Include only speech that the prose clearly presents as being spoken by that person. Quotation marks,
+    punctuation, or a character name by themselves are not enough: use the surrounding sentence context to
+    distinguish spoken words from quoted documents, signs, labels, recordings, transmissions, alarms,
+    terminal/computer output, recalled text, narration, internal thoughts, and other displayed or reported language.
+    Do not paraphrase, merge, split, invent, or reinterpret dialogue. The `text` field must match the source wording
+    closely enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
+    return an empty `spoken_dialogue` array. When uncertain whether a passage is actually spoken, exclude it.
     """).strip()
 
         user_payload = json.dumps(
@@ -574,7 +556,50 @@ PEOPLE
             and str(item.get("speaker", "") or "").strip()
         ]
 
+        self._semantic_spoken_dialogue = self._anchor_semantic_dialogue_to_story(
+            story,
+            self._semantic_spoken_dialogue,
+        )
+
         return result
+
+    def _anchor_semantic_dialogue_to_story(
+        self,
+        story: str,
+        items: list[dict],
+    ) -> list[dict]:
+        """Keep only semantic dialogue items anchored to real speech in the story.
+
+        An item is anchored when its text equals a quote-delimited span or an explicit
+        `Name: line` label. This is an exact-span safeguard shared with later reconciliation:
+        it removes narration that the extractor mislabels as speech before it can trigger a
+        false recovery. The semantic extractor remains responsible for deciding whether an
+        anchored span is actually spoken; this helper does not try to classify quoted text.
+        No word lists are used.
+        """
+        text = str(story or "")
+        quote_pattern = re.compile(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        label_pattern = re.compile(
+            r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
+        )
+        anchors: set[str] = set()
+        for match in quote_pattern.finditer(text):
+            key = self._dialogue_anchor_key(next((p for p in match.groups() if p), ""))
+            if key:
+                anchors.add(key)
+        for match in label_pattern.finditer(text):
+            display = self._normalize_dialogue_text(match.group(2), keep_case=True).rstrip(",;: ").strip()
+            key = self._dialogue_anchor_key(display)
+            if key:
+                anchors.add(key)
+        return [
+            item
+            for item in (items or [])
+            if self._dialogue_anchor_key(str(item.get("text", "") or "")) in anchors
+        ]
 
     def _shot_json_schema(
         self,
