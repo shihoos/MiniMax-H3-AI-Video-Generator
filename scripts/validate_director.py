@@ -546,6 +546,12 @@ def test_shot_dialogue_extraction_degrades_deterministically():
     _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
 
 
+def test_no_orphan_semantic_dialogue_helper_remains():
+    sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
+    _assert("def _semantic_dialogue_resolves_to_roster(" not in sanitize,
+            "orphaned semantic-dialogue helper should not remain after removing the hard gate")
+
+
 def test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor():
     sanitize = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
     director = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
@@ -724,6 +730,7 @@ def main():
         test_shot_dialogue_uses_roster_aliases,
         test_preserve_semantic_empty_dialogue_is_telemetried,
         test_shot_dialogue_extraction_degrades_deterministically,
+        test_no_orphan_semantic_dialogue_helper_remains,
         test_semantic_dialogue_does_not_impose_cast_or_dialogue_floor,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_dialogue_attribution_has_no_english_word_lists,
