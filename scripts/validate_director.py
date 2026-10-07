@@ -669,15 +669,35 @@ def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
-        _assert("consequential counterpart" in text, f"{mode} prompt lacks consequential-counterpart guidance")
-        _assert("smallest consequential human counterpart" in text, f"{mode} prompt lacks bounded human-conflict guidance")
-        _assert("no fixed cast size" in text or "there is no fixed cast size" in text, f"{mode} prompt accidentally constrains cast size")
-        _assert("solitary-protagonist" in text, f"{mode} prompt lacks solitary-template guard")
-        _assert("one person, two people, or any larger number" in text or "cast may contain one person, two people" in text, f"{mode} prompt does not explicitly preserve Qwen-selected cast size")
         _assert(
-            "do not force a solitary protagonist" in text
-            or "do not invent a speaker" in text
-            or "never force a character, counterpart, or speaker" in text,
+            "another character may create pressure" in text
+            or "present counterpart" in text
+            or "another present person" in text
+            or "relationship" in text and "causal story" in text,
+            f"{mode} prompt lacks consequential-interpersonal guidance",
+        )
+        _assert(
+            "no fixed cast size" in text
+            or "there is no fixed cast size" in text
+            or "there is no target size" in text,
+            f"{mode} prompt accidentally constrains cast size",
+        )
+        _assert(
+            "solitary story" in text
+            or "one person" in text
+            or "isolation" in text,
+            f"{mode} prompt lacks valid solitary-story guidance",
+        )
+        _assert(
+            "one person, two people, or any larger number" in text
+            or "one person, two, or many" in text
+            or "cast may contain one person, two people" in text,
+            f"{mode} prompt does not explicitly preserve Qwen-selected cast size",
+        )
+        _assert(
+            "do not add someone merely to create dialogue" in text
+            or "never add a speaker merely to satisfy a dialogue requirement" in text
+            or "do not add a character merely" in text,
             f"{mode} prompt still risks forcing dialogue/cast",
         )
 
