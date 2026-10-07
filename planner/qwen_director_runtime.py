@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import atexit
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 import faulthandler
 import gc
 import hashlib
