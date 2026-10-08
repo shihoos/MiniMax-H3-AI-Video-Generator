@@ -831,6 +831,8 @@ class ProductionController:
         return path if path.is_file() else None
 
     def shot_options(self, plan_path_value: str):
+        import gradio as gr
+
         try:
             plan, _ = self._load_plan(plan_path_value)
             choices = shot_choices(plan)
