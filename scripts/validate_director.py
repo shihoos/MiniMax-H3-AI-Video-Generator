@@ -752,6 +752,163 @@ def test_story_prompt_has_no_artificial_subtargets():
     _assert("six to eight sentences" not in source.lower(), "story prompt must not impose a per-paragraph sentence quota")
     _assert("at least 60 words" not in source.lower(), "story prompt must not impose an artificial final-paragraph word floor")
 
+
+def test_scene_binding_reuses_approved_semantic_dialogue_speaker():
+    from schemas.character import Character
+    planner = _planner()
+    characters = [
+        Character(
+            character_id="char_sara",
+            name="Sara Khan",
+            role="engineer",
+            description="An engineer.",
+            personality="Focused.",
+            semantic_aliases=["Sara"],
+        ),
+        Character(
+            character_id="char_eli",
+            name="Eli Stone",
+            role="scientist",
+            description="A scientist.",
+            personality="Cautious.",
+            semantic_aliases=["Eli"],
+        ),
+    ]
+    bound = planner._characters_in_scene(
+        '"Run!" she shouted as the alarm flashed.',
+        characters,
+        semantic_dialogue=[
+            {"speaker": "Sara", "text": "Run!"},
+        ],
+    )
+    _assert(bound == ["sara khan"], f"approved semantic speaker did not bind canonically: {bound}")
+
+
+def test_scene_binding_uses_only_safe_single_character_continuity():
+    from schemas.character import Character
+    planner = _planner()
+    characters = [
+        Character(
+            character_id="char_sara",
+            name="Sara Khan",
+            role="engineer",
+            description="An engineer.",
+            personality="Focused.",
+        ),
+        Character(
+            character_id="char_eli",
+            name="Eli Stone",
+            role="scientist",
+            description="A scientist.",
+            personality="Cautious.",
+        ),
+    ]
+    safe = planner._characters_in_scene(
+        "She reaches the console and starts the sequence.",
+        characters,
+        previous_scene_characters=["sara khan"],
+        previous_scene_text="Sara Khan enters the control room.",
+    )
+    ambiguous = planner._characters_in_scene(
+        "She reaches the console and starts the sequence.",
+        characters,
+        previous_scene_characters=["sara khan", "eli stone"],
+        previous_scene_text="Sara Khan and Eli Stone enter the control room.",
+    )
+    _assert(safe == ["sara khan"], f"safe single-character continuity failed: {safe}")
+    _assert(ambiguous == [], f"ambiguous singular continuity must fail closed: {ambiguous}")
+
+
+def test_scene_binding_allows_unambiguous_plural_continuity_only():
+    from schemas.character import Character
+    planner = _planner()
+    characters = [
+        Character("char_sara", "Sara Khan", "engineer", "An engineer.", "Focused."),
+        Character("char_eli", "Eli Stone", "scientist", "A scientist.", "Cautious."),
+    ]
+    bound = planner._characters_in_scene(
+        "They run for the exit together.",
+        characters,
+        previous_scene_characters=["sara khan", "eli stone"],
+        previous_scene_text="Sara Khan and Eli Stone enter the control room.",
+    )
+    _assert(set(bound) == {"sara khan", "eli stone"}, f"plural continuity lost approved cast: {bound}")
+
+
+def test_scene_binding_never_invents_an_unapproved_character():
+    from schemas.character import Character
+    planner = _planner()
+    characters = [
+        Character("char_sara", "Sara Khan", "engineer", "An engineer.", "Focused."),
+        Character("char_eli", "Eli Stone", "scientist", "A scientist.", "Cautious."),
+    ]
+    bound = planner._characters_in_scene(
+        "Mira enters and opens the door.",
+        characters,
+    )
+    _assert(bound == [], f"unknown story identity was deterministically invented: {bound}")
+
+
+def _unbound_loads(relative_path, watched):
+    """Names in `watched` that a function reads without a valid lexical binding."""
+    tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
+    problems = []
+
+    def bindings(node):
+        names = set()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            args = node.args
+            for arg in args.posonlyargs + args.args + args.kwonlyargs:
+                names.add(arg.arg)
+            for extra in (args.vararg, args.kwarg):
+                if extra is not None:
+                    names.add(extra.arg)
+        stack = list(ast.iter_child_nodes(node))
+        while stack:
+            child = stack.pop()
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(child.name)
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
+                names.add(child.id)
+            elif isinstance(child, (ast.Import, ast.ImportFrom)):
+                for alias in child.names:
+                    names.add((alias.asname or alias.name).split(".")[0])
+            elif isinstance(child, ast.ExceptHandler) and child.name:
+                names.add(child.name)
+            stack.extend(ast.iter_child_nodes(child))
+        return names
+
+    def visit(node, inherited):
+        scope = inherited | bindings(node)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                visit(child, scope)
+                continue
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                if child.id in watched and child.id not in scope:
+                    problems.append((relative_path, child.lineno, child.id))
+            visit(child, scope)
+
+    visit(tree, set())
+    return sorted(set(problems))
+
+
+def test_known_wiring_names_are_bound():
+    """Guard cross-module NameError regressions outside the Director validator itself."""
+    for path, names in (
+        ("planner/qwen_director_runtime.py", {"deepcopy"}),
+        ("execution/production_runner.py", {"production_plan"}),
+        ("ui/storyboard_gradio.py", {"gr"}),
+    ):
+        problems = _unbound_loads(path, names)
+        _assert(not problems, f"unbound names would raise NameError at runtime: {problems}")
+    runner = (ROOT / "execution/production_runner.py").read_text(encoding="utf-8")
+    _assert(
+        "production_plan=self._active_plan," in runner,
+        "auto-retake must pass the active production plan",
+    )
+
 def main():
     tests = [
         test_qwen_is_the_only_creative_character_authority,
@@ -811,6 +968,11 @@ def main():
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
+        test_scene_binding_reuses_approved_semantic_dialogue_speaker,
+        test_scene_binding_uses_only_safe_single_character_continuity,
+        test_scene_binding_allows_unambiguous_plural_continuity_only,
+        test_scene_binding_never_invents_an_unapproved_character,
+        test_known_wiring_names_are_bound,
     ]
     for test in tests:
         test()
