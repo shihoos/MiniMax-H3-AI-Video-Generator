@@ -1021,10 +1021,11 @@ PEOPLE
                 if duplicate_value and description_key.startswith(duplicate_value[:120]):
                     scene_payload.pop(duplicate_key, None)
 
-            if not scene_payload.get("characters"):
-                raise RuntimeError(
-                    f"Scene {scene_payload.get('scene_id') or '<unknown>'} has no canonical character binding for shot planning."
-                )
+            # Scene-level character binding is a candidate context, not a prerequisite.
+            # The full canonical Qwen-approved roster is supplied separately above,
+            # so an empty scene binding must still reach the shot director. Qwen may
+            # select visible characters from that closed roster; _sanitize_shots()
+            # and the final shot-character contract remain authoritative afterwards.
             scene_payloads.append(scene_payload)
 
         visual_context = {}
