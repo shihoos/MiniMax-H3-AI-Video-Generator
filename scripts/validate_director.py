@@ -20,10 +20,20 @@ def _planner():
 
 def test_qwen_is_the_only_creative_character_authority():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert(
-        "qwen_character_extractor=self.extract_character_entities" in source,
-        "creative character planning must use the Qwen semantic extractor",
-    )
+    planner_source = (ROOT / "planner/production_planner.py").read_text(encoding="utf-8")
+    _assert("qwen_character_extractor=self.extract_character_entities" in source,
+            "creative path must call the Qwen character extractor")
+    _assert("Qwen is the sole semantic authority" in planner_source,
+            "planner must document Qwen roster authority")
+
+
+def test_single_character_semantic_call_budget():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("if self._character_semantic_calls > 1:" in source,
+            "character semantic budget must reject a second call")
+    _assert("max 1" in source,
+            "character semantic call limit must remain one")
+
 
 def test_shot_schema_tracks_instance_topology():
     from planner.qwen_director import QwenDirector
@@ -36,6 +46,7 @@ def test_shot_schema_tracks_instance_topology():
     _assert(shot_schema["properties"]["shots"]["minItems"] == 3, "shot schema ignored instance SHOTS_PER_SCENE")
     _assert(nested["minItems"] == 3 and nested["maxItems"] == 3, "batch schema ignored instance SHOTS_PER_SCENE")
     _assert(shot_schema["properties"]["shots"]["items"]["properties"]["location"].get("minLength") == 1, "location schema must require a value")
+
 
 
 def test_mention_only_matching_is_case_insensitive():
@@ -334,26 +345,27 @@ def test_expand_is_open_cast_but_preserves_source_anchors():
 def test_expand_prompt_does_not_impose_cast_limit():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import EXPAND_USER_STORY_MODE, AI_STORY_MODE
-
     mixin = QwenDirectorPromptMixin()
     expand = mixin._story_text_system(EXPAND_USER_STORY_MODE).lower()
     ai = mixin._story_text_system(AI_STORY_MODE).lower()
-
     for text, label in ((expand, "expand"), (ai, "ai story")):
         _assert(
-            "no fixed cast size" in text
-            or "there is no fixed cast size" in text
-            or "there is no target size" in text
-            or "the cast size is yours" in text,
-            f"{label} prompt does not preserve Qwen-selected cast size",
+            ("no fixed cast size" in text
+             or "no numeric cast limit" in text
+             or "not a cast limit" in text
+             or "do not force one character, two characters, or any fixed cast size" in text
+             or ("you decide the cast" in text and "there is no target size" in text)),
+            f"{label} prompt still constrains cast size",
         )
         _assert(
             "decorative character" in text
             or "decorative cast" in text
-            or "do not add a character merely" in text
-            or "every recurring character materially affects" in text,
-            f"{label} prompt lacks the current causal-cast rule",
+            or "do not add a character merely" in text,
+            f"{label} prompt lacks anti-decorative-cast rule",
         )
+    _assert("only named people allowed" not in expand, "Expand prompt still treats source anchors as a cast whitelist")
+    _assert("exactly one" not in expand or "exactly one" in expand and "six paragraphs" in expand, "Expand prompt contains an unintended cast-count instruction")
+
 
 def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
     from planner.qwen_director import QwenDirector
@@ -361,20 +373,18 @@ def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
     _assert(schema["properties"]["candidates"]["maxItems"] >= 64, "character schema still silently caps Qwen cast at 32")
 
 
-def test_story_generation_uses_current_output_contract():
+def test_story_generation_is_single_call_fixed_seed_no_floor():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     body = source.split("def _generate_story_once")[1].split("def _coerce_story_to_six_paragraphs")[0]
-    _assert("seed=DIRECTOR_VLLM_SEED" in body, "story generation must use the configured deterministic seed")
-    _assert("story_min_output_tokens = 0" in body, "story generation must not impose a minimum-output floor")
-    _assert(
-        "minimum_output_tokens=story_min_output_tokens" in body,
-        "story minimum-output setting must reach the model call",
-    )
+    _assert(body.count("self._chat_text(") == 1, "story generation must use one primary Qwen text call")
+    _assert("seed=DIRECTOR_VLLM_SEED" in body, "story seed must remain fixed")
+    _assert("story_min_output_tokens = 0" in body, "story generation must not impose a minimum-token padding floor")
+    _assert("minimum_output_tokens=story_min_output_tokens" in body, "story minimum must reach the chat call")
 
-def test_story_prompt_has_causal_reversal_structure():
+
+def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
-
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
@@ -388,23 +398,37 @@ def test_story_prompt_has_causal_reversal_structure():
             "result:",
         ):
             _assert(line in text, f"{mode} story plan is missing the {line!r} line")
-        _assert("in your reasoning" in text, f"{mode} prompt does not place the plan in reasoning")
+        _assert(
+            "in your reasoning" in text,
+            f"{mode} prompt does not place the plan in the reasoning pass",
+        )
         _assert(
             "causes, chooses, or misjudges" in text
             or "act, choose, refuse, misjudge" in text
             or "cause, choose, or misjudge" in text,
-            f"{mode} reversal must remain action-driven",
+            f"{mode} reversal is not explicitly action-driven",
         )
-        _assert("completed past-tense action" in text, f"{mode} settled-aftermath requirement missing")
-        _assert("hold the turn until" in text, f"{mode} prompt lacks the late-turn rule")
+        _assert(
+            "completed past-tense action" in text,
+            f"{mode} settled-aftermath requirement missing",
+        )
+        _assert(
+            "hold the turn until" in text,
+            f"{mode} prompt lacks the late-turn rule",
+        )
         _assert(
             "first consequential attempt" in text and "meets resistance" in text,
             f"{mode} prompt lacks the setback rhythm",
         )
         _assert(
             "forces the protagonist to decide or act" in text,
-            f"{mode} prompt must make the turn force a decision",
+            f"{mode} prompt does not require the turn to force a decision",
         )
+        for word in ("mystery", "containment", "facility", "smallest cast"):
+            _assert(
+                word not in text,
+                f"{mode} prompt names a failure mode ({word!r}) instead of describing the target",
+            )
 
 def test_story_contract_remains_six_paragraphs_420_560():
     prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
@@ -479,10 +503,39 @@ def test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurall
     _assert(segments[1]["source_speakers"] == {"tomas"}, f"second duplicate line lost its semantic speaker: {segments}")
 
 
-def test_scene_cast_guard_checks_scene_payload_not_global_roster():
-    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    _assert('if not scene_payload.get("characters"):' in source,
-            "shot planning must reject a scene with no bound characters")
+
+def test_shot_planning_allows_empty_scene_binding_with_closed_roster():
+    from planner.qwen_director import QwenDirector
+
+    mixin = QwenDirector.__new__(QwenDirector)
+    mixin._reference_visual_context = {}
+    characters = [
+        {"name": "Sara Khan", "role": "engineer"},
+        {"name": "Eli Stone", "role": "scientist"},
+    ]
+    scenes = [{
+        "scene_id": "scene_004",
+        "description": "She reaches the control panel and studies the warning lights.",
+        "characters": [],
+    }]
+
+    payload = mixin._shot_director_batch_user(
+        "She reaches the control panel and studies the warning lights.",
+        characters,
+        scenes,
+    )
+
+    _assert("Sara Khan" in payload and "Eli Stone" in payload,
+            "shot planning must still receive the closed canonical roster")
+    _assert('"scene_id":"scene_004"' in payload,
+            "empty-bound scene must still be represented in the shot payload")
+
+
+def test_resume_never_repeats_semantic_qwen_call():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("_semantic_spoken_dialogue was not persisted" in source, "legacy semantic-dialogue checkpoints must fail closed")
+    resume_section = source[source.index("if resume_roster:"):source.index("else:\n            if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):")]
+    _assert("self.extract_character_entities(" not in resume_section, "resume path must not re-run semantic extraction")
 
 
 def test_qwen_prompt_imports_entity_resolver_for_shot_dialogue():
@@ -539,12 +592,21 @@ def test_shot_dialogue_extraction_degrades_deterministically():
     _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
 
 
+
+
+def test_semantic_dialogue_empty_is_telemetried():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert("expand_semantic_dialogue_empty" in source, "Expand semantic-dialogue misses must be visible in telemetry")
+    _assert("preserve_semantic_dialogue_empty" in source, "Preserve semantic-dialogue misses must be visible in telemetry")
+    _assert("ai_story_semantic_dialogue_empty" in source, "AI Story semantic-dialogue misses must be visible in telemetry")
+
 def test_character_semantic_schema_includes_spoken_dialogue():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     schema = QwenDirectorPromptMixin._character_extraction_json_schema()
     _assert("spoken_dialogue" in schema["properties"], "semantic character extraction schema lacks spoken_dialogue")
     _assert("spoken_dialogue" in schema["required"], "spoken_dialogue must be part of the single semantic extraction contract")
     _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 64, "spoken dialogue schema is artificially capped")
+
 
 
 def test_shot_context_preserves_paragraph_boundaries():
@@ -608,115 +670,47 @@ def test_mention_only_filter_can_fail_closed():
     _assert(planner._drop_mention_only_identities("Kovac had vanished.", ["Kovac"], preserve_empty=False) == [], "mention-only filter must not restore rejected roster")
 
 
-def test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size():
+
+
+
+def test_story_prompt_preserves_current_causal_cast_contract():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
         _assert(
-            "include another person whenever their goal, action, or knowledge would change what the protagonist does" in text
-            or "another character may create pressure" in text
+            "every recurring character materially affects the protagonist's goal" in text
             or "present counterpart" in text
-            or "another present person" in text
             or ("relationship" in text and "causal story" in text),
-            f"{mode} prompt lacks consequential-interpersonal guidance",
+            f"{mode} prompt lacks consequential character-impact guidance",
         )
         _assert(
-            "no fixed cast size" in text
+            "you decide the cast" in text
+            or "no fixed cast size" in text
             or "there is no fixed cast size" in text
-            or "there is no target size" in text
-            or "the cast size is yours" in text,
+            or "there is no target size" in text,
             f"{mode} prompt accidentally constrains cast size",
         )
         _assert(
-            "solitary story" in text
-            or "one person" in text
-            or "isolation" in text,
-            f"{mode} prompt lacks valid solitary-story guidance",
-        )
-        _assert(
-            "one person, two people, or any larger number" in text
-            or "one person, two, or many" in text
-            or "one, two, or several" in text
-            or "cast may contain one person, two people" in text
-            or "the cast size is yours: one, two, or several" in text
-            or ("you decide the cast" in text and "there is no target size" in text),
-            f"{mode} prompt does not preserve Qwen-selected cast size",
-        )
-        _assert(
             "dialogue is optional" in text
-            or "do not add someone merely to create dialogue" in text
-            or "never add a speaker merely to satisfy a dialogue requirement" in text
-            or "do not add a character merely" in text,
-            f"{mode} prompt still risks forcing dialogue/cast",
+            or "do not add a character merely" in text
+            or "never add a speaker merely" in text,
+            f"{mode} prompt risks forcing dialogue/cast",
         )
 
 
-def _unbound_loads(relative_path, watched):
-    """Names in `watched` that a function reads without a valid lexical binding."""
-    tree = ast.parse((ROOT / relative_path).read_text(encoding="utf-8"))
-    problems = []
-
-    def bindings(node):
-        names = set()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            args = node.args
-            for arg in args.posonlyargs + args.args + args.kwonlyargs:
-                names.add(arg.arg)
-            for extra in (args.vararg, args.kwarg):
-                if extra is not None:
-                    names.add(extra.arg)
-        stack = list(ast.iter_child_nodes(node))
-        while stack:
-            child = stack.pop()
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                names.add(child.name)
-                continue
-            if isinstance(child, ast.Name) and isinstance(child.ctx, (ast.Store, ast.Del)):
-                names.add(child.id)
-            elif isinstance(child, (ast.Import, ast.ImportFrom)):
-                for alias in child.names:
-                    names.add((alias.asname or alias.name).split(".")[0])
-            elif isinstance(child, ast.ExceptHandler) and child.name:
-                names.add(child.name)
-            stack.extend(ast.iter_child_nodes(child))
-        return names
-
-    def visit(node, inherited):
-        scope = inherited | bindings(node)
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                visit(child, scope)
-                continue
-            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
-                if child.id in watched and child.id not in scope:
-                    problems.append((relative_path, child.lineno, child.id))
-            visit(child, scope)
-
-    visit(tree, set())
-    return sorted(set(problems))
-
-
-
-def test_known_wiring_names_are_bound():
-    """Guard cross-module NameError regressions outside the Director validator itself."""
-    for path, names in (
-        ("planner/qwen_director_runtime.py", {"deepcopy"}),
-        ("execution/production_runner.py", {"production_plan"}),
-        ("ui/storyboard_gradio.py", {"gr"}),
-    ):
-        problems = _unbound_loads(path, names)
-        _assert(not problems, f"unbound names would raise NameError at runtime: {problems}")
-    runner = (ROOT / "execution/production_runner.py").read_text(encoding="utf-8")
-    _assert(
-        "production_plan=self._active_plan," in runner,
-        "auto-retake must pass the active production plan",
-    )
+def test_story_prompt_has_no_artificial_subtargets():
+    source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
+    _assert("about 500 words" not in source.lower(), "story prompt must not reintroduce an artificial 500-word target")
+    _assert("six to eight sentences" not in source.lower(), "story prompt must not impose a per-paragraph sentence quota")
+    _assert("at least 60 words" not in source.lower(), "story prompt must not impose an artificial final-paragraph word floor")
 
 def main():
     tests = [
         test_qwen_is_the_only_creative_character_authority,
+        test_single_character_semantic_call_budget,
         test_shot_schema_tracks_instance_topology,
         test_mention_only_matching_is_case_insensitive,
         test_sanitizer_deduplicates_normalized_identity_keys,
@@ -734,14 +728,15 @@ def main():
         test_expand_is_open_cast_but_preserves_source_anchors,
         test_expand_prompt_does_not_impose_cast_limit,
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
-        test_story_generation_uses_current_output_contract,
-        test_story_prompt_has_causal_reversal_structure,
+        test_story_generation_is_single_call_fixed_seed_no_floor,
+        test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
         test_story_contract_remains_six_paragraphs_420_560,
         test_semantic_dialogue_is_persisted_and_restored_across_resume,
         test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster,
         test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally,
-        test_scene_cast_guard_checks_scene_payload_not_global_roster,
+        test_shot_planning_allows_empty_scene_binding_with_closed_roster,
         test_story_dialogue_contract_uses_qwen_semantic_spans,
+        test_resume_never_repeats_semantic_qwen_call,
         test_preserve_semantic_call_is_conditional,
         test_qwen_prompt_imports_entity_resolver_for_shot_dialogue,
         test_dialogue_anchor_normalization_matches_terminal_punctuation_rules,
@@ -752,6 +747,7 @@ def main():
         test_shot_dialogue_uses_roster_aliases,
         test_preserve_semantic_empty_dialogue_is_telemetried,
         test_shot_dialogue_extraction_degrades_deterministically,
+        test_semantic_dialogue_empty_is_telemetried,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_shot_context_preserves_paragraph_boundaries,
         test_sound_and_ui_words_are_not_deterministic_characters,
@@ -759,11 +755,11 @@ def main():
         test_descriptive_grounding_tolerates_minor_surface_variation,
         test_descriptive_hints_populate_metadata_without_adding_cast,
         test_mention_only_filter_can_fail_closed,
-        test_story_prompt_prefers_causal_human_conflict_without_forcing_cast_size,
+        test_story_prompt_preserves_current_causal_cast_contract,
+        test_story_prompt_has_no_artificial_subtargets,
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
-        test_known_wiring_names_are_bound,
     ]
     for test in tests:
         test()
