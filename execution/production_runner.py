@@ -1184,7 +1184,7 @@ class ProductionRunner:
                                 shot_executor=executor,
                                 workflow_mode=workflow_mode,
                                 upscale=upscale_enabled,
-                                production_plan=production_plan,
+                                production_plan=self._active_plan,
                             )
                         finally:
                             executor.execution_policy = production_policy
