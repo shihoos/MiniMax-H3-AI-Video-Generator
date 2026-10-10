@@ -116,6 +116,14 @@ class StoryTruncated(RuntimeError):
         super().__init__(message)
         self.partial = partial
 
+
+class QwenJsonTruncated(RuntimeError):
+    """Raised when structured Qwen output hits the token cap before completion."""
+
+    def __init__(self, message: str, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
 # Pin the Director sampling stream at the request layer as well as the server layer.
 # This removes run-to-run RNG-state drift while preserving the existing temperature/top-p profile.
 DIRECTOR_VLLM_SEED = int(os.getenv("H3_DIRECTOR_VLLM_SEED", "0"))
@@ -1982,6 +1990,15 @@ class QwenDirectorRuntimeMixin:
             raise RuntimeError(
                 "Qwen director returned an unexpected completion structure."
             ) from exc
+
+        # Never pass a clipped structured response to JSON recovery or planner
+        # reconciliation: doing so can turn truncation into a misleading empty roster.
+        if finish_reason == "length":
+            raise QwenJsonTruncated(
+                f"Qwen structured output hit the completion limit for {call_name} "
+                "before producing a complete JSON response.",
+                partial=content,
+            )
 
         if not content.strip():
             raise RuntimeError(
