@@ -364,6 +364,15 @@ PEOPLE
 
     @staticmethod
     def _character_extraction_json_schema() -> dict:
+        """Bound redundant character metadata without changing the planner contract.
+
+        The extractor emits positive production-character candidates. Keep
+        ``is_character`` required because the existing planner uses it as an
+        explicit semantic gate; the prompt requires it to be true for every
+        emitted candidate. The cast and spoken-dialogue arrays remain open to
+        the existing high limits so the schema does not impose a cast/dialogue
+        ceiling as a quality shortcut.
+        """
         return {
             "type": "object",
             "properties": {
@@ -373,27 +382,16 @@ PEOPLE
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string"},
+                            "name": {"type": "string", "minLength": 1, "maxLength": 96},
                             "entity_type": {
                                 "type": "string",
-                                "enum": [
-                                    "PERSON",
-                                    "CHARACTER",
-                                    "SENTIENT",
-                                    "ORGANIZATION",
-                                    "LOCATION",
-                                    "FACILITY",
-                                    "OBJECT",
-                                    "ROLE",
-                                    "EVENT",
-                                    "OTHER",
-                                ],
+                                "enum": ["PERSON", "CHARACTER", "SENTIENT"],
                             },
                             "is_character": {"type": "boolean"},
                             "aliases": {
                                 "type": "array",
-                                "maxItems": 4,
-                                "items": {"type": "string"},
+                                "maxItems": 2,
+                                "items": {"type": "string", "maxLength": 96},
                             },
                             "identity_type": {
                                 "type": "string",
@@ -403,33 +401,22 @@ PEOPLE
                                     "descriptive_character",
                                 ],
                             },
-                            "relationship_to": {
-                                "type": "string",
-                            },
-                            "relationship": {
-                                "type": "string",
-                            },
+                            "relationship_to": {"type": "string", "maxLength": 96},
+                            "relationship": {"type": "string", "maxLength": 64},
                         },
-                        "required": [
-                            "name",
-                            "entity_type",
-                            "is_character",
-                            "aliases",
-                            "identity_type",
-                            "relationship_to",
-                            "relationship",
-                        ],
+                        "required": ["name", "entity_type", "is_character", "identity_type"],
                         "additionalProperties": False,
                     },
                 },
                 "spoken_dialogue": {
                     "type": "array",
+                    # Preserve the existing dialogue contract; do not cap it at 32.
                     "maxItems": 128,
                     "items": {
                         "type": "object",
                         "properties": {
                             "text": {"type": "string"},
-                            "speaker": {"type": "string"},
+                            "speaker": {"type": "string", "maxLength": 96},
                         },
                         "required": ["text", "speaker"],
                         "additionalProperties": False,
@@ -466,9 +453,19 @@ PEOPLE
         ]
 
         system_prompt = textwrap.dedent("""
-    You are a strict character/entity extraction component for a cinematic production planner.
-    Return JSON only. Analyze the supplied story and classify stable human/sentient identities that can receive
-    an identity lock. There are THREE valid character identity types:
+    You are a strict character/production-character extraction component for a cinematic production planner.
+    Return JSON only. The `candidates` array is a production-character allow-list, not a generic entity inventory.
+    Emit only actual production-character candidates: do not enumerate locations, objects, organizations, events,
+    UI/status labels, or other rejected surfaces as `is_character=false` records. Every emitted candidate MUST have
+    `is_character=true` and `entity_type` PERSON, CHARACTER, or SENTIENT.
+
+    Keep the payload compact without omitting actual characters or spoken dialogue: use a short canonical name,
+    omit aliases when none are needed and include at most two short grounded aliases, and emit relationship fields
+    only for a `relational_character`. Do not put explanations or evidence sentences in metadata fields. Complete
+    the full candidate roster before emitting `spoken_dialogue`.
+
+    Analyze the supplied story and identify stable human/sentient identities that can receive an identity lock.
+    There are THREE valid character identity types:
 
     1) named_character: a proper/named character grounded directly in the supplied story.
     2) relational_character: a persistent unnamed character whose identity is grounded by a named story
@@ -487,9 +484,8 @@ PEOPLE
     identity. A descriptive_character must contain a distinguishing description beyond the bare role.
     Reject pronouns, contractions, sentence fragments, ordinary prose tokens, UI/status words, and other
     non-identity surfaces as character candidates.
-    If `is_character=true`, `entity_type` MUST be PERSON, CHARACTER, or SENTIENT. Do not use EVENT,
-    LOCATION, OBJECT, ROLE, or OTHER for a character identity. If `is_character=false`, do not emit a
-    named_character, relational_character, or descriptive_character identity type.
+    Every emitted candidate must have `is_character=true` and use entity_type PERSON, CHARACTER, or SENTIENT.
+    Do not use EVENT, LOCATION, OBJECT, ROLE, or OTHER for a character identity.
     Relationship surfaces such as "father", "uncle", "his father", or "the man" are semantic references,
     not new canonical entities unless the story establishes a persistent relational/descriptive identity.
 
