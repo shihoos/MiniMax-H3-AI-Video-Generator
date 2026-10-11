@@ -52,7 +52,7 @@ DIALOGUE CONTRACT:
 - dialogue_events contain DIRECT SPOKEN DIALOGUE ONLY; never convert narrative prose, action description, internal thoughts, exposition, screen text, or UI text into speech.
 - A dialogue event MUST be an exact contiguous span of a quoted/scripted spoken line present in the supplied story context. If the text is not explicitly spoken, it is NOT dialogue.
 - Text on signs, tags, labels, screens, monitors, keypads, canisters, files, and IDs is WRITTEN text, never dialogue; never assign it to any speaker.
-- Copy dialogue with its original capitalization and punctuation exactly as listed in `source_dialogue`; never lower-case it.
+- Copy dialogue with its original capitalization and punctuation exactly as listed in that scene's `source_dialogue` item; never lower-case it.
 - Put a spoken line in the shot where it is actually said in the story, with its speaker visible and listed in `characters`; the `action` of that shot must show that character speaking. Do not spread unspoken shots across a line, and do not assign a line to a shot whose action is about something else.
 - A sentence such as a character's action, breath, expression, realization, or narration is NEVER dialogue, even when it begins with the character's name.
 - Every source utterance may be used only once. The only exception is splitting one longer source utterance into exact contiguous pieces across adjacent shots. Never repeat the same source line in multiple shots.
@@ -61,7 +61,8 @@ DIALOGUE CONTRACT:
 - Never invent a new generic speaker such as "man", "woman", "boy", "girl", "doctor", "guard", or "officer" when that surface is not a supplied canonical identity or validated semantic alias.
 - Preserve spoken text exactly; never paraphrase, summarize, invent, or transform narration into speech.
 - When the story contains explicit spoken dialogue or script-style dialogue, copy only those spoken lines. If there is no explicit spoken-dialogue anchor, return dialogue_events as an empty array.
-- The user payload may include a `source_dialogue` whitelist containing exact source utterances. Treat it as authoritative: dialogue_events may use only those utterances (or exact contiguous pieces of them) and must never invent a new line from narrative prose. If the supplied scenes contain no applicable source utterance, return dialogue_events as an empty array.
+- A scene entry may contain a scene-local `source_dialogue` array. Each item binds an exact source `text` to its canonical `speaker`; that pairing is authoritative.
+- A shot may use only entries from its own scene's `source_dialogue`. Never borrow a line from another scene or from the compact global story_context, even if its words appear there. Preserve the paired speaker and exact text; only split a longer line into contiguous pieces across adjacent shots in that same scene when necessary. If the scene has no applicable entry, return dialogue_events as an empty array.
 
 - `speaking_characters` and `speech_text` are derived from `dialogue_events`; focus on producing correct dialogue_events and do not invent independent values for those fields.
 - Do not put timestamps in the response.
@@ -206,6 +207,9 @@ HARD FORMAT
   or character decisions rather than adding filler or repetition. Do not pad the story merely to satisfy the word count,
   and do not truncate a necessary ending just to stay near an arbitrary target.
 - The sixth paragraph is a full settled aftermath, not a compressed summary.
+- Every paragraph is a solid block of roughly 70 to 95 words. Spoken lines stay INSIDE the paragraph of the scene where they are said:
+  never put a quotation, a speaker label, or a single line of speech on its own line or in its own paragraph, never use screenplay layout,
+  and never write a short stand-alone paragraph. A story with many spoken lines still has exactly six paragraphs.
 
 STORY PLAN (write these seven lines in your reasoning before drafting; never in the output)
 WANT: what the protagonist is trying to do right now, and where.
@@ -230,6 +234,14 @@ STRUCTURE (one beat per paragraph; each beat is shown by what people do)
 - Every named person is on screen. Someone known only through a document, label, message, or memory is evidence, not a character.
 
 CHECK (in your reasoning, after drafting and before output): six paragraphs; at least 420 words; each paragraph's event follows from an earlier one; the turn rests on something shown earlier; the price is visible; the last sentence reports something that has already happened.
+
+SCENE CRAFT
+- If a STORY BIBLE is supplied in the user message, it is your own plan: keep its exact names and cast, write one paragraph per beat, and make the planted detail, turn, choice and price land where the bible puts them.
+- Introduce every consequential person on screen by the end of paragraph 3, with one visible trait (a tool, an injury, a habit, a way of standing) and a want shown through action before they explain anything.
+- People who want different things do not explain the plot to each other. A spoken line is short (under 18 words), carries a demand, refusal, bargain, lie, or accusation, and leaves something unsaid. Never let a character deliver backstory or the premise as a speech.
+- Make the setting specific. Use at least three concrete details that belong only to THIS premise (a named procedure, instrument, tool, number, repair, sound, injury) instead of generic dread words such as ominous, eerie, mysterious, strange, or pulsing.
+- Any mysterious object, signal, or event must be concretely defined by the end: what it is, who made or left it, what it does. Show that by use or consequence, never by a character announcing it.
+- Do not reach for the nearest genre default. The reversal must be something only this cast, place, and set-up could produce.
 
 PROSE
 - Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
@@ -302,6 +314,7 @@ PEOPLE
         mode: str,
         story: str,
         source_character_names: list[str] | None = None,
+        story_bible: dict | None = None,
     ) -> str:
 
         source_text = self._compact_story_context(
@@ -325,6 +338,9 @@ PEOPLE
                     "\n\nSOURCE CHARACTER ANCHORS (established characters to preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
+        bible_text = self._format_story_bible(story_bible)
+        if bible_text:
+            result += "\n\n" + bible_text
         result += (
             "\n\nOUTPUT CONTRACT:\n"
             "Exactly six paragraphs. Keep the complete story within the required 420-560 word contract. Do not stop while under 420 words; "
@@ -333,6 +349,184 @@ PEOPLE
         )
         return result
 
+
+    _STORY_BIBLE_SYSTEM = textwrap.dedent("""
+    You are the head writer planning a short cinematic story for MiniMax H3 BEFORE any prose is written.
+    Return JSON only. Plan ONE story that fills exactly six filmable scenes; each scene is one location and one continuous stretch of time.
+
+    DIVERGE THEN SELECT (fill these fields first, in order): `obvious_version` is the one-sentence plot most writers would reach for with this premise.
+    `concepts` are three different readings of the premise whose CAUSE of conflict differs from the obvious version and from each other (each under 30 words,
+    each built on specific people, a specific profession, a specific object or place). `chosen_concept` is the one that gives the people the most incompatible wants
+    and the most specific physical detail. Everything below must be built on the chosen concept, not on the obvious version.
+
+    CAST: you decide the cast. There is no fixed number. Let the conflict choose how many people are on screen. Prefer a cast in which at least
+    one other consequential person is physically present and wants something that collides with the protagonist's want (opposition, loyalty,
+    deception, rescue, rivalry, a debt, a competing duty). Choose a lone protagonist only when the premise's isolation is itself the opposing
+    force, and say so in cast_rationale. Every cast member appears on screen, acts, and has one stable canonical full name (given name plus family
+    name, distinctive, never a bare role). Nobody is a cast member who is known only through a log, label, recording, or memory.
+
+    ORIGINALITY: do not take the nearest genre default for the premise. Find the reading of the premise that only this setting and these people
+    could produce. A mysterious object, signal, or event must be defined concretely (what it is, who made or left it, what it does) and shown
+    through use or consequence, never left as an unexplained glow, a classified project, or a hum.
+
+    CONFLICT: people with incompatible wants, not a malfunctioning system. The environment may press on them but is not the antagonist.
+    PLANTED DETAIL: one concrete fact, object, skill, or relationship shown in scene 1 or 2 that decides the choice in scene 5.
+    TURN: lands in scene 4, grows out of something already shown, and forces a different decision.
+    CHOICE and PRICE: two outcomes that cannot both be kept; the price is real and visible (it may be bleak or bittersweet).
+    ENDING IMAGE: one concrete settled image that echoes a detail from scene 1.
+    BEATS: exactly six strings, one per scene in order (open, first attempt, pressure, turn, choice, aftermath). Each names the place and states who does what and the visible consequence.
+    The beats are one causal chain: the consequence of each beat is the problem of the next. Track every cast member and the planted object through all six beats; nobody and nothing
+    vanishes or is used twice without a beat saying how. The ENDING IMAGE must restate what beat 6 shows (same person, same place, same object).
+    Keep every field short and concrete (under 40 words each).
+    """).strip()
+
+    _STORY_BIBLE_EXPAND_NOTE = (
+        "\n\nEXPAND MODE: the supplied source story is canon. Keep its people, setting, events in order, and outcome. "
+        "The plan deepens it with cause, opposition, evidence, and consequence; it never replaces it with a different plot. "
+        "Source characters are anchors, not a cast limit; add a new person only when the conflict needs them, and bring them on screen."
+    )
+
+    @staticmethod
+    def _story_bible_json_schema() -> dict:
+        def text(limit: int = 280) -> dict:
+            return {"type": "string", "minLength": 1, "maxLength": limit}
+
+        return {
+            "type": "object",
+            "properties": {
+                "obvious_version": text(240),
+                "concepts": {
+                    "type": "array",
+                    "minItems": 3,
+                    "maxItems": 3,
+                    "items": text(240),
+                },
+                "chosen_concept": text(300),
+                "cast": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 6,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                            "role": text(120),
+                            "want": text(200),
+                            "flaw_or_secret": text(200),
+                            "stance_toward_protagonist": text(160),
+                        },
+                        "required": ["name", "role", "want", "flaw_or_secret", "stance_toward_protagonist"],
+                        "additionalProperties": False,
+                    },
+                },
+                "cast_rationale": text(240),
+                "central_conflict": text(300),
+                "planted_detail": text(240),
+                "turn": text(300),
+                "choice_and_price": text(300),
+                "ending_image": text(240),
+                "beats": {
+                    "type": "array",
+                    "minItems": 6,
+                    "maxItems": 6,
+                    "items": text(320),
+                },
+            },
+            "required": [
+                "obvious_version", "concepts", "chosen_concept",
+                "cast", "cast_rationale", "central_conflict", "planted_detail",
+                "turn", "choice_and_price", "ending_image", "beats",
+            ],
+            "additionalProperties": False,
+        }
+
+    def _plan_story_bible(
+        self,
+        mode: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> dict | None:
+        """One compact planning call (no thinking, schema-guided). Never fatal.
+
+        Qwen decides the cast, conflict, planted detail, turn, price and six beats; the
+        prose pass then writes from that plan. Any failure returns None and the prose
+        pass runs exactly as before.
+        """
+        self._planned_cast = []
+        try:
+            system = self._STORY_BIBLE_SYSTEM
+            if mode == EXPAND_USER_STORY_MODE:
+                system += self._STORY_BIBLE_EXPAND_NOTE
+            anchors = list(dict.fromkeys(
+                str(value).strip()
+                for value in (source_character_names or [])
+                if str(value).strip()
+            ))
+            payload = {
+                "mode": str(mode),
+                "premise_or_source_story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
+                "source_character_anchors": anchors[:16],
+            }
+            bible = self._chat_json(
+                system,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                minimum_completion=300,
+                temperature=0.80,
+                top_p=0.90,
+                call_name="story_bible",
+                max_completion=1800,
+                json_mode=True,
+                disable_thinking=True,
+                response_schema=self._story_bible_json_schema(),
+            )
+        except Exception as exc:  # planning is an enhancement, never a hard dependency
+            print(f"[QWEN] story_bible skipped ({type(exc).__name__}: {str(exc)[:160]})", flush=True)
+            return None
+
+        if not isinstance(bible, dict):
+            return None
+        cast = [
+            item for item in (bible.get("cast") or [])
+            if isinstance(item, dict) and str(item.get("name", "") or "").strip()
+        ]
+        beats = [str(item).strip() for item in (bible.get("beats") or []) if str(item).strip()]
+        if not cast or len(beats) != 6:
+            print("[QWEN] story_bible skipped (incomplete plan)", flush=True)
+            return None
+        bible["cast"] = cast
+        bible["beats"] = beats
+        self._planned_cast = list(dict.fromkeys(str(item["name"]).strip() for item in cast))
+        print(
+            f"[QWEN] story_bible cast={len(cast)} names={self._planned_cast}",
+            flush=True,
+        )
+        return bible
+
+    @staticmethod
+    def _format_story_bible(bible: dict | None) -> str:
+        if not isinstance(bible, dict) or not bible.get("beats"):
+            return ""
+        lines = [
+            "STORY BIBLE (your own plan: keep these exact names, never contradict it, and write one paragraph per beat):",
+            "CHOSEN CONCEPT (the specific reading to write; avoid the obvious version: "
+            + str(bible.get("obvious_version", "")) + "): " + str(bible.get("chosen_concept", "")),
+            "CAST (every person below appears on screen and acts):",
+        ]
+        for person in bible.get("cast", []) or []:
+            lines.append(
+                f"- {person.get('name', '')}: {person.get('role', '')}. Wants: {person.get('want', '')}. "
+                f"Flaw or secret: {person.get('flaw_or_secret', '')}. Toward the protagonist: {person.get('stance_toward_protagonist', '')}."
+            )
+        lines.append("CAST REASON: " + str(bible.get("cast_rationale", "")))
+        lines.append("CONFLICT: " + str(bible.get("central_conflict", "")))
+        lines.append("PLANTED EARLY, PAID LATE: " + str(bible.get("planted_detail", "")))
+        lines.append("TURN (paragraph 4): " + str(bible.get("turn", "")))
+        lines.append("CHOICE AND PRICE: " + str(bible.get("choice_and_price", "")))
+        lines.append("ENDING IMAGE: " + str(bible.get("ending_image", "")))
+        lines.append("SCENE BEATS:")
+        for index, beat in enumerate(bible.get("beats", []) or [], start=1):
+            lines.append(f"{index}. {beat}")
+        return "\n".join(lines)
 
     def _sampling_for_mode(
         self,
@@ -520,12 +714,29 @@ PEOPLE
     Every `spoken_dialogue` item must be text that sits inside quotation marks in the story or on an explicit
     `Name: line` screenplay label. Narration, description, and action sentences are never dialogue, even when a
     character is the subject. If the story has no quotation marks and no labelled lines, `spoken_dialogue` must be empty.
+
+    PRESENCE RULE (apply before excluding anyone):
+    A person IS a production character when they are physically present in ANY scene of the story: they act, speak in
+    quotation marks, are addressed face to face, are touched, followed, or chased, or otherwise take part in the present
+    action. A former title, earlier job, or earlier history ("the station's former lead scientist", "a retired pilot")
+    only describes a person who is present now; it does not make them backstory-only. Exclude a person only when they NEVER
+    appear in a present scene of the story.
+    Every speaker named in `spoken_dialogue` MUST also appear in `candidates`.
+    `deterministic_character_hints` are surface forms found by a simple scan and some are wrong: classify each one and
+    include it, under its fullest grounded name, when that person is physically present.
+    `screenwriter_planned_cast` (when supplied) lists the people the story's writer intended on screen: include each one
+    who actually appears in the final story text.
     """).strip()
 
         user_payload = json.dumps(
             {
                 "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
                 "deterministic_character_hints": candidate_hints[:32],
+                "screenwriter_planned_cast": [
+                    str(value).strip()
+                    for value in (getattr(self, "_planned_cast", None) or [])
+                    if str(value).strip()
+                ][:16],
             },
             ensure_ascii=False,
             separators=(",", ":"),
@@ -543,6 +754,7 @@ PEOPLE
             disable_thinking=True,
             response_schema=self._character_extraction_json_schema(),
         )
+        result = self._complete_semantic_roster(story, result)
 
         # Raw character-extractor payloads are intentionally hidden from normal production logs.
         # Use an explicit TRACE value only when low-level debugging is actually requested.
@@ -566,6 +778,65 @@ PEOPLE
             self._semantic_spoken_dialogue,
         )
 
+        return result
+
+    def _complete_semantic_roster(self, story: str, result: dict) -> dict:
+        """Keep the extractor consistent with itself and with the story's own writer.
+
+        A name that Qwen itself reports as a speaker, or that the story-planning pass
+        listed as on-screen cast, must be offered to the planner as a candidate. This
+        adds no name of our own: both sources are Qwen output, and the planner's
+        grounding, mention-only and non-person checks still decide acceptance.
+        """
+        if not isinstance(result, dict):
+            return result
+
+        title_re = re.compile(
+            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+            flags=re.IGNORECASE,
+        )
+
+        def tokens(value: str) -> frozenset:
+            return frozenset(re.findall(r"[a-z0-9]+", title_re.sub("", str(value or "").strip()).lower()))
+
+        candidates = [item for item in (result.get("candidates") or []) if isinstance(item, dict)]
+        known = [
+            tokens(surface)
+            for item in candidates
+            for surface in [item.get("name", ""), *(item.get("aliases", []) or [])]
+            if str(surface or "").strip()
+        ]
+        known = [value for value in known if value]
+
+        wanted = list(getattr(self, "_planned_cast", None) or [])
+        wanted += [
+            str(item.get("speaker", "") or "")
+            for item in (result.get("spoken_dialogue") or [])
+            if isinstance(item, dict)
+        ]
+
+        added: list[str] = []
+        for name in wanted:
+            name = str(name or "").strip()
+            if not name or len(name) > 96 or not name[:1].isupper():
+                continue
+            wanted_tokens = tokens(name)
+            if not wanted_tokens or any(
+                wanted_tokens <= value or value <= wanted_tokens for value in known
+            ):
+                continue
+            candidates.append({
+                "name": name,
+                "entity_type": "PERSON",
+                "is_character": True,
+                "identity_type": "named_character",
+            })
+            known.append(wanted_tokens)
+            added.append(name)
+
+        if added:
+            print(f"[DIRECTOR] roster completion: Qwen speakers/planned cast re-offered {added}", flush=True)
+        result["candidates"] = candidates
         return result
 
     def _anchor_semantic_dialogue_to_story(
@@ -1039,12 +1310,14 @@ PEOPLE
                     "composition": str(analysis.get("composition", "") or "")[:220],
                 }
 
+        # H3_SCENE_BOUND_DIALOGUE_V2_1: keep the established semantic extractor and
+        # its non-fatal fallback contract, but bind each exact utterance to one scene.
         source_dialogue = []
         extract_dialogue = getattr(self, "_extract_story_spoken_segments", None)
-        if callable(extract_dialogue):
-            try:
+        try:
+            if callable(extract_dialogue):
                 source_dialogue = [
-                    str(segment.get("display", "") or segment.get("text", "") or "").strip()
+                    segment
                     for segment in extract_dialogue(
                         story,
                         getattr(self, "_semantic_spoken_dialogue", None),
@@ -1058,19 +1331,123 @@ PEOPLE
                     if isinstance(segment, dict)
                     and str(segment.get("display", "") or segment.get("text", "") or "").strip()
                 ]
-            except Exception as exc:
-                recorder = getattr(self, "_record_recovery", None)
-                if callable(recorder):
-                    recorder(
-                        "shot_director_dialogue_extraction",
-                        f"source dialogue extraction failed: {exc}",
+
+            def _dialogue_phrase_key(value):
+                return re.sub(
+                    r"[^a-z0-9]+", " ", str(value or "").casefold()
+                ).strip()
+
+            # Canonical speaker map includes the approved roster and its aliases.
+            _canonical_by_norm = {
+                EntityResolver.normalize(str(item.get("name", ""))): str(item.get("name", "")).strip()
+                for item in characters
+                if isinstance(item, dict) and str(item.get("name", "")).strip()
+            }
+            _alias_map = EntityResolver.build_character_alias_map(characters)
+
+            # Do not leave stale source_dialogue entries on reused scene dictionaries.
+            for _scene_payload in scene_payloads:
+                if isinstance(_scene_payload, dict):
+                    _scene_payload["source_dialogue"] = []
+
+            # The shot scenes are derived from the six source-story paragraphs. Match the
+            # exact semantic utterance to the FULL scene description, not compact story_context.
+            _scene_text_by_id = {}
+            for _scene in scenes:
+                if not isinstance(_scene, dict):
+                    continue
+                _scene_id = str(_scene.get("scene_id", "") or "").strip()
+                _scene_text = str(_scene.get("description", "") or _scene.get("story_summary", "") or "")
+                if _scene_id and _scene_text:
+                    _scene_text_by_id[_scene_id] = _scene_text
+
+            _used_phrases = {}
+            _scene_cursor = 0
+            _unmapped_speakers = set()
+            _unmatched_utterances = 0
+            _full_story_key = _dialogue_phrase_key(story)
+            for _segment in source_dialogue:
+                _display = str(_segment.get("display", "") or _segment.get("text", "") or "").strip()
+                _phrase = _dialogue_phrase_key(_display)
+                _speakers = [
+                    str(_value).strip()
+                    for _value in (_segment.get("source_speakers", set()) or set())
+                    if str(_value).strip()
+                ]
+                # Never guess if semantic source attribution is ambiguous.
+                if not _phrase or len(_speakers) != 1:
+                    continue
+                _speaker_key = EntityResolver.normalize(_speakers[0])
+                _canonical_speaker = _canonical_by_norm.get(_speaker_key)
+                if _canonical_speaker is None:
+                    _alias_target = _alias_map.get(_speaker_key)
+                    if _alias_target:
+                        _canonical_speaker = _canonical_by_norm.get(EntityResolver.normalize(_alias_target))
+                if _canonical_speaker is None:
+                    _unmapped_speakers.add(_speakers[0])
+                    continue
+
+                _attached = False
+                for _scene_index in range(_scene_cursor, len(scene_payloads)):
+                    _scene_payload = scene_payloads[_scene_index]
+                    if not isinstance(_scene_payload, dict):
+                        continue
+                    _scene_id = str(_scene_payload.get("scene_id", "") or "").strip()
+                    _raw_scene_text = _scene_text_by_id.get(
+                        _scene_id, str(_scene_payload.get("description", "") or "")
                     )
-                else:
-                    print(
-                        f"[DIRECTOR] source dialogue extraction failed: {exc}",
-                        flush=True,
-                    )
-                source_dialogue = []
+                    _scene_key = _dialogue_phrase_key(_raw_scene_text)
+                    _available = (" " + _scene_key + " ").count(" " + _phrase + " ")
+                    _use_key = (_scene_id, _phrase)
+                    _already_used = _used_phrases.get(_use_key, 0)
+                    if _available <= _already_used:
+                        continue
+
+                    _scene_payload["source_dialogue"].append({
+                        "speaker": _canonical_speaker,
+                        "text": _display,
+                    })
+                    _used_phrases[_use_key] = _already_used + 1
+                    _scene_cursor = _scene_index
+                    _attached = True
+                    break
+
+                if not _attached:
+                    # A line from another scene is expected to be absent from this
+                    # two-scene batch. Count only a real source-mapping miss, not a
+                    # correctly attributed utterance belonging to a different batch.
+                    if (" " + _full_story_key + " ").count(" " + _phrase + " ") > 0:
+                        continue
+                    _unmatched_utterances += 1
+
+            if _unmapped_speakers:
+                print(
+                    "[DIRECTOR] scene-bound dialogue: speaker absent from canonical roster; "
+                    "line excluded from shot whitelist: " + repr(sorted(_unmapped_speakers)),
+                    flush=True,
+                )
+            if _unmatched_utterances:
+                print(
+                    f"[DIRECTOR] scene-bound dialogue: {_unmatched_utterances} utterance(s) "
+                    "did not match a source scene description",
+                    flush=True,
+                )
+        except Exception as exc:
+            recorder = getattr(self, "_record_recovery", None)
+            if callable(recorder):
+                recorder(
+                    "shot_director_dialogue_extraction",
+                    f"source dialogue extraction failed: {exc}",
+                )
+            else:
+                print(
+                    f"[DIRECTOR] source dialogue extraction failed: {exc}",
+                    flush=True,
+                )
+            source_dialogue = []
+            for _scene_payload in scene_payloads:
+                if isinstance(_scene_payload, dict):
+                    _scene_payload["source_dialogue"] = []
 
         payload = {
             "story_context": self._compact_story_context(story, DIRECTOR_SHOT_STORY_CONTEXT_CHARS),
@@ -1079,9 +1456,6 @@ PEOPLE
             "reference_visual_analysis": visual_context,
             "scenes": scene_payloads,
         }
-        if source_dialogue:
-            payload["source_dialogue"] = source_dialogue
-
         return json.dumps(
             payload,
             ensure_ascii=False,
