@@ -1429,9 +1429,10 @@ class QwenDirectorSanitizeMixin:
             )
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
-        if not 420 <= word_count <= 560:
+        minimum_words = int(getattr(self, "_story_min_words", 420) or 420)
+        if not minimum_words <= word_count <= 560:
             errors.append(
-                "Generated story must contain 420 to 560 words "
+                f"Generated story must contain {minimum_words} to 560 words "
                 f"(found {word_count})."
             )
 
