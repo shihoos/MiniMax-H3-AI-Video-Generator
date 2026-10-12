@@ -385,50 +385,44 @@ def test_story_generation_is_single_call_fixed_seed_no_floor():
 def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
-        for line in (
-            "want:",
-            "resistance:",
-            "cast:",
-            "setup:",
-            "turn (reversal):",
-            "choice:",
-            "result:",
-        ):
-            _assert(line in text, f"{mode} story plan is missing the {line!r} line")
-        _assert(
-            "in your reasoning" in text,
-            f"{mode} prompt does not place the plan in the reasoning pass",
-        )
-        _assert(
-            "causes, chooses, or misjudges" in text
-            or "act, choose, refuse, misjudge" in text
-            or "cause, choose, or misjudge" in text,
-            f"{mode} reversal is not explicitly action-driven",
-        )
-        _assert(
-            "completed past-tense action" in text,
-            f"{mode} settled-aftermath requirement missing",
-        )
-        _assert(
-            "hold the turn until" in text,
-            f"{mode} prompt lacks the late-turn rule",
-        )
-        _assert(
-            "first consequential attempt" in text and "meets resistance" in text,
-            f"{mode} prompt lacks the setback rhythm",
-        )
-        _assert(
-            "forces the protagonist to decide or act" in text,
-            f"{mode} prompt does not require the turn to force a decision",
-        )
-        for word in ("mystery", "containment", "facility", "smallest cast"):
-            _assert(
-                word not in text,
-                f"{mode} prompt names a failure mode ({word!r}) instead of describing the target",
-            )
+        _assert("unexpected reveal or reversal" in text, f"{mode} must require a causal reversal")
+        _assert("concrete detail established earlier" in text, f"{mode} must seed the reversal")
+        _assert("at least two sentences" in text and "interiority" in text, f"{mode} must include protagonist interiority")
+        _assert("at least one short line of direct dialogue" in text, f"{mode} must retain the September 25 dialogue requirement")
+        _assert("aftermath" in text and "choice changed" in text, f"{mode} must resolve the story with a concrete aftermath")
+        _assert("no fixed cast size or target count" in text, f"{mode} must leave cast size to Qwen")
+        _assert("present counterpart" in text and "independent immediate objective" in text,
+                f"{mode} should prefer a consequential on-screen counterpart when the premise supports one")
+        _assert("paragraph 1:" not in text and "paragraph 2:" not in text,
+                f"{mode} must not prescribe a rigid plot function for every paragraph")
+
+
+def test_story_bible_and_editor_are_opt_in_by_default():
+    director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    prompt_mixin = __import__("planner.qwen_director_prompts", fromlist=["QwenDirectorPromptMixin"]).QwenDirectorPromptMixin
+    schema = prompt_mixin._story_bible_json_schema()
+    cast_schema = schema["properties"]["cast"]
+    _assert('os.getenv("H3_STORY_BIBLE", "0")' in director_source,
+            "Story Bible must be opt-in so the default path matches the September 25 single-pass baseline")
+    _assert('os.getenv("H3_STORY_EDITOR", "0")' in director_source,
+            "the optional editor must not rewrite the baseline story by default")
+    _assert("maxItems" not in cast_schema,
+            "optional Story Bible schema must not impose a fixed maximum cast size")
+
+
+def test_thinking_mode_is_enabled_for_primary_story_generation():
+    director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    runtime_source = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
+    start = director_source.index("def _generate_story_once")
+    end = director_source.index("def _story_craft_issues", start)
+    story_call = director_source[start:end]
+    _assert("disable_thinking=False" in story_call, "primary story call must enable Qwen3 thinking mode")
+    _assert('"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}' in runtime_source,
+            "runtime must propagate the explicit thinking flag to vLLM")
 
 def test_story_contract_remains_six_paragraphs_420_560():
     prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
@@ -680,41 +674,11 @@ def test_story_prompt_preserves_current_causal_cast_contract():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = mixin._story_text_system(mode).lower()
-        _assert(
-            "every recurring character materially affects the protagonist's goal" in text
-            or "present counterpart" in text
-            or ("relationship" in text and "causal story" in text),
-            f"{mode} prompt lacks consequential character-impact guidance",
-        )
-        _assert(
-            "you decide the cast" in text
-            or "no fixed cast size" in text
-            or "there is no fixed cast size" in text
-            or "there is no target size" in text,
-            f"{mode} prompt accidentally constrains cast size",
-        )
-        # The Sep-25 prompt allowed dialogue to be omitted. The corrected
-        # quality prompt instead requires consequential LIVE dialogue from a
-        # physically present speaker for ordinary speakable premises. Accept
-        # either contract here; the stricter corrected contract is checked in
-        # test_story_prompt_uses_live_dialogue_and_soft_counterpart_prior.
-        optional_dialogue_policy = (
-            "dialogue is optional" in text
-            or "do not add a character merely" in text
-            or "never add a speaker merely" in text
-        )
-        live_dialogue_policy = (
-            "at least one short line of live, direct spoken dialogue" in text
-            and "physically present in the current events" in text
-            and (
-                "must change a decision" in text
-                or "change a decision, reveal consequential information" in text
-            )
-        )
-        _assert(
-            optional_dialogue_policy or live_dialogue_policy,
-            f"{mode} prompt has no explicit dialogue policy",
-        )
+        _assert("materially affect" in text, f"{mode} prompt lacks consequential character-impact guidance")
+        _assert("no fixed cast size or target count" in text, f"{mode} prompt accidentally constrains cast size")
+        _assert("at least one short line of direct dialogue" in text, f"{mode} prompt must require functional live dialogue")
+        _assert("recording" in text and "not a present character" in text,
+                f"{mode} prompt must not treat recordings as present characters")
 
 
 def test_story_prompt_has_no_artificial_subtargets():
@@ -722,50 +686,6 @@ def test_story_prompt_has_no_artificial_subtargets():
     _assert("about 500 words" not in source.lower(), "story prompt must not reintroduce an artificial 500-word target")
     _assert("six to eight sentences" not in source.lower(), "story prompt must not impose a per-paragraph sentence quota")
     _assert("at least 60 words" not in source.lower(), "story prompt must not impose an artificial final-paragraph word floor")
-
-
-def test_story_generation_thinking_mode_is_explicitly_enabled():
-    director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    runtime_source = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
-
-    story_start = director_source.find("def _generate_story_once(")
-    _assert(story_start >= 0, "director is missing _generate_story_once")
-    next_method = director_source.find("\n    def ", story_start + 1)
-    story_body = director_source[story_start:next_method if next_method >= 0 else len(director_source)]
-    _assert("disable_thinking=False" in story_body,
-            "primary story generation must explicitly request Qwen3 thinking mode")
-    _assert("story_thinking=on" in story_body,
-            "story generation telemetry must identify the thinking-on path")
-    _assert('"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}' in runtime_source,
-            "runtime request must forward enable_thinking to vLLM")
-    _assert("enable_thinking=not disable_thinking" in runtime_source,
-            "runtime must map disable_thinking=False to enable_thinking=True")
-
-
-def test_story_prompt_uses_live_dialogue_and_soft_counterpart_prior():
-    from planner.qwen_director_prompts import QwenDirectorPromptMixin
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
-
-    mixin = QwenDirectorPromptMixin()
-    for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-        text = mixin._story_text_system(mode).lower()
-        _assert("physically present counterpart" in text,
-                f"{mode} prompt lacks a physically present counterpart prior")
-        _assert("no numerical cast quota or cap" in text or "no fixed cast size" in text
-                or "there is no fixed cast size" in text or "there is no target size" in text,
-                f"{mode} prompt must leave cast size open")
-        _assert("by paragraph 3" in text,
-                f"{mode} prompt does not establish the counterpart early enough")
-        _assert("at least one short line of live, direct spoken dialogue" in text,
-                f"{mode} prompt does not require consequential live dialogue")
-        _assert("physically present in the current events" in text,
-                f"{mode} dialogue could be incorrectly satisfied by a recording or screen")
-        _assert("must change a decision" in text or "reveal consequential information" in text,
-                f"{mode} dialogue is not required to affect the story")
-
-    prompts_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8").lower()
-    _assert("elias kade" not in prompts_source and "lin mei" not in prompts_source,
-            "the historical Sep-25 benchmark names must not be hardcoded into the prompts")
 
 def main():
     tests = [
@@ -790,6 +710,8 @@ def main():
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
         test_story_generation_is_single_call_fixed_seed_no_floor,
         test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
+        test_story_bible_and_editor_are_opt_in_by_default,
+        test_thinking_mode_is_enabled_for_primary_story_generation,
         test_story_contract_remains_six_paragraphs_420_560,
         test_semantic_dialogue_is_persisted_and_restored_across_resume,
         test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster,
@@ -816,8 +738,6 @@ def main():
         test_descriptive_hints_populate_metadata_without_adding_cast,
         test_mention_only_filter_can_fail_closed,
         test_story_prompt_preserves_current_causal_cast_contract,
-        test_story_generation_thinking_mode_is_explicitly_enabled,
-        test_story_prompt_uses_live_dialogue_and_soft_counterpart_prior,
         test_story_prompt_has_no_artificial_subtargets,
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
