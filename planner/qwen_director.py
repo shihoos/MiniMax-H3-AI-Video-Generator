@@ -1,4 +1,3 @@
-# H3_STORY_DIALOGUE_SOURCE_FIDELITY_V10: source anchors, one targeted retry, safe dialogue spans, accurate quality diagnostics.
 from __future__ import annotations
 
 from copy import deepcopy
@@ -36,7 +35,6 @@ from planner.qwen_director_scene import QwenDirectorSceneMixin
 from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
 
-# H3_STORY_DIALOGUE_RELIABILITY_V11
 class QwenDirector(
     QwenDirectorRuntimeMixin,
     QwenDirectorPromptMixin,
@@ -87,11 +85,7 @@ class QwenDirector(
         self._semantic_spoken_dialogue: list[dict] = []
         self._planned_cast: list[str] = []
         self._last_story_draft: str = ""
-        # Validator tolerance around the 420-560 prompt target. Qwen cannot count its own
-        # words, so a draft a few percent outside the target is accepted instead of failing
-        # the whole run; the prompts still ask for 420-560.
-        self._story_min_words: int = 400
-        self._story_max_words: int = 600
+        self._story_min_words: int = 420
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -114,7 +108,6 @@ class QwenDirector(
             "retries": 0,
             "cache_hits": 0,
             "deterministic_recoveries": 0,
-            "recovery_issues": 0,
         }
 
     def set_reference_visual_context(self, context: dict[str, dict] | None) -> None:
@@ -271,7 +264,6 @@ class QwenDirector(
             "retries": 0,
             "cache_hits": 0,
             "deterministic_recoveries": 0,
-            "recovery_issues": 0,
         }
         if resuming:
             # For AI Story / Expand, the single semantic extraction call is required before resume.
@@ -314,18 +306,6 @@ class QwenDirector(
             for character in (base_plan.get("characters", []) or [])
             if isinstance(character, dict) and str(character.get("name", "")).strip()
         ]
-        if mode == EXPAND_USER_STORY_MODE:
-            # Source-derived hints preserve identities; they do not add production characters
-            # and do not impose any fixed cast size.
-            source_planner = self._planner()
-            detected_source_names = [
-                *source_planner.detect_character_descriptors(user_input),
-                *source_planner._explicit_source_character_names(user_input),
-            ]
-            source_character_names = list(dict.fromkeys([
-                *source_character_names,
-                *(str(name).strip() for name in detected_source_names if str(name).strip()),
-            ]))
 
         if resuming and prior_director_plan.get(
             "story"
@@ -356,19 +336,16 @@ class QwenDirector(
                 )
             )
 
-            story_bible = None
-            if os.getenv("H3_STORY_BIBLE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-                story_bible = self._plan_story_bible(
+            # Match the proven one-pass story-writing baseline by default.
+            # The planning stage remains available for explicit A/B testing.
+            story_bible_enabled = os.getenv("H3_STORY_BIBLE", "0").strip().lower() in {"1", "true", "yes", "on"}
+            story_bible = (
+                self._plan_story_bible(
                     mode,
                     user_input,
                     source_character_names=source_character_names,
                 )
-            print(
-                "[QWEN] story_config bible="
-                + ("on" if story_bible else "off")
-                + " editor="
-                + ("on" if os.getenv("H3_STORY_EDITOR", "0").strip().lower() in {"1", "true", "yes", "on"} else "off"),
-                flush=True,
+                if story_bible_enabled else None
             )
 
             story_user = (
@@ -396,99 +373,43 @@ class QwenDirector(
                 first_text = str(first_error)
                 if "generation failed validation" not in first_text:
                     raise
-                # Guided revisions (at most two), each told the EXACT word count of the
-                # rejected draft and how far to move. A bare "470 to 520 words" instruction
-                # made Qwen overshoot (414 -> 565), because it cannot count its own output.
-                # Revisions accept a slightly wider window (380-600); the strict 420-560
-                # contract still applies to the first draft and to the editor pass.
-                last_error_text = first_text
-                story = ""
-                revised_ok = False
-                for revision_index in range(1):
-                    print("[QWEN] story contract miss; guided revision %d follows" % (revision_index + 1), flush=True)
-                    print("[QWEN] reason=" + last_error_text[:400], flush=True)
-                    try:
-                        self._qwen_telemetry["retries"] = int(self._qwen_telemetry.get("retries", 0) or 0) + 1
-                    except Exception:
-                        pass
-                    draft = str(getattr(self, "_last_story_draft", "") or "").strip()
-                    draft_words = len(re.findall(r"\b[\w'’-]+\b", draft))
-                    revision_user = (
-                        story_user
-                        + "\n\nREVISION NOTICE: your previous draft was rejected for: "
-                        + last_error_text[:400]
-                    )
-                    if draft:
-                        lowered_error = last_error_text.lower()
-                        source_fidelity_failure = mode == EXPAND_USER_STORY_MODE and any(
-                            marker in lowered_error for marker in (
-                                "source-event coverage", "source anchors", "omitted established source character",
-                                "changed too much of the supplied story",
-                            )
-                        )
-                        length_failure = any(marker in lowered_error for marker in (
-                            "must contain", "word count", "words (found", "too short", "too long",
-                        ))
-                        if source_fidelity_failure:
-                            repair_rule = (
-                                "SOURCE-FIDELITY REPAIR: keep the source story as canon. Preserve every source-derived "
-                                "character name exactly, preserve each source action/event in its original order, and make "
-                                "paragraph 1 explicitly dramatize the source's first action. Expand the supplied premise; "
-                                "do not replace its protagonist, setting, or events with a different story. Repair only the "
-                                "reported source-fidelity defect; keep the strongest existing material."
-                            )
-                        elif length_failure and draft_words < 400:
-                            repair_rule = (
-                                f"The current draft has {draft_words} words. Add only the missing causal action or consequence "
-                                "needed for a complete story. The final draft must be 400-600 words; do not target an exact count "
-                                "and do not pad every paragraph."
-                            )
-                        elif length_failure and draft_words > 600:
-                            repair_rule = (
-                                f"The current draft has {draft_words} words. Remove redundant wording without deleting source "
-                                "events, named characters, the reversal, choice, or settled ending. The final draft must be "
-                                "400-600 words; do not target an exact count."
-                            )
-                        else:
-                            repair_rule = (
-                                "Fix only the reported contract defect. Preserve established names, source events and their "
-                                "order, the strongest existing material, and the ending's causal consequence. Keep the final "
-                                "story between 400 and 600 words."
-                            )
-                        revision_user += (
-                            "\n\nPREVIOUS DRAFT (keep its best material, names, and events; fix the rejection reason):\n"
-                            + draft + "\n\n" + repair_rule
-                        )
+                # One guided revision, paid for only when the first draft misses the contract.
+                # The prompt differs from the first call, so the fixed seed gives a new draft.
+                print("[QWEN] story contract miss; one guided revision follows", flush=True)
+                print("[QWEN] reason=" + first_text[:400], flush=True)
+                try:
+                    self._qwen_telemetry["retries"] = int(self._qwen_telemetry.get("retries", 0) or 0) + 1
+                except Exception:
+                    pass
+                draft = str(getattr(self, "_last_story_draft", "") or "").strip()
+                revision_user = (
+                    story_user
+                    + "\n\nREVISION NOTICE: your previous draft was rejected for: "
+                    + first_text[:400]
+                )
+                if draft:
                     revision_user += (
-                        "\nWrite the whole story again. Exactly six paragraphs separated by one blank line, each a solid block of about 70 to 95 words. "
-                        "Every spoken line stays inside its scene paragraph and never stands on its own line. The sixth paragraph is a full settled "
-                        "aftermath of at least 50 words that ends on a completed action. Output only the story."
+                        "\n\nPREVIOUS DRAFT (keep its best material, names, and events; fix the rejection reason):\n"
+                        + draft
+                        + "\n\nIf the draft is too short, add one concrete beat of action, resistance, or consequence to each of paragraphs 1 to 5 "
+                        "and deepen the aftermath, until the story is 470 to 520 words."
                     )
-                    self._story_min_words = 400
-                    self._story_max_words = 600
-                    try:
-                        story, generated_story = self._generate_story_once(
-                            mode,
-                            user_input,
-                            story_system,
-                            revision_user,
-                            temperature=temperature,
-                            top_p=top_p,
-                            source_character_names=source_character_names,
-                            seed_offset=revision_index + 1,
-                        )
-                        revised_ok = True
-                    except RuntimeError as revision_error:
-                        last_error_text = str(revision_error)
-                        if "generation failed validation" not in last_error_text:
-                            raise
-                    finally:
-                        self._story_min_words = 400
-                        self._story_max_words = 600
-                    if revised_ok:
-                        break
-                if not revised_ok:
-                    raise RuntimeError(last_error_text)
+                revision_user += (
+                    "\nWrite the whole story again. Exactly six paragraphs separated by one blank line, each a solid block of about 70 to 95 words. "
+                    "Every spoken line stays inside its scene paragraph and never stands on its own line. The sixth paragraph is a full settled "
+                    "aftermath of at least 50 words that ends on a completed action. Output only the story."
+                )
+                self._story_min_words = 380  # the guided revision may land slightly under the 420 target
+                story, generated_story = self._generate_story_once(
+                    mode,
+                    user_input,
+                    story_system,
+                    revision_user,
+                    temperature=temperature,
+                    top_p=top_p,
+                    source_character_names=source_character_names,
+                )
+                self._story_min_words = 420
             story = self._edit_story_draft(
                 mode,
                 user_input,
@@ -1219,7 +1140,7 @@ class QwenDirector(
                 recovery_code = "preserve_semantic_dialogue_empty"
             else:
                 recovery_code = "ai_story_semantic_dialogue_empty"
-            self._record_recovery_issue(
+            self._record_recovery(
                 recovery_code,
                 "Semantic extraction returned spoken dialogue, but no dialogue events survived deterministic reconciliation.",
             )
@@ -1232,7 +1153,7 @@ class QwenDirector(
                 recovery_code = "expand_semantic_dialogue_empty"
             else:
                 recovery_code = "ai_story_semantic_dialogue_empty"
-            self._record_recovery_issue(
+            self._record_recovery(
                 recovery_code,
                 "Story contains explicit dialogue surface, but the single semantic extraction returned no spoken dialogue items.",
             )
@@ -1385,16 +1306,6 @@ class QwenDirector(
         except RuntimeError as exc:
             errors.append(str(exc))
 
-        if mode == EXPAND_USER_STORY_MODE:
-            try:
-                self._validate_expand_story_cast(
-                    user_input,
-                    working,
-                    source_character_names=source_character_names,
-                )
-            except RuntimeError as exc:
-                errors.append(str(exc))
-
         if errors:
             raise RuntimeError(" | ".join(errors))
         return working
@@ -1461,18 +1372,6 @@ class QwenDirector(
 
         issues: list[str] = []
 
-        ending_sentences = [
-            sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", text)
-            if sentence.strip()
-        ]
-        if ending_sentences and re.search(
-            r"\b(?:countdown|timer|containment breach|breach warning|time remaining)\b.{0,60}\b\d{1,2}:\d{2}(?::\d{2})?\b",
-            ending_sentences[-1],
-            flags=re.IGNORECASE,
-        ):
-            issues.append("ending leaves an active timer/breach unresolved")
-
         # Repetition metrics are intentionally structural: no stock-phrase or
         # English vocabulary blacklist is used here.
         trigrams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
@@ -1503,16 +1402,6 @@ class QwenDirector(
         if len(lengths) >= 8 and (max(lengths) - min(lengths)) < 9:
             issues.append("monotone sentence rhythm")
 
-        # H3_STORY_ENDING_EVIDENCE_DIAGNOSTIC_V12: log a concrete ending contradiction.
-        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
-        if paragraphs:
-            ending = paragraphs[-1].lower()
-            retained_evidence = bool(re.search(r"\b(?:drive|journal|data|file|record|evidence|chip|disk)\b", ending))
-            retained_by_protagonist = bool(re.search(r"\b(?:in (?:her|his|their) hand|clutched|carried|held|pocketed)\b", ending))
-            claims_no_one_can_know = bool(re.search(r"\b(?:world|anyone|nobody|no one|people)\b.{0,35}\b(?:will|would|could)\s+never\s+know\b", ending))
-            if retained_evidence and retained_by_protagonist and claims_no_one_can_know:
-                issues.append("ending claims the discovery cannot be known although the protagonist retains evidence")
-
         return issues
 
     def _generate_story_once(
@@ -1525,9 +1414,8 @@ class QwenDirector(
         temperature: float,
         top_p: float,
         source_character_names: list[str],
-        seed_offset: int = 0,
     ) -> tuple[str, bool]:
-        """Generate one story draft per call. A contract-repair retry may supply a distinct deterministic seed.
+        """ONE primary creative Qwen call. No retry, no reseed, no rewrite.
 
         A pure paragraph-count miss is repaired deterministically (no model call).
         Any other contract violation fails closed with every defect listed together.
@@ -1569,7 +1457,7 @@ class QwenDirector(
                 call_name=call_name,
                 max_completion=3200,
                 disable_thinking=False,
-                seed=DIRECTOR_VLLM_SEED + max(0, int(seed_offset)),  # V11: vary a rejected-draft retry
+                seed=DIRECTOR_VLLM_SEED,
                 creative=True,
             )
         except StoryTruncated as exc:
@@ -1622,10 +1510,10 @@ class QwenDirector(
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
         if not issues:
-            print("[QWEN] story_quality_diagnostics=PASS (heuristic checks only)", flush=True)
+            print("[QWEN] story_quality=PASS", flush=True)
         else:
             print(
-                "[QWEN] story_quality_diagnostics=ISSUES",
+                "[QWEN] story_quality=ISSUES",
                 "count=" + str(len(issues)),
                 "issues=" + "; ".join(issues[:4]),
                 flush=True,
@@ -1638,18 +1526,6 @@ class QwenDirector(
         try:
             planner = self._planner()
             named = planner.detect_character_descriptors(story)
-            group_nouns = {
-                "team", "group", "crew", "unit", "squad", "division", "department", "committee",
-                "council", "company", "corporation", "agency", "institute", "laboratory", "lab",
-                "station", "facility", "base", "project", "protocol", "program", "programme",
-                "command", "authority", "board", "order", "society", "expedition", "mission",
-            }
-            named = [
-                name for name in named
-                if str(name).strip().split()[-1:] and
-                re.sub(r"[^a-z]", "", str(name).strip().split()[-1].lower()) not in group_nouns
-                and not re.search(r"\d", str(name))
-            ]
             absent = [name for name in named if planner._is_mention_only_identity(story, name)]
         except Exception:
             absent = []
@@ -1824,7 +1700,7 @@ class QwenDirector(
         top_p: float,
     ) -> str:
         """One thinking-mode editing pass. Any miss keeps the validated draft unchanged."""
-        if os.getenv("H3_STORY_EDITOR", "0").strip().lower() not in {"1", "true", "yes", "on"}:
+        if os.getenv("H3_STORY_EDITOR", "0").strip().lower() in {"0", "false", "no", "off"}:
             return story
         from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED
 
@@ -1852,8 +1728,7 @@ class QwenDirector(
                 creative=True,
             )
             edited = self._reflow_story_paragraphs(edited)
-            self._story_min_words = 400
-            self._story_max_words = 600
+            self._story_min_words = 420
             candidate = self._validate_story_output_contracts(
                 mode,
                 user_input,
@@ -2493,7 +2368,6 @@ class QwenDirector(
             )
             .replace("’", "'")
             .replace("‘", "'")
-            .replace("…", "...")
             .replace("—", "-")
             .replace("–", "-")
         )
@@ -2504,40 +2378,6 @@ class QwenDirector(
         text = QwenDirector._normalize_dialogue_text(value)
         text = re.sub(r"^[,;:!?\.\-\s]+|[,;:!?\.\-\s]+$", "", text)
         return re.sub(r"\s+", " ", text).strip()
-
-    # H3_STORY_DIALOGUE_RELIABILITY_V11
-    # H3_QUOTE_MEDIA_CONTEXT_V12
-    @staticmethod
-    def _quote_is_non_live_evidence(story: str, quote_start: int) -> bool:
-        """Detect quotes explicitly attributed to device/media output.
-
-        Check the immediately preceding sentence as well as the current clause.
-        This catches a voice introduced in one sentence and quoted in the next,
-        but does not let an older unrelated device mention suppress later live speech.
-        """
-        text = str(story or "")
-        start = max(0, min(len(text), int(quote_start)))
-        paragraph_start = text.rfind("\n\n", 0, start) + 2
-        prefix = text[paragraph_start:start].rstrip()
-        if not prefix:
-            return False
-        boundaries = [prefix.rfind(mark) for mark in (".", "!", "?", "\n")]
-        current_boundary = max(boundaries)
-        current_clause = prefix[current_boundary + 1:].strip().lower()
-        before_current = prefix[:current_boundary].rstrip() if current_boundary >= 0 else ""
-        previous_boundaries = [before_current.rfind(mark) for mark in (".", "!", "?", "\n")]
-        previous_boundary = max(previous_boundaries)
-        previous_sentence = before_current[previous_boundary + 1:].strip().lower()
-        context = (previous_sentence + " " + current_clause).strip()
-
-        patterns = (
-            r"\bvoice\s+crackled\s+(?:through|from)\s+(?:the\s+)?(?:static|speaker|intercom|radio)\b",
-            r"\b(?:recording|playback|transmission|broadcast|audio message)\b[^.!?\n]{0,80}\b(?:played|crackled|came|issued|transmitted|announced)\b",
-            r"\b(?:appeared|was visible|showed up|was displayed)\s+(?:on|in)\s+(?:the\s+)?(?:screen|monitor|display|video feed)\b",
-            r"\b(?:screen|monitor|display|video feed)\s+(?:showed|displayed|played|revealed)\b",
-            r"\b(?:voice|message|audio|signal)\b[^.!?\n]{0,55}\b(?:from|through|over)\s+(?:the\s+)?(?:speaker|intercom|radio|terminal|screen|monitor)\b",
-        )
-        return any(re.search(pattern, context, flags=re.IGNORECASE) for pattern in patterns)
 
     @staticmethod
     def _story_has_explicit_dialogue_surface(story: str) -> bool:
@@ -2556,7 +2396,6 @@ class QwenDirector(
         if any(
             str(value or "").strip()
             for match in quote_pattern.finditer(text)
-            if not QwenDirector._quote_is_non_live_evidence(text, match.start())
             for value in match.groups()
         ):
             return True
@@ -2615,56 +2454,14 @@ class QwenDirector(
         }
 
         semantic_consumed: set[int] = set()
-        semantic_partial_consumed: dict[int, list[tuple[int, int]]] = {}
 
-        def consume_semantic_speaker(key: str, expected_speaker: str | None = None) -> set[str]:
-            # H3_MERGED_QUOTE_RECONCILIATION_V10. Source quote boundaries remain authoritative.
-            def tokens(value: str) -> list[str]:
-                return re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)?", str(value or "").casefold().replace("’", "'"))
-        
-            wanted = tokens(key)
-            if not wanted:
-                return set()
-            expected = canonicalize_speaker(expected_speaker) if expected_speaker else ""
-            exact = [
-                (index, item) for index, item in enumerate(semantic_items)
-                if index not in semantic_consumed and item["key"] == key
-                and (not expected or item["speaker"] == expected)
-            ]
-            if exact:
-                exact_speakers = {str(item.get("speaker", "")).strip() for _, item in exact if str(item.get("speaker", "")).strip()}
-                if not expected and len(exact_speakers) != 1:
-                    return set()
-                index, item = exact[0]
-                semantic_consumed.add(index)
-                return {item["speaker"]} if item.get("speaker") else set()
-        
-            contained = []
+        def consume_semantic_speaker(key: str) -> set[str]:
             for index, item in enumerate(semantic_items):
-                haystack = tokens(item["key"])
-                if len(wanted) >= len(haystack):
+                if index in semantic_consumed or item["key"] != key:
                     continue
-                speaker = str(item.get("speaker", "")).strip()
-                if not speaker or (expected and speaker != expected):
-                    continue
-                used = semantic_partial_consumed.get(index, [])
-                for begin in range(len(haystack) - len(wanted) + 1):
-                    finish = begin + len(wanted)
-                    if haystack[begin:finish] != wanted:
-                        continue
-                    if any(begin < used_end and used_begin < finish for used_begin, used_end in used):
-                        continue
-                    contained.append((len(haystack), index, begin, finish, speaker))
-            if not contained:
-                return set()
-            shortest = min(entry[0] for entry in contained)
-            best = [entry for entry in contained if entry[0] == shortest]
-            best_speakers = {entry[4] for entry in best}
-            if len(best_speakers) != 1:
-                return set()
-            _, index, begin, finish, speaker = min(best, key=lambda entry: (entry[1], entry[2]))
-            semantic_partial_consumed.setdefault(index, []).append((begin, finish))
-            return {speaker}
+                semantic_consumed.add(index)
+                return {item["speaker"]}
+            return set()
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
@@ -2673,8 +2470,6 @@ class QwenDirector(
         quote_spans: list[tuple[int, int]] = []
 
         for match in quote_pattern.finditer(text):
-            if getattr(cls, "_quote_is_non_live_evidence", lambda *_: False)(text, match.start()):
-                continue
             value = next((part for part in match.groups() if part), "")
             key = cls._dialogue_anchor_key(value)
             if not key:
@@ -2725,7 +2520,7 @@ class QwenDirector(
             key = cls._dialogue_anchor_key(display)
             if not key or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
-            semantic_speakers = consume_semantic_speaker(key, expected_speaker=speaker)
+            semantic_speakers = consume_semantic_speaker(key)
             if semantic_speakers:
                 # The explicit screenplay label and Qwen's semantic speaker must agree.
                 # This prevents a malformed model response from reassigning a source line.
@@ -2930,7 +2725,7 @@ class QwenDirector(
                     # an unresolved speaker surface. A later stage cannot recover
                     # an event that is discarded here, so fail closed with the
                     # exact shot/speaker context instead.
-                    self._record_recovery_issue(
+                    self._record_recovery(
                         "dialogue_speaker_unresolved",
                         f"shot={shot_id} speaker={speaker!r}",
                     )
@@ -2949,7 +2744,7 @@ class QwenDirector(
                     # an unsafe remap, but not to justify deleting the spoken line.
                     # Stop production so the caller can surface the exact semantic
                     # conflict instead of silently losing dialogue.
-                    self._record_recovery_issue(
+                    self._record_recovery(
                         "dialogue_source_speaker_unresolved",
                         f"shot={shot_id} speaker={speaker!r} source={sorted(matched_source_speakers)!r}",
                     )
@@ -3694,8 +3489,11 @@ the candidate roster and spoken_dialogue array before finishing the JSON.
 
     def compact_chat_json(self, system_prompt, user_prompt, *args, **kwargs):
         if kwargs.get("call_name") == "character_entity_extraction":
-            # V11: the extraction method owns the compact cast/dialogue contract; avoid
-            # appending a second full cast checklist to an already long system prompt.
+            system_prompt = (
+                str(system_prompt or "").rstrip()
+                + "\n\n"
+                + cast_audit
+            )
             kwargs["response_schema"] = (
                 QwenDirector._character_extraction_json_schema()
             )
@@ -3749,50 +3547,7 @@ the candidate roster and spoken_dialogue array before finishing the JSON.
 
     QwenDirector._post_chat = guarded_post_chat
 
-    # 4) Target a safe interior word count. The actual 420-560 contract remains
-    # strict; the validator is not weakened and no second story call is added.
-    original_story_user = QwenDirector._story_text_user
-
-    def margin_story_user(self, mode, story, source_character_names=None):
-        text = original_story_user(
-            self, mode, story, source_character_names
-        )
-        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
-            text += (
-                "\n\nWORD-COUNT SAFETY TARGET (existing bounds unchanged): "
-                "Aim for 470-500 words by the project's word-count convention, "
-                "not 420-425. Keep exactly six paragraphs. If the draft feels "
-                "finished early, deepen existing causal beats with concrete "
-                "choices, resistance, consequences, and aftermath. Do not add "
-                "filler, repeat information, or introduce a disconnected subplot. "
-                "Do not exceed 560 words."
-            )
-        return text
-
-    # (disabled) margin_story_user: the base prompt now carries the length target itself.
-
-    # 5) Reinforce the existing settled-aftermath requirement. This addresses
-    # the observed ending that introduced a new shape and left the conflict open.
-    original_story_system = QwenDirector._story_text_system
-    closure_rule = (
-        "FINAL-PARAGRAPH CLOSURE AUDIT: Paragraph 4 contains the turn/revelation; "
-        "paragraph 5 contains the consequential choice and its price. Paragraph 6 "
-        "must show the direct, settled consequence of that choice in the existing "
-        "conflict. Do not introduce a new creature, person, threat, mystery, clue, "
-        "alarm, reversal, or unresolved discovery in paragraph 6. Do not end on a "
-        "thing stirring, a new shape appearing, a warning, a promise, or a future "
-        "hook. The final sentence must describe a completed action and stable "
-        "resulting situation. The six-paragraph and 420-560-word bounds remain."
-    )
-    QwenDirector._H3_KAGGLE_CLOSURE_RULE = closure_rule
-
-    def settled_story_system(self, mode):
-        text = original_story_system(self, mode)
-        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
-            text = str(text).rstrip() + "\n\n" + closure_rule
-        return text
-
-    # (disabled) settled_story_system: closure rules live in the base prompt now.
+    # The base story prompt carries the settled-ending contract; avoid adding a second, rigid paragraph map.
     QwenDirector._H3_KAGGLE_RUNTIME_FIX_20261010 = True
 
 _h3_apply_kaggle_runtime_fix_20261010()
@@ -3805,64 +3560,6 @@ def _h3_install_causal_quality_v2():
         return
 
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
-
-    # This is a causal-quality constraint, NOT a cast-size instruction.
-    story_guard = """
-CAUSAL STORY QUALITY AUDIT — apply to the STORY PLAN and final prose.
-
-CAST SIZE:
-The cast size is your creative decision: no numerical quota, fixed count, or
-maximum. Do not default to a solitary protagonist. Unless solitude, duty, or a
-physical constraint is essential to the premise, or the premise facts rule out
-another person, prefer a physically present counterpart with an independent
-immediate objective, competing duty, withheld knowledge, or relationship stake.
-Bring that person into the current action by paragraph 3; their decision or act
-must change the protagonist's options and the protagonist must respond. An
-isolated location alone is not enough reason to omit a person. Do not add a
-person just to meet a count; the counterpart must cause or materially change an
-event. A recording, radio transmission, screen, hologram, document, or memory
-never substitutes for a physically present counterpart.
-
-PRESENT-ACTION TEST:
-A named person counts as a production character only if they are physically
-present in the current story and materially act or speak there. A recording,
-radio transmission, message, screen, document, memory, or historical reference
-must not be used as a substitute for a present human counterpart. Do not name
-a recording-only speaker as though that person were part of the present cast.
-When a present counterpart fits the premise, show that person physically
-present, with a distinct immediate objective and an action that changes what
-the protagonist can do. The protagonist must respond to that action.
-
-CAUSALITY AND ORIGINALITY:
-Build the plot around a specific objective, concrete resistance, a meaningful
-turn grounded in earlier details, and a choice whose cost is visible. Let
-character decisions or established physical consequences drive the reversal.
-Do not fall back on a reusable procedural chain of an isolated site, an access
-obstacle, a warning, a countdown, an emergency control, and an undefined threat
-unless the supplied premise genuinely requires that chain and each beat changes
-the protagonist's decision. Avoid interchangeable genre details and unexplained
-technical events. Each major event must follow from an established cause.
-
-DIALOGUE BOUNDARY:
-Include at least one short line of direct, live spoken dialogue in quotation
-marks, spoken by a named character physically present in the current events.
-The line must alter a decision, reveal consequential information, or create
-conflict. Do not use a recording, playback, transmission, displayed message,
-document, or memory to satisfy the live-dialogue requirement. Keep dialogue
-concise and specific; do not use it to explain the plot or backstory.
-
-SETTLED ENDING:
-The sixth paragraph must resolve the immediate goal and show the actual result
-of the protagonist's choice. Give the consequence concrete physical evidence.
-Do not substitute "bought time" or a similar vague temporary outcome for a
-resolved result. Do not introduce a new threat or unexplained discovery at the
-end. A wider world may remain uncertain, but the story's central conflict must
-reach a clear, earned outcome.
-
-Keep exactly six paragraphs and the existing 420-560 word contract. Do not
-change the story's premise or source-established events to satisfy these
-guidelines. These rules do not impose a character count.
-""".strip()
 
     extractor_guard = """
 SEMANTIC CAST AND DIALOGUE VERIFICATION:
@@ -3883,42 +3580,7 @@ Never include dialogue for a speaker who is absent from the accepted roster.
 Return the complete actual cast; do not optimize for any particular cast size.
 """.strip()
 
-    QwenDirector._H3_CAUSAL_STORY_GUARD_V2 = story_guard
     QwenDirector._H3_CAUSAL_EXTRACTOR_GUARD_V2 = extractor_guard
-
-    # Wrap the existing prompt builders. Keep all existing prompt content.
-    original_system = QwenDirector._story_text_system
-    original_user = QwenDirector._story_text_user
-
-    def _h3_story_system_v2(self, mode):
-        result = original_system(self, mode)
-        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
-            result = str(result).rstrip() + "\n\n" + story_guard
-        return result
-
-    def _h3_story_user_v2(self, mode, story, source_character_names=None):
-        result = original_user(
-            self, mode, story,
-            source_character_names=source_character_names,
-        )
-        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
-            result = str(result).rstrip() + (
-                "\n\nFINAL PRE-DRAFT CHECK: Do not default to a solo protagonist. Unless "
-                "the premise genuinely requires solitude or excludes another person, "
-                "prefer a physically present counterpart whose own immediate goal and "
-                "visible choice change the protagonist's options by paragraph 3; never "
-                "use a recording, radio voice, screen, or hologram as a substitute. "
-                "Include at least one short quoted line of live speech by a named person "
-                "physically present in the current events, plus at least two concrete "
-                "sentences of protagonist interiority tied to the stakes. Ensure the turn "
-                "follows from earlier setup, the choice has a visible price, every key "
-                "object pays off, and the ending resolves the immediate conflict. Do not "
-                "add decorative characters or violate source facts. Keep all existing "
-                "format and length requirements."
-            )
-        return result
-
-    # (disabled) story-prompt wrappers: causal/closure rules live in the base prompt now.
 
     # Add semantic safeguards to the existing single extraction call.
     # The previous wrapper still supplies the compact schema and preserves
@@ -3927,8 +3589,12 @@ Return the complete actual cast; do not optimize for any particular cast size.
     QwenDirector._H3_CAUSAL_QUALITY_V2_BASE_CHAT_JSON = original_chat_json
 
     def _h3_chat_json_v2(self, system_prompt, user_prompt, *args, **kwargs):
-        # V11: do not stack another full extraction guard onto the same call.
-        # The focused live-dialogue and late-name clarification lives in the base extractor prompt.
+        if kwargs.get("call_name") == "character_entity_extraction":
+            system_prompt = (
+                str(system_prompt or "").rstrip()
+                + "\n\n"
+                + extractor_guard
+            )
         return QwenDirector._H3_CAUSAL_QUALITY_V2_BASE_CHAT_JSON(
             self, system_prompt, user_prompt, *args, **kwargs
         )
@@ -3937,5 +3603,3 @@ Return the complete actual cast; do not optimize for any particular cast size.
     QwenDirector._H3_CAUSAL_QUALITY_V2 = True
 
 _h3_install_causal_quality_v2()
-# END H3_KAGGLE_CAUSAL_QUALITY_V2_20261010
-
