@@ -197,51 +197,50 @@ Return JSON only.
 
 class QwenDirectorPromptMixin:
     _STORY_CRAFT_RULES = """
-Write a complete cinematic short-film story in third-person past tense, using plain prose only.
+FORMAT AND DRAMATIC SPINE
+- Write third-person past-tense cinematic prose only. Exactly six paragraphs separated by one blank line; each paragraph is one filmable scene in one place and continuous time. Keep 420-560 words. No headings, labels, camera directions, JSON, or commentary.
+- Use the supplied STORY BIBLE as the single outline when present; do not create a competing second outline. If no plan is supplied, silently settle the protagonist's goal, resistance, planted evidence, reversal, consequential choice, and aftermath before writing.
+- Paragraphs 1-3 establish the goal, first attempt, and growing pressure through actions and consequences. Paragraph 4 delivers a reversal caused by something established earlier. Paragraph 5 forces a consequential choice with a visible price. Paragraph 6 shows the concrete result and settled aftermath. This is scene-function guidance, not permission to force unrelated events into the premise.
+- State the protagonist's concrete goal early. Make every important event follow from a visible decision, established fact, character action, or physical consequence. The turn must change what the protagonist does. End the central conflict; do not replace resolution with a future hook.
 
-CORE STORY CRAFT
-- State the protagonist's concrete immediate goal within the first two sentences. Give it real resistance; each major event must arise from an action, decision, or consequence already shown.
-- Introduce one unexpected reveal or reversal caused by a concrete detail established earlier. The reveal must change what the protagonist decides or does; do not add a random secret, artifact, monster, organization, or technical failure just to create a twist.
-- Include at least two sentences of protagonist interiority grounded in a specific fear, memory, desire, or private realization. Show why the moment matters through concrete imagery or sensory association.
-- Include at least one short line of direct dialogue spoken live by a named, physically present character. Put every spoken line in double quotation marks. The line must reveal information, create conflict, change a decision, or make the reversal land; no filler or plot-explaining speeches. A recording, radio transmission, document, or screen is evidence, not a present character or a substitute for live speech.
-- Build toward an irreversible choice or point of no return with a visible price. End with a complete aftermath showing what the choice changed; do not end mid-action or on a future hook.
+CHARACTERS AND DIALOGUE
+- Qwen chooses all character names and cast membership. There is no fixed cast size, target, or maximum. Every planned cast member must appear and act in the current events, not merely be named in backstory, a document, a photograph, a recording, a screen, or a memory.
+- Prefer a physically present counterpart with an independent immediate want when the premise can naturally support human conflict. Their action, refusal, bargain, deception, or competing duty should change the protagonist's options, and the protagonist should respond. A remote setting, dangerous job, or technical problem alone does not mean the story must be solitary. Use a solitary protagonist when the premise specifically depends on physical or social isolation, not merely because solitude is convenient. Never add a decorative character or person to satisfy a count.
+- Include a short, purposeful line of live dialogue from a named, physically present character. If a consequential counterpart is present, prefer a brief exchange that changes a decision, reveals a conflict, or makes the turn land. Keep each spoken line natural and concise; dialogue should not explain the premise or deliver backstory. A recording, transmission, alarm, displayed message, or computer output is evidence, not live speech.
+- Give each consequential person a distinct want and one stable canonical name. Avoid inventing relationships that the premise or story does not ground. Keep source-established people, chronology, location, outcome, and defining details intact in Expand Story; add new people only when they materially serve that source-specific causal story.
 
-CAST AND PREMISE
-- You decide the cast and names; there is no fixed cast size or target count. Every recurring character should materially affect the goal, resistance, turn, choice, or consequence, have a distinct want, and appear and act in the current events.
-- When the premise naturally supports human conflict, prefer a physically present counterpart with an independent immediate objective whose action changes the protagonist's options. Do not default to a solitary protagonist merely because the location is isolated; a solitary story is appropriate when isolation, duty, or a physical constraint genuinely drives the conflict. Never add decorative characters merely to meet a count.
-- Preserve the premise's concrete facts and defining nouns. Establish decisive objects, skills, relationships, and constraints before relying on them, then pay them off. Avoid a generic isolated-site/warning/countdown/system-crisis sequence unless the premise specifically calls for it.
-- For Expand Story, preserve the source's important characters, setting, event order, outcome, and meaning. Deepen the existing causal story; do not replace it with a disconnected genre plot or invent relationships just for backstory.
-
-Use concrete actions and specific details; vary sentence rhythm and avoid stock phrases, purple prose, and named-feeling summaries. No camera directions, scene headings, labels, JSON, meta-commentary, or explanations. Output only the finished story prose.
+CAUSALITY, SPECIFICITY, AND PROSE
+- Plant a concrete detail, skill, constraint, object, or relationship before the turn depends on it; pay it off through action or consequence. Track where people and important objects are; nothing teleports, vanishes, repeats, or changes hands without an event explaining it.
+- Make the setting specific to this premise and protagonist's work. Prefer precise action and concrete evidence over generic warnings, hidden chambers, malfunctioning systems, countdowns, vague signals, stock genre twists, exposition dumps, purple prose, and named-feeling summaries. Use such devices only when the supplied premise genuinely calls for them.
+- Include at least two concrete sentences of protagonist interiority grounded in a specific fear, memory, desire, or private realization. Show why the stakes matter; keep backstory subordinate to present action.
+- Vary sentence rhythm and avoid repeated phrases. Spoken lines stay inside their scene paragraph, never on separate screenplay lines. Plain text only. The sixth paragraph must be a developed aftermath of at least 25 words and end with a completed action in a settled situation.
 """.strip()
 
     def _story_text_system(
         self,
         mode: str,
     ) -> str:
+        common = (
+            "You are the narrative writer for MiniMax H3. Produce one complete, original, film-ready short-film story. "
+            "Think through cause and effect before drafting, but output only the finished prose.\n\n"
+            + self._STORY_CRAFT_RULES
+        )
         if mode == AI_STORY_MODE:
             return (
-                "You are the narrative writer for MiniMax H3. Write one complete, original, film-ready story from the supplied premise. "
-                "Before drafting, silently settle the goal, resistance, planted detail, reversal, consequential choice, and aftermath; do not print a plan.\n\n"
-                + self._STORY_CRAFT_RULES
-                + "\n\nPREMISE FIDELITY\n"
-                + "Preserve every concrete premise fact that defines the request, including the protagonist's profession, setting, discovery, and stated constraints. "
-                "Show expertise through what the protagonist actually does. Do not change the premise to force a preferred cast or plot."
+                common
+                + "\n\nAI STORY PREMISE FIDELITY\n"
+                + "Treat the user input as a premise, not a completed story. Preserve its defining facts, profession, place, discovery, and constraints. "
+                "Show expertise through the protagonist's skilled actions. Develop the premise into a causal narrative rather than paraphrasing it."
             )
-
         if mode == EXPAND_USER_STORY_MODE:
             return (
-                "You are the narrative expansion writer for MiniMax H3. Expand the supplied story into a complete, film-ready cinematic story without changing what it is about or how it ends. "
-                "Before drafting, silently settle the goal, resistance, planted detail, reversal, choice, and aftermath; do not print a plan.\n\n"
-                + self._STORY_CRAFT_RULES
-                + "\n\nSOURCE FIDELITY (strict)\n"
-                + "Preserve the source's established characters, setting, event order, outcome, and defining meaning. Keep canonical names stable. "
-                "New characters are allowed only when they materially serve the source-specific causal story and appear in the current action; do not add decorative cast or a new relationship merely to supply backstory."
+                common
+                + "\n\nEXPAND STORY SOURCE FIDELITY (strict)\n"
+                + "The supplied story is canon. Preserve its important characters, events in order, setting, outcome, and defining meaning. "
+                "Deepen the existing story with motivation, resistance, escalation, a source-grounded reversal if appropriate, a difficult choice, and consequences. "
+                "Do not replace the source plot with a generic genre plot or invent backstory/relationships just to manufacture a character."
             )
-
-        raise ValueError(
-            "Preserve Story does not use a story-text pass."
-        )
+        raise ValueError("Preserve Story does not use a story-text pass.")
 
     def _story_text_user(
         self,
@@ -254,10 +253,7 @@ Use concrete actions and specific details; vary sentence rhythm and avoid stock 
             story,
             DIRECTOR_STORY_CONTEXT_CHARS,
         )
-        result = (
-            "MODE: " + str(mode)
-            + "\n\nSOURCE STORY / PREMISE:\n" + source_text
-        )
+        result = "MODE: " + str(mode) + "\n\nSOURCE STORY / PREMISE:\n" + source_text
         if mode == EXPAND_USER_STORY_MODE:
             anchors = list(dict.fromkeys(
                 str(value).strip()
@@ -266,18 +262,15 @@ Use concrete actions and specific details; vary sentence rhythm and avoid stock 
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (identities to preserve, not a cast limit):\n"
+                    "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
         bible_text = self._format_story_bible(story_bible)
         if bible_text:
             result += "\n\n" + bible_text
         result += (
-            "\n\nOUTPUT CONTRACT:\n"
-            "Return exactly six paragraphs separated by one blank line, within the current 420-560 word production contract. "
-            "Use scene-sized paragraphs, but let the story's particular events determine their shape rather than assigning a rigid plot function to every paragraph. "
-            "Do not pad or repeat to reach length. The final paragraph must be a fully developed, settled aftermath that shows the consequence of the choice. "
-            "Keep spoken lines inside their scene paragraph; output plain story prose only."
+            "\n\nOUTPUT: exactly six paragraphs, 420-560 words, plain prose only. "
+            "Use the supplied outline if present and resolve the central conflict with a concrete aftermath."
         )
         return result
 
@@ -291,11 +284,7 @@ Use concrete actions and specific details; vary sentence rhythm and avoid stock 
     each built on specific people, a specific profession, a specific object or place). `chosen_concept` is the one that gives the people the most incompatible wants
     and the most specific physical detail. Everything below must be built on the chosen concept, not on the obvious version.
 
-    CAST: you decide the cast. There is no fixed number. Let the conflict choose how many people are on screen. Prefer a cast in which at least
-    one other consequential person is physically present and wants something that collides with the protagonist's want (opposition, loyalty,
-    deception, rescue, rivalry, a debt, a competing duty). Choose a lone protagonist only when the premise's isolation is itself the opposing
-    force, and say so in cast_rationale. Every cast member appears on screen, acts, and has one stable canonical full name (given name plus family
-    name, distinctive, never a bare role). Nobody is a cast member who is known only through a log, label, recording, or memory.
+    CAST: you decide the cast; there is no fixed number, target, or maximum. Prefer a physically present counterpart with an independent want when that person's choices can create meaningful resistance or change the protagonist's options. A remote location, a difficult job, or a broken machine alone is not enough to justify a solitary cast. Plan a lone protagonist only when physical or social isolation is essential to the premise's conflict, and state why in cast_rationale. Every planned cast member must appear and act in the present scenes, have a grounded want and one stable canonical full name, and participate in the causal chain. Nobody known only through a log, label, recording, display, or memory is a cast member.
 
     ORIGINALITY: do not take the nearest genre default for the premise. Find the reading of the premise that only this setting and these people
     could produce. A mysterious object, signal, or event must be defined concretely (what it is, who made or left it, what it does) and shown
@@ -377,7 +366,7 @@ Use concrete actions and specific details; vary sentence rhythm and avoid stock 
         story: str,
         source_character_names: list[str] | None = None,
     ) -> dict | None:
-        """One compact planning call (no thinking, schema-guided). Never fatal.
+        """One compact thinking-mode planning call (schema-guided). Never fatal.
 
         Qwen decides the cast, conflict, planted detail, turn, price and six beats; the
         prose pass then writes from that plan. Any failure returns None and the prose
@@ -398,16 +387,17 @@ Use concrete actions and specific details; vary sentence rhythm and avoid stock 
                 "premise_or_source_story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
                 "source_character_anchors": anchors[:16],
             }
+            print("[QWEN] story_bible_thinking=on", flush=True)
             bible = self._chat_json(
                 system,
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 minimum_completion=300,
-                temperature=0.80,
-                top_p=0.90,
+                temperature=0.60,
+                top_p=0.95,
                 call_name="story_bible",
-                max_completion=1800,
+                max_completion=2800,
                 json_mode=True,
-                disable_thinking=True,
+                disable_thinking=False,
                 response_schema=self._story_bible_json_schema(),
             )
         except Exception as exc:  # planning is an enhancement, never a hard dependency
