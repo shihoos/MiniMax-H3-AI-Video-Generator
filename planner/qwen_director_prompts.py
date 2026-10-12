@@ -196,70 +196,48 @@ Return JSON only.
 
 
 class QwenDirectorPromptMixin:
+    # H3_CAUSAL_CLOSURE_CAST_GUIDANCE_V10: only targeted cast/ending refinements.
     _STORY_CRAFT_RULES = """
-HARD FORMAT
-- Third-person past tense, plain prose only: no markdown, asterisks, italics, headings, or labels.
-- Exactly six paragraphs separated by one blank line. Each paragraph is ONE filmable scene:
-  one location, one continuous stretch of time, one visible turn.
-  Keep the complete story within the required 420-560 word contract. Prioritize a complete, causally coherent story over brevity.
-  Do not stop while the story is still under the minimum. Before ending, silently check that the story has six paragraphs
-  and is at least 420 words. If it is short, expand existing story beats with concrete action, consequences, sensory detail,
-  or character decisions rather than adding filler or repetition. Do not pad the story merely to satisfy the word count,
-  and do not truncate a necessary ending just to stay near an arbitrary target.
-- The sixth paragraph is a full settled aftermath, not a compressed summary.
-- Every paragraph is a solid block of roughly 70 to 95 words. Spoken lines stay INSIDE the paragraph of the scene where they are said:
-  never put a quotation, a speaker label, or a single line of speech on its own line or in its own paragraph, never use screenplay layout,
-  and never write a short stand-alone paragraph. A story with many spoken lines still has exactly six paragraphs.
+FORMAT
+- Third-person past tense, plain prose only: no markdown, asterisks, headings, labels, or emoji.
+- Exactly six paragraphs separated by one blank line, 420 to 560 words in total (aim for about 490). Each paragraph is ONE filmable scene (one place, one continuous stretch of time, one visible change) of roughly 70 to 95 words. Spoken lines stay inside the scene paragraph they belong to: never a one-line paragraph, never a speaker label, never screenplay layout.
+- Stop after the sixth paragraph.
 
-STORY PLAN (write these seven lines in your reasoning before drafting; never in the output)
+PLAN IN YOUR REASONING FIRST (never in the output). Settle all of these before writing the first word:
 WANT: what the protagonist is trying to do right now, and where.
-RESISTANCE: what or who stands in the way, why, and how the protagonist's first attempt meets resistance.
-CAST: who is physically present and what each person wants. The cast size is yours: one, two, or several. When the premise can naturally support another present person, prefer a consequential counterpart with a concrete goal, resistance, relationship, knowledge gap, or competing decision that changes what the protagonist does. Do not default to a solitary story merely because the setting is isolated; use one person when isolation, duty, or a physical constraint is genuinely the opposing force.
-SETUP: a fact, object, skill, relationship, or constraint shown early that will matter later, if the story calls for one.
-TURN (reversal): what the protagonist learns or sees that changes what they must do. It grows out of something already shown. New information is a turn only when it forces the protagonist to decide or act differently.
-CHOICE: two outcomes that cannot both be kept, and the price paid for the one chosen. The price is real; the result may be bittersweet or bleak as well as hopeful.
-RESULT: the concrete, settled situation after the choice.
+RESISTANCE: who or what stands in the way, and the personal reason behind it.
+CAST: decide who is physically present and what each person wants; there is no numerical cast quota or cap. Do not default to a solitary protagonist. Unless the premise genuinely depends on solitude, duty, or a physical constraint—or its facts rule out another person—prefer a physically present counterpart with an independent immediate goal, competing duty, withheld knowledge, or relationship stake. By paragraph 3, that person's visible action or decision must change what the protagonist can do, and the protagonist must respond. An isolated location alone is not a reason to omit a person. Never substitute a recording, radio voice, screen, hologram, note, or memory for a present counterpart; never add a decorative character.
+SECRET: the true answer to every question the story raises: what the key object is, who made or left it and why, what any message or code actually does, why the opponent acts as they do. Decide the real answer now; the story must show it through action.
+SETUP: one concrete fact, object, or line shown in paragraph 1 or 2 that the SECRET later makes mean something different from what it first seemed to mean.
+TURN (reversal): what the protagonist learns or sees that changes what an earlier fact MEANS and forces the protagonist to decide or act differently. A reader who goes back over paragraphs 1-3 should see it was there all along. A new fact merely appearing is not a turn.
+CHOICE: two outcomes that cannot both be kept, and the visible price paid for the one chosen. The result may be bittersweet or bleak.
+RESULT: the concrete, settled situation after the choice, including what became of every person on screen.
 
-STRUCTURE (one beat per paragraph; each beat is shown by what people do)
-- Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical goal and meets an immediate obstacle. Use sensory detail that belongs to this setting and serves the action.
-- Paragraph 2: the protagonist makes the first consequential attempt, and it meets resistance: it fails, succeeds at a cost, or succeeds and exposes a new problem. Either way the situation changes.
-- Paragraph 3: the situation, or another person, answers that attempt. The protagonist adapts or is forced to, and the pressure rises. End on the consequence of what just happened.
-- Paragraph 4: hold the TURN until here; paragraphs 1-3 build the pressure it overturns. Deliver it through action, evidence, another person's deeds or words, or a physical consequence, consistent with every earlier paragraph.
-- Paragraph 5: the CHOICE, made through physical action, with its price made visible. Use what the story has already established, so that the way out comes from earlier paragraphs.
-- Paragraph 6: one place, one moment. Two or three concrete actions show the direct result of the choice and end on a completed past-tense action in a settled situation. Nothing is left pending: no 'until', no 'yet to come', no next mission, no looming return.
-- The protagonist causes, chooses, or misjudges something early enough that later events follow from that action or its consequence. Characters act, choose, refuse, misjudge, cooperate, deceive, or react to concrete consequences, and the protagonist makes meaningful decisions under pressure, whether it comes from another person or from the environment. Nothing important happens without a cause the story has shown.
-- When the premise naturally supports human conflict, let a present person's action, choice, relationship, knowledge, or competing objective create meaningful resistance or change the protagonist's decision. Do not let a site, machine, warning, log, recording, alarm, or environmental puzzle become the sole engine when a consequential human conflict fits the premise.
-- Unless the premise specifically requires it, avoid a generic institutional-technical sequence of entering an isolated site, discovering a hidden chamber, reading a warning, triggering an emergency or system crisis, and then restoring or escaping the system. Make the reversal arise from the story's specific characters, choices, established facts, or physical consequences instead.
-- Establish facts, objects, relationships, and constraints before relying on them, and pay them off where the story naturally calls for it.
-- Every named person is on screen. Someone known only through a document, label, message, or memory is evidence, not a character.
+STRUCTURE (one beat per paragraph, shown through what people do)
+- Paragraph 1: open mid-action in a specific place. The protagonist has a concrete physical goal and meets an immediate obstacle. Plant the SETUP here or in paragraph 2.
+- Paragraph 2: the first consequential attempt meets resistance: it fails, succeeds at a cost, or succeeds and exposes a new problem.
+- Paragraph 3: the situation or another person answers that attempt and the pressure rises. Every consequential person is on screen by the end of this paragraph, with one visible trait (a tool, a habit, an injury, a way of standing) and a want shown through action before anyone explains it. End on the consequence of what just happened.
+- Paragraph 4: hold the TURN until here. Deliver it through action, evidence, or what another person does or says, grounded in paragraphs 1-3.
+- Paragraph 5: the CHOICE, made through physical action that uses what the story has already established, with its price visible. The conflict between the people on screen is settled here or in paragraph 6; nobody simply vanishes.
+- Paragraph 6: one place, one moment. Two or three concrete actions show the direct result of the choice and its cost; end on a completed past-tense action in a settled situation. Resolve the immediate conflict before the final sentence. A countdown, active breach warning, looping message, new threat, new puzzle, promise, or "until" is not closure; if introduced, resolve it within this story. No coincidence solves the problem.
 
-CHECK (in your reasoning, after drafting and before output): six paragraphs; at least 420 words; each paragraph's event follows from an earlier one; the turn rests on something shown earlier; the price is visible; the last sentence reports something that has already happened.
+CAUSALITY
+- Every event follows from a cause the story has already shown. Every object, code, line, and name that is introduced is used or explained by the end: if something is called a key or a code, the story says what it opens or does and uses it.
+- Characters act, choose, refuse, misjudge, bargain, or lie. The protagonist makes the decisions and pays for them. A site, machine, log, or recording is never the engine; people's choices are.
+- Keep the premise's own nouns (profession, place, weather, discovery) and show the profession through skilled actions.
 
-SCENE CRAFT
-- If a STORY BIBLE is supplied in the user message, it is your own plan: keep its exact names and cast, write one paragraph per beat, and make the planted detail, turn, choice and price land where the bible puts them.
-- Introduce every consequential person on screen by the end of paragraph 3, with one visible trait (a tool, an injury, a habit, a way of standing) and a want shown through action before they explain anything.
-- People who want different things do not explain the plot to each other. A spoken line is short (under 18 words), carries a demand, refusal, bargain, lie, or accusation, and leaves something unsaid. Never let a character deliver backstory or the premise as a speech.
-- Make the setting specific. Use at least three concrete details that belong only to THIS premise (a named procedure, instrument, tool, number, repair, sound, injury) instead of generic dread words such as ominous, eerie, mysterious, strange, or pulsing.
-- Any mysterious object, signal, or event must be concretely defined by the end: what it is, who made or left it, what it does. Show that by use or consequence, never by a character announcing it.
-- Do not reach for the nearest genre default. The reversal must be something only this cast, place, and set-up could produce.
+PEOPLE AND DIALOGUE
+- Every named person is physically present and acts or speaks in at least one scene, under one stable canonical name. A recording, radio, screen, note, label, or memory is evidence: it never carries a character name and never stands in for a person. Quotation marks are for live speech only.
+- Include at least one short line of live, direct spoken dialogue in quotation marks, spoken by a named character who is physically present in the current events. It must change a decision, reveal consequential information, create conflict, or foreshadow the reversal. Keep each line under 18 words when practical; let it carry a demand, refusal, bargain, lie, or accusation while leaving something unsaid. Never use recorded/playback speech, a transmission, or displayed text to satisfy this requirement. No filler dialogue and no plot/backstory speeches.
+
+INTERIORITY
+- Include at least two sentences revealing the protagonist's specific fear, memory, desire, or private realization through concrete imagery, sensory association, or a physical response. Tie the interiority to the present decision or reversal; do not pause for abstract biography or explain the plot to the reader.
 
 PROSE
-- Concrete verbs and nouns over adjectives. Vary sentence length; mix short blunt sentences with longer ones.
-- Do not begin more than two sentences in a row with the same word.
-- Show emotion through what hands, eyes, breath, and posture do. Never name the emotion as a mood word.
-- Avoid cliches such as "heart pounded", "the weight of", "pulse steadied", "a testament to", "shiver down",
-  "sent a chill", "palpable", and the word "suddenly".
-- Keep the prose filmable: convey private thoughts, fears, memories, and realizations through visible action,
-  physical objects, or spoken lines rather than naming the internal state. Keep backstory brief and subordinate to the present action.
-- Prefer a final physical image that echoes or transforms an important concrete detail from the opening when the story naturally supports it.
-- Plain prose means plain text: no emoji, symbols, or decorative characters anywhere.
-- Stop after the sixth paragraph. Write nothing after the story ends.
+- Concrete verbs and nouns over adjectives. Use at least three concrete details that belong only to THIS premise (a named procedure, instrument, tool, number, sound, injury). Vary sentence length. Show emotion through what hands, eyes, breath, and posture do; never simply label the emotion. No stock phrases (heart pounded, the weight of, a chill, palpable, suddenly).
+- Prefer a last image that echoes or transforms a concrete detail from the opening.
 
-PEOPLE
-- Every named person must be physically present in at least one scene and must act or speak there.
-  Recordings, radios, screens, notes, memories, and holograms are evidence only: they never carry a character name and
-  never count as a speaking character. Do not name a sound or machine as if it were a person.
-- Give every recurring character one stable canonical name and use only that name.
+CHECK (in your reasoning, after drafting and before output): six paragraphs; 420 to 560 words; the turn rests on the setup; every introduced object is paid off; every person on screen is accounted for in the result; the last sentence reports a completed action.
 """.strip()
 
     def _story_text_system(
@@ -271,16 +249,13 @@ PEOPLE
             return (
                 "You are the screenwriter of short cinematic stories for MiniMax H3. "
                 "You write one complete, original, film-ready story from the premise. "
-                "Before drafting, write the STORY PLAN lines below in your reasoning, then output only the finished prose.\n\n"
+                "You decide the cast; there is no target size. "
+                "Write the PLAN lines below in your reasoning, then output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nPREMISE FIDELITY\n"
-                "- Every concrete fact in the premise (the protagonist's profession, the place, the weather, "
-                "the discovery) must appear explicitly in the story, using the premise's own key nouns. "
-                "Show the profession through skilled actions the protagonist performs.\n\n"
-                "CAST AND DIALOGUE\n"
-                "- You decide the cast; there is no target size. Use the CAST line of your plan. Every recurring character materially affects the protagonist's goal, resistance, turn, choice, or consequence, wants something of their own, has one stable canonical name, and acts on screen. When the premise naturally supports another present person, prefer that consequential character rather than defaulting to an isolated protagonist; do not force a counterpart when the premise genuinely depends on solitude. A character may change the story through action alone.\n"
-                "- Dialogue is optional. Use short lines of direct speech in straight double quotes with a clear speaker only where speech carries conflict, information, refusal, deception, negotiation, or a relationship. Speakers want different things and interrupt, deflect, or lie instead of explaining the plot. When multiple consequential present characters exist, prefer at least one brief exchange if it naturally advances the conflict, information, decision, or reversal. Never add dialogue merely because several characters are present, and never invent a voice for a solitary story.\n"
-                "- A log, recording, radio, screen, label, or alarm is evidence, never a speaking character, and never replaces a character's own action or decision.\n\n"
+                "- Every concrete fact in the premise must appear explicitly in the story, using the premise's own key nouns.\n"
+                "- Make the premise's discovery mean something specific that only this setting and these people could produce, "
+                "not the nearest genre default.\n\n"
                 "Output only the finished story prose."
             )
 
@@ -288,20 +263,17 @@ PEOPLE
             return (
                 "You are the story editor-writer for MiniMax H3. You expand a short source story into a complete, "
                 "film-ready cinematic story without changing who it is about or what happened. "
-                "First identify silently the source's characters, setting, events, and outcome, then build the causal "
-                "spine around them with the STORY PLAN lines below, written in your reasoning before drafting. "
-                "Output only the finished prose.\n\n"
+                "Write the PLAN lines below in your reasoning, built around the source's characters, setting, events, and outcome, "
+                "then output only the finished prose.\n\n"
                 + self._STORY_CRAFT_RULES
                 + "\n\nSOURCE FIDELITY (strict)\n"
-                "- Preserve every established source character that remains part of the story, the source setting, the source events in order, and the source outcome.\n"
-                "- SOURCE CHARACTER ANCHORS are established identities to preserve, not a cast limit. There is no fixed cast size. The expanded cast may contain one person, two people, or any larger number according to Qwen's causal judgment. Keep established canonical names stable.\n"
-                "- Qwen may introduce additional named, relational, or descriptive recurring characters when the expanded narrative genuinely requires them. "
-                "A new character must materially affect the goal, resistance, reversal, choice, or consequence; do not add decorative cast.\n"
-                "- Do not invent a relative, colleague, mentor, friend, or other relationship merely as backstory. If a new relationship matters to the causal story, establish that character explicitly on screen.\n"
-                "- Dialogue is optional. Use short lines of direct speech in straight double quotes with a clear speaker only where speech carries conflict, information, refusal, deception, or a relationship. A character may change the story through action alone. Never add a character or a line of dialogue solely to create speech; a story with one person needs none.\n"
-                "- If the source supports a present counterpart, let that person's action, choice, relationship, or spoken information drive the turn.\n"
-                "- Add only cause, resistance, evidence, escalation, and consequence that deepen the source-specific causal chain. Preserve the source's setting and events in order; do not replace it with a generic genre plot.\n"
-                "- Do not write the expansion as a compressed six-paragraph synopsis. Each paragraph should develop a concrete scene beat with visible action and consequence. If the story reaches its apparent ending before the minimum length, deepen the existing causal beats and aftermath rather than stopping early or introducing a disconnected subplot.\n\n"
+                "- The source is canon. Keep every source character under the exact name the source uses (never rename, replace, or drop them), "
+                "the source setting, the source events in order, and the source outcome. The source's first event is the action of paragraph 1.\n"
+                "- Expand by adding cause, a present person's opposition with a stake of their own, evidence, escalation, and consequence. "
+                "Do not replace the source with a generic genre plot, and do not write a compressed synopsis.\n"
+                "- SOURCE CHARACTER ANCHORS are identities to preserve, not a cast limit; there is no fixed cast size. "
+                "Add a new person only when the conflict needs them, bring them on screen, and give them a want; no decorative cast. "
+                "Do not invent a relative, colleague, or mentor merely as backstory.\n\n"
                 "Output only the finished expanded story prose."
             )
 
@@ -335,17 +307,37 @@ PEOPLE
             ))
             if anchors:
                 result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (established characters to preserve; not a cast limit):\n"
+                    "\n\nSOURCE CHARACTER ANCHORS (established characters to preserve by this exact name; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
         bible_text = self._format_story_bible(story_bible)
         if bible_text:
             result += "\n\n" + bible_text
+        # H3_TARGETED_STORY_ANCHORS_V11
+        # H3_TARGETED_STORY_ANCHORS_V11: targeted emphasis, not a prompt rewrite.
+        if mode == AI_STORY_MODE:
+            result += (
+                "\n\nPREMISE ANCHORS: Explicitly preserve the protagonist's stated profession, setting, weather, and discovery. "
+                "Show the profession through a skilled action that materially changes the situation. Build one central causal mechanism; "
+                "do not stack unrelated mysteries or introduce an unexplained world-scale threat. Resolve the opening goal in the ending. "
+                "Explain apparent impossibilities before the climax; the decisive action must intentionally use an earlier setup, "
+                "not accidental contact. End with settled consequences, never an active countdown or a newly introduced threat. "
+                # H3_CAUSAL_CAST_PAYOFF_V12: targeted emphasis; existing prompt remains intact.
+                "Do not use a screen-only face or recorded voice as a substitute for a present person when an embodied counterpart would materially improve the conflict. Bring that person into the current action and let their own decision change the protagonist's options. Add no person merely to meet a count; cast size is chosen from causal need. "
+                "If the protagonist keeps usable evidence, show how it can affect the outcome or establish why it cannot be used; do not claim it can never reach the world while it remains usable in the protagonist's possession."
+            )
+        elif mode == EXPAND_USER_STORY_MODE:
+            _source_first_event = re.split(r"(?<=[.!?])\s+", str(story or "").strip(), maxsplit=1)[0].strip()
+            if _source_first_event:
+                result += (
+                    "\n\nSOURCE OPENING EVENT (must be visibly enacted in paragraph 1): "
+                    + _source_first_event
+                    + " Preserve its subject, action, setting, and object before adding detail; do not replace the stated location "
+                    "with a nearby sublocation. Keep source events in order and preserve the exact source character names."
+                )
         result += (
-            "\n\nOUTPUT CONTRACT:\n"
-            "Exactly six paragraphs. Keep the complete story within the required 420-560 word contract. Do not stop while under 420 words; "
-            "if short, continue developing the existing causal beats with concrete action, consequences, sensory detail, character decisions, and a fully developed aftermath rather than filler or repetition. "
-            "Do not compress the final consequence into a brief summary. Plain prose only. End on a completed consequence, not a future hook."
+            "\n\nWrite the six-paragraph story now: 420 to 560 words, aim for about 490. "
+            "Plain prose only. End on a completed consequence."
         )
         return result
 
@@ -728,6 +720,14 @@ PEOPLE
     who actually appears in the final story text.
     """).strip()
 
+        system_prompt += (
+            "\n\nLIVE-DIALOGUE PRIORITY: Scan every quoted span in source order. Include each line spoken live by a "
+            "physically present character. If an attribution uses a pronoun and the character's canonical name appears "
+            "later in that same paragraph, resolve it using the whole paragraph. Exclude a quote introduced as output from "
+            "a recording, playback, transmission, intercom, radio, screen, or terminal. A recorded line must never replace "
+            "nearby live dialogue. Do not guess when more than one speaker is plausible."
+        )
+
         user_payload = json.dumps(
             {
                 "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
@@ -754,7 +754,14 @@ PEOPLE
             disable_thinking=True,
             response_schema=self._character_extraction_json_schema(),
         )
+        # Complete Qwen's grounded cast candidates before filtering dialogue evidence.
+        # The existing planner presence/mention-only checks still decide whether candidates
+        # are production characters. A recording is removed as dialogue in the next step.
         result = self._complete_semantic_roster(story, result)
+        if isinstance(result, dict):
+            result["spoken_dialogue"] = self._anchor_semantic_dialogue_to_story(
+                story, result.get("spoken_dialogue", []) or []
+            )
 
         # Raw character-extractor payloads are intentionally hidden from normal production logs.
         # Use an explicit TRACE value only when low-level debugging is actually requested.
@@ -861,7 +868,10 @@ PEOPLE
             r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
         )
         anchors: set[str] = set()
+        evidence_detector = getattr(self, "_quote_is_non_live_evidence", None)
         for match in quote_pattern.finditer(text):
+            if callable(evidence_detector) and evidence_detector(text, match.start()):
+                continue
             key = self._dialogue_anchor_key(next((p for p in match.groups() if p), ""))
             if key:
                 anchors.add(key)
