@@ -197,20 +197,24 @@ Return JSON only.
 
 class QwenDirectorPromptMixin:
     _STORY_CRAFT_RULES = """
-FORMAT AND STORY SPINE
-- Third-person past tense; exactly six paragraphs separated by one blank line, 420-560 words, plain filmable prose only. No headings, labels, or camera directions. One place and continuous time per paragraph.
-- Treat the Story Bible as provisional, not canon or a cast quota. Improve or discard plan details that weaken premise fidelity or causality. In Expand Story, the user's established events, people, setting, and outcome remain canon.
-- Paragraphs 1-3 establish the protagonist's concrete goal, attempts, and rising pressure. Paragraph 4 delivers a reversal caused by something established earlier. Paragraph 5 forces a consequential choice with a visible price. Paragraph 6 shows the actual outcome and settled aftermath. End the central conflict rather than hiding it behind a poetic hook.
+Plan a compact causal spine: protagonist goal, resistance, a planted detail,
+a grounded reversal that changes the meaning of that detail, a consequential
+choice, and the concrete consequence. Output only the finished prose.
 
-CHARACTERS AND DIALOGUE
-- Qwen chooses cast size and names: no fixed cast size, target, or maximum. Retain a person only when their independent action changes the causal chain or another character's options. Prefer a physically present counterpart with a competing but understandable goal when the premise supports one; do not add a decorative character or people to fill beats.
-- Include a short, purposeful line of live dialogue from a physically present character. Dialogue should change a decision, expose incompatible goals, or sharpen the turn—not dump backstory. Recordings, transmissions, alarms, and displayed text are evidence, not live dialogue.
-- Show at least two concrete sentences of protagonist interiority rooted in a specific fear, memory, desire, or realization. Keep identities, knowledge, locations, and important objects continuous.
+Write six filmable scene paragraphs in third-person past tense. Keep prose economical
+and specific to the premise. Preserve its important facts. Let actions and decisions
+carry the story; avoid exposition-heavy explanations and generic hidden-project twists.
+Include a brief line of direct dialogue attributed to a named character when it naturally
+advances conflict, information, or a decision. Do not use a recording, alarm, screen,
+or system message as a substitute for a consequential character.
+Resolve the protagonist's immediate goal and central conflict. End with a concrete,
+settled consequence rather than a new mystery or future mission.
 
-CAUSALITY AND PROSE
-- Make every important event follow from a visible decision, established fact, character action, or physical consequence. State the central mechanism's rule and limit; plant a concrete detail, skill, object, or relationship before relying on it, then pay it off through action or consequence. Explain consequential changes of state or ownership.
-- The turn must change what the protagonist does. Build resistance from human goals and profession-specific constraints; weather or broken machinery is pressure, not a substitute for conflict. Prefer precise details specific to this premise over generic mysteries, secret experiments, countdowns, glows, viruses/cures, sabotage, or conspiracy unless the source demands them.
-- Vary sentence rhythm, avoid repeated phrasing and stock emotional labels, and make the choice's cost tangible. The sixth paragraph must contain at least 25 words of aftermath and end with a completed action in a settled situation.
+Qwen decides names, identities, relationships, and cast size. No hardcoded roster or
+numeric cast quota. Do not default to a one-person story: unless the premise genuinely
+depends on isolation, include a second physically present, consequential character
+whose independent goal or decision changes the protagonist's options. Add more people
+only when their choices materially affect the causal chain.
 """.strip()
 
     def _story_text_system(
@@ -218,25 +222,18 @@ CAUSALITY AND PROSE
         mode: str,
     ) -> str:
         common = (
-            "You are the narrative writer for MiniMax H3. Produce one complete, original, film-ready short-film story. "
-            "Think through cause and effect before drafting, but output only the finished prose.\n\n"
+            "You are the screenwriter of short cinematic stories for MiniMax H3. "
+            "Write one complete, original, film-ready story from the premise.\n\n"
             + self._STORY_CRAFT_RULES
         )
         if mode == AI_STORY_MODE:
-            return (
-                common
-                + "\n\nAI STORY PREMISE FIDELITY\n"
-                + "Treat the user input as a premise, not a completed story. Preserve its defining facts, profession, place, discovery, and constraints. "
-                "Show expertise through the protagonist's skilled actions. Develop the premise into a causal narrative rather than paraphrasing it."
-            )
+            return common
         if mode == EXPAND_USER_STORY_MODE:
             return (
                 common
-                + "\n\nEXPAND STORY SOURCE FIDELITY (strict)\n"
+                + "\n\nEXPAND STORY SOURCE FIDELITY\n"
                 + "The supplied story is canon. Preserve its important characters, events in order, setting, outcome, and defining meaning. "
-                "Deepen the existing story with motivation, resistance, escalation, a source-grounded reversal if appropriate, a difficult choice, and consequences. "
-                "Do not replace the source plot with a generic genre plot or invent backstory/relationships just to manufacture a character."
-            )
+                + "Deepen the existing causal chain; do not replace it with a generic genre plot or invent disconnected backstory.")
         raise ValueError("Preserve Story does not use a story-text pass.")
 
     def _story_text_user(
@@ -265,10 +262,7 @@ CAUSALITY AND PROSE
         bible_text = self._format_story_bible(story_bible)
         if bible_text:
             result += "\n\n" + bible_text
-        result += (
-            "\n\nOUTPUT: exactly six paragraphs, 420-560 words, plain prose only. "
-            "Use the supplied outline if present and resolve the central conflict with a concrete aftermath."
-        )
+        result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Plain prose only."
         return result
 
 
@@ -457,8 +451,11 @@ CAUSALITY AND PROSE
         mode: str,
     ) -> tuple[float, float]:
 
-        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
-            return (0.60, 0.95)
+        if mode == AI_STORY_MODE:
+            return (0.78, 0.90)
+
+        if mode == EXPAND_USER_STORY_MODE:
+            return (0.62, 0.88)
 
         if mode == PRESERVE_USER_STORY_MODE:
             return (
