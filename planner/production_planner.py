@@ -2366,26 +2366,35 @@ class ProductionPlanner:
         story: str,
         name: str,
     ) -> bool:
-        """Return True only when a proposed canonical name is present in the story.
+        """Return True when a canonical name or title-free form is text-grounded.
 
-        This is a hard anti-hallucination boundary for semantic extraction: the
-        language model may recover or classify names, but it may not invent a
-        canonical identity that has no textual anchor in the source story.
+        Honorifics (Dr., Captain, Professor, etc.) are metadata, not part of a
+        character's stable identity. Allow a title-free full-name variant while
+        preserving the token-boundary anti-hallucination check.
         """
-        story_norm = re.sub(r"[^a-z0-9]+", " ", str(story or "").lower()).strip()
-        name_norm = re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
-        if not story_norm or not name_norm:
+        text = str(story or "").lower()
+        supplied = str(name or "").strip()
+        if not text.strip() or not supplied:
             return False
+        variants = [supplied]
+        titleless = re.sub(
+            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+            "", supplied, count=1, flags=re.IGNORECASE,
+        ).strip()
+        if titleless and titleless.casefold() != supplied.casefold():
+            variants.append(titleless)
+        story_norm = re.sub(r"[^a-z0-9]+", " ", text).strip()
         story_tokens = story_norm.split()
-        name_tokens = name_norm.split()
-        if not name_tokens:
-            return False
-        width = len(name_tokens)
-        for index in range(0, len(story_tokens) - width + 1):
-            if story_tokens[index : index + width] == name_tokens:
-                return True
-        # Possessive mentions such as "Sara's notebook" normalize to the same
-        # token, so they are intentionally covered by the normalization above.
+        for variant in variants:
+            name_norm = re.sub(r"[^a-z0-9]+", " ", variant.lower()).strip()
+            name_tokens = name_norm.split()
+            if not name_tokens:
+                continue
+            width = len(name_tokens)
+            for index in range(0, len(story_tokens) - width + 1):
+                if story_tokens[index:index + width] == name_tokens:
+                    return True
+        # Possessive mentions normalize to the same token, so they are covered.
         return False
 
     @classmethod
@@ -2488,8 +2497,64 @@ class ProductionPlanner:
         flags=re.IGNORECASE,
     )
 
+    _IDENTITY_TITLE = re.compile(
+        r"^(?:Dr|Doctor|Prof|Professor|Mr|Mrs|Ms|Miss|Captain|Commander|Detective|Agent|Lieutenant|Sergeant)\.?\s+",
+        flags=re.IGNORECASE,
+    )
+
     @classmethod
-    def _is_mention_only_identity(cls, story: str, name: str) -> bool:
+    def _identity_surfaces(cls, name: str) -> list[str]:
+        """Surface forms a story may use for one person: full, title-stripped, given name.
+
+        A person introduced as "Dr. Lena Voss" and afterwards called "Lena" is one
+        identity. Family-name-only surfaces are excluded because relatives share them.
+        """
+        full = re.sub(r"\s+", " ", str(name or "")).strip()
+        if not full:
+            return []
+        bare = cls._IDENTITY_TITLE.sub("", full).strip()
+        surfaces = [full]
+        if bare and bare.casefold() != full.casefold():
+            surfaces.append(bare)
+        tokens = bare.split()
+        if len(tokens) >= 2 and len(tokens[0]) >= 3 and tokens[0][:1].isupper():
+            surfaces.append(tokens[0])
+        return list(dict.fromkeys(surfaces))
+
+    @classmethod
+    def _surface_texts(cls, story: str, name: str):
+        """Yield (surface, text) where longer surface forms are masked out of the text.
+
+        "Elias" inside "Dr. Elias Kwan's final recording" must not count as a separate
+        on-screen occurrence of Elias, so each shorter surface sees the story with the
+        longer forms of the same name replaced by a neutral placeholder.
+        """
+        text = str(story or "")
+        surfaces = sorted(cls._identity_surfaces(name), key=len, reverse=True)
+        for index, surface in enumerate(surfaces):
+            masked = text
+            for longer in surfaces[:index]:
+                masked = re.sub(
+                    r"(?<![A-Za-z0-9'_-])" + re.escape(longer) + r"(?![A-Za-z0-9_-])",
+                    "\u00a7", masked, flags=re.IGNORECASE,
+                )
+            yield surface, masked
+
+    @classmethod
+    def identity_presence(cls, story: str, name: str) -> str:
+        """Return 'absent', 'mention_only' or 'present' using every surface form of the name."""
+        seen = False
+        for surface, text in cls._surface_texts(story, name):
+            if not cls._story_has_character_name(text, surface):
+                continue
+            seen = True
+            if not cls._is_mention_only_surface(text, surface):
+                return "present"
+        return "mention_only" if seen else "absent"
+
+
+    @classmethod
+    def _is_mention_only_surface(cls, story: str, name: str) -> bool:
         """True when EVERY occurrence of a name is evidence, not presence.
 
         Evidence means: a label/etching/nameplate ("a name etched into the metal: Kovac"),
@@ -2523,6 +2588,81 @@ class ProductionPlanner:
                 continue
             return False
         return found
+
+
+    @classmethod
+    def _is_mention_only_identity(
+        cls,
+        story: str,
+        name: str,
+        aliases: list[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        """True only when every grounded name/alias occurrence is reference-only.
+
+        Longest forms win at overlapping spans, so ``Lena`` inside ``Dr. Lena
+        Voss's recorded voice`` is not mistaken for an independent on-screen
+        appearance. A later active ``Lena grabbed his wrist`` occurrence is.
+        Honorific-free forms and Qwen-provided aliases are considered together.
+        """
+        text = str(story or "")
+        canonical = str(name or "").strip()
+        if not text or not canonical:
+            return False
+        surfaces = [canonical]
+        surfaces.extend(str(value or "").strip() for value in (aliases or []) if str(value or "").strip())
+        title_pattern = r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+"
+        for surface in list(surfaces):
+            titleless = re.sub(title_pattern, "", surface, count=1, flags=re.IGNORECASE).strip()
+            if titleless and titleless.casefold() != surface.casefold():
+                surfaces.append(titleless)
+                tokens = titleless.split()
+                # A first-name alias is only derived from an explicit title/full
+                # name, never from an ordinary untitled canonical name.
+                if len(tokens) >= 2:
+                    surfaces.append(tokens[0])
+        dedup: list[str] = []
+        seen_surfaces: set[str] = set()
+        for surface in surfaces:
+            key = re.sub(r"\s+", " ", surface).strip().casefold()
+            if key and key not in seen_surfaces:
+                seen_surfaces.add(key)
+                dedup.append(surface)
+        dedup.sort(key=lambda value: len(value), reverse=True)
+
+        matches: list[tuple[int, int, str]] = []
+        covered: list[tuple[int, int]] = []
+        for surface in dedup:
+            pattern = re.compile(
+                r"(?<![A-Za-z0-9'_-])" + re.escape(surface) + r"(?![A-Za-z0-9_-])",
+                flags=re.IGNORECASE,
+            )
+            for match in pattern.finditer(text):
+                span = (match.start(), match.end())
+                # Ignore short aliases nested inside an already-counted longer
+                # canonical surface occurrence.
+                if any(start <= span[0] and span[1] <= end for start, end in covered):
+                    continue
+                covered.append(span)
+                matches.append((span[0], span[1], surface))
+        if not matches:
+            return False
+
+        for start, end, surface in matches:
+            before = text[max(0, start - 80):start]
+            after = text[end:end + 90]
+            if cls._SPEECH_AFTER.search(after):
+                return False
+            possessive_doc = re.match(
+                r"^[\u2019']s\s+" + cls._ABSENT_DOC_NOUNS + r"\b", after, flags=re.IGNORECASE
+            )
+            if (
+                cls._ABSENT_BEFORE.search(before)
+                or cls._ABSENT_AFTER.search(after)
+                or possessive_doc
+            ):
+                continue
+            return False
+        return True
 
     @classmethod
     def _drop_mention_only_identities(
@@ -2948,7 +3088,7 @@ class ProductionPlanner:
             story_lower,
         ))
         alias_anchor = any(
-            cls._story_has_character_name(story, surface)
+            cls.identity_presence(story, surface) != "absent"
             for surface in surfaces
             if surface
         )
@@ -3073,7 +3213,7 @@ class ProductionPlanner:
                 or not cls._semantic_named_surface_is_safe(name)
                 or name.lower() in cls.GENERIC_PERSON_LABELS
                 or name.lower() in cls.RELATIONSHIP_TERMS
-                or not any(cls._story_has_character_name(story, surface) for surface in [name, *aliases])
+                or not any(cls.identity_presence(story, surface) != "absent" for surface in [name, *aliases])
             ):
                 continue
             canonical = re.sub(
@@ -3207,7 +3347,7 @@ class ProductionPlanner:
                      and cls._descriptive_identity_is_grounded(story, surface)),
                     None,
                 )
-                if canonical and not cls._is_mention_only_identity(story, canonical):
+                if canonical and not cls._is_mention_only_identity(story, canonical, aliases=[name, *aliases]):
                     descriptive_candidates.append((raw, canonical))
                 continue
 
@@ -3219,7 +3359,7 @@ class ProductionPlanner:
                  if surface
                  and not safe_non_person(surface)
                  and cls._semantic_named_surface_is_safe(surface)
-                 and cls._story_has_character_name(story, surface)),
+                 and cls.identity_presence(story, surface) != "absent"),
                 None,
             )
             if not grounded_surface:
@@ -3231,7 +3371,7 @@ class ProductionPlanner:
                 count=1,
                 flags=re.IGNORECASE,
             ).strip() or name
-            if safe_non_person(canonical) or cls._is_mention_only_identity(story, canonical):
+            if safe_non_person(canonical) or cls._is_mention_only_identity(story, canonical, aliases=[name, *aliases]):
                 continue
             named_candidates.append((raw, canonical))
 
