@@ -442,7 +442,7 @@ class QwenDirector(
             # Quality-first bounded verification: if a material defect triggered the
             # editor, independently review the result. If a major issue remains, make
             # exactly one targeted repair pass; never enter an unbounded self-critique loop.
-            editor_enabled = os.getenv("H3_STORY_EDITOR", "auto").strip().lower() not in {
+            editor_enabled = os.getenv("H3_STORY_EDITOR", "0").strip().lower() not in {
                 "0", "false", "no", "off"
             }
             if story_review_findings and editor_enabled:
@@ -1525,7 +1525,7 @@ class QwenDirector(
         story_min_output_tokens = 0
 
         print(
-            "[QWEN] story_thinking=on story_max_tokens=3200",
+            "[QWEN] story_thinking=off story_max_tokens=1600",
             flush=True,
         )
 
@@ -1538,8 +1538,8 @@ class QwenDirector(
                 temperature=temperature,
                 top_p=top_p,
                 call_name=call_name,
-                max_completion=3200,
-                disable_thinking=False,
+                max_completion=1600,
+                disable_thinking=True,
                 seed=DIRECTOR_VLLM_SEED + int(getattr(self, "_story_seed_offset", 0) or 0),
                 creative=True,
             )
@@ -1949,7 +1949,7 @@ class QwenDirector(
         order confirmation agrees. On judge failure or disagreement, retain A.
         """
         try:
-            attempts = max(1, min(2, int(os.getenv("H3_STORY_CANDIDATES", "2"))))
+            attempts = max(1, min(2, int(os.getenv("H3_STORY_CANDIDATES", "1"))))
         except (TypeError, ValueError):
             attempts = 2
         incumbent = str(story or "").strip()
@@ -2144,7 +2144,7 @@ class QwenDirector(
         finding is accepted only if its quoted evidence occurs in the exact draft.
         This prevents unsupported generic critique from driving a rewrite.
         """
-        if os.getenv("H3_STORY_CRITIC", "1").strip().lower() in {"0", "false", "no", "off"}:
+        if os.getenv("H3_STORY_CRITIC", "0").strip().lower() in {"0", "false", "no", "off"}:
             return []
         try:
             plan = self._format_story_bible(story_bible)
@@ -2260,7 +2260,7 @@ class QwenDirector(
         call_name: str = "story_editor_pass",
     ) -> str:
         """One thinking-mode editing pass guided by the Story Bible and evidence-backed review."""
-        editor_mode = os.getenv("H3_STORY_EDITOR", "auto").strip().lower()
+        editor_mode = os.getenv("H3_STORY_EDITOR", "0").strip().lower()
         if editor_mode in {"0", "false", "no", "off"}:
             return story
         if editor_mode not in {"1", "true", "yes", "on", "always"} and not review_findings:
