@@ -2473,7 +2473,7 @@ class ProductionPlanner:
     # Mention-only identities: people who are named but never on screen
     # ------------------------------------------------------------------
     _ABSENT_DOC_NOUNS = (
-        r"(?:last|final|first|old|own|earlier|previous)?\s*(?:transmissions?|journals?|logs?|notes?|messages?|"
+        r"(?:last|final|first|old|own|earlier|previous|recorded)?\s*(?:transmissions?|journals?|logs?|notes?|messages?|"
         r"recordings?|diary|diaries|signature|research|files?|data|secrets?|work|reports?|voice|"
         r"memory|memories|legacy|body|grave|death|name|badge|initials|handwriting|findings|"
         r"experiments?|project|theory|warning|words|final entry)"
@@ -2522,15 +2522,18 @@ class ProductionPlanner:
         return list(dict.fromkeys(surfaces))
 
     @classmethod
-    def _surface_texts(cls, story: str, name: str):
-        """Yield (surface, text) where longer surface forms are masked out of the text.
-
-        "Elias" inside "Dr. Elias Kwan's final recording" must not count as a separate
-        on-screen occurrence of Elias, so each shorter surface sees the story with the
-        longer forms of the same name replaced by a neutral placeholder.
-        """
+    def _surface_texts(cls, story: str, name: str, aliases=()):
+        """Yield masked text for the canonical name and its grounded aliases."""
         text = str(story or "")
-        surfaces = sorted(cls._identity_surfaces(name), key=len, reverse=True)
+        surfaces = []
+        seen = set()
+        for identity in [name, *(aliases or [])]:
+            for surface in cls._identity_surfaces(str(identity or "")):
+                key = re.sub(r"\s+", " ", surface).strip().casefold()
+                if key and key not in seen:
+                    seen.add(key)
+                    surfaces.append(surface)
+        surfaces.sort(key=len, reverse=True)
         for index, surface in enumerate(surfaces):
             masked = text
             for longer in surfaces[:index]:
@@ -2541,10 +2544,10 @@ class ProductionPlanner:
             yield surface, masked
 
     @classmethod
-    def identity_presence(cls, story: str, name: str) -> str:
-        """Return 'absent', 'mention_only' or 'present' using every surface form of the name."""
+    def identity_presence(cls, story: str, name: str, aliases=None) -> str:
+        """Return 'absent', 'mention_only' or 'present' across all name forms."""
         seen = False
-        for surface, text in cls._surface_texts(story, name):
+        for surface, text in cls._surface_texts(story, name, aliases):
             if not cls._story_has_character_name(text, surface):
                 continue
             seen = True
@@ -2552,6 +2555,10 @@ class ProductionPlanner:
                 return "present"
         return "mention_only" if seen else "absent"
 
+    @classmethod
+    def _is_mention_only_identity(cls, story: str, name: str, aliases=None) -> bool:
+        """Filter only identities whose canonical and alias forms are all references."""
+        return cls.identity_presence(story, name, aliases) == "mention_only"
 
     @classmethod
     def _is_mention_only_surface(cls, story: str, name: str) -> bool:
@@ -2589,80 +2596,6 @@ class ProductionPlanner:
             return False
         return found
 
-
-    @classmethod
-    def _is_mention_only_identity(
-        cls,
-        story: str,
-        name: str,
-        aliases: list[str] | tuple[str, ...] | None = None,
-    ) -> bool:
-        """True only when every grounded name/alias occurrence is reference-only.
-
-        Longest forms win at overlapping spans, so ``Lena`` inside ``Dr. Lena
-        Voss's recorded voice`` is not mistaken for an independent on-screen
-        appearance. A later active ``Lena grabbed his wrist`` occurrence is.
-        Honorific-free forms and Qwen-provided aliases are considered together.
-        """
-        text = str(story or "")
-        canonical = str(name or "").strip()
-        if not text or not canonical:
-            return False
-        surfaces = [canonical]
-        surfaces.extend(str(value or "").strip() for value in (aliases or []) if str(value or "").strip())
-        title_pattern = r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+"
-        for surface in list(surfaces):
-            titleless = re.sub(title_pattern, "", surface, count=1, flags=re.IGNORECASE).strip()
-            if titleless and titleless.casefold() != surface.casefold():
-                surfaces.append(titleless)
-                tokens = titleless.split()
-                # A first-name alias is only derived from an explicit title/full
-                # name, never from an ordinary untitled canonical name.
-                if len(tokens) >= 2:
-                    surfaces.append(tokens[0])
-        dedup: list[str] = []
-        seen_surfaces: set[str] = set()
-        for surface in surfaces:
-            key = re.sub(r"\s+", " ", surface).strip().casefold()
-            if key and key not in seen_surfaces:
-                seen_surfaces.add(key)
-                dedup.append(surface)
-        dedup.sort(key=lambda value: len(value), reverse=True)
-
-        matches: list[tuple[int, int, str]] = []
-        covered: list[tuple[int, int]] = []
-        for surface in dedup:
-            pattern = re.compile(
-                r"(?<![A-Za-z0-9'_-])" + re.escape(surface) + r"(?![A-Za-z0-9_-])",
-                flags=re.IGNORECASE,
-            )
-            for match in pattern.finditer(text):
-                span = (match.start(), match.end())
-                # Ignore short aliases nested inside an already-counted longer
-                # canonical surface occurrence.
-                if any(start <= span[0] and span[1] <= end for start, end in covered):
-                    continue
-                covered.append(span)
-                matches.append((span[0], span[1], surface))
-        if not matches:
-            return False
-
-        for start, end, surface in matches:
-            before = text[max(0, start - 80):start]
-            after = text[end:end + 90]
-            if cls._SPEECH_AFTER.search(after):
-                return False
-            possessive_doc = re.match(
-                r"^[\u2019']s\s+" + cls._ABSENT_DOC_NOUNS + r"\b", after, flags=re.IGNORECASE
-            )
-            if (
-                cls._ABSENT_BEFORE.search(before)
-                or cls._ABSENT_AFTER.search(after)
-                or possessive_doc
-            ):
-                continue
-            return False
-        return True
 
     @classmethod
     def _drop_mention_only_identities(
