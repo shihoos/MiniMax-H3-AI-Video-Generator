@@ -340,7 +340,7 @@ DIRECTOR_SHOTS_PER_SCENE = 2
 DIRECTOR_SHOT_STORY_CONTEXT_CHARS = int(
     os.getenv(
         "H3_DIRECTOR_SHOT_STORY_CONTEXT_CHARS",
-        "850",
+        "2800",
     )
 )
 
