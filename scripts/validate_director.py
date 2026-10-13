@@ -344,28 +344,32 @@ def test_expand_is_open_cast_but_preserves_source_anchors():
 
 
 def test_expand_prompt_does_not_impose_cast_limit():
+    """Assert the September 25 cast contract, not wording from a later prompt revision."""
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import EXPAND_USER_STORY_MODE, AI_STORY_MODE
+
     mixin = QwenDirectorPromptMixin()
-    expand = mixin._story_text_system(EXPAND_USER_STORY_MODE).lower()
-    ai = mixin._story_text_system(AI_STORY_MODE).lower()
+    expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
+    ai = " ".join(mixin._story_text_system(AI_STORY_MODE).lower().split())
     for text, label in ((expand, "expand"), (ai, "ai story")):
         _assert(
-            ("no fixed cast size" in text
-             or "no numeric cast limit" in text
-             or "not a cast limit" in text
-             or "do not force one character, two characters, or any fixed cast size" in text
-             or ("you decide the cast" in text and "there is no target size" in text)),
-            f"{label} prompt still constrains cast size",
+            "qwen decides names, identities, relationships, and cast size" in text
+            and "no hardcoded roster or numeric cast quota" in text,
+            f"{label} prompt must leave cast authorship to Qwen without a numeric quota",
         )
         _assert(
-            "decorative character" in text
-            or "decorative cast" in text
-            or "do not add a character merely" in text,
-            f"{label} prompt lacks anti-decorative-cast rule",
+            "unless the premise genuinely depends on isolation" in text
+            and "include a second physically present, consequential character" in text,
+            f"{label} prompt must retain the baseline's qualified counterpart preference",
         )
-    _assert("only named people allowed" not in expand, "Expand prompt still treats source anchors as a cast whitelist")
-    _assert("exactly one" not in expand or "exactly one" in expand and "six paragraphs" in expand, "Expand prompt contains an unintended cast-count instruction")
+        _assert(
+            "only when their choices materially affect the causal chain" in text,
+            f"{label} prompt must keep additional cast members consequential",
+        )
+    _assert("only named people allowed" not in expand,
+            "Expand prompt must not treat source anchors as a cast whitelist")
+    _assert("only named people allowed" not in ai,
+            "AI Story prompt must not treat source anchors as a cast whitelist")
 
 
 def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
@@ -388,36 +392,42 @@ def test_each_story_candidate_is_one_call_with_seed_offset_and_no_floor():
 
 
 def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
+    """Check the compact September 25 contract without requiring later prompt wording."""
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-        text = mixin._story_text_system(mode).lower()
-        _assert("paragraph 4 delivers a reversal caused by something established earlier" in text,
-                f"{mode} must require a planted, causal reversal")
-        _assert("every important event follow from a visible decision" in text,
-                f"{mode} must require event-level cause and effect")
-        _assert("plant a concrete detail" in text and "pay it off through action or consequence" in text,
-                f"{mode} must establish and pay off a concrete detail")
-        _assert("the turn must change what the protagonist does" in text,
-                f"{mode} reversal must change protagonist action")
-        _assert("paragraph 5 forces a consequential choice with a visible price" in text,
-                f"{mode} must require a consequential choice with a price")
-        _assert("end the central conflict" in text and "settled aftermath" in text,
-                f"{mode} must require resolution rather than a future hook")
-        _assert("think through cause and effect before drafting" in text,
-                f"{mode} must prompt Qwen to plan causal relationships before drafting")
-        _assert("no fixed cast size, target, or maximum" in text,
-                f"{mode} must leave cast size to Qwen")
+        text = " ".join(mixin._story_text_system(mode).lower().split())
+        _assert("plan a compact causal spine" in text,
+                f"{mode} must retain the compact September 25 story structure")
+        _assert("protagonist goal" in text and "resistance" in text and "a planted detail" in text,
+                f"{mode} must establish a goal, resistance, and planted detail")
+        _assert("grounded reversal that changes the meaning of that detail" in text,
+                f"{mode} must require a meaningful causal reversal")
+        _assert("consequential choice" in text and "concrete consequence" in text,
+                f"{mode} must connect the choice to an observable consequence")
+        _assert("six filmable scene paragraphs" in text,
+                f"{mode} must retain the six-paragraph scene contract")
+        _assert("brief line of direct dialogue attributed to a named character" in text,
+                f"{mode} must prefer purposeful character dialogue")
+        _assert("no hardcoded roster or numeric cast quota" in text,
+                f"{mode} must leave character identities and cast size to Qwen")
         _assert("always use a mystery" not in text and "always use containment" not in text,
                 f"{mode} must not force a fixed genre template")
 
 def test_story_contract_remains_six_paragraphs_420_560():
+    director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
     sanitize_source = (ROOT / "planner/qwen_director_sanitize.py").read_text(encoding="utf-8")
     combined = prompt_source + "\n" + sanitize_source
-    _assert("420 to 560 words" in combined or "420-560" in combined, "story word contract missing")
     _assert("six paragraphs" in combined.lower(), "six-paragraph contract missing")
+    _assert("self._story_min_words: int = 420" in director_source,
+            "story validator must retain the 420-word minimum")
+    _assert('minimum_words = int(getattr(self, "_story_min_words", 420) or 420)' in sanitize_source,
+            "story validator must use the configured minimum word count")
+    _assert("if not minimum_words <= word_count <= 560:" in sanitize_source,
+            "story validator must enforce the 560-word maximum")
 
 
 def test_story_dialogue_contract_uses_qwen_semantic_spans():
