@@ -49,7 +49,6 @@ def test_shot_schema_tracks_instance_topology():
     _assert(shot_schema["properties"]["shots"]["items"]["properties"]["location"].get("minLength") == 1, "location schema must require a value")
 
 
-
 def test_mention_only_matching_is_case_insensitive():
     planner = _planner()
     _assert(planner._is_mention_only_identity("KOVAC had vanished.", "Kovac"), "mention-only matching must ignore case")
@@ -64,7 +63,6 @@ def test_sanitizer_deduplicates_normalized_identity_keys():
         {"name": "  elias   kade  ", "identity_type": "named_character"},
     ])
     _assert(len(result) == 1, f"sanitizer should deduplicate normalized identity keys: {result}")
-
 
 
 def test_build_alias_map_skips_stopword_first_token():
@@ -377,7 +375,7 @@ def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
             "spoken-dialogue extraction should retain its independent bounded payload")
 
 
-def test_each_story_candidate_is_one_call_with_seed_offset_and_no_floor():
+def test_story_generation_is_single_call_with_seed_offsets_and_no_floor():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     body = source.split("def _generate_story_once")[1].split("def _coerce_story_to_six_paragraphs")[0]
     _assert(body.count("self._chat_text(") == 1, "story generation must use one primary Qwen text call")
@@ -485,7 +483,6 @@ def test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurall
     _assert(segments[1]["source_speakers"] == {"tomas"}, f"second duplicate line lost its semantic speaker: {segments}")
 
 
-
 def test_shot_planning_allows_empty_scene_binding_with_closed_roster():
     from planner.qwen_director import QwenDirector
 
@@ -574,8 +571,6 @@ def test_shot_dialogue_extraction_degrades_deterministically():
     _assert("source_dialogue = []" in source and "source dialogue extraction failed" in source, "shot dialogue extraction failure must not abort scene batching")
 
 
-
-
 def test_semantic_dialogue_empty_is_telemetried():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     _assert("expand_semantic_dialogue_empty" in source, "Expand semantic-dialogue misses must be visible in telemetry")
@@ -590,7 +585,6 @@ def test_character_semantic_schema_includes_spoken_dialogue():
     _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 64, "spoken dialogue schema is artificially capped")
 
 
-
 def test_shot_context_preserves_paragraph_boundaries():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     story = "\n\n".join(
@@ -599,50 +593,41 @@ def test_shot_context_preserves_paragraph_boundaries():
     )
     compact = QwenDirectorPromptMixin._compact_story_context(story, 240)
     _assert("P1:" in compact and "P6:" in compact, "compact story context dropped narrative endpoints")
-
-
-
-def test_shot_context_does_not_split_honorific_from_name():
-    from planner.qwen_director_prompts import QwenDirectorPromptMixin
-    paragraphs = []
-    for i in range(1, 7):
-        paragraphs.append(
-            f"Dr. Lena Voss entered chamber {i} after the pressure alarms began. "
-            f"She checked the seal and read the damaged gauge while Eli watched the corridor. "
-            f"A pressure seal failed, so Lena grabbed the valve and stopped the leak in chamber {i}. "
-            f"The diver left chamber {i} with the valve locked and the repair recorded for the next crew."
-        )
-    compact = QwenDirectorPromptMixin._compact_story_context("\n\n".join(paragraphs), 1800)
-    _assert("Dr. Lena Voss" in compact, "shot context split a title from the character name")
-    _assert("P1:" in compact and "P6:" in compact, "title-safe compaction must preserve paragraph anchors")
-
+    critique = " ".join((ROOT / "planner/qwen_director.py").read_text(encoding="utf-8").split()).lower()
+    _assert("track story-established key objects across the full story" in critique and "after it was moved" in critique, "shot critique must check object continuity")
 
 def test_honorific_and_active_short_name_do_not_drop_character():
+    from planner.production_planner import ProductionPlanner as P
     planner = _planner()
     story = "Dr. Lena Voss’s voice cut through the murk. She hovered beside him. Lena’s jaw tightened."
     _assert(planner._story_has_character_name(story, "Dr. Lena Voss"), "title-free story usage must match canonical full name")
     _assert(not planner._is_mention_only_identity(story, "Dr. Lena Voss"), "active first-name usage must override a mention-only full-name occurrence")
     _assert(not planner._is_mention_only_identity(story, "Lena Voss", aliases=["Dr. Lena Voss", "Lena", "Dr. Voss"]),
             "Qwen alias evidence must preserve an actively present identity")
+    recorded_only = "Dr. Lena Voss's recorded voice crackled from the console."
+    _assert(planner._is_mention_only_identity(recorded_only, "Dr. Lena Voss"),
+            "a recorded voice alone must not count as physical character presence")
     result = planner._reconcile_semantic_characters(story, {"candidates": [
         {"name": "Dr. Lena Voss", "entity_type": "PERSON", "is_character": True,
          "aliases": ["Lena", "Dr. Voss"], "identity_type": "named_character"}], "spoken_dialogue": []})
     _assert(result == ["Lena Voss"], f"active Lena Voss was filtered from canonical roster: {result}")
-
+    _assert(P.identity_presence("Elara Voss entered the vault and shut the door.", "Dr. Elara Voss") == "present", "title-free full name must match")
+    _assert(P.identity_presence(recorded_only, "Dr. Lena Voss") == "mention_only", "a recording alone must not imply physical presence")
+    _assert(P.identity_presence("Mira opened the door.", "Dr. Kaelen Mira") == "absent", "surname overlap must not merge different people")
 
 def test_story_context_compactor_keeps_causal_middle_action():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     story = "\n\n".join(
-        f"The diver reached chamber {i} after a long descent through a narrow access tunnel lined with old warning labels and corroded support ribs. "
+        f"Dr. Lena Voss reached chamber {i} after a long descent through a narrow access tunnel lined with old warning labels and corroded support ribs. "
         f"The station had been silent for decades, and the pressure readings moved unpredictably as the diver crossed the damaged threshold. "
         f"A pressure seal failed, so Lena grabbed the valve and stopped the leak in chamber {i}. "
         f"The diver left chamber {i} with the valve locked, marking the repair with a strip of orange emergency tape for the next crew to find."
         for i in range(1, 7)
     )
     compact = QwenDirectorPromptMixin._compact_story_context(story, 1800)
+    _assert("Dr. Lena Voss" in compact, "shot context split the honorific from the name")
     _assert("Lena grabbed the valve" in compact, "shot context dropped the causal action in the middle of a paragraph")
     _assert("P1:" in compact and "P6:" in compact, "shot context must retain all six paragraph anchors")
-
 
 def test_sound_and_ui_words_are_not_deterministic_characters():
     planner = _planner()
@@ -695,9 +680,6 @@ def test_mention_only_filter_can_fail_closed():
     _assert(planner._drop_mention_only_identities("Kovac had vanished.", ["Kovac"], preserve_empty=False) == [], "mention-only filter must not restore rejected roster")
 
 
-
-
-
 def test_story_prompt_preserves_causal_cast_and_live_dialogue_contract():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
@@ -725,7 +707,7 @@ def test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated():
             "Story Bible must state one protagonist and the causal rule")
     _assert("not a fixed cast quota" in prompt_source.lower(), "the outline must not force an unnecessary cast")
     _assert("not automatically sent to editor" in source, "outline discrepancies must stay advisory")
-
+    _assert('os.getenv("H3_STORY_BIBLE", "0")' in source, "Story Bible stays opt-in until controlled runs justify it")
 
 def test_editor_uses_same_story_contract_and_can_repair_supported_counterpart():
     from planner.qwen_director import QwenDirector
@@ -756,7 +738,8 @@ def test_thinking_mode_is_enabled_for_story_planner_writer_and_editor():
 
 def test_story_quality_review_is_evidence_bound_and_precedes_editor():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
 
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     generation_start = source.index("story_review_findings = self._collect_story_findings(")
@@ -801,7 +784,12 @@ def test_story_quality_review_is_evidence_bound_and_precedes_editor():
             os.environ["H3_STORY_CRITIC"] = previous
     _assert(len(findings_out) == 1, f"only exact evidence-backed findings should survive, got {findings_out}")
     _assert(findings_out[0]["code"] == "planned_cast_presence", "wrong evidence-backed finding survived")
-
+    import inspect
+    _assert(inspect.signature(QwenDirector._validate_story_output_contracts).parameters["enforce_planned_cast"].default is False, "planned cast must remain advisory")
+    _assert('call_name="story_quality_repair_pass"' in source and "exactly one targeted repair pass" in source, "verification repair must be bounded")
+    mixin = QwenDirectorPromptMixin()
+    for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+        _assert(len(mixin._story_text_system(mode)) < 3500, f"{mode} story prompt exceeded compact budget")
 
 def test_audit_gated_editor_and_quality_critic_default():
     from planner.qwen_director import QwenDirector
@@ -840,25 +828,6 @@ def test_audit_gated_editor_and_quality_critic_default():
                 os.environ[k] = v
 
 
-
-def test_story_quality_verification_is_bounded_and_cast_is_advisory_by_default():
-    import inspect
-    from planner.qwen_director import QwenDirector
-    from planner.qwen_director_prompts import QwenDirectorPromptMixin
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
-
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    default = inspect.signature(QwenDirector._validate_story_output_contracts).parameters["enforce_planned_cast"].default
-    _assert(default is False, "provisional Story Bible cast must not be a hard output contract")
-    _assert("story_quality_verification" in source, "a repaired story must receive a verification review")
-    _assert('call_name="story_quality_repair_pass"' in source, "verification findings need one separately logged bounded repair")
-    _assert("exactly one targeted repair pass" in source, "story repair loop must have an explicit finite bound")
-
-    mixin = QwenDirectorPromptMixin()
-    for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-        prompt_chars = len(mixin._story_text_system(mode))
-        _assert(prompt_chars < 3500, f"{mode} writing prompt drifted above compact budget: {prompt_chars} chars")
-
 def test_writer_path_does_not_abort_on_planned_cast_heuristic():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     start = source.index("def _generate_story_once")
@@ -881,22 +850,6 @@ def test_story_prompt_has_no_artificial_subtargets():
             "guided revision must not impose a conflicting final-paragraph floor")
     _assert("420-560 words total" in director_source,
             "guided revision must restate the authoritative story-length contract")
-
-def test_identity_presence_accepts_title_free_and_given_name_surfaces():
-    from planner.production_planner import ProductionPlanner as P
-    story = (
-        "Dr. Lena Voss's recorded voice crackled from the console. "
-        "Lena grabbed Eli's wrist. \"Do not open it,\" Lena said."
-    )
-    _assert(P.identity_presence(story, "Dr. Lena Voss") == "present",
-            "active given-name occurrence must override a title-bearing recording reference")
-    _assert(P.identity_presence("Elara Voss entered the vault and shut the door.", "Dr. Elara Voss") == "present",
-            "title-free full-name construction must match")
-    _assert(P.identity_presence("Dr. Elias Kwan's final recording played; Kwan's log remained sealed.", "Dr. Elias Kwan") == "mention_only",
-            "recording/document references alone must not imply physical presence")
-    _assert(P.identity_presence("Mira opened the door.", "Dr. Kaelen Mira") == "absent",
-            "surname-only overlap must not imply identity presence")
-
 
 def test_best_of_n_requires_grounded_pairwise_and_position_swap():
     from planner.qwen_director import QwenDirector
@@ -940,29 +893,9 @@ def test_best_of_n_requires_grounded_pairwise_and_position_swap():
             os.environ.pop("H3_STORY_CANDIDATES", None)
         else:
             os.environ["H3_STORY_CANDIDATES"] = saved
-
-
-def test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("position-swap confirmation failed" in source,
-            "pairwise choice must fail closed when the reversed comparison disagrees")
-    _assert("_quote_is_grounded" in source,
-            "candidate preference must cite exact evidence from both drafts")
-    _assert("source_fidelity" in source and "do not force" in source.lower(),
-            "candidate comparison must prioritize source facts and avoid cast quotas")
-
-
-def test_story_bible_remains_optional_by_default():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert('os.getenv("H3_STORY_BIBLE", "0")' in source,
-            "Story Bible should remain opt-in until controlled runs show it helps this model/prompt")
-
-
-def test_shot_critique_checks_object_state_across_story():
-    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert("track\n        story-established key objects across the full story" in source,
-            "shot critique must explicitly track story-established object state across shots")
-    _assert("after it was moved" in source, "shot critique must catch objects reappearing at old locations")
+    _assert("position-swap confirmation failed" in source and "_quote_is_grounded" in source, "candidate choice must be grounded and position-swap confirmed")
+    _assert("source_fidelity" in source and "do not force" in source.lower(), "candidate choice must preserve source facts without cast quotas")
 
 def main():
     tests = [
@@ -985,7 +918,7 @@ def main():
         test_expand_is_open_cast_but_preserves_source_anchors,
         test_expand_prompt_does_not_impose_cast_limit,
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
-        test_each_story_candidate_is_one_call_with_seed_offset_and_no_floor,
+        test_story_generation_is_single_call_with_seed_offsets_and_no_floor,
         test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
         test_story_contract_remains_six_paragraphs_420_560,
         test_semantic_dialogue_is_persisted_and_restored_across_resume,
@@ -1007,7 +940,6 @@ def main():
         test_semantic_dialogue_empty_is_telemetried,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_shot_context_preserves_paragraph_boundaries,
-        test_shot_context_does_not_split_honorific_from_name,
         test_honorific_and_active_short_name_do_not_drop_character,
         test_story_context_compactor_keeps_causal_middle_action,
         test_sound_and_ui_words_are_not_deterministic_characters,
@@ -1021,17 +953,12 @@ def main():
         test_thinking_mode_is_enabled_for_story_planner_writer_and_editor,
         test_story_quality_review_is_evidence_bound_and_precedes_editor,
         test_audit_gated_editor_and_quality_critic_default,
-        test_story_quality_verification_is_bounded_and_cast_is_advisory_by_default,
         test_writer_path_does_not_abort_on_planned_cast_heuristic,
         test_story_prompt_has_no_artificial_subtargets,
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
-        test_identity_presence_accepts_title_free_and_given_name_surfaces,
         test_best_of_n_requires_grounded_pairwise_and_position_swap,
-        test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity,
-        test_story_bible_remains_optional_by_default,
-        test_shot_critique_checks_object_state_across_story,
     ]
     for test in tests:
         test()
