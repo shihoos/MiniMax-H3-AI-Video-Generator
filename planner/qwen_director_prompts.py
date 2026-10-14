@@ -209,6 +209,16 @@ advances conflict, information, or a decision. Do not use a recording, alarm, sc
 or system message as a substitute for a consequential character.
 Resolve the protagonist's immediate goal and central conflict. End with a concrete,
 settled consequence rather than a new mystery or future mission.
+Total length is 420-560 words; a draft under 420 words is rejected.
+
+Dialogue is conflict, not exposition: a spoken line demands, refuses, bargains, lies or
+pleads, and never tells a character what both already know or announces backstory.
+Track every important object and person: nothing is used twice, reappears where it was
+left, or contradicts the choice made in the fifth paragraph; the last paragraph must
+show what that choice actually caused. Avoid stock phrases (jaw tightened, pulse
+quickened, heart pounding, breath hitched, reeked of, eerie glow, skeletal shadows,
+the weight of what she had chosen) and avoid a miracle-cure, virus, cover-up or
+countdown plot unless the premise itself asks for one.
 
 Qwen decides names, identities, relationships, and cast size. No hardcoded roster or
 numeric cast quota. Do not default to a one-person story: unless the premise genuinely
