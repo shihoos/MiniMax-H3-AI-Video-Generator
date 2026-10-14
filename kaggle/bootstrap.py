@@ -309,6 +309,26 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
     return result.returncode == 0
 
 
+def _exact_requirement_pin(package_name: str) -> str:
+    """Read one exact package pin from the project requirements file."""
+    requirements_path = ROOT / "requirements.txt"
+    matches = []
+    for raw in requirements_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "==" not in line:
+            continue
+        name, version = line.split("==", 1)
+        if name.strip().lower().replace("_", "-") == package_name.lower().replace("_", "-"):
+            version = version.split(";", 1)[0].strip()
+            if version:
+                matches.append(version)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"requirements.txt must contain exactly one exact pin for {package_name}."
+        )
+    return matches[0]
+
+
 def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     # The Director runtime is intentionally locked to the project's 2xT4/SM75
     # topology. A different visible GPU count or architecture is treated as a
@@ -320,10 +340,20 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     python = env_dir / "bin" / "python"
     if not python.is_file() or not vllm_version or not wrapt_version or tp_size <= 0:
         return False
+    try:
+        transformers_version = _exact_requirement_pin("transformers")
+        tokenizers_version = _exact_requirement_pin("tokenizers")
+    except (OSError, RuntimeError):
+        return False
     code = (
         "import inspect; import vllm; import torch; import wrapt; "
+        "import transformers; import tokenizers; "
+        "from transformers import Qwen3Config; "
+        "from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM; "
         "from vllm.config import SpeculativeConfig; "
         f"assert vllm.__version__ == {vllm_version!r}; "
+        f"assert transformers.__version__ == {transformers_version!r}; "
+        f"assert tokenizers.__version__ == {tokenizers_version!r}; "
         f"assert wrapt.__version__ == {wrapt_version!r}; "
         "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
         "assert torch.cuda.is_available(); "
@@ -1094,6 +1124,11 @@ def install_director_runtime(
     if str(verifier.get("name_or_path", "")).strip() != "Qwen/Qwen3-14B":
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
+    transformers_version = _exact_requirement_pin("transformers")
+    tokenizers_version = _exact_requirement_pin("tokenizers")
+    allow_transformers_override = bool(
+        director.get("allow_transformers_vllm_constraint_override", False)
+    )
     wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
@@ -1127,23 +1162,80 @@ def install_director_runtime(
         raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
     env = os.environ.copy()
     env["UV_LINK_MODE"] = "copy"
-    install = subprocess.run(
-        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={wrapt_version}"],
-        env=env,
-        check=False,
-        text=True,
-    )
+    install_args = [
+        uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy",
+        f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
+    ]
+    if not allow_transformers_override:
+        install_args.extend([
+            f"transformers=={transformers_version}",
+            f"tokenizers=={tokenizers_version}",
+        ])
+    install = subprocess.run(install_args, env=env, check=False, text=True)
     if install.returncode != 0:
         raise RuntimeError("Failed to install isolated vLLM runtime.")
+
+    if allow_transformers_override:
+        print(
+            "[DIRECTOR WARNING] Experimental Transformers dependency override is enabled; "
+            "the installed versions are sourced from requirements.txt."
+        )
+        override = subprocess.run(
+            [
+                uv, "pip", "install", "--python", str(venv_python),
+                "--no-deps", "--link-mode", "copy",
+                f"transformers=={transformers_version}",
+                f"tokenizers=={tokenizers_version}",
+            ],
+            env=env, check=False, text=True,
+        )
+        if override.returncode != 0:
+            raise RuntimeError("Failed to install the pinned Transformers/tokenizers versions.")
+
+    dependency_check = subprocess.run(
+        [uv, "pip", "check", "--python", str(venv_python)],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    check_output = "\n".join(
+        item.strip() for item in (dependency_check.stdout, dependency_check.stderr)
+        if item and item.strip()
+    )
+    if dependency_check.returncode != 0:
+        check_lines = [" ".join(line.split()).lower() for line in check_output.splitlines() if line.strip()]
+        expected_conflicts = [
+            line for line in check_lines
+            if allow_transformers_override
+            and line.startswith(f"vllm {vllm_version.lower()} ")
+            and "has requirement transformers" in line
+            and f"but you have transformers {transformers_version.lower()}" in line
+        ]
+        unexpected_lines = [line for line in check_lines if line not in expected_conflicts]
+        if len(expected_conflicts) != 1 or unexpected_lines:
+            raise RuntimeError(
+                "Director dependency check found unexpected conflicts:\n"
+                + (check_output or "uv pip check failed without diagnostic output")
+            )
+        print(
+            "[DIRECTOR WARNING] Dependency check found only the expected vLLM/Transformers "
+            "constraint conflict for this experimental run."
+        )
+    elif check_output:
+        print(check_output)
+
     verification = subprocess.run(
         [
             str(venv_python), "-c",
             (
-                "import vllm, torch, inspect, wrapt; "
+                "import vllm, torch, inspect, wrapt, transformers, tokenizers; "
+                "from transformers import Qwen3Config; "
+                "from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM; "
                 "from vllm.config import SpeculativeConfig; "
                 "print('vLLM import: PASS'); "
                 "print('wrapt version:', wrapt.__version__); "
                 "print('vLLM version:', vllm.__version__); "
+                "print('Transformers version:', transformers.__version__); "
+                "print('tokenizers version:', tokenizers.__version__); "
+                "print('Qwen3 imports: PASS'); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
                 "print('GPU count:', torch.cuda.device_count()); "
@@ -1166,6 +1258,23 @@ def install_director_runtime(
         raise RuntimeError(
             "Director isolated runtime wrapt mismatch: "
             f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
+        )
+    observed_transformers_version = None
+    observed_tokenizers_version = None
+    for line in verification.stdout.splitlines():
+        if line.startswith("Transformers version:"):
+            observed_transformers_version = line.split(":", 1)[1].strip()
+        elif line.startswith("tokenizers version:"):
+            observed_tokenizers_version = line.split(":", 1)[1].strip()
+    if observed_transformers_version != transformers_version:
+        raise RuntimeError(
+            "Director Transformers version mismatch: "
+            f"observed={observed_transformers_version!r}, expected={transformers_version!r}."
+        )
+    if observed_tokenizers_version != tokenizers_version:
+        raise RuntimeError(
+            "Director tokenizers version mismatch: "
+            f"observed={observed_tokenizers_version!r}, expected={tokenizers_version!r}."
         )
     observed_version = None
     for line in verification.stdout.splitlines():
