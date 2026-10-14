@@ -747,27 +747,23 @@ def test_editor_uses_same_story_contract_and_can_repair_supported_counterpart():
     _assert("story bible is provisional" in editor, "editor must treat the outline as advisory")
     _assert("do not force every outline beat or planned character" in editor, "editor must be free to drop nonessential planned cast")
     _assert("consequential present-day counterpart" in editor, "editor should repair a missing consequential counterpart when premise supports one")
-    _assert('os.getenv("h3_story_editor", "0")' in (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8").lower(), "editor should default to audit-gated (auto) mode")
+    _assert('"h3_story_editor": "auto"' in (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8").lower(), "quality profile should run the editor in audit-gated (auto) mode")
 
 
-def test_sep25_baseline_story_generation_settings():
+def test_fast_profile_keeps_the_sep25_baseline_settings():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     prompts = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    story_start = source.index("def _generate_story_once")
-    story_end = source.index("def _story_craft_issues", story_start)
-    story_code = source[story_start:story_end]
     sampling_start = prompts.index("def _sampling_for_mode(")
     sampling_end = prompts.index("def _shot_sampling(", sampling_start)
     sampling_code = prompts[sampling_start:sampling_end]
-    _assert("max_completion=1600" in story_code, "September 25 story completion cap must be 1600")
-    _assert("disable_thinking=True" in story_code, "September 25 story generation must run without thinking mode")
-    _assert("story_thinking=off story_max_tokens=1600" in story_code, "story telemetry must reflect the actual baseline settings")
-    _assert("return (0.78, 0.90)" in sampling_code, "AI Story sampling must match the September 25 reference")
-    _assert("return (0.62, 0.88)" in sampling_code, "Expand Story sampling must match the September 25 reference")
-    _assert('os.getenv("H3_STORY_CANDIDATES", "1")' in source, "the default story path must not generate a challenger")
-    _assert('os.getenv("H3_STORY_CRITIC", "0")' in source, "the semantic critic must be off by default")
-    _assert('os.getenv("H3_STORY_EDITOR", "0")' in source, "the story editor must be off by default")
-    _assert('os.getenv("H3_STORY_BIBLE", "0")' in source, "Story Bible must remain opt-in")
+    _assert("story_budget = 3200 if story_thinking else 1600" in source, "non-thinking drafts keep the 1600-token cap")
+    _assert("disable_thinking=not story_thinking" in source, "writer thinking must follow the profile")
+    _assert("return (0.78, 0.90)" in sampling_code, "AI Story baseline sampling must match the September 25 reference")
+    _assert("return (0.62, 0.88)" in sampling_code, "Expand Story baseline sampling must match the September 25 reference")
+    fast = source[source.index("_STORY_PROFILES = {"):source.index("def _story_setting")]
+    _assert('"fast":    {"H3_STORY_THINKING": "0", "H3_STORY_BIBLE": "0", "H3_STORY_CRITIC": "0", "H3_STORY_EDITOR": "0",    "H3_STORY_CANDIDATES": "1"}' in fast,
+            "the fast profile must be the compact one-pass baseline")
+    _assert("temperature, top_p = 0.60, 0.95" in source, "thinking drafts use Qwen3's documented thinking sampler")
 
 
 def test_story_quality_review_is_evidence_bound_and_precedes_editor():
@@ -830,16 +826,23 @@ def test_audit_gated_editor_and_quality_critic_default():
     calls = {"chat": 0, "json": 0}
     director._chat_text = lambda *a, **k: calls.__setitem__("chat", calls["chat"] + 1) or ""
     director._chat_json = lambda *a, **k: calls.__setitem__("json", calls["json"] + 1) or {"findings": []}
-    saved = {k: os.environ.pop(k, None) for k in ("H3_STORY_EDITOR", "H3_STORY_CRITIC")}
+    saved = {k: os.environ.pop(k, None) for k in ("H3_STORY_EDITOR", "H3_STORY_CRITIC", "H3_STORY_PROFILE")}
     try:
         story = "Lena opened the hatch."
-        # September 25 baseline: no editor or semantic-review inference by default.
+        # Default (quality) profile runs the critic; the editor stays audit-gated.
+        _assert(director._edit_story_draft(AI_STORY_MODE, "p", story, None, [], temperature=0.6, top_p=0.95) == story,
+                "auto editor must not touch a draft that has no findings")
+        _assert(director._review_story_draft(AI_STORY_MODE, "p", story, None, []) == [], "an empty review returns no findings")
+        _assert(calls == {"chat": 0, "json": 1} and director._review_status == "ok", f"quality profile must call the critic once: {calls}")
+        calls["json"] = 0
+        # Fast profile: September 25 baseline, no editor or semantic-review inference.
+        os.environ["H3_STORY_PROFILE"] = "fast"
         _assert(director._edit_story_draft(AI_STORY_MODE, "p", story, None, [], temperature=0.6, top_p=0.95) == story,
                 "baseline editor must not touch a draft")
         _assert(director._review_story_draft(AI_STORY_MODE, "p", story, None, []) == [],
                 "the critic must be off by default")
         _assert(calls == {"chat": 0, "json": 0}, f"baseline should make no review/editor calls: {calls}")
-        # The critic remains available as an explicit experiment.
+        # The critic remains available as an explicit experiment in the fast profile.
         os.environ["H3_STORY_CRITIC"] = "1"
         _assert(director._review_story_draft(AI_STORY_MODE, "p", story, None, []) == [],
                 "an empty explicitly-enabled review should return no findings")
@@ -855,6 +858,8 @@ def test_audit_gated_editor_and_quality_critic_default():
         director._planned_cast = []
         _assert(director._planned_cast_findings(AI_STORY_MODE, story) == [], "no plan means no cast findings")
     finally:
+        for k in ("H3_STORY_EDITOR", "H3_STORY_CRITIC", "H3_STORY_PROFILE"):
+            os.environ.pop(k, None)
         for k, v in saved.items():
             if v is not None:
                 os.environ[k] = v
@@ -885,6 +890,84 @@ def test_writer_path_does_not_abort_on_planned_cast_heuristic():
     end = source.index("def _story_craft_issues", start)
     _assert(source[start:end].count("enforce_planned_cast=False") >= 3,
             "writer-path validation must leave planned-cast repair to the targeted editor")
+
+
+def test_story_profiles_control_thinking_and_review_defaults():
+    import planner.qwen_director as qd
+
+    names = ("H3_STORY_PROFILE", "H3_STORY_THINKING", "H3_STORY_BIBLE", "H3_STORY_CRITIC", "H3_STORY_EDITOR", "H3_STORY_CANDIDATES")
+    saved = {k: os.environ.pop(k, None) for k in names}
+    try:
+        _assert(qd._story_flag_on("H3_STORY_THINKING") and qd._story_flag_on("H3_STORY_CRITIC"), "default profile is quality: thinking writer and critic on")
+        os.environ["H3_STORY_PROFILE"] = "fast"
+        _assert(not qd._story_flag_on("H3_STORY_THINKING") and not qd._story_flag_on("H3_STORY_BIBLE") and qd._story_setting("H3_STORY_CANDIDATES") == "1", "fast profile is the compact baseline")
+        os.environ["H3_STORY_PROFILE"] = "max"
+        _assert(qd._story_setting("H3_STORY_CANDIDATES") == "2", "max profile allows an alternative draft")
+        os.environ["H3_STORY_CRITIC"] = "0"
+        _assert(not qd._story_flag_on("H3_STORY_CRITIC"), "an explicit variable overrides the profile")
+    finally:
+        for k in names:
+            os.environ.pop(k, None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_writer_thinking_follows_profile():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE
+
+    seen = {}
+    director = QwenDirector.__new__(QwenDirector)
+    director._fallback_planner = None
+    director.project_root = ROOT
+    director._planned_cast = []
+
+    def fake_chat_text(system, user, **kwargs):
+        seen.update(disable=kwargs["disable_thinking"], budget=kwargs["max_completion"])
+        raise RuntimeError("stop after capturing the request")
+
+    director._chat_text = fake_chat_text
+    saved = {k: os.environ.pop(k, None) for k in ("H3_STORY_PROFILE", "H3_STORY_THINKING")}
+    try:
+        for profile, expect_disable, expect_budget in (("quality", False, 3200), ("fast", True, 1600)):
+            os.environ["H3_STORY_PROFILE"] = profile
+            try:
+                director._generate_story_once(AI_STORY_MODE, "p", "sys", "usr", temperature=0.6, top_p=0.95, source_character_names=[])
+            except RuntimeError:
+                pass
+            _assert(seen["disable"] is expect_disable and seen["budget"] == expect_budget, f"{profile}: {seen}")
+    finally:
+        os.environ.pop("H3_STORY_PROFILE", None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def test_critic_failure_is_reported_as_unverified_not_clean():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._planned_cast = []
+    director._fallback_planner = None
+    director.project_root = ROOT
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("Qwen structured output hit the completion limit")
+
+    director._chat_json = boom
+    saved = os.environ.pop("H3_STORY_PROFILE", None)
+    os.environ.pop("H3_STORY_CRITIC", None)
+    try:
+        _assert(director._review_story_draft(AI_STORY_MODE, "p", "Mara climbed.", None, []) == [], "failed critic returns no findings")
+        _assert(director._review_status == "failed", "a failed critic must be distinguishable from a clean review")
+    finally:
+        if saved is not None:
+            os.environ["H3_STORY_PROFILE"] = saved
+    review_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    start = review_source.index("def _review_story_draft(")
+    _assert("max_completion=3000" in review_source[start:start + 3500], "thinking critic needs room for reasoning plus JSON")
 
 
 def test_story_prompt_has_no_artificial_subtargets():
@@ -972,10 +1055,10 @@ def test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity
             "candidate comparison must prioritize source facts and avoid cast quotas")
 
 
-def test_story_bible_remains_optional_by_default():
+def test_story_bible_is_profile_controlled_and_optional_in_fast_profile():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert('os.getenv("H3_STORY_BIBLE", "0")' in source,
-            "Story Bible should remain opt-in until controlled runs show it helps this model/prompt")
+    _assert('_story_flag_on("H3_STORY_BIBLE")' in source, "Story Bible must follow the story profile")
+    _assert('"fast":    {"H3_STORY_THINKING": "0", "H3_STORY_BIBLE": "0"' in source, "the fast profile keeps the Story Bible off")
 
 
 def test_shot_critique_checks_object_state_across_story():
@@ -1041,11 +1124,14 @@ def main():
         test_story_prompt_preserves_causal_cast_and_live_dialogue_contract,
         test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated,
         test_editor_uses_same_story_contract_and_can_repair_supported_counterpart,
-        test_sep25_baseline_story_generation_settings,
+        test_fast_profile_keeps_the_sep25_baseline_settings,
         test_story_quality_review_is_evidence_bound_and_precedes_editor,
         test_audit_gated_editor_and_quality_critic_default,
         test_story_quality_verification_is_bounded_and_cast_is_advisory_by_default,
         test_writer_path_does_not_abort_on_planned_cast_heuristic,
+        test_story_profiles_control_thinking_and_review_defaults,
+        test_writer_thinking_follows_profile,
+        test_critic_failure_is_reported_as_unverified_not_clean,
         test_story_prompt_has_no_artificial_subtargets,
         test_build_alias_map_skips_stopword_first_token,
         test_characters_in_scene_does_not_bind_descriptive_by_article,
@@ -1053,7 +1139,7 @@ def main():
         test_identity_presence_accepts_title_free_and_given_name_surfaces,
         test_best_of_n_requires_grounded_pairwise_and_position_swap,
         test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity,
-        test_story_bible_remains_optional_by_default,
+        test_story_bible_is_profile_controlled_and_optional_in_fast_profile,
         test_shot_critique_checks_object_state_across_story,
     ]
     for test in tests:
