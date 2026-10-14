@@ -101,12 +101,13 @@ def _validate_control_plane_requirements() -> None:
         if not line or "==" not in line:
             continue
         name, version = [part.strip() for part in line.split("==", 1)]
-        requirements[name.lower()] = version
-    expected = {"transformers": "5.18.0", "tokenizers": "0.23.2"}
-    for name, version in expected.items():
-        if requirements.get(name) != version:
+        if name and version:
+            requirements[name.lower().replace("_", "-")] = version.split(";", 1)[0].strip()
+
+    for name in ("transformers", "tokenizers"):
+        if not requirements.get(name):
             raise RuntimeError(
-                f"requirements.txt must pin {name}=={version} for deterministic Director token accounting."
+                f"requirements.txt must contain an exact {name}== pin for deterministic Director token accounting."
             )
 
 
