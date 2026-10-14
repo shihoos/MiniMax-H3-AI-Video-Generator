@@ -241,6 +241,26 @@ def find_director_speculator() -> Path:
 
 
 
+def _exact_requirement_pin(package_name: str) -> str:
+    """Read one exact package pin from the project requirements file."""
+    requirements_path = ROOT / "requirements.txt"
+    matches = []
+    for raw in requirements_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "==" not in line:
+            continue
+        name, version = line.split("==", 1)
+        if name.strip().lower().replace("_", "-") == package_name.lower().replace("_", "-"):
+            version = version.split(";", 1)[0].strip()
+            if version:
+                matches.append(version)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"requirements.txt must contain exactly one exact pin for {package_name}."
+        )
+    return matches[0]
+
+
 def check_director() -> None:
     model = find_director_model()
     speculator = find_director_speculator()
@@ -248,7 +268,10 @@ def check_director() -> None:
     print("DIRECTOR SPECULATOR:", speculator)
     director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
     version = str(director.get("vllm_version", "") or "").strip()
+    transformers_version = _exact_requirement_pin("transformers")
+    tokenizers_version = _exact_requirement_pin("tokenizers")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
+    env_dir_value = os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", "").strip() or env_dir_value
     method = str(director.get("speculative_method", "") or "").strip().lower()
     tokens = int(director.get("speculative_tokens", 0) or 0)
     if not version:
@@ -263,14 +286,45 @@ def check_director() -> None:
     venv_python = env_dir / "bin" / "python"
     if not version or not venv_python.is_file():
         raise RuntimeError("Pinned vLLM environment is missing; run bootstrap first.")
-    result = subprocess.run([str(venv_python), "-c", "import vllm; print(vllm.__version__)"], capture_output=True, text=True, check=False)
+    probe = (
+        "import vllm, transformers, tokenizers; "
+        "from transformers import Qwen3Config; "
+        "from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM; "
+        "print('vLLM version:', vllm.__version__); "
+        "print('Transformers version:', transformers.__version__); "
+        "print('tokenizers version:', tokenizers.__version__); "
+        "print('Qwen3 imports: PASS')"
+    )
+    result = subprocess.run([str(venv_python), "-c", probe], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         raise RuntimeError("vLLM Director runtime is unavailable.\n" + (result.stderr or result.stdout))
-    observed = result.stdout.strip()
+    print(result.stdout.strip())
+    observed_versions = {}
+    for line in result.stdout.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            observed_versions[key.strip()] = value.strip()
+    observed = observed_versions.get("vLLM version", "")
+    observed_transformers = observed_versions.get("Transformers version", "")
+    observed_tokenizers = observed_versions.get("tokenizers version", "")
     if observed != version:
         raise RuntimeError(f"Director vLLM version mismatch: observed={observed}, expected={version}")
+    if observed_transformers != transformers_version:
+        raise RuntimeError(
+            "Director Transformers version mismatch: "
+            f"observed={observed_transformers}, expected={transformers_version}"
+        )
+    if observed_tokenizers != tokenizers_version:
+        raise RuntimeError(
+            "Director tokenizers version mismatch: "
+            f"observed={observed_tokenizers}, expected={tokenizers_version}"
+        )
+    if bool(director.get("allow_transformers_vllm_constraint_override", False)):
+        print("DIRECTOR COMPATIBILITY: EXPERIMENTAL override enabled")
     print("DIRECTOR RUNTIME: PASS")
     print("DIRECTOR VLLM:", observed, "expected:", version)
+    print("DIRECTOR TRANSFORMERS:", observed_transformers, "expected:", transformers_version)
+    print("DIRECTOR TOKENIZERS:", observed_tokenizers, "expected:", tokenizers_version)
     print("DIRECTOR SPECULATION: PASS", f"method={method}", f"tokens={tokens}", f"speculator={speculator}")
 
 
