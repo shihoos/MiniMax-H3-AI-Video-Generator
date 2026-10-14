@@ -1201,16 +1201,46 @@ def install_director_runtime(
         if item and item.strip()
     )
     if dependency_check.returncode != 0:
-        check_lines = [" ".join(line.split()).lower() for line in check_output.splitlines() if line.strip()]
-        expected_conflicts = [
-            line for line in check_lines
-            if allow_transformers_override
-            and line.startswith(f"vllm {vllm_version.lower()} ")
-            and "has requirement transformers" in line
-            and f"but you have transformers {transformers_version.lower()}" in line
+        check_lines = [
+            " ".join(line.split()).lower()
+            for line in check_output.splitlines()
+            if line.strip()
         ]
-        unexpected_lines = [line for line in check_lines if line not in expected_conflicts]
-        if len(expected_conflicts) != 1 or unexpected_lines:
+        # `uv pip check` reports diagnostics differently from `pip check`:
+        # e.g. "The package `vllm` requires `transformers>=...,<...`, but
+        # `5.19.0` is installed". Validate diagnostic lines separately from
+        # uv's informational summary (environment, checked count, conflict count).
+        diagnostic_lines = [
+            line for line in check_lines
+            if line.startswith("the package `")
+            and " requires `" in line
+            and ", but `" in line
+            and " is installed" in line
+        ]
+        expected_conflicts = [
+            line for line in diagnostic_lines
+            if allow_transformers_override
+            and line.startswith("the package `vllm` requires `transformers")
+            and f", but `{transformers_version.lower()}` is installed" in line
+        ]
+        unexpected_conflicts = [
+            line for line in diagnostic_lines if line not in expected_conflicts
+        ]
+        summary_lines = [
+            line for line in check_lines
+            if line.startswith("found ") and " incompatibilit" in line
+        ]
+        try:
+            reported_conflicts = int(summary_lines[0].split()[1]) if len(summary_lines) == 1 else -1
+        except (IndexError, ValueError):
+            reported_conflicts = -1
+        if (
+            len(summary_lines) != 1
+            or reported_conflicts != len(diagnostic_lines)
+            or reported_conflicts != 1
+            or len(expected_conflicts) != 1
+            or unexpected_conflicts
+        ):
             raise RuntimeError(
                 "Director dependency check found unexpected conflicts:\n"
                 + (check_output or "uv pip check failed without diagnostic output")
