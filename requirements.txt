@@ -8,5 +8,5 @@ websocket-client==1.9.1
 jsonschema==4.26.0
 requests==2.32.5
 psutil==7.0.0
-transformers==5.18.0
-tokenizers==0.23.2
+transformers==5.19.0
+tokenizers==0.23.3
