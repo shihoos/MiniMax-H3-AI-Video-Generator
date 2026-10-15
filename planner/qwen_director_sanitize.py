@@ -810,6 +810,7 @@ class QwenDirectorSanitizeMixin:
         ).strip()
 
         result: list[dict] = []
+        visual_prompts_normalized = 0
 
         for value in (
             shots
@@ -900,6 +901,33 @@ class QwenDirectorSanitizeMixin:
 
             if not str(candidate.get("visual_prompt", "") or "").strip():
                 continue
+
+            # The shot prompt contract is 15-40 words. Enforce it deterministically
+            # rather than spending another model call: enrich short prompts only with
+            # same-shot action/composition already present, and trim excess words.
+            visual_prompt = re.sub(
+                r"\s+", " ", str(candidate.get("visual_prompt", "") or "").strip()
+            )
+            original_visual_prompt = visual_prompt
+            def _visual_word_count(value: str) -> int:
+                return len(re.findall(r"[\w'’-]+", value))
+
+            if _visual_word_count(visual_prompt) < 15:
+                additions = [
+                    str(candidate.get("action", "") or "").strip(),
+                    str(candidate.get("composition_notes", "") or "").strip(),
+                    f"{shot_location or scene_location or 'the scene'} under {scene_lighting}",
+                ]
+                for addition in additions:
+                    if addition and addition.casefold() not in visual_prompt.casefold():
+                        visual_prompt = (visual_prompt + " " + addition).strip()
+                    if _visual_word_count(visual_prompt) >= 15:
+                        break
+            if _visual_word_count(visual_prompt) > 40:
+                visual_prompt = " ".join(visual_prompt.split()[:40]).rstrip(" ,;:")
+            if visual_prompt != original_visual_prompt:
+                candidate["visual_prompt"] = visual_prompt
+                visual_prompts_normalized += 1
 
             # Character binding is production-critical. Qwen may omit the
             # field or return an empty list even though the scene already
@@ -1049,6 +1077,12 @@ class QwenDirectorSanitizeMixin:
 
             result.append(
                 candidate
+            )
+
+        if visual_prompts_normalized:
+            print(
+                f"[DIRECTOR] visual_prompt word range normalized for {visual_prompts_normalized} shot(s) in {scene_id}; no model retry",
+                flush=True,
             )
 
         # Canonicalize dialogue continuation across adjacent shots in the same
