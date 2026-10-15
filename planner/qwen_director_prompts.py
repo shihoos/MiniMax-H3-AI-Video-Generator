@@ -54,6 +54,7 @@ DIALOGUE CONTRACT:
 - Text on signs, tags, labels, screens, monitors, keypads, canisters, files, and IDs is WRITTEN text, never dialogue; never assign it to any speaker.
 - Copy dialogue with its original capitalization and punctuation exactly as listed in that scene's `source_dialogue` item; never lower-case it.
 - Put a spoken line in the shot where it is actually said in the story, with its speaker visible and listed in `characters`; the `action` of that shot must show that character speaking. Do not spread unspoken shots across a line, and do not assign a line to a shot whose action is about something else.
+- Dialogue spoken only over a radio, intercom, loudspeaker, phone, recording, or screen is off-screen audio, not a visible speaking-character event. Do not bind that remote speaker to a shot as though physically present; omit that line from scene-local `dialogue_events`.
 - A sentence such as a character's action, breath, expression, realization, or narration is NEVER dialogue, even when it begins with the character's name.
 - Every source utterance may be used only once. The only exception is splitting one longer source utterance into exact contiguous pieces across adjacent shots. Never repeat the same source line in multiple shots.
 - Every dialogue_events[].speaker MUST exactly match one supplied canonical character name.
@@ -197,34 +198,19 @@ Return JSON only.
 
 class QwenDirectorPromptMixin:
     _STORY_CRAFT_RULES = """
-Plan a compact causal spine: protagonist goal, resistance, a planted detail,
-a grounded reversal that changes the meaning of that detail, a consequential
-choice, and the concrete consequence. Output only the finished prose.
+Write one complete, original short-film story in third-person past tense: exactly six filmable scene paragraphs, 420-560 words total. Aim for 480-520 words (never under 440 unless the premise genuinely constrains length). Each paragraph is one continuous scene at one physical location and time. Output only the finished story.
 
-Write six filmable scene paragraphs in third-person past tense. Keep prose economical
-and specific to the premise. Preserve its important facts. Let actions and decisions
-carry the story; avoid exposition-heavy explanations and generic hidden-project twists.
-Include a brief line of direct dialogue attributed to a named character when it naturally
-advances conflict, information, or a decision. Do not use a recording, alarm, screen,
-or system message as a substitute for a consequential character.
-Resolve the protagonist's immediate goal and central conflict. End with a concrete,
-settled consequence rather than a new mystery or future mission.
-Total length is 420-560 words; a draft under 420 words is rejected.
+Plan a compact causal spine: protagonist goal and resistance; introduce a planted detail; grounded reversal that changes the meaning of that detail; consequential choice; concrete consequence. Major events must follow established facts. Keep each key mechanism to one understandable rule demonstrated by observable evidence. No arbitrary countdown, collapse, weather shift, hidden system, sudden danger, or generic conspiracy/experiment reveal without a cause in the premise.
 
-Dialogue is conflict, not exposition: a spoken line demands, refuses, bargains, lies or
-pleads, and never tells a character what both already know or announces backstory.
-Track every important object and person: nothing is used twice, reappears where it was
-left, or contradicts the choice made in the fifth paragraph; the last paragraph must
-show what that choice actually caused. Avoid stock phrases (jaw tightened, pulse
-quickened, heart pounding, breath hitched, reeked of, eerie glow, skeletal shadows,
-the weight of what she had chosen) and avoid a miracle-cure, virus, cover-up or
-countdown plot unless the premise itself asks for one.
+Default to ordinary physical cause and effect. Use supernatural, surreal, or dream logic, identity twists, miracle cures, or cover-ups only when the premise calls for them. When the premise establishes a profession or skill, make it materially affect the decisive choice or reversal; do not invent convenient expertise.
 
-Qwen decides names, identities, relationships, and cast size. No hardcoded roster or
-numeric cast quota. Do not default to a one-person story: unless the premise genuinely
-depends on isolation, include a second physically present, consequential character
-whose independent goal or decision changes the protagonist's options. Add more people
-only when their choices materially affect the causal chain.
+Track people's and objects' state and location. If an object is moved, handed over, pocketed, dropped, broken, destroyed, or left behind, keep its state consistent unless a shown event changes it. Establish every clue, tool, skill, or promise used in the climax and pay it off visibly.
+
+Include a brief line of direct dialogue attributed to a named character when it advances conflict, resistance, a decision, or a reversal. Natural lines demand, refuse, bargain, lie, or plead instead of explaining known facts. The central opposition must not exist only as a radio, loudspeaker, recording, screen, or system voice. Unless the premise genuinely depends on isolation, include a second physically present, consequential character whose independent choice changes the protagonist's options; keep that person active in multiple scenes when the causal arc supports it. Additional characters should appear only when their choices materially affect the causal chain. Qwen decides names, identities, relationships, and cast size; no hardcoded roster or numeric cast quota.
+
+Avoid stock emotional shorthand and repeated filler. Prefer specific observable behavior and premise-specific details.
+
+Paragraph five contains the consequential decision or decisive act. Paragraph six shows its observable cost/result, resolves the immediate conflict, and ends with a completed action—not a fresh mystery or future mission. Preserve the premise's important facts and, in Expand Story, the source's established events, chronology, outcome, and defining meaning.
 """.strip()
 
     def _story_text_system(
@@ -242,8 +228,9 @@ only when their choices materially affect the causal chain.
             return (
                 common
                 + "\n\nEXPAND STORY SOURCE FIDELITY\n"
-                + "The supplied story is canon. Preserve its important characters, events in order, setting, outcome, and defining meaning. "
-                + "Deepen the existing causal chain; do not replace it with a generic genre plot or invent disconnected backstory.")
+                + "The supplied story is canon: preserve established characters, concrete objects and locations, events in chronological order, outcome, and meaning. "
+                + "Establish its opening situation early, then carry later source events into the scenes where they occur; do not cram every source sentence into the opening paragraphs. "
+                + "Deepen the same causal chain without a disconnected backstory, family link, subplot, or generic genre reveal.")
         raise ValueError("Preserve Story does not use a story-text pass.")
 
     def _story_text_user(
@@ -251,7 +238,6 @@ only when their choices materially affect the causal chain.
         mode: str,
         story: str,
         source_character_names: list[str] | None = None,
-        story_bible: dict | None = None,
     ) -> str:
         source_text = self._compact_story_context(
             story,
@@ -269,9 +255,6 @@ only when their choices materially affect the causal chain.
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
-        bible_text = self._format_story_bible(story_bible)
-        if bible_text:
-            result += "\n\n" + bible_text
         result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Plain prose only."
         return result
 
