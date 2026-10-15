@@ -151,6 +151,44 @@ DIRECTOR_TOP_P = float(
     )
 )
 
+# Dedicated Qwen3 thinking-mode profile for story planning and prose generation.
+# Keep generic Director JSON/shot defaults separate; story calls must not silently
+# override these values in qwen_director.py.
+_story_sampling = dict(RUNTIME["director"].get("story_sampling", {}) or {})
+_story_thinking_sampling = dict(_story_sampling.get("thinking", {}) or {})
+
+DIRECTOR_STORY_THINKING_TEMPERATURE = float(os.getenv(
+    "H3_DIRECTOR_STORY_TEMPERATURE",
+    str(_story_thinking_sampling["temperature"]),
+))
+DIRECTOR_STORY_THINKING_TOP_P = float(os.getenv(
+    "H3_DIRECTOR_STORY_TOP_P",
+    str(_story_thinking_sampling["top_p"]),
+))
+DIRECTOR_STORY_THINKING_TOP_K = int(os.getenv(
+    "H3_DIRECTOR_STORY_TOP_K",
+    str(_story_thinking_sampling["top_k"]),
+))
+DIRECTOR_STORY_THINKING_MIN_P = float(os.getenv(
+    "H3_DIRECTOR_STORY_MIN_P",
+    str(_story_thinking_sampling["min_p"]),
+))
+DIRECTOR_STORY_PRESENCE_PENALTY = float(os.getenv(
+    "H3_DIRECTOR_STORY_PRESENCE_PENALTY",
+    str(_story_thinking_sampling["presence_penalty"]),
+))
+
+if not 0.0 <= DIRECTOR_STORY_THINKING_TEMPERATURE <= 2.0:
+    raise RuntimeError("Story thinking temperature must be in [0, 2].")
+if not 0.0 < DIRECTOR_STORY_THINKING_TOP_P <= 1.0:
+    raise RuntimeError("Story thinking top_p must be in (0, 1].")
+if DIRECTOR_STORY_THINKING_TOP_K < 1:
+    raise RuntimeError("Story thinking top_k must be >= 1.")
+if not 0.0 <= DIRECTOR_STORY_THINKING_MIN_P <= 1.0:
+    raise RuntimeError("Story thinking min_p must be in [0, 1].")
+if not -2.0 <= DIRECTOR_STORY_PRESENCE_PENALTY <= 2.0:
+    raise RuntimeError("Story presence_penalty must be in [-2, 2].")
+
 DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE = int(
     os.getenv(
         "H3_DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE",
