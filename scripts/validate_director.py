@@ -175,6 +175,12 @@ def test_qwen_extractor_is_called_even_for_obvious_named_roster():
     story = "Elias Kade entered the station. Lin Mei waited beside the vault."
     calls = []
 
+    def fail_deterministic_scan(*_args, **_kwargs):
+        raise AssertionError("creative Qwen path must not run deterministic character scans")
+
+    planner.detect_character_descriptors = fail_deterministic_scan
+    planner._explicit_source_character_names = fail_deterministic_scan
+
     def extractor(_story, hints):
         calls.append(list(hints))
         return {"candidates": [
@@ -183,7 +189,7 @@ def test_qwen_extractor_is_called_even_for_obvious_named_roster():
         ]}
 
     planner.create_characters(story, qwen_character_extractor=extractor)
-    _assert(len(calls) == 1, f"Qwen character extraction was bypassed or repeated: {calls}")
+    _assert(calls == [[]], f"Qwen must receive the story without any deterministic name hints: {calls}")
 
 
 def test_mention_only_qwen_candidates_are_filtered_without_restoring_them():
@@ -343,33 +349,25 @@ def test_expand_is_open_cast_but_preserves_source_anchors():
         _assert("omitted established source character" in str(exc), f"wrong source-anchor error: {exc}")
 
 
-def test_expand_prompt_does_not_impose_cast_limit():
-    """Assert the September 25 cast contract, not wording from a later prompt revision."""
+def test_story_prompt_does_not_force_cast_size():
+    """Qwen must choose the cast; story quality must not depend on a numeric quota."""
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import EXPAND_USER_STORY_MODE, AI_STORY_MODE
 
     mixin = QwenDirectorPromptMixin()
-    expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
-    ai = " ".join(mixin._story_text_system(AI_STORY_MODE).lower().split())
-    for text, label in ((expand, "expand"), (ai, "ai story")):
+    for mode in (EXPAND_USER_STORY_MODE, AI_STORY_MODE):
+        text = " ".join(mixin._story_text_system(mode).lower().split())
         _assert(
-            "qwen decides names, identities, relationships, and cast size" in text
+            "qwen decides names, identities, relationships, and final cast size" in text
             and "no hardcoded roster or numeric cast quota" in text,
-            f"{label} prompt must leave cast authorship to Qwen without a numeric quota",
+            f"{mode} must leave cast authorship to Qwen",
         )
-        _assert(
-            "unless the premise genuinely depends on isolation" in text
-            and "include a second physically present, consequential character" in text,
-            f"{label} prompt must retain the baseline's qualified counterpart preference",
-        )
-        _assert(
-            "only when their choices materially affect the causal chain" in text,
-            f"{label} prompt must keep additional cast members consequential",
-        )
-    _assert("only named people allowed" not in expand,
+        _assert("include a second physically present" not in text,
+                f"{mode} must not force a second character")
+        _assert("at least two characters" not in text and "two-character minimum" not in text,
+                f"{mode} must not enforce a numeric cast quota")
+    _assert("only named people allowed" not in " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split()),
             "Expand prompt must not treat source anchors as a cast whitelist")
-    _assert("only named people allowed" not in ai,
-            "AI Story prompt must not treat source anchors as a cast whitelist")
 
 
 def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
@@ -379,51 +377,161 @@ def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
     _assert("maxItems" not in candidates, "character extraction schema must not impose a cast-size cap")
     _assert(schema["properties"]["spoken_dialogue"].get("maxItems") == 128,
             "spoken-dialogue extraction should retain its independent bounded payload")
+    _assert("hint_classifications" not in schema["properties"] and "hint_classifications" not in schema["required"],
+            "the roster contract must not require per-name hint classifications")
 
 
-def test_story_generation_is_single_pass_thinking_3200_no_floor():
+def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue():
+    import json
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+
+    mixin = QwenDirectorPromptMixin()
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._planned_cast = ["Planned Person"]
+    # This unit isolates roster authorship; dialogue anchoring is tested separately.
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
+    observed = {}
+    story = 'Elara opened the vault. Kael Mercer woke and said, "I can walk." Elara helped him reach the exit.'
+
+    def fake_chat_json(system_prompt, user_prompt, *args, **kwargs):
+        observed["schema"] = kwargs["response_schema"]
+        observed["system"] = system_prompt
+        observed["payload"] = json.loads(user_prompt)
+        # Simulate Qwen returning an incomplete roster. The code must not inject
+        # Kael from hint scans, its planned cast, or the separate dialogue list.
+        return {
+            "candidates": [{"name": "Elara", "entity_type": "PERSON", "is_character": True,
+                            "identity_type": "named_character"}],
+            "spoken_dialogue": [{"text": "I can walk.", "speaker": "Kael Mercer"}],
+        }
+
+    mixin._chat_json = fake_chat_json
+    result = mixin.extract_character_entities(
+        story, deterministic_candidates=["Elara", "Kael Mercer", "Station Echo-7"]
+    )
+    _assert(set(observed["payload"]) == {"story"},
+            "deterministic hint names and planned cast must not be sent as roster directives")
+    _assert(set(observed["schema"]["properties"]) == {"candidates", "spoken_dialogue"},
+            "Qwen should decide the cast directly, not fill a per-name classification array")
+    _assert("physically participate" in observed["system"] and "no cast-count quota" in observed["system"].lower(),
+            "extractor must request all current-action participants without a cast quota")
+    _assert([item["name"] for item in result["candidates"]] == ["Elara"],
+            "the extractor must not programmatically add a missing character to Qwen's roster")
+    _assert(mixin._semantic_spoken_dialogue == [{"text": "I can walk.", "speaker": "Kael Mercer"}],
+            "dialogue extraction should remain available without silently rewriting the roster")
+
+
+def test_ai_story_does_not_inherit_template_cast_anchors():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    start = source.index("source_character_names: list[str] =", source.index("def generate("))
+    end = source.index("if resuming and prior_director_plan.get(", start)
+    assignment = source[start:end]
+    _assert("if mode == EXPAND_USER_STORY_MODE" in assignment,
+            "only source-preserving Expand Story may receive base-plan character anchors")
+
+
+def test_story_generation_is_single_pass_thinking_2200_no_floor():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     body = source.split("def _generate_story_once")[1].split("def _story_craft_issues")[0]
-    generation_start = source.index("# The previous Story Bible / critic / editor chain")
+    generation_start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     generation_end = source.index("# PASS 1B: deterministic production foundation", generation_start)
     generation = source[generation_start:generation_end]
     _assert(body.count("self._chat_text(") == 1, "story generation must use one primary Qwen text call")
-    _assert("story_budget = 3200" in body and "max_completion=story_budget" in body,
-            "story writer must use the requested 3,200-token completion cap")
+    _assert("story_budget = 2200" in body and "max_completion=story_budget" in body,
+            "story writer must use the 2,200-token completion cap")
     _assert("disable_thinking=False" in body, "story writer must use thinking mode")
     _assert("seed=DIRECTOR_VLLM_SEED," in body, "single-pass story generation must use the stable Director seed")
     _assert("minimum_output_tokens=story_min_output_tokens" in body and "story_min_output_tokens = 0" in body,
             "story writer must not force minimum-token padding")
     _assert(generation.count("self._generate_story_once(") == 1,
             "normal story path must invoke the writer exactly once")
-    for forbidden in ("_plan_story_bible(", "_collect_story_findings(", "_resample_for_audit(", "_edit_story_draft(", "story_quality_repair_pass"):
+    for forbidden in ("_collect_story_findings(", "_resample_for_audit(", "_edit_story_draft(", "story_quality_repair_pass"):
         _assert(forbidden not in generation, f"normal story path must not call expensive optional stage {forbidden}")
-    _assert("temperature, top_p = 0.60, 0.95" in source,
-            "thinking-mode writer sampling must be explicit")
-def test_story_prompt_has_causal_reversal_not_fixed_mystery_template():
-    """Check the compact September 25 contract without requiring later prompt wording."""
+    _assert("temperature, top_p = self._sampling_for_mode(mode)" in source,
+            "story writer must use its configured story sampler")
+def test_qwen3_story_sampler_is_runtime_config_driven():
+    import yaml
+    from planner.config import (
+        DIRECTOR_STORY_THINKING_TEMPERATURE,
+        DIRECTOR_STORY_THINKING_TOP_P,
+        DIRECTOR_STORY_THINKING_TOP_K,
+        DIRECTOR_STORY_THINKING_MIN_P,
+        DIRECTOR_STORY_PRESENCE_PENALTY,
+    )
+    config = yaml.safe_load((ROOT / "configs/runtime_versions.yaml").read_text(encoding="utf-8"))
+    profile = config["director"]["story_sampling"]["thinking"]
+    expected = {
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "top_k": 20,
+        "min_p": 0.0,
+        "presence_penalty": 1.5,
+    }
+    _assert(profile == expected, f"wrong runtime story profile: {profile}")
+    _assert(config["director"]["temperature"] == 0.2 and config["director"]["top_p"] == 0.85,
+            "generic Director defaults must remain unchanged; story sampler is a dedicated profile")
+    _assert((DIRECTOR_STORY_THINKING_TEMPERATURE, DIRECTOR_STORY_THINKING_TOP_P,
+             DIRECTOR_STORY_THINKING_TOP_K, DIRECTOR_STORY_THINKING_MIN_P,
+             DIRECTOR_STORY_PRESENCE_PENALTY) == (0.6, 0.95, 20, 0.0, 1.5),
+            "loaded story profile differs from runtime_versions.yaml")
+    runtime = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
+    _assert("payload[\"top_k\"] = int(DIRECTOR_STORY_THINKING_TOP_K)" in runtime,
+            "top_k must come from runtime configuration")
+    _assert("payload[\"min_p\"] = float(DIRECTOR_STORY_THINKING_MIN_P)" in runtime,
+            "min_p must come from runtime configuration")
+    # Exercise the actual request payload without starting a live vLLM server.
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+    class Response:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"ok": True}
+    class Session:
+        def __init__(self):
+            self.payload = None
+        def post(self, url, json, timeout):
+            self.payload = dict(json)
+            return Response()
+    probe = QwenDirectorRuntimeMixin.__new__(QwenDirectorRuntimeMixin)
+    probe._vllm_session = Session()
+    probe._vllm_model_name = lambda: "qwen3-14b-awq"
+    probe._vllm_base_url = lambda: "http://127.0.0.1:8000/v1"
+    probe._post_chat(
+        messages=[{"role": "user", "content": "test"}],
+        temperature=DIRECTOR_STORY_THINKING_TEMPERATURE,
+        top_p=DIRECTOR_STORY_THINKING_TOP_P,
+        max_tokens=20,
+        creative=True,
+        enable_thinking=True,
+    )
+    sent = probe._vllm_session.payload
+    _assert((sent["temperature"], sent["top_p"], sent["top_k"], sent["min_p"], sent["presence_penalty"])
+            == (0.6, 0.95, 20, 0.0, 1.5), f"wrong effective sampler sent to vLLM: {sent}")
+    _assert(sent["chat_template_kwargs"]["enable_thinking"] is True,
+            "request must explicitly retain thinking mode")
+
+
+def test_story_prompt_restores_september_25_craft_contract():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
 
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = " ".join(mixin._story_text_system(mode).lower().split())
-        _assert("plan a compact causal spine" in text,
-                f"{mode} must retain the compact September 25 story structure")
-        _assert(("protagonist goal" in text or "protagonist's goal" in text) and "resistance" in text and "a planted detail" in text,
-                f"{mode} must establish a goal, resistance, and planted detail")
-        _assert("grounded reversal that changes the meaning of that detail" in text,
-                f"{mode} must require a meaningful causal reversal")
-        _assert("consequential choice" in text and "concrete consequence" in text,
-                f"{mode} must connect the choice to an observable consequence")
-        _assert("six filmable scene paragraphs" in text,
-                f"{mode} must retain the six-paragraph scene contract")
-        _assert("brief line of direct dialogue attributed to a named character" in text,
-                f"{mode} must prefer purposeful character dialogue")
-        _assert("no hardcoded roster or numeric cast quota" in text,
-                f"{mode} must leave character identities and cast size to Qwen")
-        _assert("always use a mystery" not in text and "always use containment" not in text,
-                f"{mode} must not force a fixed genre template")
+        _assert("unexpected reveal or reversal" in text,
+                f"{mode} must preserve the September 25 reversal requirement")
+        _assert("at least two sentences" in text and "interiority" in text,
+                f"{mode} must preserve the baseline interiority requirement")
+        _assert("short line of spoken dialogue by a named character" in text,
+                f"{mode} must preserve purposeful spoken dialogue")
+        _assert("400-650 words" in text,
+                f"{mode} must restore the September 25 word-range guidance")
+        _assert(("complete aftermath paragraph" in text if mode == AI_STORY_MODE else "complete resolution paragraph" in text),
+                f"{mode} must require a completed aftermath")
+        _assert("include a second physically present" not in text,
+                f"{mode} must not force a second character")
+
 
 def test_story_contract_remains_six_paragraphs_420_560():
     director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
@@ -553,7 +661,7 @@ def test_dialogue_anchor_normalization_matches_terminal_punctuation_rules():
 def test_empty_character_extraction_result_keeps_dialogue_schema_contract():
     source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
     _assert('return {"candidates": [], "spoken_dialogue": []}' in source,
-            "empty semantic extraction must return both schema fields")
+            "empty semantic extraction must return only Qwen roster and dialogue fields")
 
 
 def test_preserve_dialogue_detection_uses_normalized_story():
@@ -720,6 +828,15 @@ def test_mention_only_filter_can_fail_closed():
 
 
 
+def test_final_telemetry_is_not_printed_twice_when_critique_is_skipped():
+    source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert(source.count('self._print_qwen_summary("FINAL")') == 2,
+            "only the enabled-critique finally and disabled-critique branch should print final telemetry")
+    enrich = source[source.index("    def enrich_plan("):source.index("    def critique_plan(")]
+    _assert('self._print_qwen_summary("FINAL")' not in enrich,
+            "enrich_plan must not duplicate the summary owned by critique_plan")
+
+
 def test_director_critique_is_opt_in_without_empty_recompile_payload():
     import os
     from planner.qwen_director import QwenDirector
@@ -750,36 +867,43 @@ def test_director_critique_is_opt_in_without_empty_recompile_payload():
             "the canonical critique switch must override the runtime manifest feature flag")
 
 
-def test_story_prompt_includes_target_length_grounded_causality_and_source_order():
+def test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
+
+    mixin = QwenDirectorPromptMixin()
+    from planner.config import DIRECTOR_STORY_THINKING_TEMPERATURE, DIRECTOR_STORY_THINKING_TOP_P
+    expected_sampling = (DIRECTOR_STORY_THINKING_TEMPERATURE, DIRECTOR_STORY_THINKING_TOP_P)
+    _assert(mixin._sampling_for_mode(AI_STORY_MODE) == expected_sampling,
+            "AI Story should use the configured Qwen3 thinking-mode profile")
+    _assert(mixin._sampling_for_mode(EXPAND_USER_STORY_MODE) == expected_sampling,
+            "Expand Story should use the configured Qwen3 thinking-mode profile")
+    _assert(expected_sampling == (0.6, 0.95),
+            f"story sampler should match Qwen3's documented thinking-mode baseline: {expected_sampling}")
+    ai = " ".join(mixin._story_text_system(AI_STORY_MODE).lower().split())
+    expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
+    _assert("subvert the obvious" in ai and "specific fear, memory, desire" in ai,
+            "AI Story lost the baseline reversal/interiority craft guidance")
+    _assert("preserving its important characters, events, chronology, setting, outcome" in expand,
+            "Expand Story must preserve its source's established plot")
+    _assert("qwen decides names, identities, relationships, and final cast size" in ai and
+            "qwen decides names, identities, relationships, and final cast size" in expand,
+            "both modes must keep open-cast authorship with Qwen")
+
+
+def test_story_prompt_preserves_baseline_dialogue_without_cast_quota():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
 
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = " ".join(mixin._story_text_system(mode).lower().split())
-        _assert("aim for 480-520 words" in text, f"{mode} should target the safe middle of the 420-560 contract")
-        _assert("ordinary physical cause and effect" in text, f"{mode} should avoid unsupported dream logic while respecting premise genre")
-        _assert("materially affect the decisive choice or reversal" in text, f"{mode} should use established protagonist skills causally")
-        _assert("avoid stock emotional shorthand" in text, f"{mode} should discourage repeated stock prose")
-    expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
-    _assert("events in chronological order" in expand, "Expand Story must preserve source event ordering")
-    _assert("do not cram every source sentence into the opening paragraphs" in expand,
-            "source coverage must not be front-loaded into two awkward opening paragraphs")
-
-
-def test_story_prompt_preserves_causal_cast_and_live_dialogue_contract():
-    from planner.qwen_director_prompts import QwenDirectorPromptMixin
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
-
-    mixin = QwenDirectorPromptMixin()
-    for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-        text = mixin._story_text_system(mode).lower()
-        _assert("compact causal spine" in text, f"{mode} must retain the compact September 25 story contract")
-        _assert("grounded reversal that changes the meaning of that detail" in text, f"{mode} must require a meaningful reversal")
-        _assert("brief line of direct dialogue attributed to a named character" in text, f"{mode} must prefer purposeful live dialogue")
-        _assert("no hardcoded roster or" in text and "numeric cast quota" in text, f"{mode} must leave cast authorship to Qwen")
-        _assert("second physically present, consequential character" in text, f"{mode} should prefer a consequential counterpart when the premise supports one")
-        _assert("six filmable scene paragraphs" in text, f"{mode} must retain the six-scene prose contract")
+        _assert("spoken dialogue by a named character" in text,
+                f"{mode} must preserve the baseline dialogue requirement")
+        _assert("qwen decides names, identities, relationships, and final cast size" in text,
+                f"{mode} must leave cast authorship to Qwen")
+        _assert("include a second physically present, consequential character" not in text,
+                f"{mode} must not impose a second-person preference")
 
 
 def test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated():
@@ -809,26 +933,26 @@ def test_editor_uses_same_story_contract_and_can_repair_supported_counterpart():
 def test_story_profile_is_single_pass_and_skips_optional_story_calls():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     prompt = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    start = source.index("# The previous Story Bible / critic / editor chain")
+    start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     normal_path = source[start:end]
     writer_start = source.index("def _generate_story_once")
     writer_end = source.index("def _story_craft_issues", writer_start)
     writer = source[writer_start:writer_end]
-    _assert("max_completion=story_budget" in writer and "story_budget = 3200" in writer,
-            "story writer must use the 3,200-token cap")
+    _assert("max_completion=story_budget" in writer and "story_budget = 2200" in writer,
+            "story writer must use the 2,200-token cap")
     _assert("disable_thinking=False" in writer, "story generation must keep thinking enabled")
-    _assert("story_thinking=on story_max_tokens={story_budget} single_pass=true" in writer,
-            "story telemetry must identify the no-retry profile")
+    _assert("story_thinking=on story_max_tokens={story_budget} temperature={temperature:.2f} top_p={top_p:.2f} top_k={DIRECTOR_STORY_THINKING_TOP_K} min_p={DIRECTOR_STORY_THINKING_MIN_P:.1f} presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.1f} single_pass=true" in writer,
+            "story telemetry must identify the runtime-configured sampler and no-retry profile")
     _assert(normal_path.count("self._generate_story_once(") == 1,
             "normal story path must make exactly one writer call")
-    for stage in ("_plan_story_bible(", "_collect_story_findings(", "_resample_for_audit(", "_edit_story_draft(", "story_quality_repair_pass"):
+    for stage in ("_collect_story_findings(", "_resample_for_audit(", "_edit_story_draft(", "story_quality_repair_pass"):
         _assert(stage not in normal_path, f"unnecessary story-stage call remains wired into normal path: {stage}")
-    _assert("420-560 words total" in prompt, "writing prompt must retain the authoritative story length")
+    _assert("400-650 words" in prompt, "writing prompt must restore the September 25 word-range guidance")
 def test_story_quality_review_helpers_remain_optional_but_are_not_called_by_story_path():
     from planner.qwen_director import QwenDirector
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    generation_start = source.index("# The previous Story Bible / critic / editor chain")
+    generation_start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     generation_end = source.index("# PASS 1B: deterministic production foundation", generation_start)
     generation = source[generation_start:generation_end]
     for forbidden in ("_collect_story_findings(", "_review_story_draft(", "_resample_for_audit(", "_edit_story_draft("):
@@ -891,7 +1015,7 @@ def test_story_contract_warnings_do_not_trigger_verification_or_repair_calls():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     default = inspect.signature(QwenDirector._validate_story_output_contracts).parameters["enforce_planned_cast"].default
     _assert(default is False, "planned cast must not become a hard contract")
-    start = source.index("# The previous Story Bible / critic / editor chain")
+    start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     generation = source[start:end]
     _assert("story_quality_verification" not in generation, "normal path must not run a follow-up verification call")
@@ -922,7 +1046,7 @@ def test_story_prompt_has_no_artificial_subtargets():
             "story path must not impose a conflicting per-paragraph word quota")
     _assert("at least 50 words" not in director_source,
             "story path must not impose a conflicting final-paragraph floor")
-    _assert("# the previous story bible / critic / editor chain" in director_source, "single-pass story path marker is missing")
+    _assert("one deliberate plan-before-write call is enabled by default" in director_source, "plan-before-write path marker is missing")
     _assert("story contract miss; one guided revision follows" not in director_source,
             "single-pass story profile must not automatically retry a failed soft contract")
 
@@ -944,7 +1068,7 @@ def test_identity_presence_accepts_title_free_and_given_name_surfaces():
 
 def test_best_of_n_is_not_wired_into_normal_story_generation():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    start = source.index("# The previous Story Bible / critic / editor chain")
+    start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     normal_path = source[start:end]
     _assert("_resample_for_audit(" not in normal_path, "normal path must not generate a challenger story")
@@ -960,13 +1084,35 @@ def test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity
             "candidate comparison must prioritize source facts and avoid cast quotas")
 
 
-def test_story_bible_is_skipped_in_normal_single_pass_path():
+def test_story_plan_precedes_one_writer_and_repair_stays_off_by_default():
+    import os
+    from planner.qwen_director import QwenDirector
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    start = source.index("# The previous Story Bible / critic / editor chain")
+    start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     normal_path = source[start:end]
-    _assert("_plan_story_bible(" not in normal_path, "single-pass story path must skip Story Bible planning")
-    _assert("_plan_story_bible(" not in normal_path, "normal story generation must not spend a Qwen call on Story Bible planning")
+    _assert("self._maybe_plan_story_bible(" in normal_path, "plan call must precede prose generation")
+    _assert(normal_path.index("self._maybe_plan_story_bible(") < normal_path.index("self._generate_story_once("),
+            "the plan must be supplied before writing")
+    _assert(normal_path.count("self._generate_story_once(") == 1, "exactly one prose-writing call")
+    _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
+            "default path must not retry or automatically repair the story")
+    director = QwenDirector.__new__(QwenDirector)
+    director._planned_cast = ["stale"]
+    calls = []
+    director._plan_story_bible = lambda *args: calls.append(args) or {"cast": [{"name": "Mira"}], "beats": ["b"] * 6}
+    old = os.environ.pop("H3_STORY_PLAN", None)
+    try:
+        result = director._maybe_plan_story_bible("ai_story", "premise", [])
+        _assert(result is not None and len(calls) == 1, "story planning should default on")
+        os.environ["H3_STORY_PLAN"] = "0"
+        calls.clear()
+        result = director._maybe_plan_story_bible("ai_story", "premise", [])
+        _assert(result is None and not calls, "H3_STORY_PLAN=0 must disable planning")
+    finally:
+        os.environ.pop("H3_STORY_PLAN", None)
+        if old is not None:
+            os.environ["H3_STORY_PLAN"] = old
 def test_shot_critique_checks_object_state_across_story():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     # Normalize whitespace so this contract checks the wording, not incidental wrapping/indentation.
@@ -983,7 +1129,7 @@ def test_shot_critique_checks_object_state_across_story():
             "shot critique must not demand visible binding for remote-only dialogue")
 
 
-def test_story_writer_makes_exactly_one_3200_token_thinking_call():
+def test_story_writer_makes_exactly_one_2200_token_thinking_call():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE
 
@@ -1023,7 +1169,7 @@ def test_story_writer_makes_exactly_one_3200_token_thinking_call():
         )
     _assert(generated and result == story, "single-pass writer should return the one generated draft")
     _assert(len(calls) == 1, f"writer made more than one model call: {len(calls)}")
-    _assert(calls[0].get("max_completion") == 3200, f"writer budget changed: {calls[0]}")
+    _assert(calls[0].get("max_completion") == 2200, f"writer budget changed: {calls[0]}")
     _assert(calls[0].get("disable_thinking") is False, f"thinking mode is not enabled: {calls[0]}")
     _assert(calls[0].get("minimum_output_tokens") == 0, f"writer unexpectedly forced output padding: {calls[0]}")
     log = captured.getvalue()
@@ -1156,11 +1302,14 @@ def main():
         test_no_adjudication_call_even_when_extractor_is_partial,
         test_director_create_characters_keywords_match_planner_signature,
         test_expand_is_open_cast_but_preserves_source_anchors,
-        test_expand_prompt_does_not_impose_cast_limit,
+        test_story_prompt_does_not_force_cast_size,
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
-        test_story_generation_is_single_pass_thinking_3200_no_floor,
-        test_story_writer_makes_exactly_one_3200_token_thinking_call,
-        test_story_prompt_has_causal_reversal_not_fixed_mystery_template,
+        test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
+        test_ai_story_does_not_inherit_template_cast_anchors,
+        test_story_generation_is_single_pass_thinking_2200_no_floor,
+        test_story_writer_makes_exactly_one_2200_token_thinking_call,
+        test_qwen3_story_sampler_is_runtime_config_driven,
+        test_story_prompt_restores_september_25_craft_contract,
         test_story_contract_remains_six_paragraphs_420_560,
         test_semantic_dialogue_is_persisted_and_restored_across_resume,
         test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster,
@@ -1191,9 +1340,10 @@ def main():
         test_descriptive_grounding_tolerates_minor_surface_variation,
         test_descriptive_hints_populate_metadata_without_adding_cast,
         test_mention_only_filter_can_fail_closed,
+        test_final_telemetry_is_not_printed_twice_when_critique_is_skipped,
         test_director_critique_is_opt_in_without_empty_recompile_payload,
-        test_story_prompt_includes_target_length_grounded_causality_and_source_order,
-        test_story_prompt_preserves_causal_cast_and_live_dialogue_contract,
+        test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity,
+        test_story_prompt_preserves_baseline_dialogue_without_cast_quota,
         test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated,
         test_editor_uses_same_story_contract_and_can_repair_supported_counterpart,
         test_story_profile_is_single_pass_and_skips_optional_story_calls,
@@ -1207,7 +1357,7 @@ def main():
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
         test_identity_presence_accepts_title_free_and_given_name_surfaces,
         test_best_of_n_is_not_wired_into_normal_story_generation,
-        test_story_bible_is_skipped_in_normal_single_pass_path,
+        test_story_plan_precedes_one_writer_and_repair_stays_off_by_default,
         test_shot_critique_checks_object_state_across_story,
         test_short_visual_prompts_are_normalized_to_15_40_words_without_model_call,
     ]
