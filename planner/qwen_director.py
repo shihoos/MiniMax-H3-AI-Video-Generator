@@ -19,6 +19,9 @@ from planner.config import (
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_N_CTX,
+    DIRECTOR_STORY_THINKING_TOP_K,
+    DIRECTOR_STORY_THINKING_MIN_P,
+    DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
@@ -290,22 +293,26 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
+        # Preserve the September 25 per-mode sampler; thinking remains enabled
+        # only for the single story-writing call in this single-pass profile.
         temperature, top_p = self._sampling_for_mode(mode)
-        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-            # One thinking-mode story call; keep the Qwen3 reasoning sampler and
-            # budget stable across AI Story and Expand Story comparisons.
-            temperature, top_p = 0.60, 0.95
 
         # ----------------------------------------------------
         # PASS 1A: narrative
         # ----------------------------------------------------
 
         generated_story = False
-        source_character_names: list[str] = [
-            str(character.get("name", "")).strip()
-            for character in (base_plan.get("characters", []) or [])
-            if isinstance(character, dict) and str(character.get("name", "")).strip()
-        ]
+        # Only Expand Story has source-canon character anchors. AI Story must not
+        # inherit a cast from a deterministic/template base plan: Qwen authors it.
+        source_character_names: list[str] = (
+            [
+                str(character.get("name", "")).strip()
+                for character in (base_plan.get("characters", []) or [])
+                if isinstance(character, dict) and str(character.get("name", "")).strip()
+            ]
+            if mode == EXPAND_USER_STORY_MODE
+            else []
+        )
 
         if resuming and prior_director_plan.get(
             "story"
@@ -336,15 +343,25 @@ class QwenDirector(
                 )
             )
 
-            # The previous Story Bible / critic / editor chain added multiple long
-            # model calls but did not reliably improve the accepted story. Keep this
-            # path deliberately single-pass: Qwen writes once, deterministic checks
-            # report contract issues, and no story retry or alternate draft is made.
             story_user = self._story_text_user(
                 mode,
                 user_input,
                 source_character_names=source_character_names,
             )
+            # One deliberate plan-before-write call is enabled by default because
+            # the October 15 run showed that unplanned prose and the final cast can
+            # diverge. The plan is provisional; it does not constrain cast size or
+            # override Expand Story source canon. Disable with H3_STORY_PLAN=0.
+            story_bible = self._maybe_plan_story_bible(
+                mode,
+                user_input,
+                source_character_names,
+            )
+            bible_block = self._format_story_bible(story_bible)
+            if bible_block:
+                story_user += "\n\n" + bible_block
+            # Exactly one prose-writing request. No automatic story repair/retry is
+            # run in the default path; hard/soft validation behavior stays unchanged.
             story, generated_story = self._generate_story_once(
                 mode,
                 user_input,
@@ -1188,12 +1205,6 @@ class QwenDirector(
             "shots": all_shots,
         }
 
-        critique_setting = os.getenv("H3_DIRECTOR_CRITIQUE")
-        if critique_setting is None:
-            critique_setting = os.getenv("H3_DIRECTOR_CRITIC", "0")
-        if str(critique_setting).strip().lower() not in {"1", "true", "yes", "on"}:
-            self._print_qwen_summary("FINAL")
-
         self._save_checkpoint(
             checkpoint_store,
             checkpoint_session_id,
@@ -1221,6 +1232,24 @@ class QwenDirector(
             "plan": final_director_plan,
             "director_notes": director_notes,
         }
+
+    def _maybe_plan_story_bible(
+        self,
+        mode: str,
+        user_input: str,
+        source_character_names: list[str] | None,
+    ) -> dict | None:
+        """Run one Qwen planning call before prose; optional by explicit opt-out."""
+        self._planned_cast = []
+        if mode not in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            return None
+        enabled = os.getenv("H3_STORY_PLAN", "1").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+        if not enabled:
+            print("[QWEN] story_plan skipped (H3_STORY_PLAN=0)", flush=True)
+            return None
+        return self._plan_story_bible(mode, user_input, source_character_names)
 
     def _validate_story_output_contracts(
         self,
@@ -1418,9 +1447,9 @@ class QwenDirector(
         # cap with thinking enabled; no retry, alternative candidate, critic, or editor
         # call is made on this path.
         story_min_output_tokens = 0
-        story_budget = 3200
+        story_budget = 2200
         print(
-            f"[QWEN] story_thinking=on story_max_tokens={story_budget} single_pass=true",
+            f"[QWEN] story_thinking=on story_max_tokens={story_budget} temperature={temperature:.2f} top_p={top_p:.2f} top_k={DIRECTOR_STORY_THINKING_TOP_K} min_p={DIRECTOR_STORY_THINKING_MIN_P:.1f} presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.1f} single_pass=true",
             flush=True,
         )
 
@@ -4032,48 +4061,14 @@ def _h3_apply_kaggle_runtime_fix_20261010():
         compact_character_schema
     )
 
-    # 2) Stronger extraction audit. This guides Qwen; it does not add characters
-    # deterministically or force a multi-person cast.
-    cast_audit = """
-MANDATORY CAST-COMPLETENESS AUDIT:
-Read the ENTIRE story from beginning to end before emitting JSON. Return every
-distinct production person who is physically present and materially acts,
-blocks, helps, threatens, fights, negotiates, or speaks in the current story.
-Do not stop after finding the protagonist. A named person previously described
-as missing, presumed lost, a former researcher, or part of the backstory MUST
-still be included if that person physically appears and acts in the current
-events. Exclude people who exist only in documents, recordings, memories,
-screens, or historical accounts and never appear in the present action.
-The cast size is open: do not force one character or force multiple characters.
-Return the actual on-screen cast.
-
-Every emitted candidate must have is_character=true. Never emit rejected
-entities or is_character=false records. Use only PERSON, CHARACTER, or SENTIENT.
-Keep names canonical and concise; omit titles such as Dr. or Captain from the
-canonical name. Optional aliases and relationship metadata should be brief.
-
-DIALOGUE-TO-CAST AUDIT:
-Inspect every directly spoken quoted span. If a physically present named person
-speaks, that person must also appear in candidates. Every spoken_dialogue speaker
-must exactly match the canonical name field of its candidate, without titles.
-Return each distinct direct spoken utterance exactly as written. Do not label
-console, monitor, sign, document, or other displayed text as speech. Complete
-the candidate roster and spoken_dialogue array before finishing the JSON.
-""".strip()
-
-    QwenDirector._H3_KAGGLE_CAST_AUDIT = cast_audit
+    # 2) Keep the extraction prompt single-source. Qwen returns its cast directly
+    # from the completed story; no deterministic hint list or planned cast is sent
+    # for per-name classification, and no post-hoc roster add-back is performed.
     original_chat_json = QwenDirector._chat_json
 
     def compact_chat_json(self, system_prompt, user_prompt, *args, **kwargs):
-        if kwargs.get("call_name") == "character_entity_extraction":
-            system_prompt = (
-                str(system_prompt or "").rstrip()
-                + "\n\n"
-                + cast_audit
-            )
-            kwargs["response_schema"] = (
-                QwenDirector._character_extraction_json_schema()
-            )
+        if kwargs.get("call_name") == "character_entity_extraction" and not kwargs.get("response_schema"):
+            kwargs["response_schema"] = QwenDirector._character_extraction_json_schema()
         return original_chat_json(
             self, system_prompt, user_prompt, *args, **kwargs
         )
