@@ -10,6 +10,8 @@ from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
+    DIRECTOR_STORY_THINKING_TEMPERATURE,
+    DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
     DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
@@ -197,41 +199,89 @@ Return JSON only.
 
 
 class QwenDirectorPromptMixin:
-    _STORY_CRAFT_RULES = """
-Write one complete, original short-film story in third-person past tense: exactly six filmable scene paragraphs, 420-560 words total. Aim for 480-520 words (never under 440 unless the premise genuinely constrains length). Each paragraph is one continuous scene at one physical location and time. Output only the finished story.
-
-Plan a compact causal spine: protagonist goal and resistance; introduce a planted detail; grounded reversal that changes the meaning of that detail; consequential choice; concrete consequence. Major events must follow established facts. Keep each key mechanism to one understandable rule demonstrated by observable evidence. No arbitrary countdown, collapse, weather shift, hidden system, sudden danger, or generic conspiracy/experiment reveal without a cause in the premise.
-
-Default to ordinary physical cause and effect. Use supernatural, surreal, or dream logic, identity twists, miracle cures, or cover-ups only when the premise calls for them. When the premise establishes a profession or skill, make it materially affect the decisive choice or reversal; do not invent convenient expertise.
-
-Track people's and objects' state and location. If an object is moved, handed over, pocketed, dropped, broken, destroyed, or left behind, keep its state consistent unless a shown event changes it. Establish every clue, tool, skill, or promise used in the climax and pay it off visibly.
-
-Include a brief line of direct dialogue attributed to a named character when it advances conflict, resistance, a decision, or a reversal. Natural lines demand, refuse, bargain, lie, or plead instead of explaining known facts. The central opposition must not exist only as a radio, loudspeaker, recording, screen, or system voice. Unless the premise genuinely depends on isolation, include a second physically present, consequential character whose independent choice changes the protagonist's options; keep that person active in multiple scenes when the causal arc supports it. Additional characters should appear only when their choices materially affect the causal chain. Qwen decides names, identities, relationships, and cast size; no hardcoded roster or numeric cast quota.
-
-Avoid stock emotional shorthand and repeated filler. Prefer specific observable behavior and premise-specific details.
-
-Paragraph five contains the consequential decision or decisive act. Paragraph six shows its observable cost/result, resolves the immediate conflict, and ends with a completed action—not a fresh mystery or future mission. Preserve the premise's important facts and, in Expand Story, the source's established events, chronology, outcome, and defining meaning.
-""".strip()
-
     def _story_text_system(
         self,
         mode: str,
     ) -> str:
-        common = (
-            "You are the screenwriter of short cinematic stories for MiniMax H3. "
-            "Write one complete, original, film-ready story from the premise.\n\n"
-            + self._STORY_CRAFT_RULES
-        )
+
         if mode == AI_STORY_MODE:
-            return common
+            return textwrap.dedent("""
+    You are the narrative writer for MiniMax H3.
+
+    The user provides a premise.
+
+    Write a complete cinematic short-film story with a clear beginning,
+    escalating middle, irreversible choice or point of no return, climax,
+    consequence, and explicit resolution. Completion is more important than
+    reaching a target word count.
+
+    Hard requirements:
+    1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal that
+       is caused by a concrete detail established earlier in the story. Do not
+       rely on a familiar default twist or introduce a random secret, artifact,
+       monster, or organization only for surprise.
+    2. INTERIORITY. Include at least two sentences that reveal the protagonist's
+       specific fear, memory, desire, or private realization through concrete
+       imagery or sensory association. Show why the moment matters to them.
+    3. DIALOGUE. Include at least one short line of spoken dialogue by a named
+       character. In AI-STORY and EXPAND-STORY output, every spoken line MUST be
+       enclosed in quotation marks; never present spoken dialogue as unquoted narrative. The line must change a decision, reveal information, create
+       conflict, or foreshadow the central reversal. No filler dialogue.
+    4. RESOLUTION. End with a complete aftermath paragraph showing what happened
+       to the protagonist and what changed. Do not stop mid-action, mid-sentence,
+       mid-word, or on an ellipsis.
+
+    Additional constraints:
+    - Aim for 400-650 words, but always finish the story completely.
+    - Third person past tense.
+    - One protagonist whose goal is stated in the first two sentences.
+    - Qwen decides names, identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
+    - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
+
+    Output ONLY the story prose.
+    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
+    """).strip()
+
         if mode == EXPAND_USER_STORY_MODE:
-            return (
-                common
-                + "\n\nEXPAND STORY SOURCE FIDELITY\n"
-                + "The supplied story is canon: preserve established characters, concrete objects and locations, events in chronological order, outcome, and meaning. "
-                + "Establish its opening situation early, then carry later source events into the scenes where they occur; do not cram every source sentence into the opening paragraphs. "
-                + "Deepen the same causal chain without a disconnected backstory, family link, subplot, or generic genre reveal.")
-        raise ValueError("Preserve Story does not use a story-text pass.")
+            return textwrap.dedent("""
+    You are the narrative expansion writer for MiniMax H3.
+
+    Expand the supplied story substantially while preserving its important characters,
+    events, chronology, setting, outcome, and explicit constraints. Add meaningful
+    new narrative material, cause-and-effect development, emotional depth, escalation,
+    and consequences rather than merely rephrasing or lightly lengthening the source.
+    Build a complete arc with escalation, point of no return, climax, consequence,
+    and resolution.
+
+    Hard requirements for the expansion:
+    1. Preserve an existing twist if one exists. If none exists, introduce one
+       unexpected reveal or reversal that is caused by a concrete detail already
+       established in the source; do not add a random secret, artifact, monster,
+       or organization solely for surprise.
+    2. Add at least two sentences of meaningful interiority for the protagonist,
+       tied to a specific fear, memory, desire, or private realization.
+    3. Preserve or add at least one short line of spoken dialogue by a named
+       character. The line must advance conflict, reveal information, or connect
+       to the central reversal. In EXPAND-STORY output, every spoken line MUST be
+       enclosed in quotation marks; never present spoken dialogue as unquoted narrative.
+    4. End with a complete resolution paragraph describing the aftermath and what
+       changed. Do not stop mid-action, mid-sentence, mid-word, or on an ellipsis.
+
+    Additional constraints:
+    - Aim for 400-650 words, but always finish the story completely.
+    - Preserve source meaning and chronology; Do not replace the original plot.
+    - Qwen decides names, identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
+    - Do not merely add adjectives.
+    - Do not convert the story into camera directions, scene headings, or shot descriptions.
+
+    Output ONLY the expanded story prose.
+    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
+    """).strip()
+
+        raise ValueError(
+            "Preserve Story does not use a story-text pass."
+        )
+
 
     def _story_text_user(
         self,
@@ -370,8 +420,8 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
                 system,
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 minimum_completion=300,
-                temperature=0.60,
-                top_p=0.95,
+                temperature=DIRECTOR_STORY_THINKING_TEMPERATURE,
+                top_p=DIRECTOR_STORY_THINKING_TOP_P,
                 call_name="story_bible",
                 max_completion=2800,
                 json_mode=True,
@@ -444,11 +494,13 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
         mode: str,
     ) -> tuple[float, float]:
 
-        if mode == AI_STORY_MODE:
-            return (0.78, 0.90)
-
-        if mode == EXPAND_USER_STORY_MODE:
-            return (0.62, 0.88)
+        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            # Qwen3's documented thinking-mode profile is config-driven. Keep one
+            # consistent profile for planning and writing while thinking is enabled.
+            return (
+                DIRECTOR_STORY_THINKING_TEMPERATURE,
+                DIRECTOR_STORY_THINKING_TOP_P,
+            )
 
         if mode == PRESERVE_USER_STORY_MODE:
             return (
@@ -459,6 +511,8 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
         return (
             DIRECTOR_TEMPERATURE,
             DIRECTOR_TOP_P,
+    DIRECTOR_STORY_THINKING_TEMPERATURE,
+    DIRECTOR_STORY_THINKING_TOP_P,
         )
 
     def _shot_sampling(
@@ -472,21 +526,16 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
 
     @staticmethod
     def _character_extraction_json_schema() -> dict:
-        """Bound redundant character metadata without changing the planner contract.
+        """Let Qwen return the complete cast without per-name or cast-count rules.
 
-        The extractor emits positive production-character candidates. Keep
-        ``is_character`` required because the existing planner uses it as an
-        explicit semantic gate; the prompt requires it to be true for every
-        emitted candidate. The cast and spoken-dialogue arrays remain open to
-        the existing high limits so the schema does not impose a cast/dialogue
-        ceiling as a quality shortcut.
+        The candidates array has no minItems/maxItems cast quota. Output tokens and
+        the normal planner validations still bound the response operationally.
         """
         return {
             "type": "object",
             "properties": {
                 "candidates": {
                     "type": "array",
-                    "maxItems": 128,
                     "items": {
                         "type": "object",
                         "properties": {
@@ -518,7 +567,6 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
                 },
                 "spoken_dialogue": {
                     "type": "array",
-                    # Preserve the existing dialogue contract; do not cap it at 32.
                     "maxItems": 128,
                     "items": {
                         "type": "object",
@@ -554,107 +602,30 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
         if self._character_semantic_calls > 1:
             raise RuntimeError("Character semantic Qwen call budget exceeded (max 1).")
 
-        candidate_hints = [
-            str(value).strip()
-            for value in (deterministic_candidates or [])
-            if str(value).strip()
-        ]
-
+        # Keep deterministic_candidates for caller compatibility only. Do not send
+        # them to Qwen for per-name verdicts and never use them to add cast members.
+        # The final prose itself is the complete source for Qwen's roster decision.
+        _ = deterministic_candidates
         system_prompt = textwrap.dedent("""
-    You are a strict character/production-character extraction component for a cinematic production planner.
-    Return JSON only. The `candidates` array is a production-character allow-list, not a generic entity inventory.
-    Emit only actual production-character candidates: do not enumerate locations, objects, organizations, events,
-    UI/status labels, or other rejected surfaces as `is_character=false` records. Every emitted candidate MUST have
-    `is_character=true` and `entity_type` PERSON, CHARACTER, or SENTIENT.
+    You are Qwen's character and dialogue extractor for a film-production planner. Return JSON only.
 
-    Keep the payload compact without omitting actual characters or spoken dialogue: use a short canonical name,
-    omit aliases when none are needed and include at most two short grounded aliases, and emit relationship fields
-    only for a `relational_character`. Do not put explanations or evidence sentences in metadata fields. Complete
-    the full candidate roster before emitting `spoken_dialogue`.
+    Read the COMPLETE final story from its first paragraph to its last. Determine the actual production cast from the story itself. `candidates` is the set of people who physically participate in present-time story events: people who act, speak in person, oppose/help another character, touch or rescue someone, wake up and interact, enter or leave, or otherwise take part in an event shown happening now. Include a person first introduced as missing or in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
 
-    Analyze the supplied story and identify stable human/sentient identities that can receive an identity lock.
-    There are THREE valid character identity types:
+    Review every paragraph for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Qwen alone decides the identities and number of production characters. There is no minimum cast target beyond the protagonist required for a story, no preference for one-person or multi-person stories, and no cast-count quota. Return the actual cast that the final prose depicts. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
 
-    1) named_character: a proper/named character grounded directly in the supplied story.
-    2) relational_character: a persistent unnamed character whose identity is grounded by a named story
-       character and a concrete grounded relationship, expressed as a canonical relational identity.
-    3) descriptive_character: a persistent unnamed person whose identity is grounded by a distinctive,
-       recurring description, such as "the man in the suit" or "the woman with piercing eyes".
+    Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. Do not use a deterministic hint list or a planning cast as a separate source of truth. The `candidates` array itself is your final cast decision; no downstream step will add names from hints, planned cast, or dialogue speakers. A dialogue speaker must therefore also be represented in `candidates` when that person physically participates in the story.
 
-    CHARACTER COUNT IS OPEN. Return every recurring production character actually created by the story,
-    whether the final cast contains one person, two people, or many. Do not impose a numeric cast limit.
-    For a newly created AI Story, invent and return the canonical names the story itself uses. For Expand Story,
-    preserve every supplied source anchor and also return any new character that the expanded narrative genuinely
-    introduces and makes consequential. Do not suppress a valid new character merely because it was not in the source.
+    Return `spoken_dialogue` containing only exact direct speech spoken by a physically present character. Radio, intercom, recording, note, sign, screen, label, alarm, narration, and internal thought are not in-person speech. Every dialogue speaker must exactly match one candidate's canonical name. Preserve the exact utterance text; do not paraphrase or invent speech.
 
-    Bare generic role labels are NOT canonical identities: "man", "woman", "boy", "girl", "person",
-    "doctor", "scientist", "guard", "officer", and similar labels must not be returned as a canonical
-    identity. A descriptive_character must contain a distinguishing description beyond the bare role.
-    Reject pronouns, contractions, sentence fragments, ordinary prose tokens, UI/status words, and other
-    non-identity surfaces as character candidates.
-    Every emitted candidate must have `is_character=true` and use entity_type PERSON, CHARACTER, or SENTIENT.
-    Do not use EVENT, LOCATION, OBJECT, ROLE, or OTHER for a character identity.
-    Relationship surfaces such as "father", "uncle", "his father", or "the man" are semantic references,
-    not new canonical entities unless the story establishes a persistent relational/descriptive identity.
-
-    Do NOT invent a relationship or identity. For a relational_character, relationship_to MUST name a canonical
-    character actually grounded in the story, relationship MUST be one concrete family/role relation, and the
-    supplied story must contain enough evidence to support that link. Prefer a canonical name in the form
-    "<Canonical Character>'s <relationship>" and include grounded surface forms in aliases.
-    For a descriptive_character, do not invent a relationship; preserve the most specific stable descriptor
-    actually grounded in the story and include generic surface forms only as aliases.
-
-    Do NOT treat locations, organizations, facilities, projects, missions, events, objects, calendar words, or
-    weather as characters. Titles such as Dr., Captain, Commander, etc. are not part of the canonical name.
-    A person mentioned only as a historical incident, dead/missing subject, past researcher, archival reference,
-    name on a container/document/photograph, or other backstory-only identity is NOT a production character
-    unless that person is physically present in the story and takes meaningful action.
-    Interrogative/function words such as "Why", "When", "Where", and "How" are never character names.
-    Source anchors are preservation requirements, not a whitelist of permitted identities.
-    Do not promote a weak textual surface into a canonical character merely because it is capitalized.
-    Recover every stable named, relational, and descriptive identity actually created by the story.
-
-    SPOKEN DIALOGUE SEMANTICS:
-    Also return `spoken_dialogue` for direct speech actually spoken by a physically present production
-    character in the supplied story. Each item must contain the exact spoken text and the speaker's
-    canonical character name (or the grounded character surface when the character is descriptive/relational).
-    Include quoted dialogue and explicit screenplay-style character lines only when they are genuinely spoken
-    by that person. Exclude logs, notes, signs, labels, photographs, recordings, transmissions, alarms,
-    terminal/computer output, narration, internal thoughts, remembered speech, and other text that is merely
-    displayed, transmitted, reported, or read. Quotation marks alone do not make text spoken dialogue.
-    Do not paraphrase, merge, split, or invent dialogue. The `text` field must match the source wording closely
-    enough for deterministic exact-span reconciliation after this call. If there is no direct spoken dialogue,
-    return an empty `spoken_dialogue` array.
-    Every `spoken_dialogue` item must be text that sits inside quotation marks in the story or on an explicit
-    `Name: line` screenplay label. Narration, description, and action sentences are never dialogue, even when a
-    character is the subject. If the story has no quotation marks and no labelled lines, `spoken_dialogue` must be empty.
-
-    PRESENCE RULE (apply before excluding anyone):
-    A person IS a production character when they are physically present in ANY scene of the story: they act, speak in
-    quotation marks, are addressed face to face, are touched, followed, or chased, or otherwise take part in the present
-    action. A former title, earlier job, or earlier history ("the station's former lead scientist", "a retired pilot")
-    only describes a person who is present now; it does not make them backstory-only. Exclude a person only when they NEVER
-    appear in a present scene of the story.
-    Every speaker named in `spoken_dialogue` MUST also appear in `candidates`.
-    `deterministic_character_hints` are surface forms found by a simple scan and some are wrong: classify each one and
-    include it, under its fullest grounded name, when that person is physically present.
-    `screenwriter_planned_cast` (when supplied) lists the people the story's writer intended on screen: include each one
-    who actually appears in the final story text.
+    Return exactly these top-level fields: `candidates` and `spoken_dialogue`. Before responding, re-read the complete story and check that every distinct person who physically participates in its current events is represented once, while mention-only and off-screen people are excluded. This is a semantic review of the story, not a requirement to classify any externally supplied names. Keep the JSON compact and output no explanation outside it.
     """).strip()
 
         user_payload = json.dumps(
-            {
-                "story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "deterministic_character_hints": candidate_hints[:32],
-                "screenwriter_planned_cast": [
-                    str(value).strip()
-                    for value in (getattr(self, "_planned_cast", None) or [])
-                    if str(value).strip()
-                ][:16],
-            },
+            {"story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS)},
             ensure_ascii=False,
             separators=(",", ":"),
         )
+        extraction_schema = self._character_extraction_json_schema()
 
         result = self._chat_json(
             system_prompt,
@@ -666,9 +637,21 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
             max_completion=768,
             json_mode=True,
             disable_thinking=True,
-            response_schema=self._character_extraction_json_schema(),
+            response_schema=extraction_schema,
         )
-        result = self._complete_semantic_roster(story, result)
+        if not isinstance(result, dict):
+            result = {"candidates": [], "spoken_dialogue": []}
+        # Never supplement candidates from hints, the planning outline, or dialogue
+        # speaker names. Qwen's `candidates` response is the roster authority.
+        result = {
+            "candidates": [item for item in (result.get("candidates") or []) if isinstance(item, dict)],
+            "spoken_dialogue": [item for item in (result.get("spoken_dialogue") or []) if isinstance(item, dict)],
+        }
+        print(
+            f"[DIRECTOR] Qwen cast candidates={len(result['candidates'])} "
+            f"dialogue_events={len(result['spoken_dialogue'])}",
+            flush=True,
+        )
 
         # Raw character-extractor payloads are intentionally hidden from normal production logs.
         # Use an explicit TRACE value only when low-level debugging is actually requested.
@@ -692,65 +675,6 @@ Paragraph five contains the consequential decision or decisive act. Paragraph si
             self._semantic_spoken_dialogue,
         )
 
-        return result
-
-    def _complete_semantic_roster(self, story: str, result: dict) -> dict:
-        """Keep the extractor consistent with itself and with the story's own writer.
-
-        A name that Qwen itself reports as a speaker, or that the story-planning pass
-        listed as on-screen cast, must be offered to the planner as a candidate. This
-        adds no name of our own: both sources are Qwen output, and the planner's
-        grounding, mention-only and non-person checks still decide acceptance.
-        """
-        if not isinstance(result, dict):
-            return result
-
-        title_re = re.compile(
-            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
-            flags=re.IGNORECASE,
-        )
-
-        def tokens(value: str) -> frozenset:
-            return frozenset(re.findall(r"[a-z0-9]+", title_re.sub("", str(value or "").strip()).lower()))
-
-        candidates = [item for item in (result.get("candidates") or []) if isinstance(item, dict)]
-        known = [
-            tokens(surface)
-            for item in candidates
-            for surface in [item.get("name", ""), *(item.get("aliases", []) or [])]
-            if str(surface or "").strip()
-        ]
-        known = [value for value in known if value]
-
-        wanted = list(getattr(self, "_planned_cast", None) or [])
-        wanted += [
-            str(item.get("speaker", "") or "")
-            for item in (result.get("spoken_dialogue") or [])
-            if isinstance(item, dict)
-        ]
-
-        added: list[str] = []
-        for name in wanted:
-            name = str(name or "").strip()
-            if not name or len(name) > 96 or not name[:1].isupper():
-                continue
-            wanted_tokens = tokens(name)
-            if not wanted_tokens or any(
-                wanted_tokens <= value or value <= wanted_tokens for value in known
-            ):
-                continue
-            candidates.append({
-                "name": name,
-                "entity_type": "PERSON",
-                "is_character": True,
-                "identity_type": "named_character",
-            })
-            known.append(wanted_tokens)
-            added.append(name)
-
-        if added:
-            print(f"[DIRECTOR] roster completion: Qwen speakers/planned cast re-offered {added}", flush=True)
-        result["candidates"] = candidates
         return result
 
     def _anchor_semantic_dialogue_to_story(
