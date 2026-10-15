@@ -3351,9 +3351,11 @@ class ProductionPlanner:
         """Create the canonical production roster.
 
         When the Qwen extractor is supplied, Qwen is the sole semantic authority
-        for cast membership, count, aliases, and identity type. Deterministic
-        detection is used only as extraction hints and bounded safety evidence;
-        it never adds a missing Qwen character or overrides ``is_character=false``.
+        for cast membership, count, aliases, and identity type. The creative path
+        does not run deterministic character detection, pass per-name hints, or
+        add characters from hints, plans, or dialogue. Qwen's candidate array is
+        validated/canonicalized but never supplemented. Deterministic detection is
+        reserved for the non-Qwen fallback path.
 
         ``qwen_character_adjudicator`` is a deprecated compatibility parameter.
         It is intentionally ignored in the creative path: one semantic Qwen call
@@ -3365,16 +3367,10 @@ class ProductionPlanner:
         if not story:
             return []
 
-        hints = self._canonicalize_character_descriptors(
-            [
-                *self.detect_character_descriptors(story),
-                *self._explicit_source_character_names(story),
-            ]
-        )
-        hints = self._drop_mention_only_identities(story, hints, preserve_empty=True)
-
         if qwen_character_extractor is not None:
-            semantic_result = qwen_character_extractor(story, hints[:32])
+            # Keep the callback's two-argument contract for compatibility, but send
+            # no deterministic names. Qwen reads the story and authors the whole cast.
+            semantic_result = qwen_character_extractor(story, [])
             reconciled = self._reconcile_semantic_characters(story, semantic_result)
             if not reconciled:
                 raise RuntimeError(
@@ -3383,11 +3379,18 @@ class ProductionPlanner:
             descriptors = reconciled
             semantic_result_final = semantic_result
         else:
-            # Non-Qwen fallback for disabled/legacy callers only. This path may use
-            # deterministic evidence because there is no semantic model to defer to.
-            descriptors = self._drop_mention_only_identities(story, hints, preserve_empty=False)
-            if not descriptors:
+            # Non-Qwen fallback for disabled/legacy callers only. Deterministic
+            # detection stays inside this path; it never supplements Qwen output.
+            hints = self._canonicalize_character_descriptors(
+                [
+                    *self.detect_character_descriptors(story),
+                    *self._explicit_source_character_names(story),
+                ]
+            )
+            hints = self._drop_mention_only_identities(story, hints, preserve_empty=False)
+            if not hints:
                 return []
+            descriptors = hints
             semantic_result_final = None
 
         metadata = self._semantic_character_metadata(
