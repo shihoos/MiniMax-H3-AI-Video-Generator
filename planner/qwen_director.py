@@ -35,31 +35,6 @@ from planner.qwen_director_scene import QwenDirectorSceneMixin
 from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
 
-# Story-quality profiles. One switch (H3_STORY_PROFILE) replaces five hand-set flags, and any
-# individual H3_STORY_* variable still overrides it.
-#   fast    one non-thinking draft, no plan/critic/editor (the compact baseline)
-#   quality thinking draft from a thinking-mode plan, evidence-bound critic, gated editor (default)
-#   max     quality plus one alternative draft chosen by position-swapped pairwise judging
-_STORY_PROFILES = {
-    "fast":    {"H3_STORY_THINKING": "0", "H3_STORY_BIBLE": "0", "H3_STORY_CRITIC": "0", "H3_STORY_EDITOR": "0",    "H3_STORY_CANDIDATES": "1"},
-    "quality": {"H3_STORY_THINKING": "1", "H3_STORY_BIBLE": "1", "H3_STORY_CRITIC": "1", "H3_STORY_EDITOR": "auto", "H3_STORY_CANDIDATES": "1"},
-    "max":     {"H3_STORY_THINKING": "1", "H3_STORY_BIBLE": "1", "H3_STORY_CRITIC": "1", "H3_STORY_EDITOR": "auto", "H3_STORY_CANDIDATES": "2"},
-}
-
-
-def _story_setting(name: str) -> str:
-    """Return an explicit H3_STORY_* override, else the active profile's value."""
-    value = os.getenv(name)
-    if value is not None and value.strip():
-        return value.strip()
-    profile = os.getenv("H3_STORY_PROFILE", "quality").strip().lower()
-    return _STORY_PROFILES.get(profile, _STORY_PROFILES["quality"])[name]
-
-
-def _story_flag_on(name: str) -> bool:
-    return _story_setting(name).lower() in {"1", "true", "yes", "on", "auto", "always"}
-
-
 class QwenDirector(
     QwenDirectorRuntimeMixin,
     QwenDirectorPromptMixin,
@@ -315,14 +290,10 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
-        temperature, top_p = (
-            self._sampling_for_mode(
-                mode
-            )
-        )
-        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and _story_flag_on("H3_STORY_THINKING"):
-            # Qwen3's documented thinking-mode sampler (temperature 0.6, top-p 0.95, top-k 20).
-            # The September 25 values (0.78/0.90, 0.62/0.88) belong to non-thinking drafts.
+        temperature, top_p = self._sampling_for_mode(mode)
+        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            # One thinking-mode story call; keep the Qwen3 reasoning sampler and
+            # budget stable across AI Story and Expand Story comparisons.
             temperature, top_p = 0.60, 0.95
 
         # ----------------------------------------------------
@@ -365,150 +336,24 @@ class QwenDirector(
                 )
             )
 
-            story_bible_enabled = _story_flag_on("H3_STORY_BIBLE")
-            story_bible = (
-                self._plan_story_bible(
-                    mode,
-                    user_input,
-                    source_character_names=source_character_names,
-                )
-                if story_bible_enabled else None
-            )
-
-            story_user = (
-                self._story_text_user(
-                    mode,
-                    user_input,
-                    source_character_names=source_character_names,
-                )
-            ) + (
-                ("\n\n" + self._format_story_bible(story_bible))
-                if story_bible else ""
-            )
-
-            try:
-                story, generated_story = self._generate_story_once(
-                    mode,
-                    user_input,
-                    story_system,
-                    story_user,
-                    temperature=temperature,
-                    top_p=top_p,
-                    source_character_names=source_character_names,
-                )
-            except RuntimeError as first_error:
-                first_text = str(first_error)
-                if "generation failed validation" not in first_text:
-                    raise
-                # One guided revision, paid for only when the first draft misses the contract.
-                # The prompt differs from the first call, so the fixed seed gives a new draft.
-                print("[QWEN] story contract miss; one guided revision follows", flush=True)
-                print("[QWEN] reason=" + first_text[:400], flush=True)
-                try:
-                    self._qwen_telemetry["retries"] = int(self._qwen_telemetry.get("retries", 0) or 0) + 1
-                except Exception:
-                    pass
-                draft = str(getattr(self, "_last_story_draft", "") or "").strip()
-                revision_user = (
-                    story_user
-                    + "\n\nREVISION NOTICE: your previous draft was rejected for: "
-                    + first_text[:400]
-                )
-                if draft:
-                    revision_user += (
-                        "\n\nPREVIOUS DRAFT (keep its best material, names, and events; fix the rejection reason):\n"
-                        + draft
-                    )
-                revision_user += (
-                    "\nWrite the whole story again and repair only the reported contract defects. "
-                    "Use exactly six paragraphs separated by one blank line and 420-560 words total. "
-                    "Each paragraph is one filmable scene; keep spoken lines inside their scene paragraph, never on standalone screenplay lines. "
-                    "The sixth paragraph must show a settled aftermath of at least 25 words and end with a completed action. "
-                    "Do not pad, repeat, invent a disconnected subplot, or force a cast count. Output only the story."
-                )
-                story, generated_story = self._generate_story_once(
-                    mode,
-                    user_input,
-                    story_system,
-                    revision_user,
-                    temperature=temperature,
-                    top_p=top_p,
-                    source_character_names=source_character_names,
-                )
-            # Review the first valid draft before deciding whether another sample is
-            # worth its latency. A second draft is triggered by a material, evidence-
-            # grounded defect or a concrete deterministic style warning—not generated
-            # unconditionally and not selected by surface counts alone.
-            story_review_findings = self._collect_story_findings(
+            # The previous Story Bible / critic / editor chain added multiple long
+            # model calls but did not reliably improve the accepted story. Keep this
+            # path deliberately single-pass: Qwen writes once, deterministic checks
+            # report contract issues, and no story retry or alternate draft is made.
+            story_user = self._story_text_user(
                 mode,
                 user_input,
-                story,
-                story_bible,
-                source_character_names,
+                source_character_names=source_character_names,
             )
-            story, story_review_findings = self._resample_for_audit(
+            story, generated_story = self._generate_story_once(
                 mode,
                 user_input,
-                story,
                 story_system,
                 story_user,
                 temperature=temperature,
                 top_p=top_p,
                 source_character_names=source_character_names,
-                story_bible=story_bible,
-                initial_findings=story_review_findings,
             )
-            story_before_edit = story
-            story = self._edit_story_draft(
-                mode,
-                user_input,
-                story,
-                story_bible,
-                source_character_names,
-                temperature=temperature,
-                top_p=top_p,
-                review_findings=story_review_findings,
-            )
-            # Quality-first bounded verification: if a material defect triggered the
-            # editor, independently review the result. If a major issue remains, make
-            # exactly one targeted repair pass; never enter an unbounded self-critique loop.
-            editor_enabled = _story_flag_on("H3_STORY_EDITOR")
-            if story_review_findings and editor_enabled and story != story_before_edit:
-                verification_findings = self._review_story_draft(
-                    mode, user_input, story, story_bible, source_character_names
-                )
-                if getattr(self, "_review_status", "ok") != "ok":
-                    print("[QWEN] story_quality_verification UNVERIFIED (critic failed); keeping the edit that passed the story contract", flush=True)
-                elif self._audit_score(verification_findings) > self._audit_score(story_review_findings):
-                    print(
-                        "[QWEN] story_quality_verification: edit made the review worse "
-                        f"({len(story_review_findings)} -> {len(verification_findings)} findings); reverting to the pre-edit draft",
-                        flush=True,
-                    )
-                    story = story_before_edit
-                elif verification_findings:
-                    print(
-                        "[QWEN] story_quality_verification unresolved="
-                        + str(len(verification_findings))
-                        + " codes=" + ",".join(item["code"] for item in verification_findings),
-                        flush=True,
-                    )
-                    before_repair = story
-                    story = self._edit_story_draft(
-                        mode,
-                        user_input,
-                        story,
-                        story_bible,
-                        source_character_names,
-                        temperature=temperature,
-                        top_p=top_p,
-                        review_findings=verification_findings,
-                        call_name="story_quality_repair_pass",
-                    )
-                    if story == before_repair:
-                        print("[QWEN] story_quality_repair made no accepted change; preserving validated draft", flush=True)
-                else:
-                    print("[QWEN] story_quality_verification passed", flush=True)
 
         # ----------------------------------------------------
         # PASS 1B: deterministic production foundation
@@ -1343,7 +1188,10 @@ class QwenDirector(
             "shots": all_shots,
         }
 
-        if not os.getenv("H3_DIRECTOR_CRITIC", "1").strip().lower() in {"1", "true", "yes", "on"}:
+        critique_setting = os.getenv("H3_DIRECTOR_CRITIQUE")
+        if critique_setting is None:
+            critique_setting = os.getenv("H3_DIRECTOR_CRITIC", "0")
+        if str(critique_setting).strip().lower() not in {"1", "true", "yes", "on"}:
             self._print_qwen_summary("FINAL")
 
         self._save_checkpoint(
@@ -1381,16 +1229,20 @@ class QwenDirector(
         story: str,
         source_character_names: list[str] | None = None,
         enforce_planned_cast: bool = False,
+        *,
+        strict: bool = True,
     ) -> str:
         """Validate the current story without rewriting its topology.
 
-        Raw model output is authoritative: it is validated first, and every defect is
-        reported together in one error. The deterministic six-paragraph topology adapter
-        lives outside this validator and is applied only when paragraph count is the sole
-        defect. There is no second Qwen call.
+        Raw model output is authoritative. In strict mode every detected defect raises;
+        the single-pass writer uses strict=False so soft word/source-coverage misses are
+        logged while the already-generated draft continues without a second Qwen call.
+        Paragraph topology is normalized deterministically before this validation.
         """
         working = self._normalize_story(story)
         errors: list[str] = []
+        # Prevent a warning from one draft leaking into a later resume/checkpoint.
+        self._last_story_contract_warnings = []
 
         try:
             self._validate_mode_output(mode, user_input, working)
@@ -1426,7 +1278,14 @@ class QwenDirector(
                 )
 
         if errors:
-            raise RuntimeError(" | ".join(errors))
+            self._last_story_contract_warnings = list(errors)
+            detail = " | ".join(errors)
+            if strict:
+                raise RuntimeError(detail)
+            # Single-pass generation must not make another Qwen request just to
+            # satisfy a soft length/source-coverage heuristic. Keep the draft, but
+            # make the miss visible so PASS never means semantic quality was proven.
+            print("[QWEN] story_contract=WARNING " + detail[:900], flush=True)
         return working
 
     def _validate_expand_story_cast(
@@ -1460,7 +1319,7 @@ class QwenDirector(
             )
 
     # ------------------------------------------------------------------
-    # Story generation: one-call drafts, optional bounded candidate reseeding, fail-closed validation
+    # Story generation: one thinking-mode call, deterministic checks, no retries
     # ------------------------------------------------------------------
     def _salvage_runaway_story(self, text: str) -> str:
         """Recover a clean story from a draft that kept generating after it ended."""
@@ -1534,11 +1393,10 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
     ) -> tuple[str, bool]:
-        """Generate one candidate in one creative Qwen call.
+        """Generate the story in one creative Qwen call, with no retry or challenger.
 
-        Candidate selection may call this method again with an explicit seed offset.
-        A pure paragraph-count miss is repaired deterministically (no model call).
-        Any other contract violation fails closed with every defect listed together.
+        Paragraph topology is repaired without changing prose. Word-count and source
+        coverage misses are observable warnings; empty or unfinished output fails closed.
         """
         from planner.qwen_director_runtime import (
             DIRECTOR_VLLM_SEED,
@@ -1555,16 +1413,14 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "Expand Story generation failed validation: "
         )
-        # No minimum-token floor: vLLM min_tokens suppresses end-of-sequence, so a floor forces
-        # the model to keep writing filler after the story is finished (observed: a valid
-        # 6-paragraph, 469-word story followed by 5 padding paragraphs of emoji and repetition).
-        # Length is enforced by the prompt contract and the validator, never by token padding.
+        # Do not set min_tokens: forcing continuation after a complete story has
+        # previously caused repeated filler. One pass uses a 3,200-token completion
+        # cap with thinking enabled; no retry, alternative candidate, critic, or editor
+        # call is made on this path.
         story_min_output_tokens = 0
-
-        story_thinking = _story_flag_on("H3_STORY_THINKING")
-        story_budget = 3200 if story_thinking else 1600
+        story_budget = 3200
         print(
-            f"[QWEN] story_thinking={'on' if story_thinking else 'off'} story_max_tokens={story_budget}",
+            f"[QWEN] story_thinking=on story_max_tokens={story_budget} single_pass=true",
             flush=True,
         )
 
@@ -1578,8 +1434,8 @@ class QwenDirector(
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=not story_thinking,
-                seed=DIRECTOR_VLLM_SEED + int(getattr(self, "_story_seed_offset", 0) or 0),
+                disable_thinking=False,
+                seed=DIRECTOR_VLLM_SEED,
                 creative=True,
             )
         except StoryTruncated as exc:
@@ -1589,58 +1445,74 @@ class QwenDirector(
 
         raw = self._reflow_story_paragraphs(raw)
         self._last_story_draft = raw
+        if not str(raw or "").strip():
+            raise RuntimeError(failure_prefix + "Qwen returned an empty story.")
 
-        try:
-            candidate = self._validate_story_output_contracts(
-                mode,
-                user_input,
-                raw,
-                source_character_names=source_character_names,
-                enforce_planned_cast=False,
+        # Six scene paragraphs are a production-topology requirement. Repair only
+        # their boundaries deterministically; never ask the model to rewrite prose.
+        paragraphs = [
+            part.strip()
+            for part in re.split(r"\n\s*\n+", str(raw or ""))
+            if part.strip()
+        ]
+        candidate = str(raw or "").strip()
+        if len(paragraphs) != 6:
+            candidate = self._coerce_story_to_six_paragraphs(candidate)
+            repaired_count = len([
+                part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
+            ])
+            print(
+                f"[DIRECTOR] story topology normalized without regeneration: {len(paragraphs)} -> {repaired_count} paragraphs",
+                flush=True,
             )
-        except RuntimeError as err:
-            error_text = str(err)
-            parts = [piece.strip() for piece in error_text.split(" | ") if piece.strip()]
-            topology_only = bool(parts) and all(
-                "exactly six paragraphs" in piece for piece in parts
-            )
-            trimmed = self._trim_runaway_tail(raw)
-            if trimmed != raw:
-                # The model finished a valid six-paragraph story and then kept writing.
-                # Dropping the surplus trailing paragraphs is topology repair, not a rewrite.
-                try:
-                    candidate = self._validate_story_output_contracts(
-                        mode,
-                        user_input,
-                        trimmed,
-                        source_character_names=source_character_names,
-                        enforce_planned_cast=False,
-                    )
-                except RuntimeError as err3:
-                    raise RuntimeError(failure_prefix + str(err3)) from err3
-            elif not topology_only:
-                raise RuntimeError(failure_prefix + error_text) from err
-            else:
-                try:
-                    candidate = self._validate_story_output_contracts(
-                        mode,
-                        user_input,
-                        self._coerce_story_to_six_paragraphs(raw),
-                        source_character_names=source_character_names,
-                        enforce_planned_cast=False,
-                    )
-                except RuntimeError as err2:
-                    raise RuntimeError(failure_prefix + str(err2)) from err2
 
+        self._last_story_contract_warnings = []
+        candidate = self._validate_story_output_contracts(
+            mode,
+            user_input,
+            candidate,
+            source_character_names=source_character_names,
+            enforce_planned_cast=False,
+            strict=False,
+        )
+
+        # A truncated/incomplete final sentence cannot safely become a story, but
+        # ordinary word-count and source-coverage misses are warnings in this
+        # no-retry profile rather than a trigger for another generation call.
+        if not candidate or not self._ends_cleanly(candidate):
+            raise RuntimeError(
+                failure_prefix + "The single-pass draft is empty or ends mid-sentence. "
+                "No retry was attempted; inspect the draft/trace before rerunning manually."
+            )
+
+        word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
+        paragraph_count = len([
+            part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
+        ])
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
-        if not issues:
-            print("[QWEN] story_quality=PASS", flush=True)
+        issues.extend(
+            "contract: " + str(item)
+            for item in (getattr(self, "_last_story_contract_warnings", []) or [])
+        )
+        if not 420 <= word_count <= 560:
+            issues.append(f"word count {word_count} outside target 420-560")
+        if paragraph_count != 6:
+            issues.append(f"paragraph count {paragraph_count} outside target 6")
+        if issues:
+            print(
+                "[QWEN] story_static_checks=WARN",
+                f"words={word_count}",
+                f"paragraphs={paragraph_count}",
+                "issues=" + "; ".join(issues[:6]),
+                flush=True,
+            )
         else:
             print(
-                "[QWEN] story_quality=ISSUES",
-                "count=" + str(len(issues)),
-                "issues=" + "; ".join(issues[:4]),
+                "[QWEN] story_static_checks=PASS",
+                f"words={word_count}",
+                f"paragraphs={paragraph_count}",
+                "semantic_quality=NOT_EVALUATED",
                 flush=True,
             )
         return candidate, True
@@ -1988,7 +1860,7 @@ class QwenDirector(
         order confirmation agrees. On judge failure or disagreement, retain A.
         """
         try:
-            attempts = max(1, min(2, int(_story_setting("H3_STORY_CANDIDATES"))))
+            attempts = max(1, min(2, int(os.getenv("H3_STORY_CANDIDATES", "1"))))
         except (TypeError, ValueError):
             attempts = 2
         incumbent = str(story or "").strip()
@@ -2112,13 +1984,8 @@ class QwenDirector(
                 flush=True,
             )
         critic = self._review_story_draft(mode, user_input, story, story_bible, source_character_names)
-        status = getattr(self, "_review_status", "disabled")
-        if not critic and status == "ok":
+        if not critic and not outline_notes:
             print("[QWEN] story_audit no material evidence-backed defects", flush=True)
-        elif not critic and status == "failed":
-            print("[QWEN] story_audit UNVERIFIED: the critic call failed, so no review was performed", flush=True)
-        elif not critic and status == "disabled":
-            print("[QWEN] story_audit not run (critic disabled)", flush=True)
         return critic[:5]
 
     _STORY_REVIEW_SYSTEM = (
@@ -2188,8 +2055,7 @@ class QwenDirector(
         finding is accepted only if its quoted evidence occurs in the exact draft.
         This prevents unsupported generic critique from driving a rewrite.
         """
-        if not _story_flag_on("H3_STORY_CRITIC"):
-            self._review_status = "disabled"
+        if os.getenv("H3_STORY_CRITIC", "0").strip().lower() in {"0", "false", "no", "off"}:
             return []
         try:
             plan = self._format_story_bible(story_bible)
@@ -2211,7 +2077,7 @@ class QwenDirector(
                 temperature=0.25,
                 top_p=0.90,
                 call_name="story_quality_review",
-                max_completion=3000,
+                max_completion=1800,
                 json_mode=True,
                 disable_thinking=False,
                 response_schema=self._story_review_json_schema(),
@@ -2273,14 +2139,12 @@ class QwenDirector(
                 )
             else:
                 print("[QWEN] story_quality_review no evidence-backed major findings", flush=True)
-            self._review_status = "ok"
             return accepted
         except Exception as exc:
             print(
                 f"[QWEN] story_quality_review skipped ({type(exc).__name__}: {str(exc)[:180]}); preserving draft",
                 flush=True,
             )
-            self._review_status = "failed"
             return []
 
     _STORY_EDITOR_SYSTEM = (
@@ -2307,7 +2171,7 @@ class QwenDirector(
         call_name: str = "story_editor_pass",
     ) -> str:
         """One thinking-mode editing pass guided by the Story Bible and evidence-backed review."""
-        editor_mode = _story_setting("H3_STORY_EDITOR").lower()
+        editor_mode = os.getenv("H3_STORY_EDITOR", "0").strip().lower()
         if editor_mode in {"0", "false", "no", "off"}:
             return story
         if editor_mode not in {"1", "true", "yes", "on", "always"} and not review_findings:
@@ -2363,9 +2227,6 @@ class QwenDirector(
             # contracts and Expand source-canon checks remain authoritative.
             if len(re.split(r"\n\s*\n+", candidate.strip())) != 6:
                 print("[QWEN] story_editor rejected (paragraph count); keeping draft", flush=True)
-                return story
-            if re.sub(r"\s+", " ", candidate).strip() == re.sub(r"\s+", " ", story).strip():
-                print("[QWEN] story_editor returned the draft unchanged; nothing to accept", flush=True)
                 return story
             print(f"[QWEN] story_editor accepted words {count(story)} -> {count(candidate)}", flush=True)
             return candidate
@@ -3052,8 +2913,36 @@ class QwenDirector(
 
         def canonicalize_speaker(surface: str) -> str:
             normalized = EntityResolver.normalize(surface)
-            return alias_map.get(normalized, normalized)
+            # The extraction model commonly returns a title-bearing surface
+            # ("Dr. Renn") while the production roster deliberately stores the
+            # canonical name ("Renn"). Resolve the title-free form BEFORE the
+            # allowed-speaker gate, not later after the source line was discarded.
+            titleless = EntityResolver.strip_honorific(normalized)
+            resolved = alias_map.get(normalized) or alias_map.get(titleless)
+            return EntityResolver.normalize(resolved or titleless or normalized)
 
+        remote_context_re = re.compile(
+            r"\b(?:radio|walkie-talkie|intercom|loudspeaker|speaker|phone|telephone|"
+            r"voicemail|recording|transmission|communicator|through the static|over the line)\b",
+            flags=re.IGNORECASE,
+        )
+        physical_presence_re = re.compile(
+            r"\b(?:appeared|arrived|entered|stood|stepped|walked|emerged|joined|"
+            r"came in|came closer|was standing|stood beside|stood at|in person|"
+            r"gripped|grabbed|took her arm|took his arm)\b",
+            flags=re.IGNORECASE,
+        )
+
+        def is_remote_quote(position: int) -> bool:
+            paragraph_start = text.rfind("\n\n", 0, position) + 2
+            context = text[paragraph_start:position]
+            remote_positions = [match.start() for match in remote_context_re.finditer(context)]
+            physical_positions = [match.start() for match in physical_presence_re.finditer(context)]
+            return bool(remote_positions) and (
+                not physical_positions or max(remote_positions) > max(physical_positions)
+            )
+
+        remote_excluded = 0
         semantic_items: list[dict] = []
         for item in (semantic_spoken_dialogue or []):
             if not isinstance(item, dict):
@@ -3104,11 +2993,19 @@ class QwenDirector(
             if allowed:
                 speakers = {speaker for speaker in speakers if speaker in allowed}
                 if not speakers:
+                    quote_spans.append((match.start(), match.end()))
                     continue
 
             display = cls._normalize_dialogue_text(value, keep_case=True)
             display = display.rstrip(",;: ").strip()
+            quote_spans.append((match.start(), match.end()))
             if not display or len(re.findall(r"[A-Za-z]", display)) < 2:
+                continue
+            if is_remote_quote(match.start()):
+                # The shot contract requires visible speakers. Do not bind a voice
+                # from a radio/speaker/recording to a physical shot; live, in-person
+                # lines in later paragraphs remain eligible.
+                remote_excluded += 1
                 continue
 
             segments.append({
@@ -3119,7 +3016,6 @@ class QwenDirector(
                 "end": match.end(),
                 "semantic": True,
             })
-            quote_spans.append((match.start(), match.end()))
 
         # Explicit screenplay/script labels can be recovered deterministically even when a
         # semantic payload is unavailable. This path uses only the speaker surface, not a
@@ -3166,6 +3062,12 @@ class QwenDirector(
         for segment in segments:
             segment.pop("start", None)
             segment.pop("end", None)
+        if remote_excluded:
+            print(
+                f"[DIRECTOR] dialogue source filter excluded {remote_excluded} remote/off-screen utterance(s); "
+                "scene-local dialogue keeps only visible speaking characters",
+                flush=True,
+            )
         return segments
 
     @classmethod
@@ -3221,6 +3123,13 @@ class QwenDirector(
         segment_progress = [0 for _ in spoken_segments]
 
         last_display: list[str] = [""]
+        dialogue_counts = {
+            "input": 0,
+            "kept": 0,
+            "empty": 0,
+            "no_source_anchor": 0,
+            "unmatched_text": 0,
+        }
 
         def _consume_source_dialogue(normalized_text: str):
             last_display[0] = ""
@@ -3309,10 +3218,13 @@ class QwenDirector(
 
             for event in events:
                 if not isinstance(event, dict):
+                    dialogue_counts["empty"] += 1
                     continue
+                dialogue_counts["input"] += 1
                 speaker = str(event.get("speaker", "") or "").strip()
                 text = str(event.get("text", "") or "").strip()
                 if not speaker or not text:
+                    dialogue_counts["empty"] += 1
                     continue
 
                 # When the source story contains explicit speech anchors, only
@@ -3321,13 +3233,16 @@ class QwenDirector(
                 # rejecting whole narrative/action sentences.
                 normalized_text = self._normalize_dialogue_text(text)
                 if not spoken_segments:
+                    dialogue_counts["no_source_anchor"] += 1
                     continue
 
                 matched_source_speakers = _consume_source_dialogue(normalized_text)
                 if matched_source_speakers is None:
                     # Qwen sometimes emits a narrative sentence or repeats a source
                     # line in multiple shots. Neither is valid audio. Drop it before
-                    # any timing/compilation stage can treat it as speech.
+                    # any timing/compilation stage can treat it as speech, and count
+                    # the reason so dialogue loss is no longer silent.
+                    dialogue_counts["unmatched_text"] += 1
                     continue
 
                 canonical = _resolve(speaker)
@@ -3433,6 +3348,7 @@ class QwenDirector(
                 if last_display[0]:
                     repaired["text"] = last_display[0]
                 repaired_events.append(repaired)
+                dialogue_counts["kept"] += 1
 
             shot["dialogue_events"] = repaired_events
             shot["speaking_characters"] = list(dict.fromkeys(
@@ -3444,6 +3360,19 @@ class QwenDirector(
                 str(event.get("text", "")).strip()
                 for event in repaired_events
                 if str(event.get("text", "")).strip()
+            )
+
+        dropped = dialogue_counts["input"] - dialogue_counts["kept"]
+        if dialogue_counts["input"] and dropped:
+            reasons = ", ".join(
+                f"{key}={value}"
+                for key, value in dialogue_counts.items()
+                if key not in {"input", "kept"} and value
+            )
+            print(
+                f"[DIRECTOR] dialogue reconciliation kept={dialogue_counts['kept']}/{dialogue_counts['input']} "
+                f"dropped={dropped} ({reasons or 'unclassified'})",
+                flush=True,
             )
 
     def _validate_dialogue_speaker_contract(
@@ -3601,14 +3530,39 @@ class QwenDirector(
             critique["overall_score"] = round(min(score or ceiling, ceiling), 1)
         return critique
 
-    def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict:
+    def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict | None:
         """Run an optional read-only cinematic critique.
 
-        The critic may identify problems but never mutates the canonical plan.
+        The critic may identify problems but never mutates the canonical plan. It is
+        opt-in because the Oct 13-15 traces showed 14-34 seconds of cost with weak,
+        sometimes false-positive findings. H3_DIRECTOR_CRITIQUE is the preferred
+        switch; the older H3_DIRECTOR_CRITIC environment variable remains a fallback.
         """
+        critique_setting = os.getenv("H3_DIRECTOR_CRITIQUE")
+        if critique_setting is None:
+            critique_setting = os.getenv("H3_DIRECTOR_CRITIC", "0")
+        if str(critique_setting).strip().lower() not in {"1", "true", "yes", "on"}:
+            print(
+                "[QWEN] director_critique skipped (set H3_DIRECTOR_CRITIQUE=1 to enable)",
+                flush=True,
+            )
+            self._print_qwen_summary("FINAL")
+            # None is intentional: ProductionOrchestrator will not attach an empty
+            # critique or needlessly recompile the same shots after a skipped review.
+            return None
         system_prompt = """
     You audit a film production plan against its story. Check each item and report only defects you
     can point to.
+
+    EVIDENCE RULES
+    - Every finding must include a short verbatim quote from the story or the affected shot field.
+      For a mismatch, quote the relevant phrase from both sides. If exact support is unavailable, omit the finding.
+    - Compare character names case-insensitively for identity after trimming whitespace. Capitalization alone
+      is not a roster defect; preserve canonical roster spelling in any patch.
+    - A person mentioned only as a radio/intercom/recording voice is not necessarily visible in the shot.
+      Do not report the remote speaker as missing from the visible-character list unless the story places them there.
+    - Do not claim an event or object transition is absent when the story states it explicitly. Read the whole
+      relevant sentence before reporting a continuity defect.
 
     CHECKS
     1. ROSTER: enforce the roster in both directions. Every name in a scene or shot `characters` list
@@ -3628,7 +3582,7 @@ class QwenDirector(
     - status is "review" if there is at least one finding, otherwise "pass".
     - Report at most 6 findings and at most 3 shot_patches. Merge repeats of the same defect
       (for example one bad roster name across many shots) into ONE finding.
-    - Every finding names a shot_id or scene_id and says what is wrong in under 20 words.
+    - Every finding names a shot_id or scene_id and states one actionable defect concisely; include only the short evidence quote needed to prove it.
     - Add a shot_patch only for a defect in checks 2, 3, or 5, rewriting only that field in the same
       style and length. Never change ids, characters, timing, or continuity. If no concrete defect
       exists, return empty arrays.
