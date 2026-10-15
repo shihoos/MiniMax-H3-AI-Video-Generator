@@ -27,6 +27,11 @@ from planner.config import (
     DIRECTOR_N_CTX,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
+    DIRECTOR_STORY_THINKING_TEMPERATURE,
+    DIRECTOR_STORY_THINKING_TOP_P,
+    DIRECTOR_STORY_THINKING_TOP_K,
+    DIRECTOR_STORY_THINKING_MIN_P,
+    DIRECTOR_STORY_PRESENCE_PENALTY,
     DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION,
     DIRECTOR_VLLM_MAX_MODEL_LEN,
     DIRECTOR_VLLM_PORT,
@@ -640,6 +645,13 @@ class QwenDirectorRuntimeMixin:
         recoveries = int(
             self._qwen_telemetry.get("deterministic_recoveries", 0) or 0
         )
+
+        if label == "FINAL":
+            # One FINAL block per telemetry session; a second request with the
+            # same call count would only repeat identical numbers.
+            if self._qwen_telemetry.get("_final_printed_calls") == len(calls):
+                return
+            self._qwen_telemetry["_final_printed_calls"] = len(calls)
 
         print(f"[QWEN] ==================== {label} ====================", flush=True)
         print("[QWEN] calls=" + str(len(calls)), flush=True)
@@ -1464,14 +1476,12 @@ class QwenDirectorRuntimeMixin:
                         "model": model_name,
                         "messages": [{"role": "user", "content": "Say OK."}],
                         "max_tokens": 2,
-                        "temperature": 0.6,
-                        "top_p": 0.95,
-                        # Match the story request's sampler/reasoning path so the first real
-                        # thinking-enabled story call does not discover a different JIT path.
-                        "top_k": 20,
-                        "presence_penalty": float(
-                            os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "1.5")
-                        ),
+                        "temperature": DIRECTOR_STORY_THINKING_TEMPERATURE,
+                        "top_p": DIRECTOR_STORY_THINKING_TOP_P,
+                        # Match the actual config-driven thinking story sampler.
+                        "top_k": DIRECTOR_STORY_THINKING_TOP_K,
+                        "min_p": DIRECTOR_STORY_THINKING_MIN_P,
+                        "presence_penalty": DIRECTOR_STORY_PRESENCE_PENALTY,
                         "chat_template_kwargs": {"enable_thinking": True},
                     }
                     try:
@@ -1767,13 +1777,15 @@ class QwenDirectorRuntimeMixin:
             "seed": int(DIRECTOR_VLLM_SEED if seed is None else seed),
             "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
         }
+        if enable_thinking:
+            # Qwen3 thinking-mode sampler from runtime_versions.yaml. min_p=0 is
+            # the documented default but is sent explicitly for reproducibility.
+            payload["top_k"] = int(DIRECTOR_STORY_THINKING_TOP_K)
+            payload["min_p"] = float(DIRECTOR_STORY_THINKING_MIN_P)
         if creative:
-            # Story-only anti-runaway sampling. Do not alter the structured JSON passes
-            # with a story-specific top-k or presence penalty.
-            payload["top_k"] = 20
-            payload["presence_penalty"] = float(
-                os.getenv("H3_DIRECTOR_STORY_PRESENCE_PENALTY", "1.5")
-            )
+            # The Qwen3 technical report used presence_penalty=1.5 on Creative
+            # Writing/WritingBench. Scope it to prose writing, not structured JSON.
+            payload["presence_penalty"] = float(DIRECTOR_STORY_PRESENCE_PENALTY)
         if int(min_tokens or 0) > 0:
             payload["min_tokens"] = int(min_tokens)
         if thinking_token_budget is not None:
@@ -1785,12 +1797,22 @@ class QwenDirectorRuntimeMixin:
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
         response = self._vllm_session.post(url, json=payload, timeout=timeout)
         if response.status_code == 400 and any(
-            key in response.text for key in ("presence_penalty", "top_k")
+            key in response.text for key in ("presence_penalty", "top_k", "min_p")
         ):
-            # Sampling extras are optional. Never drop chat_template_kwargs or the reasoning
-            # budget on fallback: changing the thinking mode would silently change story quality.
-            for key in ("presence_penalty", "top_k"):
+            # Some vLLM API versions differ in which sampling extras they expose.
+            # Remove only extras named by the error; if the server does not identify
+            # a field, remove the optional extras together. Never alter temperature,
+            # top_p, seed, or thinking mode in this compatibility fallback.
+            extras = ("presence_penalty", "top_k", "min_p")
+            rejected = [key for key in extras if key in response.text]
+            if not rejected:
+                rejected = [key for key in extras if key in payload]
+            for key in rejected:
                 payload.pop(key, None)
+            print(
+                "[QWEN] sampling_extra_fallback rejected=" + ",".join(rejected),
+                flush=True,
+            )
             response = self._vllm_session.post(url, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
