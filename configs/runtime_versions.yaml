@@ -34,11 +34,12 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.31.0
-  # Experimental only: permits the configured Transformers pin to override vLLM metadata.
-  allow_transformers_vllm_constraint_override: true
-  vllm_env_dir: /tmp/qwen_vllm_031_tf519_exp
+  # vLLM 0.31.0 supports Transformers >=5.10.4,<5.18.0; the project's 5.17.0 pin is within range.
+  allow_transformers_vllm_constraint_override: false
+  vllm_env_dir: /tmp/qwen_vllm_031_tf517
   context: 8192
   max_tokens: 7000
+  story_max_tokens: 3200
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
