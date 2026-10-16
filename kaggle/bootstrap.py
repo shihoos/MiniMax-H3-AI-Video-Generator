@@ -999,6 +999,28 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
         )
     target.write_text(text.replace(exact, replacement, 1), encoding="utf-8")
     print("[H3 VAE PATCH] applied to", target)
+def _exact_requirement_pin(package_name: str) -> str:
+    """Return the sole exact pin for a package from requirements.txt."""
+    requirements_path = ROOT / "requirements.txt"
+    if not requirements_path.is_file():
+        raise RuntimeError(f"Project dependency manifest is missing: {requirements_path}")
+    matches = []
+    for raw in requirements_path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or "==" not in line:
+            continue
+        name, version = line.split("==", 1)
+        if name.strip().lower().replace("_", "-") == package_name.lower().replace("_", "-"):
+            version = version.split(";", 1)[0].strip()
+            if version:
+                matches.append(version)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"requirements.txt must contain exactly one exact pin for {package_name}."
+        )
+    return matches[0]
+
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -1095,6 +1117,8 @@ def install_director_runtime(
         raise RuntimeError("Configured EAGLE-3 speculator is not paired with Qwen/Qwen3-14B.")
     vllm_version = str(director.get("vllm_version", "") or "").strip()
     wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
+    transformers_version = _exact_requirement_pin("transformers")
+    tokenizers_version = _exact_requirement_pin("tokenizers")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not vllm_version:
@@ -1128,7 +1152,11 @@ def install_director_runtime(
     env = os.environ.copy()
     env["UV_LINK_MODE"] = "copy"
     install = subprocess.run(
-        [uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy", f"vllm=={vllm_version}", f"wrapt=={wrapt_version}"],
+        [
+            uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy",
+            f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
+            f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
+        ],
         env=env,
         check=False,
         text=True,
@@ -1139,11 +1167,15 @@ def install_director_runtime(
         [
             str(venv_python), "-c",
             (
-                "import vllm, torch, inspect, wrapt; "
+                "import vllm, torch, inspect, wrapt, transformers, tokenizers; "
+                "from transformers import Qwen3Config; "
                 "from vllm.config import SpeculativeConfig; "
                 "print('vLLM import: PASS'); "
                 "print('wrapt version:', wrapt.__version__); "
                 "print('vLLM version:', vllm.__version__); "
+                "print('Transformers version:', transformers.__version__); "
+                "print('tokenizers version:', tokenizers.__version__); "
+                "print('Qwen3 config import: PASS', Qwen3Config.__name__); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
                 "print('GPU count:', torch.cuda.device_count()); "
@@ -1167,16 +1199,31 @@ def install_director_runtime(
             "Director isolated runtime wrapt mismatch: "
             f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
         )
-    observed_version = None
+    observed_versions = {}
     for line in verification.stdout.splitlines():
-        if line.startswith("vLLM version:"):
-            observed_version = line.split(":", 1)[1].strip()
-            break
+        if ":" in line:
+            name, value = line.split(":", 1)
+            observed_versions[name.strip()] = value.strip()
+    observed_version = observed_versions.get("vLLM version", "")
     if observed_version != vllm_version:
         raise RuntimeError(
             "Director runtime verification version mismatch: "
             f"observed={observed_version!r}, configured={vllm_version!r}."
         )
+    observed_transformers = observed_versions.get("Transformers version", "")
+    if observed_transformers != transformers_version:
+        raise RuntimeError(
+            "Director Transformers version mismatch: "
+            f"observed={observed_transformers!r}, expected={transformers_version!r}."
+        )
+    observed_tokenizers = observed_versions.get("tokenizers version", "")
+    if observed_tokenizers != tokenizers_version:
+        raise RuntimeError(
+            "Director tokenizers version mismatch: "
+            f"observed={observed_tokenizers!r}, expected={tokenizers_version!r}."
+        )
+    if "Qwen3 config import: PASS" not in verification.stdout:
+        raise RuntimeError("Director runtime did not import the pinned Transformers Qwen3 config.")
     if f"EAGLE-3 supported: True" not in verification.stdout:
         raise RuntimeError(
             f"Director runtime verification did not confirm speculative method {speculative_method!r}."
