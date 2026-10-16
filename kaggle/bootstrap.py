@@ -316,15 +316,24 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     director = dict(runtime.get("director", {}) or {})
     vllm_version = str(director.get("vllm_version", "") or "").strip()
     wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
+    # A warm environment is reusable only when it matches every exact project pin.
+    # The cold install path uses the same requirements.txt pins below.
+    transformers_version = _exact_requirement_pin("transformers")
+    tokenizers_version = _exact_requirement_pin("tokenizers")
     tp_size = int(director.get("tensor_parallel_size", 0) or 0)
     python = env_dir / "bin" / "python"
     if not python.is_file() or not vllm_version or not wrapt_version or tp_size <= 0:
         return False
     code = (
         "import inspect; import vllm; import torch; import wrapt; "
+        "import transformers; import tokenizers; "
+        "from transformers import Qwen3Config; "
         "from vllm.config import SpeculativeConfig; "
         f"assert vllm.__version__ == {vllm_version!r}; "
         f"assert wrapt.__version__ == {wrapt_version!r}; "
+        f"assert transformers.__version__ == {transformers_version!r}; "
+        f"assert tokenizers.__version__ == {tokenizers_version!r}; "
+        "assert Qwen3Config.__name__ == 'Qwen3Config'; "
         "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
         "assert torch.cuda.is_available(); "
         f"assert torch.cuda.device_count() == {tp_size}; "
@@ -1177,6 +1186,8 @@ def install_director_runtime(
                 "print('tokenizers version:', tokenizers.__version__); "
                 "print('Qwen3 config import: PASS', Qwen3Config.__name__); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
+                f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel_size}; "
+                "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
                 "print('GPU count:', torch.cuda.device_count()); "
                 "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
