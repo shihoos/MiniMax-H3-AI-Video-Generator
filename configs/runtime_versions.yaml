@@ -50,6 +50,14 @@ director:
   speculative_model_path: /kaggle/input/eagle-3
   speculative_tokens: 2
   generation_config: vllm
+  # Qwen3-14B-AWQ documented thinking-mode profile for story planning/writing.
+  story_sampling:
+    thinking:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      min_p: 0.0
+      presence_penalty: 1.5
 storyboard:
   host: 0.0.0.0
   port: 8765
