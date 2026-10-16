@@ -157,6 +157,13 @@ DIRECTOR_TOP_P = float(
 _story_sampling = dict(RUNTIME["director"].get("story_sampling", {}) or {})
 _story_thinking_sampling = dict(_story_sampling.get("thinking", {}) or {})
 
+DIRECTOR_STORY_MAX_TOKENS = int(os.getenv(
+    "H3_DIRECTOR_STORY_MAX_TOKENS",
+    str(RUNTIME["director"].get("story_max_tokens", 3200)),
+))
+if DIRECTOR_STORY_MAX_TOKENS < 1:
+    raise RuntimeError("Story max tokens must be positive.")
+
 DIRECTOR_STORY_THINKING_TEMPERATURE = float(os.getenv(
     "H3_DIRECTOR_STORY_TEMPERATURE",
     str(_story_thinking_sampling["temperature"]),
