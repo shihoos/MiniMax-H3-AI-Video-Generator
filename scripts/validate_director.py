@@ -431,15 +431,15 @@ def test_ai_story_does_not_inherit_template_cast_anchors():
             "only source-preserving Expand Story may receive base-plan character anchors")
 
 
-def test_story_generation_is_single_pass_thinking_2200_no_floor():
+def test_story_generation_is_single_pass_thinking_3200_no_floor():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     body = source.split("def _generate_story_once")[1].split("def _story_craft_issues")[0]
     generation_start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     generation_end = source.index("# PASS 1B: deterministic production foundation", generation_start)
     generation = source[generation_start:generation_end]
     _assert(body.count("self._chat_text(") == 1, "story generation must use one primary Qwen text call")
-    _assert("story_budget = 2200" in body and "max_completion=story_budget" in body,
-            "story writer must use the 2,200-token completion cap")
+    _assert("story_budget = DIRECTOR_STORY_MAX_TOKENS" in body and "max_completion=story_budget" in body,
+            "story writer must use the runtime-configured 3,200-token completion cap")
     _assert("disable_thinking=False" in body, "story writer must use thinking mode")
     _assert("seed=DIRECTOR_VLLM_SEED," in body, "single-pass story generation must use the stable Director seed")
     _assert("minimum_output_tokens=story_min_output_tokens" in body and "story_min_output_tokens = 0" in body,
@@ -453,6 +453,7 @@ def test_story_generation_is_single_pass_thinking_2200_no_floor():
 def test_qwen3_story_sampler_is_runtime_config_driven():
     import yaml
     from planner.config import (
+        DIRECTOR_STORY_MAX_TOKENS,
         DIRECTOR_STORY_THINKING_TEMPERATURE,
         DIRECTOR_STORY_THINKING_TOP_P,
         DIRECTOR_STORY_THINKING_TOP_K,
@@ -461,6 +462,8 @@ def test_qwen3_story_sampler_is_runtime_config_driven():
     )
     config = yaml.safe_load((ROOT / "configs/runtime_versions.yaml").read_text(encoding="utf-8"))
     profile = config["director"]["story_sampling"]["thinking"]
+    _assert(config["director"]["story_max_tokens"] == 3200 and DIRECTOR_STORY_MAX_TOKENS == 3200,
+            "story completion cap must be runtime-configured at 3,200 tokens")
     expected = {
         "temperature": 0.6,
         "top_p": 0.95,
@@ -939,8 +942,8 @@ def test_story_profile_is_single_pass_and_skips_optional_story_calls():
     writer_start = source.index("def _generate_story_once")
     writer_end = source.index("def _story_craft_issues", writer_start)
     writer = source[writer_start:writer_end]
-    _assert("max_completion=story_budget" in writer and "story_budget = 2200" in writer,
-            "story writer must use the 2,200-token cap")
+    _assert("max_completion=story_budget" in writer and "story_budget = DIRECTOR_STORY_MAX_TOKENS" in writer,
+            "story writer must use the runtime-configured 3,200-token cap")
     _assert("disable_thinking=False" in writer, "story generation must keep thinking enabled")
     _assert("story_thinking=on story_max_tokens={story_budget} temperature={temperature:.2f} top_p={top_p:.2f} top_k={DIRECTOR_STORY_THINKING_TOP_K} min_p={DIRECTOR_STORY_THINKING_MIN_P:.1f} presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.1f} single_pass=true" in writer,
             "story telemetry must identify the runtime-configured sampler and no-retry profile")
@@ -1129,7 +1132,7 @@ def test_shot_critique_checks_object_state_across_story():
             "shot critique must not demand visible binding for remote-only dialogue")
 
 
-def test_story_writer_makes_exactly_one_2200_token_thinking_call():
+def test_story_writer_makes_exactly_one_3200_token_thinking_call():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE
 
@@ -1169,7 +1172,7 @@ def test_story_writer_makes_exactly_one_2200_token_thinking_call():
         )
     _assert(generated and result == story, "single-pass writer should return the one generated draft")
     _assert(len(calls) == 1, f"writer made more than one model call: {len(calls)}")
-    _assert(calls[0].get("max_completion") == 2200, f"writer budget changed: {calls[0]}")
+    _assert(calls[0].get("max_completion") == 3200, f"writer budget differs from configured 3,200-token contract: {calls[0]}")
     _assert(calls[0].get("disable_thinking") is False, f"thinking mode is not enabled: {calls[0]}")
     _assert(calls[0].get("minimum_output_tokens") == 0, f"writer unexpectedly forced output padding: {calls[0]}")
     log = captured.getvalue()
@@ -1306,8 +1309,8 @@ def main():
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
         test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
         test_ai_story_does_not_inherit_template_cast_anchors,
-        test_story_generation_is_single_pass_thinking_2200_no_floor,
-        test_story_writer_makes_exactly_one_2200_token_thinking_call,
+        test_story_generation_is_single_pass_thinking_3200_no_floor,
+        test_story_writer_makes_exactly_one_3200_token_thinking_call,
         test_qwen3_story_sampler_is_runtime_config_driven,
         test_story_prompt_restores_september_25_craft_contract,
         test_story_contract_remains_six_paragraphs_420_560,
