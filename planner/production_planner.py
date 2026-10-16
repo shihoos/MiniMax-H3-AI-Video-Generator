@@ -48,35 +48,17 @@ LOGGER = logging.getLogger(__name__)
 
 class ProductionPlanner:
     """
-    Dependency-free production planner.
+    Production validation and H3 binding layer.
 
-    Important architectural rule:
+    With the Qwen Director enabled, this class must not choose the creative
+    cast. Its legacy deterministic character detector is available only to
+    explicit Director-disabled/offline callers. The live Director build starts
+    without guessed characters; Qwen's completed-story extraction supplies the
+    canonical roster, which this class validates and canonicalizes.
 
-    When the local Qwen director is enabled, Qwen is the
-    creative authority for:
-      - story development
-      - character creation
-      - scene design
-      - cinematic shot planning
-
-    This deterministic planner then acts only as the production
-    safety/reference/H3 binding layer.
-
-    When the Qwen director is disabled, this planner remains
-    available as a deterministic fallback for CI and offline
-    operation.
-
-    Character creation therefore means:
-
-        story
-          -> deterministic canonical character profile
-          -> identity locks
-          -> H3 prompt
-
-    When reference media exists, it is attached.
-
-    When it does not exist, the generated character profile
-    becomes the canonical identity source for the production.
+    The planner never rewrites the story by injecting instructions or inferred
+    prose. It handles production structure, safe identity/reference binding,
+    and H3 constraints. Reference media is attached when available.
     """
 
     ROLE_PATTERNS = (
@@ -4122,11 +4104,14 @@ class ProductionPlanner:
             user_input,
         )
 
-        # Always construct the deterministic production foundation.
-        # The Director may enrich it, but it must never be responsible for
-        # creating the canonical roster or scene topology.
-        characters = self.create_characters(
-            story
+        # Do not run the word-list character detector in the live Qwen path.
+        # It is only a legacy/offline fallback when the Director is disabled.
+        # When Qwen is enabled, the final-story extractor owns cast identity and
+        # count; an empty provisional roster is safer than guessed characters.
+        characters = (
+            []
+            if director_enabled()
+            else self.create_characters(story)
         )
 
         scenes = self.create_scenes(
