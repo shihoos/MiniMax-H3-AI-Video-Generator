@@ -110,6 +110,15 @@ def _validate_control_plane_requirements() -> None:
                 f"requirements.txt must contain an exact {name}== pin for deterministic Director token accounting."
             )
 
+    # The warm probe must enforce the same package pins as the cold install.
+    bootstrap_source = (ROOT / "kaggle/bootstrap.py").read_text(encoding="utf-8")
+    probe_start = bootstrap_source.index("def _probe_director_venv(")
+    probe_end = bootstrap_source.index("def _sage_build_stamp_path(", probe_start)
+    warm_probe = bootstrap_source[probe_start:probe_end]
+    required = ('_exact_requirement_pin("transformers")', '_exact_requirement_pin("tokenizers")',
+                "transformers.__version__", "tokenizers.__version__", "from transformers import Qwen3Config")
+    if any(item not in warm_probe for item in required):
+        raise RuntimeError("Bootstrap warm vLLM reuse must verify the locked Transformers/tokenizers pins and Qwen3Config import.")
 
 def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
     """Return recognized main() call targets in lexical source order.
