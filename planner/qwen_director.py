@@ -19,6 +19,7 @@ from planner.config import (
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_N_CTX,
+    DIRECTOR_STORY_MAX_TOKENS,
     DIRECTOR_STORY_THINKING_TOP_K,
     DIRECTOR_STORY_THINKING_MIN_P,
     DIRECTOR_STORY_PRESENCE_PENALTY,
@@ -1447,7 +1448,7 @@ class QwenDirector(
         # cap with thinking enabled; no retry, alternative candidate, critic, or editor
         # call is made on this path.
         story_min_output_tokens = 0
-        story_budget = 2200
+        story_budget = DIRECTOR_STORY_MAX_TOKENS
         print(
             f"[QWEN] story_thinking=on story_max_tokens={story_budget} temperature={temperature:.2f} top_p={top_p:.2f} top_k={DIRECTOR_STORY_THINKING_TOP_K} min_p={DIRECTOR_STORY_THINKING_MIN_P:.1f} presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.1f} single_pass=true",
             flush=True,
