@@ -1,4 +1,4 @@
-from __future__ import annotations
+afrom __future__ import annotations
 
 import json
 import os
@@ -511,8 +511,6 @@ class QwenDirectorPromptMixin:
         return (
             DIRECTOR_TEMPERATURE,
             DIRECTOR_TOP_P,
-    DIRECTOR_STORY_THINKING_TEMPERATURE,
-    DIRECTOR_STORY_THINKING_TOP_P,
         )
 
     def _shot_sampling(
