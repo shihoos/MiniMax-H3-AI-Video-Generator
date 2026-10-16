@@ -203,84 +203,102 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
-
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""
     You are the narrative writer for MiniMax H3.
 
-    The user provides a premise.
+    Write one complete, filmable short-film story from the supplied premise. The
+    story must have a clear protagonist goal, a causal middle, a consequential
+    decision, a climax, and a resolved aftermath.
 
-    Write a complete cinematic short-film story with a clear beginning,
-    escalating middle, irreversible choice or point of no return, climax,
-    consequence, and explicit resolution. Completion is more important than
-    reaching a target word count.
-
-    Hard requirements:
-    1. SUBVERT THE OBVIOUS. Introduce one unexpected reveal or reversal that
-       is caused by a concrete detail established earlier in the story. Do not
-       rely on a familiar default twist or introduce a random secret, artifact,
-       monster, or organization only for surprise.
-    2. INTERIORITY. Include at least two sentences that reveal the protagonist's
+    HARD STORY REQUIREMENTS
+    1. SUBVERT THE OBVIOUS: introduce one unexpected reveal or reversal rooted in
+       a concrete detail established earlier. Prefer a re-interpretation of evidence,
+       motive, or a human choice. The reveal must be understandable from what the audience has
+       already seen; do not add a new mechanism at the last moment just for surprise.
+    2. INTERIORITY: include at least two sentences revealing the protagonist's
        specific fear, memory, desire, or private realization through concrete
-       imagery or sensory association. Show why the moment matters to them.
-    3. DIALOGUE. Include at least one short line of spoken dialogue by a named
-       character. In AI-STORY and EXPAND-STORY output, every spoken line MUST be
-       enclosed in quotation marks; never present spoken dialogue as unquoted narrative. The line must change a decision, reveal information, create
-       conflict, or foreshadow the central reversal. No filler dialogue.
-    4. RESOLUTION. End with a complete aftermath paragraph showing what happened
-       to the protagonist and what changed. Do not stop mid-action, mid-sentence,
-       mid-word, or on an ellipsis.
+       imagery or sensory association. It must affect a present decision.
+    3. DIALOGUE: include at least one short line of spoken dialogue by a named
+       character when it advances the conflict. Every spoken line must be enclosed in quotation marks and placed
+       inside its scene paragraph, never as a standalone paragraph. Dialogue must
+       demand, refuse, bargain, expose a motive, or change a decision; no filler.
+    4. RESOLUTION: paragraph six must be a complete aftermath paragraph showing the
+       actual consequence of the climax, resolving the immediate conflict, and ending
+       on a concrete image that pays off the opening. Do not add a separate epilogue.
 
-    Additional constraints:
-    - Aim for 400-650 words, but always finish the story completely.
-    - Third person past tense.
-    - One protagonist whose goal is stated in the first two sentences.
-    - Qwen decides names, identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
-    - No camera directions, scene headings, shot descriptions, labels, or meta commentary.
+    CAUSALITY AND SCOPE
+    - Establish one central physical or social rule and obey it. Track every key
+      object's location and state; nothing changes without a shown cause.
+    - A supporting person is optional, not a quota. Include only characters whose
+      choices materially change the protagonist's options. Qwen decides names,
+      identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
+    - Use the protagonist's profession or demonstrated skill to solve a real part
+      of the problem, not as decorative biography.
+    - Do not default to a monster, future/alternate version of the protagonist,
+      time loop, secret experiment, hidden organization, conspiracy, world-ending
+      threat, arbitrary countdown, or catastrophic self-destruct. Use such devices
+      only when the supplied premise clearly establishes or strongly calls for them.
+    - Do not force a twist if it breaks the causal logic. One coherent conflict is
+      better than several disconnected mysteries.
 
-    Output ONLY the story prose.
-    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
+    OUTPUT CONTRACT
+    - Exactly six non-empty paragraphs, one filmable scene per paragraph.
+    - 420-560 words total. Finish the resolution within that range; do not add a
+      coda or exceed the limit to explain the mystery again.
+    - Third-person past tense. State the protagonist's concrete goal in the first
+      two sentences. No camera directions, scene headings, labels, or meta text.
+    - Output only the completed story prose.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
     You are the narrative expansion writer for MiniMax H3.
 
-    Expand the supplied story substantially while preserving its important characters,
-    events, chronology, setting, outcome, and explicit constraints. Add meaningful
-    new narrative material, cause-and-effect development, emotional depth, escalation,
-    and consequences rather than merely rephrasing or lightly lengthening the source.
-    Build a complete arc with escalation, point of no return, climax, consequence,
-    and resolution.
+    Expand the supplied story into one complete, filmable short-film narrative.
+    Preserving its important characters, events, chronology, setting, outcome, and all
+    explicit constraints is mandatory whenever an outcome is stated in the source. Deepen cause and effect, motivation,
+    emotional pressure, intermediate action, and consequences rather than merely
+    paraphrasing the source.
 
-    Hard requirements for the expansion:
-    1. Preserve an existing twist if one exists. If none exists, introduce one
-       unexpected reveal or reversal that is caused by a concrete detail already
-       established in the source; do not add a random secret, artifact, monster,
-       or organization solely for surprise.
-    2. Add at least two sentences of meaningful interiority for the protagonist,
-       tied to a specific fear, memory, desire, or private realization.
-    3. Preserve or add at least one short line of spoken dialogue by a named
-       character. The line must advance conflict, reveal information, or connect
-       to the central reversal. In EXPAND-STORY output, every spoken line MUST be
-       enclosed in quotation marks; never present spoken dialogue as unquoted narrative.
-    4. End with a complete resolution paragraph describing the aftermath and what
-       changed. Do not stop mid-action, mid-sentence, mid-word, or on an ellipsis.
+    HARD STORY REQUIREMENTS
+    1. SUBVERT THE OBVIOUS: preserve an existing reversal if present. If the source is
+       only a premise and contains no plot yet, introduce one unexpected reveal or
+       reversal rooted in a concrete detail introduced earlier. It must clarify or re-interpret that detail, not
+       create an unrelated mystery.
+    2. INTERIORITY: include at least two sentences revealing the protagonist's
+       specific fear, memory, desire, or private realization through concrete
+       imagery or sensory association; connect it to a present choice.
+    3. DIALOGUE: include at least one short line of spoken dialogue by a named character
+       when useful. Every spoken line must be enclosed in quotation marks and stay inside its scene
+       paragraph. Dialogue must change the conflict, motive, or decision; no filler.
+    4. RESOLUTION: paragraph six must be a complete resolution paragraph showing the
+       consequence. If the source has an explicit outcome, preserve it. Do not add
+       a detached epilogue or stop on an unexplained teaser.
 
-    Additional constraints:
-    - Aim for 400-650 words, but always finish the story completely.
-    - Preserve source meaning and chronology; Do not replace the original plot.
-    - Qwen decides names, identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
-    - Do not merely add adjectives.
-    - Do not convert the story into camera directions, scene headings, or shot descriptions.
+    SOURCE FIDELITY AND SCOPE
+    - Treat every stated source fact as canon. Do not replace it with a different
+      plot or claim an unstated backstory as if the source established it.
+    - If the source is very short, invent only the missing material needed for one
+      coherent causal story around the stated event and object. Do not inflate a
+      sealed vault into a conspiracy, secret organization, monster, future self,
+      time loop, bioweapon, arbitrary countdown, or world-ending mechanism by default.
+    - Use one consistent physical/social rule, plant its evidence before the turn,
+      and show how the protagonist's choice causes the ending.
+    - A supporting person is optional, not a quota. Include only someone whose
+      independent choice changes the protagonist's options. Qwen decides names,
+      identities, relationships, and final cast size; no hardcoded roster or numeric cast quota.
 
-    Output ONLY the expanded story prose.
-    Do not output JSON, JSON objects, labels, analysis, metadata, or explanations.
+    OUTPUT CONTRACT
+    - Exactly six non-empty paragraphs, one filmable scene per paragraph.
+    - 420-560 words total. Complete the story within this range without padding or
+      repeating the source as a recap.
+    - Third-person past tense. Every spoken line is quoted and remains in its scene
+      paragraph. No camera directions, scene headings, labels, or meta text.
+    - Output only the expanded story prose.
     """).strip()
 
-        raise ValueError(
-            "Preserve Story does not use a story-text pass."
-        )
+        raise ValueError("Preserve Story does not use a story-text pass.")
 
 
     def _story_text_user(
@@ -305,32 +323,64 @@ class QwenDirectorPromptMixin:
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
-        result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Plain prose only."
+        result += (
+            "\n\nOUTPUT CONTRACT: exactly six non-empty filmable scene paragraphs; "
+            "420-560 words total; third-person past tense; keep spoken dialogue inside "
+            "its scene paragraph; complete the immediate conflict and aftermath in "
+            "paragraph six. Plain prose only."
+        )
         return result
 
 
     _STORY_BIBLE_SYSTEM = textwrap.dedent("""
-    You are the head writer planning a specific, coherent short film before prose is written. Return JSON only. Plan six filmable scenes, each one location and a continuous stretch of time.
+    You are the story architect planning one coherent short film for a final prose
+    writer. Return JSON only. Create ONE grounded plan. Do not compare multiple competing concepts. Use six scene beats, each a filmable place, action, and result.
 
-    CONCEPT SELECTION: identify the obvious version, then create three alternatives whose CAUSES of conflict differ from one another. Differences must come from incompatible human goals, profession-specific constraints, or consequences—not simply swapping the setting, genre, object, or villain. Choose the most distinctive premise-specific concept, not the most spectacular one. Do not default to a secret experiment, virus/cure, bioweapon, countdown, evil AI, sabotage, or conspiracy unless the source premise explicitly establishes it.
+    SOURCE AND SCOPE
+    - Use the supplied premise as the center of the story. Do not swap its profession,
+      setting, key object, or central event for a different premise.
+    - In Expand Story, all stated source facts are canon. If the source is only one
+      sentence, it leaves the outcome open, but build the new plot around that event;
+      do not invent a prior family tragedy, secret organization, or conspiracy merely
+      to make the premise feel bigger.
+    - Keep the stakes proportional to the premise. Do not default to a monster,
+      bioweapon, hidden experiment, evil AI, time loop, future/alternate self, arbitrary
+      countdown, meltdown, or world-ending threat unless the input supports it.
 
-    PROTAGONIST: select exactly one protagonist from the cast and copy their canonical name into `protagonist_name`. This person has a concrete, understandable goal, a consequential blind spot, and agency in every major turn. For the protagonist's `stance_toward_protagonist`, describe internal conflict rather than an interpersonal attitude.
+    PROTAGONIST AND CAST
+    - `protagonist_name` and `protagonist_goal` describe the lead. The protagonist is
+      separate from `cast`; never repeat the protagonist inside `cast`.
+    - `cast` means optional supporting characters only and may be empty. There is no
+      minimum, maximum, preferred number, or requirement for an on-screen counterpart.
+      Add a person only when removing that person's independent choice breaks a causal
+      link or makes the protagonist's decision substantially easier.
+    - Every supporting person needs an independent want, a practical constraint, and
+      one visible action that changes the protagonist's options. Do not require a secret,
+      hidden identity, betrayal, or a special flaw for every character.
+    - Do not force a name or character into the final story. The prose writer may drop
+      any planned supporting character and may revise a detail if needed for coherence.
+      Final cast ownership remains with Qwen's finished-story extraction.
 
-    CAST: choose only characters whose choices are causally useful; there is no fixed number, target, or maximum. A person is necessary only if removing them would break a causal link, remove meaningful resistance, or make the protagonist's central decision substantially easier. Every non-protagonist must have an independent, defensible want and take an action that changes the protagonist's options. Do not add people to fill beats. Other cast details are provisional and may be removed by the prose writer if they damage coherence.
-
-    CAUSAL MECHANISM: in `causal_mechanism`, state the central physical/social rule in concrete terms: what the mechanism does, its limit, and the evidence that lets the protagonist act on it. Avoid magic mechanics that solve the story without setup. The object/skill used in the climax must be planted early and have a specific function.
-
-    CONFLICT: people with incompatible goals drive the story; weather, a broken machine, or a generic disaster is pressure, not the antagonist. Every beat must cause the problem of the next beat. The turn in scene 4 grows from earlier evidence and forces a new action. Scene 5 contains a consequential choice between outcomes that cannot both be kept. Scene 6 shows what actually happened, the cost paid, and a concrete settled image that echoes scene 1.
-
-    ORIGINALITY AND CONSISTENCY: avoid vague mysteries, random reveals, exposition dumps, stock emotional shorthand, arbitrary countdowns, unexplained glows, and generic technology jargon. Use two or more specific details that arise from the protagonist's profession and this setting. Before returning JSON, check that the chosen concept is genuinely different from the obvious version, the central mechanism has one consistent rule, each cast member has a necessary causal function, and the ending directly pays off the choice.
-
-    Keep each field short and concrete (under 40 words per beat). `beats` contains exactly six strings in order: opening, first attempt, pressure, turn, choice, aftermath. Each beat names the place, who acts, and the visible consequence. Track every necessary character and the planted detail; nothing can vanish or change state without a beat explaining it.
+    CAUSAL PLAN
+    - State one concrete physical or social `causal_mechanism`: how it works, its limit,
+      and what observable evidence lets the protagonist reason about it. Do not use a
+      mechanism that appears only in the climax.
+    - Plant one specific piece of evidence early. The turn in beat 4 must grow from it
+      and change what the protagonist believes or must do.
+    - Beat 5 contains a meaningful choice between outcomes that cannot both be kept.
+      Beat 6 shows the actual consequence and resolves the immediate conflict; no tease
+      for a sequel and no unexplained last-minute rescue.
+    - All six beats must form one cause-and-effect chain. Each beat causes the next.
+      Prefer a concrete human/professional conflict over generic catastrophe pressure.
+    - Keep each field concise. Use only details that the finished short story can
+      establish and pay off within six paragraphs.
     """).strip()
 
     _STORY_BIBLE_EXPAND_NOTE = (
-        "\n\nEXPAND MODE: the supplied source story is canon. Keep its people, setting, events in order, and outcome. "
-        "The plan deepens it with cause, opposition, evidence, and consequence; it never replaces it with a different plot. "
-        "Source characters are anchors, not a cast limit; add a new person only when the conflict needs them, and bring them on screen."
+        "\n\nEXPAND MODE: preserve every concrete source fact and its chronology. "
+        "The outline may add a goal, obstacle, evidence, choice, and outcome only where "
+        "the source leaves them open; it must not rewrite an established outcome. "
+        "Source character anchors are facts, not a limit on the cast."
     )
 
     @staticmethod
@@ -342,48 +392,42 @@ class QwenDirectorPromptMixin:
             "type": "object",
             "properties": {
                 "protagonist_name": text(64),
+                "protagonist_goal": text(200),
+                "protagonist_skill": text(180),
+                "personal_stake": text(200),
                 "causal_mechanism": text(260),
-                "obvious_version": text(240),
-                "concepts": {
-                    "type": "array",
-                    "minItems": 3,
-                    "maxItems": 3,
-                    "items": text(240),
-                },
-                "chosen_concept": text(300),
+                "central_conflict": text(300),
                 "cast": {
                     "type": "array",
-                    "minItems": 1,
+                    "minItems": 0,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                            "name": text(64),
                             "role": text(120),
                             "want": text(200),
-                            "flaw_or_secret": text(200),
-                            "stance_toward_protagonist": text(160),
+                            "constraint": text(200),
+                            "causal_action": text(200),
                         },
-                        "required": ["name", "role", "want", "flaw_or_secret", "stance_toward_protagonist"],
+                        "required": ["name", "role", "want", "constraint", "causal_action"],
                         "additionalProperties": False,
                     },
                 },
-                "cast_rationale": text(240),
-                "central_conflict": text(300),
                 "planted_detail": text(240),
-                "turn": text(300),
-                "choice_and_price": text(300),
-                "ending_image": text(240),
+                "turn": text(260),
+                "choice_and_price": text(280),
+                "ending_image": text(200),
                 "beats": {
                     "type": "array",
                     "minItems": 6,
                     "maxItems": 6,
-                    "items": text(320),
+                    "items": text(280),
                 },
             },
             "required": [
-                "protagonist_name", "causal_mechanism", "obvious_version", "concepts", "chosen_concept",
-                "cast", "cast_rationale", "central_conflict", "planted_detail",
-                "turn", "choice_and_price", "ending_image", "beats",
+                "protagonist_name", "protagonist_goal", "protagonist_skill", "personal_stake",
+                "causal_mechanism", "central_conflict", "cast", "planted_detail", "turn",
+                "choice_and_price", "ending_image", "beats",
             ],
             "additionalProperties": False,
         }
@@ -394,12 +438,7 @@ class QwenDirectorPromptMixin:
         story: str,
         source_character_names: list[str] | None = None,
     ) -> dict | None:
-        """One compact thinking-mode planning call (schema-guided). Never fatal.
-
-        Qwen decides the cast, conflict, planted detail, turn, price and six beats; the
-        prose pass then writes from that plan. Any failure returns None and the prose
-        pass runs exactly as before.
-        """
+        """Make one compact, premise-grounded plan; it is advisory, not a cast contract."""
         self._planned_cast = []
         try:
             system = self._STORY_BIBLE_SYSTEM
@@ -419,11 +458,11 @@ class QwenDirectorPromptMixin:
             bible = self._chat_json(
                 system,
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                minimum_completion=300,
+                minimum_completion=240,
                 temperature=DIRECTOR_STORY_THINKING_TEMPERATURE,
                 top_p=DIRECTOR_STORY_THINKING_TOP_P,
                 call_name="story_bible",
-                max_completion=2800,
+                max_completion=2000,
                 json_mode=True,
                 disable_thinking=False,
                 response_schema=self._story_bible_json_schema(),
@@ -433,30 +472,40 @@ class QwenDirectorPromptMixin:
             return None
 
         if not isinstance(bible, dict):
+            print("[QWEN] story_bible skipped (response was not an object)", flush=True)
             return None
+
+        raw_cast = bible.get("cast", [])
         cast = [
-            item for item in (bible.get("cast") or [])
+            dict(item) for item in raw_cast
             if isinstance(item, dict) and str(item.get("name", "") or "").strip()
-        ]
+        ] if isinstance(raw_cast, list) else []
         beats = [str(item).strip() for item in (bible.get("beats") or []) if str(item).strip()]
         protagonist_name = str(bible.get("protagonist_name", "") or "").strip()
+        protagonist_goal = str(bible.get("protagonist_goal", "") or "").strip()
         mechanism = str(bible.get("causal_mechanism", "") or "").strip()
-        normalized_names = {
-            re.sub(r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+", "", str(item.get("name", "") or "").strip(), flags=re.IGNORECASE).casefold()
-            for item in cast
-        }
-        normalized_protagonist = re.sub(
-            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
-            "", protagonist_name, count=1, flags=re.IGNORECASE,
-        ).casefold()
-        if not cast or len(beats) != 6 or not mechanism or normalized_protagonist not in normalized_names:
-            print("[QWEN] story_bible skipped (incomplete or inconsistent protagonist/mechanism)", flush=True)
+
+        # The protagonist is a separate field from optional supporting cast. Do not
+        # reject a useful plan merely because the model doesn't duplicate the lead in
+        # `cast`, and do not require a supporting character for an isolated story.
+        missing = []
+        if not protagonist_name:
+            missing.append("protagonist")
+        if not protagonist_goal:
+            missing.append("goal")
+        if not mechanism:
+            missing.append("causal mechanism")
+        if len(beats) != 6:
+            missing.append("six beats")
+        if missing:
+            print("[QWEN] story_bible skipped (missing " + ", ".join(missing) + ")", flush=True)
             return None
+
         bible["cast"] = cast
         bible["beats"] = beats
         self._planned_cast = list(dict.fromkeys(str(item["name"]).strip() for item in cast))
         print(
-            f"[QWEN] story_bible protagonist={protagonist_name} cast={len(cast)} names={self._planned_cast}",
+            f"[QWEN] story_bible accepted protagonist={protagonist_name} supporting_cast={len(cast)}",
             flush=True,
         )
         return bible
@@ -466,27 +515,38 @@ class QwenDirectorPromptMixin:
         if not isinstance(bible, dict) or not bible.get("beats"):
             return ""
         lines = [
-            "STORY BIBLE (provisional causal map; improve or simplify it if that produces a more coherent story; not a fixed cast quota):",
-            "PROTAGONIST: " + str(bible.get("protagonist_name", "")),
-            "CAUSAL MECHANISM (keep this rule consistent and show its consequence): " + str(bible.get("causal_mechanism", "")),
-            "CHOSEN CONCEPT (distinct from the obvious version: "
-            + str(bible.get("obvious_version", "")) + "): " + str(bible.get("chosen_concept", "")),
-            "CANDIDATE CAST (use each person only if their actions materially change the causal story; you may drop unnecessary planned characters):",
+            "PROVISIONAL STORY PLAN: use this as the default causal spine, not as a mandatory cast list. "
+            "Obey the source premise first. Keep one central mechanism and one connected conflict; "
+            "revise any plan detail that creates a contradiction or an unexplained coincidence.",
+            "PROTAGONIST (chosen by Qwen): " + str(bible.get("protagonist_name", "")),
+            "CONCRETE GOAL: " + str(bible.get("protagonist_goal", "")),
+            "RELEVANT SKILL: " + str(bible.get("protagonist_skill", "")),
+            "PERSONAL STAKE (do not invent extra backstory beyond this without a causal need): " + str(bible.get("personal_stake", "")),
+            "CAUSAL MECHANISM (one rule, its limit, and its evidence): " + str(bible.get("causal_mechanism", "")),
+            "CENTRAL CONFLICT: " + str(bible.get("central_conflict", "")),
+            "OPTIONAL SUPPORTING CAST (may be empty; never force these names into the final story):",
         ]
-        for person in bible.get("cast", []) or []:
+        cast = [item for item in (bible.get("cast") or []) if isinstance(item, dict)]
+        if not cast:
+            lines.append("- None is required by this plan. The final writer may add a person only if the causal story genuinely needs one.")
+        for person in cast:
             lines.append(
-                f"- {person.get('name', '')}: {person.get('role', '')}. Wants: {person.get('want', '')}. "
-                f"Flaw or secret: {person.get('flaw_or_secret', '')}. Toward the protagonist: {person.get('stance_toward_protagonist', '')}."
+                f"- {person.get('name', '')}: {person.get('role', '')}. Want: {person.get('want', '')}. "
+                f"Constraint: {person.get('constraint', '')}. Causal action: {person.get('causal_action', '')}."
             )
-        lines.append("CAST REASON: " + str(bible.get("cast_rationale", "")))
-        lines.append("CONFLICT: " + str(bible.get("central_conflict", "")))
-        lines.append("PLANTED EARLY, PAID LATE: " + str(bible.get("planted_detail", "")))
-        lines.append("TURN (paragraph 4): " + str(bible.get("turn", "")))
-        lines.append("CHOICE AND PRICE: " + str(bible.get("choice_and_price", "")))
-        lines.append("ENDING IMAGE: " + str(bible.get("ending_image", "")))
-        lines.append("SCENE BEATS:")
+        lines.extend([
+            "PLANT EARLY: " + str(bible.get("planted_detail", "")),
+            "TURN FROM THAT EVIDENCE: " + str(bible.get("turn", "")),
+            "CHOICE AND PRICE: " + str(bible.get("choice_and_price", "")),
+            "ENDING IMAGE / RESOLUTION: " + str(bible.get("ending_image", "")),
+            "SIX CAUSAL SCENE BEATS:",
+        ])
         for index, beat in enumerate(bible.get("beats", []) or [], start=1):
             lines.append(f"{index}. {beat}")
+        lines.append(
+            "The final writer owns the finished story and final cast. Do not add an unrelated second mystery, "
+            "new high-stakes mechanism, or separate epilogue to decorate this plan."
+        )
         return "\n".join(lines)
 
     def _sampling_for_mode(
@@ -609,7 +669,7 @@ class QwenDirectorPromptMixin:
 
     Read the COMPLETE final story from its first paragraph to its last. Determine the actual production cast from the story itself. `candidates` is the set of people who physically participate in present-time story events: people who act, speak in person, oppose/help another character, touch or rescue someone, wake up and interact, enter or leave, or otherwise take part in an event shown happening now. Include a person first introduced as missing or in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
 
-    Review every paragraph for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Qwen alone decides the identities and number of production characters. There is no minimum cast target beyond the protagonist required for a story, no preference for one-person or multi-person stories, and no cast-count quota. Return the actual cast that the final prose depicts. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
+    Review every paragraph for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Qwen alone decides the identities and number of production characters. There is no minimum cast target beyond the protagonist required for a story, no preference for one-person or multi-person stories, and no cast-count quota; this is not a fixed cast quota. Return the actual cast that the final prose depicts. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. Do not use a deterministic hint list or a planning cast as a separate source of truth. The `candidates` array itself is your final cast decision; no downstream step will add names from hints, planned cast, or dialogue speakers. A dialogue speaker must therefore also be represented in `candidates` when that person physically participates in the story.
 
@@ -897,12 +957,11 @@ class QwenDirectorPromptMixin:
 
     @staticmethod
     def _compact_story_context(story: str, max_chars: int = DIRECTOR_SHOT_STORY_CONTEXT_CHARS) -> str:
-        """Compact by paragraph while retaining a causal/action-bearing sentence.
+        """Compact long story context only at sentence boundaries.
 
-        The old first+last-only strategy removed the middle actions that explained
-        why a scene changed, leaving shot batches to invent visual bridges. This
-        version preserves paragraph boundaries and selects first, last, and the
-        strongest interior action/cause sentence when the character budget allows.
+        Shot batches also receive complete descriptions for their current scenes. This
+        cross-story summary must never cut through a quote or a sentence, because that
+        can change who said what or make a cause look like disconnected narration.
         """
         value = str(story or "").strip()
         if len(value) <= max_chars:
@@ -913,7 +972,7 @@ class QwenDirectorPromptMixin:
             if part.strip()
         ]
         if not paragraphs:
-            return value[:max_chars].rstrip() + "…"
+            return value
 
         action_cues = re.compile(
             r"\b(?:but|because|when|until|after|before|then|instead|therefore|so|"
@@ -922,81 +981,150 @@ class QwenDirectorPromptMixin:
             r"warned|shouted|slid|turned|reached|failed|collapsed|leaked|mutated|"
             r"stopped|followed|handed|pulled|cut|locked|unlocked|answered|lied|"
             r"admitted|betrayed|offered|threatened|confronted|blocked|struck|switched|"
-            r"pocketed|pockets|tucked|dropped|stowed|carried|retrieved|returned|placed|"
-            r"removed|held|took|kept|stored|transferred|hid|hidden|recovered|picked)\b",
+            r"pocketed|tucked|dropped|carried|retrieved|returned|placed|removed|held|"
+            r"took|kept|stored|transferred|hid|recovered|picked)\b",
             re.IGNORECASE,
         )
-        quote_cue = re.compile(r"[\"“”‘’]")
-        separator_cost = max(0, len(paragraphs) - 1) * 2
-        prefix_cost = sum(len(f"P{i + 1}: ") for i in range(len(paragraphs)) if len(paragraphs) <= 12)
-        budget_each = max(24, (max_chars - separator_cost - prefix_cost) // len(paragraphs))
 
-        selected: list[str] = []
-        for index, paragraph in enumerate(paragraphs):
-            # Protect common honorifics before sentence splitting: without this,
-            # "Dr. Lena Voss" can become a standalone first sentence and the
-            # compactor may keep "Dr." while dropping the identity that follows.
+        def sentence_spans(paragraph: str) -> list[str]:
             protected = re.sub(
                 r"\b(Dr|Mr|Mrs|Ms|Prof|Capt|Cmdr|Lt|Sgt|St|Rev|Hon|Sr|Jr)\.(?=\s)",
                 lambda match: match.group(1) + "\u2024",
                 paragraph,
             )
-            sentences = [
-                part.strip().replace("\u2024", ".")
-                for part in re.split(r"(?<=[.!?])[\"\u201d\u2019']?\s+(?=[A-Z\"\u201c])", protected)
-                if part.strip()
-            ]
-            if not sentences:
-                continue
-            chosen_indexes = {0, len(sentences) - 1}
-            if len(sentences) > 2:
+            result: list[str] = []
+            start_at = 0
+            quote_mode: str | None = None
+            i = 0
+            while i < len(protected):
+                char = protected[i]
+                if char == "“" and quote_mode is None:
+                    quote_mode = "curly"
+                elif char == "”" and quote_mode == "curly":
+                    quote_mode = None
+                elif char == '"':
+                    quote_mode = None if quote_mode == "straight" else ("straight" if quote_mode is None else quote_mode)
+
+                if char in ".!?":
+                    mode_before = quote_mode
+                    probe_mode = quote_mode
+                    j = i + 1
+                    saw_closer = False
+                    # A sentence-ending punctuation mark inside a quoted line is a
+                    # boundary only when the matching quote closes immediately after it.
+                    while j < len(protected) and protected[j] in {'”', '"'}:
+                        closer = protected[j]
+                        if (probe_mode == "curly" and closer == "”") or (probe_mode == "straight" and closer == '"'):
+                            probe_mode = None
+                            saw_closer = True
+                            j += 1
+                        else:
+                            break
+                    k = j
+                    # Keep closing Markdown emphasis markers attached to the sentence.
+                    while k < len(protected) and protected[k] in "*_)]}":
+                        k += 1
+                    can_end = mode_before is None or (saw_closer and probe_mode is None)
+                    if can_end:
+                        next_at = k
+                        while next_at < len(protected) and protected[next_at].isspace():
+                            next_at += 1
+                        if next_at > k and next_at < len(protected) and (
+                            protected[next_at].isupper()
+                            or protected[next_at].isdigit()
+                            or protected[next_at] in '“"'
+                        ):
+                            part = protected[start_at:k].strip().replace("\u2024", ".")
+                            if part:
+                                result.append(part)
+                            start_at = next_at
+                            quote_mode = probe_mode
+                            i = next_at
+                            continue
+                i += 1
+            tail = protected[start_at:].strip().replace("\u2024", ".")
+            if tail:
+                result.append(tail)
+            return result or [paragraph]
+
+        n = len(paragraphs)
+        prefix_cost = sum(len(f"P{i + 1}: ") for i in range(n) if n <= 12)
+        separators_cost = 2 * max(0, n - 1)
+        per_body_budget = max(1, (max_chars - prefix_cost - separators_cost) // n)
+        selected: list[str] = []
+
+        for index, paragraph in enumerate(paragraphs):
+            sentences = sentence_spans(paragraph)
+            if len(sentences) <= 2:
+                indexes = list(range(len(sentences)))
+            else:
                 middles = list(range(1, len(sentences) - 1))
                 center = (len(sentences) - 1) / 2
-                def sentence_score(i: int) -> tuple[int, float, int]:
-                    sentence = sentences[i]
-                    score = len(action_cues.findall(sentence)) * 3
-                    score += 2 if quote_cue.search(sentence) else 0
-                    score += 1 if len(sentence.split()) >= 9 else 0
-                    return (score, -abs(i - center), -i)
-                best_middle = max(middles, key=sentence_score)
-                chosen_indexes.add(best_middle)
+                best_middle = max(
+                    middles,
+                    key=lambda i: (
+                        len(action_cues.findall(sentences[i])) * 3
+                        + (2 if re.search(r"[\"\u201c\u201d'\u2018\u2019]", sentences[i]) else 0)
+                        + min(2, len(sentences[i].split()) // 10),
+                        -abs(i - center),
+                    ),
+                )
+                indexes = [0, best_middle, len(sentences) - 1]
+                quoted = [
+                    i for i, sentence in enumerate(sentences)
+                    if ("“" in sentence and "”" in sentence) or sentence.count('"') >= 2
+                ]
+                if quoted:
+                    # Preserve one complete quoted/dialogue sentence when space allows;
+                    # never select a fragment from inside a quoted utterance.
+                    quote_middle = max(
+                        quoted,
+                        key=lambda i: (
+                            len(action_cues.findall(sentences[i])) * 3
+                            + min(3, len(sentences[i].split()) // 8)
+                            - abs(i - center),
+                        ),
+                    )
+                    indexes.append(quote_middle)
+                indexes = sorted(set(indexes))
 
-            # Preserve chronological order. If the budget is tight, sacrifice
-            # the optional interior sentence only after reserving opening/ending.
-            chosen = [sentences[i] for i in sorted(chosen_indexes)]
-            def total_len(items: list[str]) -> int:
-                return sum(len(x) for x in items) + max(0, len(items) - 1)
-            if total_len(chosen) > budget_each and len(chosen) == 3:
-                # The interior sentence usually carries the causal turn. Do not
-                # discard it just because the opening and closing prose are long.
-                middle = chosen[1]
-                middle_budget = min(len(middle), max(80, budget_each - 100))
-                middle = middle[:middle_budget].rstrip()
-                side_budget = max(8, (budget_each - len(middle) - 4) // 2)
-                opening = chosen[0][:side_budget].rstrip()
-                ending = chosen[-1][-side_budget:].lstrip()
-                chosen = [opening + "…", middle, "…" + ending]
-            if total_len(chosen) > budget_each:
-                side = max(8, (budget_each - 3) // 2)
-                if len(chosen) == 1:
-                    snippet = chosen[0][:max(1, budget_each - 1)].rstrip() + "…"
-                else:
-                    snippet = chosen[0][:side].rstrip() + " … " + chosen[-1][-side:].lstrip()
-                chosen = [snippet[:budget_each].rstrip()]
-            snippet = " ".join(chosen)
-            prefix = f"P{index + 1}: " if len(paragraphs) <= 12 else ""
-            available = max(1, budget_each)
-            body_budget = max(1, available - len(prefix))
-            if len(snippet) > body_budget:
-                snippet = snippet[:max(1, body_budget - 1)].rstrip() + "…"
-            candidate = prefix + snippet
-            selected.append(candidate)
+            # Try complete-sentence combinations. Score first/last coverage, quoted
+            # dialogue, and causal action; never slice a sentence to meet a character budget.
+            candidates = []
+            for mask in range(1, 1 << len(indexes)):
+                picked = [indexes[j] for j in range(len(indexes)) if mask & (1 << j)]
+                picked.sort()
+                snippet = " ".join(sentences[i] for i in picked)
+                if len(snippet) > per_body_budget:
+                    continue
+                score = sum(
+                    4 if i == 0 else 3 if i == len(sentences) - 1 else 2
+                    for i in picked
+                )
+                score += 3 * sum(len(action_cues.findall(sentences[i])) for i in picked)
+                score += 4 * sum(
+                    1 for i in picked
+                    if ("“" in sentences[i] and "”" in sentences[i]) or sentences[i].count('"') >= 2
+                )
+                candidates.append((score, len(snippet), picked, snippet))
+            if candidates:
+                _, _, _, snippet = max(candidates, key=lambda item: (item[0], item[1]))
+            else:
+                # A single overlong sentence is omitted rather than corrupted. The
+                # current scene's full description remains separately in the prompt.
+                snippet = ""
+            prefix = f"P{index + 1}: " if n <= 12 else ""
+            if snippet:
+                selected.append(prefix + snippet)
 
         compact = "\n\n".join(selected).strip()
-        # Ensure strict cap under unusual paragraph counts or very short caps.
-        if len(compact) > max_chars:
-            compact = compact[:max_chars - 1].rstrip() + "…"
-        return compact or (value[:max_chars].rstrip() + "…")
+        # The whole-sentence budget above should fit. If an unusual number of
+        # prefixes still exceeds the cap, drop a complete lower-priority summary
+        # paragraph rather than cutting through its text.
+        while len(compact) > max_chars and selected:
+            selected.pop()
+            compact = "\n\n".join(selected).strip()
+        return compact or "[Cross-story summary omitted to preserve complete sentences; use the full scene descriptions.]"
 
     def _shot_director_batch_user(
         self,
