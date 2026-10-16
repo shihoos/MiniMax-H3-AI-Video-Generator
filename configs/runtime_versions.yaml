@@ -36,7 +36,7 @@ director:
   vllm_version: 0.31.0
   # vLLM 0.31.0 supports Transformers >=5.10.4,<5.18.0; the project's 5.17.0 pin is within range.
   allow_transformers_vllm_constraint_override: false
-  vllm_env_dir: /tmp/qwen_vllm_031_tf517
+  vllm_env_dir:  /tmp/h3_qwen_vllm_031_tf517_tok0233
   context: 8192
   max_tokens: 7000
   story_max_tokens: 3200
