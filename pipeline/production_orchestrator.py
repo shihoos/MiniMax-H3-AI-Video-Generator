@@ -100,7 +100,10 @@ class ProductionOrchestrator:
                     continue
                 for key, value in patch.items():
                     if key in allowed and isinstance(value, str) and value.strip():
-                        shot[key] = value.strip()
+                        normalized_value = value.strip()
+                        if str(shot.get(key, "") or "").strip() == normalized_value:
+                            continue
+                        shot[key] = normalized_value
                         applied.append({"shot_id": shot["shot_id"], "field": key})
         plan["director_critique_applied"] = applied
         return plan
@@ -1591,11 +1594,7 @@ class ProductionOrchestrator:
                 else:
                     plan["characters"] = deepcopy(canonical_characters or base_plan.get("characters", []) or [])
 
-                # Use the same resolver as QwenDirector. This prevents the
-                # orchestrator and critique_plan() from disagreeing about whether
-                # the critic is enabled by the runtime manifest or environment.
-                run_director_critic = director_critic_enabled()
-                if run_director_critic:
+                if director_critic_enabled():
                     try:
                         critique = self.director.critique_plan(
                             mode=mode,
@@ -1612,17 +1611,27 @@ class ProductionOrchestrator:
                             if plan.get("_canonical_character_roster_verified") is not True:
                                 plan["characters"] = deepcopy(canonical_characters)
 
-                            # Recompile only after bounded, whitelisted creative edits.
-                            from planner.cinematic_compiler import CinematicCompiler
-                            plan["shots"] = CinematicCompiler(
-                                character_names={
-                                    str(c.get("name", "")).strip()
-                                    for c in plan.get("characters", []) or []
-                                    if isinstance(c, dict) and str(c.get("name", "")).strip()
-                                }
-                            ).compile_all(plan.get("scenes", []) or [], plan.get("shots", []) or [])
+                            # Recompile only if the critic produced a real, changed, whitelisted
+                            # shot-field patch. A findings-only/empty critique must not rebuild an
+                            # identical plan or mutate compiler-derived fields needlessly.
+                            if plan.get("director_critique_applied"):
+                                from planner.cinematic_compiler import CinematicCompiler
+                                plan["shots"] = CinematicCompiler(
+                                    character_names={
+                                        str(c.get("name", "")).strip()
+                                        for c in plan.get("characters", []) or []
+                                        if isinstance(c, dict) and str(c.get("name", "")).strip()
+                                    }
+                                ).compile_all(plan.get("scenes", []) or [], plan.get("shots", []) or [])
                     except Exception as critique_error:
                         plan["director_critique_warning"] = str(critique_error)
+                else:
+                    # Keep one final telemetry block even when the critic is explicitly disabled.
+                    print(
+                        "[QWEN] director_critique skipped (set H3_DIRECTOR_CRITIQUE=1 to enable)",
+                        flush=True,
+                    )
+                    self.director._print_qwen_summary("FINAL")
 
             except Exception as exc:
 
