@@ -580,12 +580,24 @@ def feature_enabled(name: str, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def director_critic_enabled() -> bool:
+    """Resolve the Director plan critic setting consistently across all layers.
+
+    H3_DIRECTOR_CRITIQUE is the preferred explicit override. When it is absent,
+    use the legacy H3_DIRECTOR_CRITIC override and then the runtime manifest.
+    """
+    preferred = os.getenv("H3_DIRECTOR_CRITIQUE")
+    if preferred is not None:
+        return str(preferred).strip().lower() in {"1", "true", "yes", "on"}
+    return feature_enabled("director_critic", True)
+
+
 H3_LIVE_PREVIEW = feature_enabled("live_preview", True)
 H3_CONTEXT_IR_VERSION = int(os.getenv("H3_CONTEXT_IR_VERSION", str(RUNTIME.get("features", {}).get("context_ir_version", 2))))
 H3_VLM_ENABLED = feature_enabled("vlm_enabled", True)
 H3_QA_ENABLED = feature_enabled("qa_enabled", True)
 H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
-H3_DIRECTOR_CRITIC = feature_enabled("director_critic", True)
+H3_DIRECTOR_CRITIC = director_critic_enabled()
 H3_VLM_REFERENCE_ANALYSIS = feature_enabled("vlm_reference_analysis", True)
 H3_VLM_VISUAL_QA = feature_enabled("vlm_visual_qa", True)
 H3_AUTO_RETAKE = feature_enabled("auto_retake", True)
