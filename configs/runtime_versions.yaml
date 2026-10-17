@@ -85,7 +85,7 @@ features:
   context_ir_version: 2
   timeline_version: 1
   selective_retake: true
-  director_critic: true
+  director_critic: false
   auto_retake: true
   max_auto_retakes_per_shot: 1
   vlm_reference_analysis: true
