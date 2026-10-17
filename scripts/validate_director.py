@@ -579,14 +579,14 @@ def test_story_prompt_restores_september_25_craft_contract():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = " ".join(mixin._story_text_system(mode).lower().split())
-        _assert("unexpected reveal or reversal" in text,
-                f"{mode} must preserve the causal reversal requirement")
+        _assert("unexpected reveal or reversal" in text and ("optional, not a quota" in text or "optional, not mandatory" in text),
+                f"{mode} must allow an earned reveal without forcing a twist")
         _assert("at least two sentences" in text and "interiority" in text,
                 f"{mode} must preserve meaningful interiority")
-        _assert("short line of spoken dialogue by a named character" in text,
-                f"{mode} must preserve purposeful spoken dialogue")
+        _assert("dialogue is optional" in text and ("physically present character" in text or "current scene" in text),
+                f"{mode} must permit purposeful dialogue without manufacturing speech")
         _assert("420–560 words" in text and "420–600 is a safe range" in text,
-                f"{mode} must distinguish preferred word count from safe range")
+                f"{mode} must preserve the established 420–560 word target and safe range")
         _assert(("complete aftermath paragraph" in text if mode == AI_STORY_MODE else "complete resolution paragraph" in text),
                 f"{mode} must require a completed aftermath")
         _assert("include a second physically present" not in text,
@@ -640,6 +640,44 @@ def test_story_dialogue_contract_uses_qwen_semantic_spans():
         allowed_speakers={"Ines"},
     )
     _assert(unusual_verb and unusual_verb[0]["source_speakers"] == {"ines"}, "semantic dialogue must not depend on a speech-verb list")
+
+    written_quote = QwenDirector._extract_story_spoken_segments(
+        'Nadia opened the journal. “Seal at five,” Nadia read. She closed the book.',
+        [{"text": "Seal at five", "speaker": "Nadia"}],
+        allowed_speakers={"Nadia"},
+    )
+    _assert(not written_quote, "a named character reading journal text must not become present-time dialogue")
+
+    live_quote = QwenDirector._extract_story_spoken_segments(
+        'Nadia entered the room and said, “Leave now.”',
+        [{"text": "Leave now", "speaker": "Nadia"}],
+        allowed_speakers={"Nadia"},
+    )
+    _assert(live_quote, "generalized written-source filtering must preserve direct in-person speech")
+
+    later_live_quote = QwenDirector._extract_story_spoken_segments(
+        'He remembered his mother saying “Come home before dark.” '
+        'The door flew open. Mara stepped into the room and shouted, “Get down!”',
+        [
+            {"text": "Come home before dark.", "speaker": "Mara"},
+            {"text": "Get down!", "speaker": "Mara"},
+        ],
+        allowed_speakers={"Mara"},
+    )
+    _assert(
+        len(later_live_quote) == 1 and later_live_quote[0]["display"] == "Get down!",
+        "a prior memory in the same paragraph must not suppress a later present-time line",
+    )
+
+    written_then_live_quote = QwenDirector._extract_story_spoken_segments(
+        'Mara read the log, then turned toward Eli and said, “Leave now.”',
+        [{"text": "Leave now", "speaker": "Mara"}],
+        allowed_speakers={"Mara"},
+    )
+    _assert(
+        written_then_live_quote and written_then_live_quote[0]["display"] == "Leave now.",
+        "a preceding document mention must not suppress subsequent present-time speech",
+    )
 
 
 def test_semantic_dialogue_is_persisted_and_restored_across_resume():
@@ -904,7 +942,7 @@ def test_final_telemetry_is_not_printed_twice_when_critique_is_skipped():
             "enrich_plan must not duplicate the summary owned by critique_plan")
 
 
-def test_director_critique_is_opt_in_without_empty_recompile_payload():
+def test_director_critique_respects_manifest_default_and_explicit_opt_out():
     import os
     from planner.qwen_director import QwenDirector
 
@@ -914,6 +952,11 @@ def test_director_critique_is_opt_in_without_empty_recompile_payload():
     director._print_qwen_summary = lambda *a, **k: calls.__setitem__("summary", calls["summary"] + 1)
     saved = {key: os.environ.get(key) for key in ("H3_DIRECTOR_CRITIQUE", "H3_DIRECTOR_CRITIC")}
     try:
+        from planner.config import director_critic_enabled
+        os.environ.pop("H3_DIRECTOR_CRITIQUE", None)
+        os.environ.pop("H3_DIRECTOR_CRITIC", None)
+        _assert(director_critic_enabled(), "runtime manifest must enable the cinematic critic by default")
+
         # The new explicit opt-out wins over the legacy feature variable.
         os.environ["H3_DIRECTOR_CRITIQUE"] = "0"
         os.environ["H3_DIRECTOR_CRITIC"] = "1"
@@ -928,10 +971,10 @@ def test_director_critique_is_opt_in_without_empty_recompile_payload():
     _assert(calls == {"model": 0, "summary": 1}, f"critique opt-out should avoid Qwen and print final telemetry once: {calls}")
     director_source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     orchestrator_source = (ROOT / "pipeline/production_orchestrator.py").read_text(encoding="utf-8")
-    _assert('os.getenv("H3_DIRECTOR_CRITIQUE")' in director_source,
-            "the canonical critique switch must control both the model call and final telemetry")
-    _assert('os.getenv("H3_DIRECTOR_CRITIQUE")' in orchestrator_source,
-            "the canonical critique switch must override the runtime manifest feature flag")
+    _assert("director_critic_enabled()" in director_source,
+            "the critique entrypoint must use the shared feature resolver")
+    _assert("director_critic_enabled()" in orchestrator_source,
+            "the orchestrator must use the same feature resolver as the critic")
 
 
 def test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity():
@@ -951,7 +994,7 @@ def test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity():
     expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
     _assert("unexpected reveal or reversal" in ai and "specific fear, memory, desire" in ai,
             "AI Story lost causal-reversal/interiority craft guidance")
-    _assert("preserving its established people, setting, event order, causal facts, and outcome" in expand,
+    _assert("preserve every established person, place, event, causal fact, and outcome, in order" in expand,
             "Expand Story must preserve its source's established plot")
     _assert("qwen decides names, identities, relationships, and final cast size" in ai and
             "qwen decides names, identities, relationships, and final cast size" in expand,
@@ -965,8 +1008,8 @@ def test_story_prompt_preserves_baseline_dialogue_without_cast_quota():
     mixin = QwenDirectorPromptMixin()
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = " ".join(mixin._story_text_system(mode).lower().split())
-        _assert("spoken dialogue by a named character" in text,
-                f"{mode} must preserve the baseline dialogue requirement")
+        _assert("dialogue is optional" in text,
+                f"{mode} must not force dialogue into stories where it does not belong")
         _assert("qwen decides names, identities, relationships, and final cast size" in text,
                 f"{mode} must leave cast authorship to Qwen")
         _assert("include a second physically present, consequential character" not in text,
@@ -1113,7 +1156,8 @@ def test_story_prompt_has_no_artificial_subtargets():
             "story path must not impose a conflicting per-paragraph word quota")
     _assert("at least 50 words" not in director_source,
             "story path must not impose a conflicting final-paragraph floor")
-    _assert("one deliberate plan-before-write call is enabled by default" in director_source, "plan-before-write path marker is missing")
+    _assert("the extra story bible call is deliberately absent from normal generation" in director_source.lower(),
+            "normal generation must not call the harmful/discarded Story Bible pass")
     _assert("story contract miss; one guided revision follows" not in director_source,
             "single-pass story profile must not automatically retry a failed soft contract")
 
@@ -1151,35 +1195,20 @@ def test_candidate_judge_requires_exact_evidence_and_prioritizes_source_fidelity
             "candidate comparison must prioritize source facts and avoid cast quotas")
 
 
-def test_story_plan_precedes_one_writer_and_repair_stays_off_by_default():
-    import os
-    from planner.qwen_director import QwenDirector
+def test_story_writer_skips_story_plan_and_uses_one_pass_without_repair():
+    """Normal generation skips the costly Story Bible and makes exactly one writer call."""
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     start = source.index("story_user = self._story_text_user(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     normal_path = source[start:end]
-    _assert("self._maybe_plan_story_bible(" in normal_path, "plan call must precede prose generation")
-    _assert(normal_path.index("self._maybe_plan_story_bible(") < normal_path.index("self._generate_story_once("),
-            "the plan must be supplied before writing")
+    _assert("self._maybe_plan_story_bible(" not in normal_path,
+            "normal generation must not invoke the Story Bible inference pass")
+    _assert("_format_story_bible(" not in normal_path,
+            "normal generation must not inject an untrusted planning outline")
     _assert(normal_path.count("self._generate_story_once(") == 1, "exactly one prose-writing call")
     _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
             "default path must not retry or automatically repair the story")
-    director = QwenDirector.__new__(QwenDirector)
-    director._planned_cast = ["stale"]
-    calls = []
-    director._plan_story_bible = lambda *args: calls.append(args) or {"protagonist_name": "Mira", "causal_mechanism": "A keyed lock opens once", "cast": [], "beats": ["b"] * 6}
-    old = os.environ.pop("H3_STORY_PLAN", None)
-    try:
-        result = director._maybe_plan_story_bible("ai_story", "premise", [])
-        _assert(result is not None and len(calls) == 1, "story planning should default on")
-        os.environ["H3_STORY_PLAN"] = "0"
-        calls.clear()
-        result = director._maybe_plan_story_bible("ai_story", "premise", [])
-        _assert(result is None and not calls, "H3_STORY_PLAN=0 must disable planning")
-    finally:
-        os.environ.pop("H3_STORY_PLAN", None)
-        if old is not None:
-            os.environ["H3_STORY_PLAN"] = old
+
 def test_shot_critique_checks_object_state_across_story():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     # Normalize whitespace so this contract checks the wording, not incidental wrapping/indentation.
@@ -1194,6 +1223,12 @@ def test_shot_critique_checks_object_state_across_story():
             "shot critique must ground findings in source evidence")
     _assert("remote speaker as missing" in normalized_source,
             "shot critique must not demand visible binding for remote-only dialogue")
+    _assert("action distinctness" in normalized_source and "two paraphrases of the same observable action" in normalized_source,
+            "shot critique must identify repeated actions, not only repeated camera framing")
+    _assert('"color_temperature": str(shot.get("color_temperature"' in normalized_source,
+            "critic context must include each shot's color temperature for continuity review")
+    _assert('"location": str(shot.get("location"' in normalized_source,
+            "critic context must include each shot's location for continuity review")
 
 
 def test_story_writer_makes_exactly_one_3200_token_thinking_call():
@@ -1408,7 +1443,7 @@ def main():
         test_descriptive_hints_populate_metadata_without_adding_cast,
         test_mention_only_filter_can_fail_closed,
         test_final_telemetry_is_not_printed_twice_when_critique_is_skipped,
-        test_director_critique_is_opt_in_without_empty_recompile_payload,
+        test_director_critique_respects_manifest_default_and_explicit_opt_out,
         test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity,
         test_story_prompt_preserves_baseline_dialogue_without_cast_quota,
         test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated,
@@ -1424,7 +1459,7 @@ def main():
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
         test_identity_presence_accepts_title_free_and_given_name_surfaces,
         test_best_of_n_is_not_wired_into_normal_story_generation,
-        test_story_plan_precedes_one_writer_and_repair_stays_off_by_default,
+        test_story_writer_skips_story_plan_and_uses_one_pass_without_repair,
         test_shot_critique_checks_object_state_across_story,
         test_short_visual_prompts_are_normalized_to_15_40_words_without_model_call,
     ]
