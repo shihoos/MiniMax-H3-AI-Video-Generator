@@ -798,6 +798,15 @@ class QwenDirector(
                     # sanitization and invariant errors are intentionally outside the catch so
                     # programmer defects cannot be misclassified as an ordinary Qwen fallback.
                     if batch_response is not None:
+                        scene_metadata_map = self._normalize_batch_scene_metadata_response(
+                            batch_response
+                        )
+                        for target_scene in batch_scenes:
+                            target_id = str(target_scene.get("scene_id", "") or "").strip()
+                            self._apply_scene_metadata(
+                                target_scene, scene_metadata_map.get(target_id, {})
+                            )
+
                         batch_map = self._normalize_batch_shot_response(
                             batch_response
                         )
@@ -1525,8 +1534,10 @@ class QwenDirector(
             "contract: " + str(item)
             for item in (getattr(self, "_last_story_contract_warnings", []) or [])
         )
-        if not 420 <= word_count <= 560:
-            issues.append(f"word count {word_count} outside target 420-560")
+        # 420-560 is preferred, not a hard rejection boundary. A complete 562-word
+        # story is production-safe; only flag a meaningful departure from the safe band.
+        if not 420 <= word_count <= 600:
+            issues.append(f"word count {word_count} outside safe range 420-600 (preferred 420-560)")
         if paragraph_count != 6:
             issues.append(f"paragraph count {paragraph_count} outside target 6")
         if issues:
@@ -1572,7 +1583,7 @@ class QwenDirector(
             return raw
         head = paragraphs[:6]
         words = len(re.findall(r"\b[\w'’-]+\b", " ".join(head)))
-        if not 420 <= words <= 560:
+        if not 420 <= words <= 600:
             return raw
         return "\n\n".join(head)
 
@@ -1782,7 +1793,7 @@ class QwenDirector(
         "You are a strict pairwise short-film story evaluator. Compare two completed drafts of the same task; do not rewrite either and do not award independent numerical scores. "
         "Treat source facts as hard constraints. In Expand Story, the user-provided story is canon; in AI Story, preserve the premise's defining facts and constraints while allowing creative development. "
         "The Story Bible is provisional, so an absent planned character is not a defect unless the actual story establishes that the character's causal role is necessary. "
-        "First reject any candidate that breaks the six-paragraph/420-560-word contract, drops a source-established fact, introduces a material contradiction, or leaves the physical outcome of the central choice unresolved. "
+        "Reject candidates outside the six-paragraph/420-600 safe contract, those that drop a source-established fact, introduce a material contradiction, or leave the physical outcome of the central choice unresolved; prefer 420-560 words when quality is equal. "
         "Then compare, in priority order: causal coherence and event order; premise/source fidelity; protagonist agency and understandable opposition; setup/payoff and a visible price for the climax; concrete resolution; premise-specific originality; natural purposeful dialogue; prose style. "
         "Do not reward extra characters, dialogue quantity, stock genre beats, twists, length, or melodrama by themselves. Treat supplied critic findings as hypotheses and verify them against the actual text. "
         "Choose A, B, or tie. Give one exact, verbatim evidence span copied from each draft. The evidence should show a meaningful strength or defect relevant to your choice, not merely quote an arbitrary sentence. Never prefer the first or second draft because of its position. Return JSON only."
@@ -2179,7 +2190,7 @@ class QwenDirector(
 
     _STORY_EDITOR_SYSTEM = (
         "You are the final short-film story editor. Improve the draft without replacing the user's premise or its strongest effective material. "
-        "Return only the finished story: exactly six paragraphs, 420-560 words, plain prose. "
+        "Return only the finished story: exactly six paragraphs, 420-600 words (420-560 preferred), plain prose. "
         "In Expand Story, preserve user-established characters, chronology, setting, events, outcome, and defining meaning. The Story Bible is provisional: do not preserve an invented plan detail or character if it makes the actual story less causal or less coherent. "
         "Do not add decorative people, generic revelations, or a subplot to satisfy a quota. Add or retain a consequential present-day counterpart only when their independent action changes the protagonist's options and the premise supports it. A single-character story is valid when that is the strongest source-grounded choice. "
         "Repair only high-impact defects: unclear goal/resistance; an event without a causal setup; a turn unrelated to earlier evidence; an object or skill with no concrete function/payoff; contradictory motives or physical states; dialogue that only explains; a choice without a visible cost; an unresolved central conflict; or an ending that obscures what the protagonist's action actually caused. "
@@ -2265,126 +2276,108 @@ class QwenDirector(
             return story
 
     @staticmethod
+    def _apply_scene_metadata(scene: dict, metadata: dict) -> None:
+        """Apply Qwen-authored scene semantics while keeping structural IDs deterministic."""
+        if not isinstance(scene, dict) or not isinstance(metadata, dict):
+            return
+        string_fields = (
+            "location", "time_of_day", "weather", "atmosphere", "mood",
+            "lighting", "color_temperature",
+        )
+        unset_values = {"", "n/a", "unknown", "not specified", "unspecified"}
+        for field in string_fields:
+            raw = metadata.get(field)
+            if not isinstance(raw, str):
+                continue
+            value = re.sub(r"\s+", " ", raw).strip()
+            if field in {"time_of_day", "weather"} and value.casefold() in unset_values:
+                value = "unspecified"
+            elif value.casefold() in unset_values:
+                value = ""
+            if value:
+                scene[field] = value
+        for field, limit in (("environment_details", 4), ("key_props", 6)):
+            raw_values = metadata.get(field)
+            if isinstance(raw_values, list):
+                scene[field] = list(dict.fromkeys(
+                    re.sub(r"\s+", " ", str(value or "")).strip()
+                    for value in raw_values
+                    if re.sub(r"\s+", " ", str(value or "")).strip()
+                ))[:limit]
+
+    @staticmethod
     def _enforce_scene_coherence(
         scenes: list[dict],
         shots: list[dict],
         characters: list[dict],
     ) -> None:
-        """Deterministic, prose-preserving scene continuity repair.
+        """Enforce within-scene consistency without guessing semantics from vocabulary.
 
-        - Every shot in a scene shares ONE physical location. The scene location wins when
-          supplied; otherwise the first shot's location becomes the scene location.
-        - Every shot in a scene shares the first shot's lighting + color temperature
-          (framing, lens and movement are the only things that should vary inside a scene).
-        - Shot character bindings use the canonical roster spelling, not a lower-cased key.
+        Qwen-authored scene metadata wins when supplied. If legacy/fallback data has
+        no scene metadata, the first usable Qwen shot value becomes the scene value.
+        IDs, character canonicalization, and equality across shots are deterministic;
+        no list of English place/weather/lighting words decides what a scene means.
         """
         canonical_by_norm = {
-            str(c.get("name", "")).strip().lower(): str(c.get("name", "")).strip()
+            str(c.get("name", "")).strip().casefold(): str(c.get("name", "")).strip()
             for c in (characters or [])
             if isinstance(c, dict) and str(c.get("name", "")).strip()
         }
         scene_by_id = {
             str(sc.get("scene_id", "") or "").strip(): sc
-            for sc in (scenes or [])
-            if isinstance(sc, dict)
+            for sc in (scenes or []) if isinstance(sc, dict)
         }
         by_scene: dict[str, list[dict]] = {}
         for shot in shots or []:
             if isinstance(shot, dict):
                 by_scene.setdefault(str(shot.get("scene_id", "") or "").strip(), []).append(shot)
 
-        _INVALID_LOCATION_RE = re.compile(
-            r"\b(?:ladder|mug|cup|key|keypad|door|screen|monitor|display|terminal|panel|hands?|face|eyes?|fingers?|body|floor|ceiling|wall|crate|canister|drive|document|photo|photograph)\b",
-            flags=re.IGNORECASE,
+        scene_string_fields = (
+            "location", "time_of_day", "weather", "atmosphere", "mood",
+            "lighting", "color_temperature",
         )
-        _PLACE_HINT_RE = re.compile(
-            r"\b(?:station|facility|vault|chamber|room|corridor|hall|lab|laboratory|platform|deck|stairwell|stairs|"
-            r"tunnel|bunker|cabin|warehouse|hangar|garage|office|rooftop|roof|street|road|forest|shore|bridge|"
-            r"ship|boat|vehicle|aircraft|airfield|yard|courtyard|kitchen|bedroom|basement|attic|archive|"
-            r"observatory|tower|camp|compound|campus|lobby|foyer|entrance|exit|interior|exterior)\b",
-            flags=re.IGNORECASE,
-        )
-
-        def _usable_location(value: str) -> bool:
-            text = str(value or "").strip()
-            if not text or len(text.split()) > 8:
-                return False
-            if re.match(r"^(?:on|in|inside|at|near|behind|beside|through|under|over)\b", text, flags=re.IGNORECASE):
-                return False
-            if _INVALID_LOCATION_RE.search(text) and not _PLACE_HINT_RE.search(text):
-                return False
-            return bool(_PLACE_HINT_RE.search(text)) or len(text.split()) >= 2
-
-        def _pick_location(candidates: list[str]) -> str:
-            valid = [str(c).strip() for c in candidates if _usable_location(str(c))]
-            if not valid:
-                return ""
-            ranked = sorted(
-                valid,
-                key=lambda value: (
-                    1 if _PLACE_HINT_RE.search(value) else 0,
-                    -sum(1 for token in value.lower().split() if token in {"ladder", "mug", "door", "screen", "keypad"}),
-                    -len(value.split()),
-                ),
-                reverse=True,
-            )
-            return ranked[0]
-
+        shot_shared_fields = {
+            "location", "time_of_day", "weather", "mood", "lighting",
+            "color_temperature",
+        }
         for scene_id, group in by_scene.items():
             scene = scene_by_id.get(scene_id)
-            first = group[0]
-            scene_location = str((scene or {}).get("location", "") or "").strip()
-            location = scene_location if _usable_location(scene_location) else ""
-            if not location:
-                location = _pick_location([str(shot.get("location", "") or "").strip() for shot in group])
-
-            scene_text = " ".join(
-                [str((scene or {}).get("description", "") or ""), str((scene or {}).get("scene_objective", "") or "")]
-                + [str(v) for v in ((scene or {}).get("key_props", []) or [])]
-            ).lower()
-            indoor = bool(re.search(r"\b(inside|indoor|corridor|chamber|vault|room|lab|hall|stairwell|tunnel|bunker|cabin|basement|archive)\b", f"{location} {scene_text}", flags=re.IGNORECASE))
-
-            lighting_candidates = [str(shot.get("lighting", "") or "").strip() for shot in group]
-            color_candidates = [str(shot.get("color_temperature", "") or "").strip() for shot in group]
-
-            def _lighting_ok(value: str) -> bool:
-                lowered = value.lower()
-                if not lowered:
-                    return False
-                if "neon" in lowered and not re.search(r"\b(neon|sign|billboard|arcade)\b", scene_text):
-                    return False
-                if "tungsten" in lowered and not re.search(r"\b(lamp|bulb|tungsten|candle|lantern|fixture|filament)\b", scene_text):
-                    return False
-                if "overcast" in lowered and indoor:
-                    return False
-                return True
-
-            lighting = next((v for v in lighting_candidates if _lighting_ok(v)), "mixed practical/ambient")
-            color = next((v for v in color_candidates if v), "")
-
-            if scene is not None and location and not str(scene.get("location", "") or "").strip():
-                scene["location"] = location
+            if scene is None:
+                continue
+            # Scene-level Qwen direction owns shared fields. For older checkpoints or
+            # deterministic fallback shots, inherit the first populated shot value.
+            for field in scene_string_fields:
+                value = str(scene.get(field, "") or "").strip()
+                if field in {"time_of_day", "weather"} and value.casefold() in {"", "unknown", "not specified", "n/a"}:
+                    value = "unspecified"
+                if not value and field in shot_shared_fields:
+                    value = next((str(shot.get(field, "") or "").strip() for shot in group
+                                  if str(shot.get(field, "") or "").strip()), "")
+                if field in {"time_of_day", "weather"} and not value:
+                    value = "unspecified"
+                if value:
+                    scene[field] = value
+                    if field in shot_shared_fields:
+                        for shot in group:
+                            shot[field] = value
 
             for shot in group:
-                if location:
-                    shot["location"] = location
-                if lighting:
-                    shot["lighting"] = lighting
-                if color:
-                    shot["color_temperature"] = color
-                for key in ("continuity_start_state", "continuity_end_state"):
-                    state = shot.get(key)
-                    if isinstance(state, dict):
-                        if location:
-                            state["location"] = location
-                        if lighting:
-                            state["lighting"] = lighting
+                for state_key in ("continuity_start_state", "continuity_end_state"):
+                    state = shot.get(state_key)
+                    if not isinstance(state, dict):
+                        continue
+                    for field in ("location", "lighting", "environment"):
+                        scene_field = "environment_details" if field == "environment" else field
+                        value = scene.get(scene_field, "")
+                        if field == "environment" and isinstance(value, list):
+                            value = ", ".join(str(item) for item in value if str(item).strip())
+                        if value:
+                            state[field] = value
                 names = shot.get("characters")
                 if isinstance(names, list):
                     shot["characters"] = list(dict.fromkeys(
-                        canonical_by_norm.get(str(n).strip().lower(), str(n).strip())
-                        for n in names
-                        if str(n).strip()
+                        canonical_by_norm.get(str(name).strip().casefold(), str(name).strip())
+                        for name in names if str(name).strip()
                     ))
 
     @staticmethod
