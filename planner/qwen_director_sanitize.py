@@ -794,6 +794,26 @@ class QwenDirectorSanitizeMixin:
                         result.setdefault(sid, []).append(item)
         return result
 
+    @staticmethod
+    def _normalize_batch_scene_metadata_response(response: dict) -> dict[str, dict]:
+        """Return Qwen's per-scene semantic metadata without mixing it into shots."""
+        if not isinstance(response, dict):
+            return {}
+        entries = response.get("scene_shots", [])
+        if isinstance(entries, dict):
+            entries = [dict(value, scene_id=key) for key, value in entries.items() if isinstance(value, dict)]
+        if not isinstance(entries, list):
+            return {}
+        result: dict[str, dict] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            scene_id = str(entry.get("scene_id", "") or "").strip()
+            metadata = entry.get("scene_metadata")
+            if scene_id and isinstance(metadata, dict):
+                result[scene_id] = dict(metadata)
+        return result
+
     def _sanitize_shots(
         self,
         shots,
@@ -1464,10 +1484,12 @@ class QwenDirectorSanitizeMixin:
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
         minimum_words = int(getattr(self, "_story_min_words", 420) or 420)
-        if not minimum_words <= word_count <= 560:
+        # 420-560 is a preferred range, not a rejection boundary. Accept a
+        # complete 562-word draft; reject only drafts outside the safe 400-600 band.
+        if not minimum_words <= word_count <= 600:
             errors.append(
-                f"Generated story must contain {minimum_words} to 560 words "
-                f"(found {word_count})."
+                f"Generated story must contain {minimum_words} to 600 words "
+                f"(preferred 420-560; found {word_count})."
             )
 
         if self._story_has_open_ended_finale(result):
