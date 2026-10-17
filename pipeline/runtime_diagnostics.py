@@ -115,7 +115,7 @@ class RuntimeDiagnostics:
                 "vlm_enabled": bool(features.get("vlm_enabled", True)),
                 "vlm_reference_analysis": bool(features.get("vlm_reference_analysis", True)),
                 "vlm_visual_qa": bool(features.get("vlm_visual_qa", True)),
-                "director_critic": bool(features.get("director_critic", False)),
+                "director_critic": bool(features.get("director_critic", True)),
                 "selective_retake": bool(features.get("selective_retake", True)),
                 "auto_retake": bool(features.get("auto_retake", True)),
                 "max_auto_retakes_per_shot": int(features.get("max_auto_retakes_per_shot", 1) or 0),
