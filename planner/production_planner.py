@@ -378,58 +378,6 @@ class ProductionPlanner:
     }
 
 
-    TIME_WORDS = {
-        "sunrise": "sunrise",
-        "dawn": "dawn",
-        "morning": "morning",
-        "noon": "midday",
-        "midday": "midday",
-        "afternoon": "afternoon",
-        "sunset": "sunset",
-        "evening": "evening",
-        "dusk": "dusk",
-        "night": "night",
-        "midnight": "midnight",
-    }
-
-    MOOD_WORDS = (
-        "tense",
-        "dangerous",
-        "joyful",
-        "sad",
-        "melancholic",
-        "romantic",
-        "hopeful",
-        "mysterious",
-        "dark",
-        "peaceful",
-        "urgent",
-        "violent",
-        "dramatic",
-        "calm",
-        "fearful",
-        "exciting",
-        "warm",
-        "lonely",
-        "eerie",
-        "epic",
-    )
-
-    WEATHER_WORDS = (
-        "rain",
-        "rainy",
-        "storm",
-        "stormy",
-        "fog",
-        "foggy",
-        "snow",
-        "snowy",
-        "wind",
-        "windy",
-        "clear",
-        "cloudy",
-    )
-
     def __init__(
         self,
         project_root: Path | str,
@@ -578,43 +526,11 @@ class ProductionPlanner:
             # narrative beats. Two sentences per beat gives the
             # deterministic fallback useful scene granularity
             # without pretending to be the creative director.
-            current: list[str] = []
-
-            for sentence in sentences:
-
-                current.append(sentence)
-
-                transition = re.search(
-                    r"\b(?:"
-                    r"then|suddenly|meanwhile|later|"
-                    r"after|before|when|but|however|"
-                    r"finally|eventually|soon|"
-                    r"moments later|as soon as"
-                    r")\b",
-                    sentence,
-                    flags=re.IGNORECASE,
-                )
-
-                if (
-                    len(current) >= 2
-                    and transition is not None
-                ):
-                    units.append(
-                        " ".join(current)
-                    )
-                    current = []
-                    continue
-
-                if len(current) >= 2:
-                    units.append(
-                        " ".join(current)
-                    )
-                    current = []
-
-            if current:
-                units.append(
-                    " ".join(current)
-                )
+            # Pair adjacent sentences deterministically. Semantic transition words
+            # are not reliable scene boundaries across genres or languages; the
+            # final prose's paragraph boundaries are preferred whenever available.
+            for start in range(0, len(sentences), 2):
+                units.append(" ".join(sentences[start:start + 2]))
 
         if not units:
             units = [story]
@@ -2381,38 +2297,34 @@ class ProductionPlanner:
 
     @classmethod
     def _semantic_named_surface_is_safe(cls, name: str) -> bool:
-        """Reject obvious non-name noun phrases while leaving cast choice to Qwen.
+        """Apply only structural validation to a Qwen-approved named identity.
 
-        This is a structural safety boundary, not a character-count rule. Named
-        characters remain model-selected when their source surface looks like an
-        actual proper name; role/descriptive identities use their dedicated paths.
+        The Qwen path deliberately has no English noun blacklist or list of
+        project/location words. Entity type comes from Qwen; this gate only rejects
+        empty/malformed surfaces and multi-token phrases that are not name-shaped.
+        One-token names are accepted when Qwen classifies them as people and the
+        surface is grounded in the finished story.
         """
-        value = str(name or "").strip()
-        if not value:
+        value = re.sub(
+            r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
+            "", str(name or "").strip(), count=1, flags=re.IGNORECASE,
+        ).strip()
+        if not value or not re.search(r"[A-Za-z]", value):
             return False
-        tokens = [token.strip(" ,.;:!?()[]{}\\\"'") for token in value.split()]
+        tokens = [token.strip(" ,.;:!?()[]{}\"'") for token in value.split()]
+        tokens = [token for token in tokens if token]
         if not tokens:
             return False
-        lowered = [token.lower().rstrip(".,:;!?\"'") for token in tokens]
-        if lowered[0] in cls.NARRATIVE_NUMBER_WORDS:
+        # Article-led role descriptions belong to the descriptive identity path.
+        if tokens[0].lower() in {"the", "a", "an"}:
             return False
-        common_proper_lower = {str(value).lower() for value in cls.COMMON_PROPER_WORDS}
-        narrative_exclusions_lower = {str(value).lower() for value in cls.NARRATIVE_SUBJECT_EXCLUSIONS}
-        if lowered[0] in common_proper_lower or lowered[0] in narrative_exclusions_lower:
-            return False
-        if any(token in {"photo", "photograph", "picture", "portrait", "image"} for token in lowered):
-            return False
-        if len(tokens) >= 2:
-            allowed_particles = {
-                "de", "da", "del", "della", "di", "du", "la", "le",
-                "van", "von", "der", "den", "bin", "ibn",
-            }
-            for token in tokens[1:]:
-                if token.lower() in allowed_particles:
-                    continue
-                if not token or not token[0].isupper():
-                    return False
-        return True
+        if len(tokens) == 1:
+            return True
+        particles = {"de", "da", "del", "della", "di", "du", "la", "le", "van", "von", "der", "den", "bin", "ibn"}
+        return all(
+            token.lower() in particles or token[0].isupper()
+            for token in tokens
+        )
 
     @classmethod
     def _single_token_name_has_case_proof(cls, story: str, name: str) -> bool:
@@ -3189,6 +3101,61 @@ class ProductionPlanner:
         return result
 
     @classmethod
+    def _normalize_qwen_candidate_identity_types(cls, story: str, semantic_result):
+        """Normalize Qwen-approved surface forms without adding or deleting candidates.
+
+        Qwen occasionally labels a grounded relational/descriptive identity as a
+        named person. Correct the type from the candidate's own surface structure;
+        this does not discover names, impose a cast count, or add roster entries.
+        """
+        if not isinstance(semantic_result, dict):
+            return semantic_result
+        result = dict(semantic_result)
+        key = "candidates" if isinstance(result.get("candidates"), list) else "characters"
+        candidates = result.get(key, [])
+        if not isinstance(candidates, list):
+            return result
+        copied = [dict(item) if isinstance(item, dict) else item for item in candidates]
+
+        named_owners = []
+        for item in copied:
+            if not isinstance(item, dict) or not item.get("is_character"):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if (str(item.get("identity_type", "named_character") or "named_character").lower() == "named_character"
+                    and name and cls._semantic_named_surface_is_safe(name)
+                    and cls.identity_presence(story, name) != "absent"):
+                named_owners.append(name)
+        owner_aliases = EntityResolver.build_alias_map(named_owners)
+
+        for item in copied:
+            if not isinstance(item, dict) or not item.get("is_character"):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if not name or str(item.get("identity_type", "named_character") or "named_character").lower() != "named_character":
+                continue
+            # A relational surface is grounded only when its owner is another
+            # Qwen-approved named candidate and the relation belongs to the
+            # existing closed kinship vocabulary.
+            match = re.match(r"^(.+?)['’]s\s+([A-Za-z][A-Za-z-]*)$", name)
+            if match and match.group(2).lower() in cls.RELATIONSHIP_TERMS:
+                owner_surface = EntityResolver.normalize(match.group(1))
+                owner_norm = owner_aliases.get(owner_surface)
+                owner = next((candidate for candidate in named_owners
+                              if EntityResolver.normalize(candidate) == owner_norm), None)
+                if owner:
+                    item["identity_type"] = "relational_character"
+                    item["relationship_to"] = owner
+                    item["relationship"] = match.group(2).lower()
+                    continue
+            # Article-led role descriptions are descriptions, not malformed
+            # proper names. They remain eligible only if the phrase is grounded.
+            if re.match(r"^(?:the|a|an)\s+", name, flags=re.IGNORECASE) and cls._descriptive_identity_is_grounded(story, name):
+                item["identity_type"] = "descriptive_character"
+        result[key] = copied
+        return result
+
+    @classmethod
     def _reconcile_semantic_characters(
         cls,
         story: str,
@@ -3221,15 +3188,13 @@ class ProductionPlanner:
             return raw if isinstance(raw, dict) else None
 
         def safe_non_person(name: str) -> bool:
-            normalized = EntityResolver.normalize(name)
-            tokens = normalized.split()
-            if not tokens:
-                return True
-            if tokens[-1] in cls.NON_PERSON_HEAD_WORDS:
-                return True
-            if tokens[0] in cls.NON_PERSON_PREFIX_WORDS:
-                return True
-            return False
+            # Reuse the repository's existing bounded safety guard; do not add
+            # story-specific names, roles, or new vocabulary to the planner.
+            tokens = EntityResolver.normalize(name).split()
+            return bool(tokens) and (
+                tokens[-1] in cls.NON_PERSON_HEAD_WORDS
+                or tokens[0] in cls.NON_PERSON_PREFIX_WORDS
+            )
 
         named_candidates: list[tuple[dict, str]] = []
         descriptive_candidates: list[tuple[dict, str]] = []
@@ -3286,7 +3251,7 @@ class ProductionPlanner:
                 count=1,
                 flags=re.IGNORECASE,
             ).strip() or name
-            if safe_non_person(canonical) or cls._is_mention_only_identity(story, canonical, aliases=[name, *aliases]):
+            if cls._is_mention_only_identity(story, canonical, aliases=[name, *aliases]):
                 continue
             named_candidates.append((raw, canonical))
 
@@ -3353,6 +3318,7 @@ class ProductionPlanner:
             # Keep the callback's two-argument contract for compatibility, but send
             # no deterministic names. Qwen reads the story and authors the whole cast.
             semantic_result = qwen_character_extractor(story, [])
+            semantic_result = self._normalize_qwen_candidate_identity_types(story, semantic_result)
             reconciled = self._reconcile_semantic_characters(story, semantic_result)
             if not reconciled:
                 raise RuntimeError(
@@ -3424,81 +3390,6 @@ class ProductionPlanner:
     # ============================================================
     # SCENE EXTRACTION
     # ============================================================
-
-    @staticmethod
-    def _time_of_day(
-        text: str,
-    ) -> str:
-
-        lower = text.lower()
-
-        for key, value in ProductionPlanner.TIME_WORDS.items():
-            if key in lower:
-                return value
-
-        return "unspecified time"
-
-    @staticmethod
-    def _mood(
-        text: str,
-    ) -> str:
-
-        lower = text.lower()
-
-        values = [
-            word
-            for word in ProductionPlanner.MOOD_WORDS
-            if word in lower
-        ]
-
-        return (
-            ", ".join(values)
-            if values
-            else "cinematic"
-        )
-
-    @staticmethod
-    def _weather(
-        text: str,
-    ) -> str:
-
-        lower = text.lower()
-
-        values = [
-            word
-            for word in ProductionPlanner.WEATHER_WORDS
-            if word in lower
-        ]
-
-        return (
-            values[0]
-            if values
-            else "natural"
-        )
-
-    @staticmethod
-    def _lighting(
-        text: str,
-    ) -> str:
-
-        lower = text.lower()
-
-        if "sunset" in lower:
-            return "warm directional sunset light"
-
-        if "sunrise" in lower:
-            return "soft sunrise light"
-
-        if "night" in lower:
-            return "cinematic night illumination"
-
-        if "neon" in lower:
-            return "neon cinematic lighting"
-
-        if "dark" in lower:
-            return "low-key dramatic lighting"
-
-        return "cinematic naturalistic lighting"
 
     def _characters_in_scene(
         self,
@@ -3623,14 +3514,9 @@ class ProductionPlanner:
             start=1,
         ):
 
-            mood = self._mood(
-                unit.text
-            )
-
-            # Physical scene location is semantic metadata. The deterministic
-            # planner must not infer it from arbitrary prepositional phrases.
-            # The existing Qwen cinematography pass supplies this field.
-            location = ""
+            # The planner owns topology and structural contracts, not semantic
+            # scene interpretation. Scene setting is supplied by the existing
+            # Qwen shot-batch call and validated/synchronized downstream.
 
             scenes.append(
                 Scene(
@@ -3638,26 +3524,15 @@ class ProductionPlanner:
                         f"scene_{index:03d}"
                     ),
                     order=index,
-                    location=location,
-                    time_of_day=self._time_of_day(
-                        unit.text
-                    ),
-                    weather=self._weather(
-                        unit.text
-                    ),
-                    atmosphere=(
-                        f"{mood}; natural cinematic "
-                        "environmental ambience"
-                    ),
+                    location="",
+                    time_of_day="",
+                    weather="",
+                    atmosphere="",
                     description=unit.text,
-                    mood=mood,
-                    lighting=self._lighting(
-                        unit.text
-                    ),
-                    environment_details=[
-                        "cinematic depth",
-                        "stable environmental continuity",
-                    ],
+                    mood="",
+                    lighting="",
+                    color_temperature="",
+                    environment_details=[],
                     key_props=[],
                     scene_objective=unit.text,
                     characters=(
@@ -3792,10 +3667,14 @@ class ProductionPlanner:
         scene: Scene,
     ) -> str:
 
+        soundscape = (
+            f" Soundscape: {scene.atmosphere}."
+            if str(scene.atmosphere or "").strip() else ""
+        )
         return (
             "Native H3 audio generation policy: "
-            "generate suitable scene ambience natively. "
-            f"Soundscape: {scene.atmosphere}. "
+            "generate suitable scene ambience natively."
+            f"{soundscape} "
             "Do not require an external audio reference unless "
             "one is explicitly supplied."
         )
@@ -3854,18 +3733,18 @@ class ProductionPlanner:
                 )
             )
 
-            detailed = (
-                f"{scene.description} "
-                f"Location: {scene.location}. "
-                f"Time: {scene.time_of_day}. "
-                f"Weather: {scene.weather}. "
-                f"Lighting: {scene.lighting}. "
-                f"Mood: {scene.mood}. "
-                f"Camera: {camera_shot}; "
-                f"{camera_movement}. "
-                f"Environment: "
-                f"{', '.join(scene.environment_details)}."
-            )
+            scene_setting = [
+                f"Location: {scene.location}" if scene.location else "",
+                f"Time: {scene.time_of_day}" if scene.time_of_day else "",
+                f"Weather: {scene.weather}" if scene.weather else "",
+                f"Lighting: {scene.lighting}" if scene.lighting else "",
+                f"Mood: {scene.mood}" if scene.mood else "",
+                f"Environment: {', '.join(scene.environment_details)}" if scene.environment_details else "",
+            ]
+            detailed = " ".join(
+                part for part in (scene.description, ". ".join(x for x in scene_setting if x),
+                                  f"Camera: {camera_shot}; {camera_movement}.") if part
+            ).strip()
 
             positive_prompt = (
                 f"{detailed} "
@@ -3915,6 +3794,8 @@ class ProductionPlanner:
                 duration_seconds=5.2,
                 characters=selected_characters,
                 location=scene.location,
+                time_of_day=scene.time_of_day,
+                weather=scene.weather,
                 action=scene.scene_objective,
                 camera_shot=camera_shot,
                 camera_movement=camera_movement,
