@@ -75,6 +75,8 @@ class Shot:
     characters: list[str] = field(default_factory=list)
 
     location: str = ""
+    time_of_day: str = ""
+    weather: str = ""
     action: str = ""
 
     camera_shot: str = ""
@@ -231,6 +233,8 @@ class Shot:
 
         for field_name in (
             "location",
+            "time_of_day",
+            "weather",
             "action",
             "camera_shot",
             "camera_movement",
@@ -642,9 +646,15 @@ class Shot:
             else ""
         )
 
+        scene_setting = "; ".join(
+            f"{label}: {value}"
+            for label, value in (("Time of day", self.time_of_day), ("Weather", self.weather))
+            if str(value or "").strip() and str(value or "").strip().casefold() != "unspecified"
+        )
         integrated_description = (
             f"[Shot {self.order}] {description}\n"
             f"Location: {self.location}.\n"
+            f"{('Scene setting: ' + scene_setting + chr(10)) if scene_setting else ''}"
             f"{cinematography}\n"
             f"Continuity: {self.continuity_notes}\n"
             f"Continuity boundary policy: {boundary_note}\n"
@@ -680,6 +690,8 @@ class Shot:
             "duration_seconds": self.duration_seconds,
             "characters": self.characters,
             "location": self.location,
+            "time_of_day": self.time_of_day,
+            "weather": self.weather,
             "action": self.action,
             "camera_shot": self.camera_shot,
             "camera_movement": self.camera_movement,
