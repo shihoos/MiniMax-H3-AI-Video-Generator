@@ -25,6 +25,7 @@ from planner.config import (
     DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
+    director_critic_enabled,
     director_enabled,
 )
 
@@ -3552,19 +3553,16 @@ class QwenDirector(
         return critique
 
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict | None:
-        """Run an optional read-only cinematic critique.
+        """Run one bounded cinematic critique when the effective feature flag is enabled.
 
-        The critic may identify problems but never mutates the canonical plan. It is
-        opt-in because the Oct 13-15 traces showed 14-34 seconds of cost with weak,
-        sometimes false-positive findings. H3_DIRECTOR_CRITIQUE is the preferred
-        switch; the older H3_DIRECTOR_CRITIC environment variable remains a fallback.
+        The critic itself does not mutate the canonical plan; the orchestrator may
+        apply its whitelisted shot-field patches. H3_DIRECTOR_CRITIQUE overrides the
+        legacy H3_DIRECTOR_CRITIC environment variable and runtime manifest setting.
+        This method deliberately performs no story regeneration or retry.
         """
-        critique_setting = os.getenv("H3_DIRECTOR_CRITIQUE")
-        if critique_setting is None:
-            critique_setting = os.getenv("H3_DIRECTOR_CRITIC", "0")
-        if str(critique_setting).strip().lower() not in {"1", "true", "yes", "on"}:
+        if not director_critic_enabled():
             print(
-                "[QWEN] director_critique skipped (set H3_DIRECTOR_CRITIQUE=1 to enable)",
+                "[QWEN] director_critique skipped (effective director_critic setting is disabled)",
                 flush=True,
             )
             self._print_qwen_summary("FINAL")
