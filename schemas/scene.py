@@ -38,6 +38,7 @@ class Scene:
     mood: str = ""
     lighting: str = ""
     color_temperature: str = ""
+    dramatic_purpose: str = ""
 
     environment_details: list[str] = field(
         default_factory=list
@@ -90,6 +91,7 @@ class Scene:
             "mood",
             "lighting",
             "color_temperature",
+            "dramatic_purpose",
             "scene_objective",
             "story_summary",
             "continuity_notes",
@@ -131,6 +133,7 @@ class Scene:
             "mood": self.mood,
             "lighting": self.lighting,
             "color_temperature": self.color_temperature,
+            "dramatic_purpose": self.dramatic_purpose,
             "environment_details": self.environment_details,
             "key_props": self.key_props,
             "scene_objective": self.scene_objective,
