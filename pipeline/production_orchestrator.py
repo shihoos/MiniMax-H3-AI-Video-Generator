@@ -21,7 +21,7 @@ from planner.config import (
     DELIVERY_FPS,
     DELIVERY_HEIGHT,
     DELIVERY_WIDTH,
-    H3_DIRECTOR_CRITIC,
+    director_critic_enabled,
     H3_VLM_REFERENCE_ANALYSIS,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
@@ -1591,12 +1591,10 @@ class ProductionOrchestrator:
                 else:
                     plan["characters"] = deepcopy(canonical_characters or base_plan.get("characters", []) or [])
 
-                critic_override = os.getenv("H3_DIRECTOR_CRITIQUE")
-                run_director_critic = (
-                    str(critic_override).strip().lower() in {"1", "true", "yes", "on"}
-                    if critic_override is not None
-                    else H3_DIRECTOR_CRITIC
-                )
+                # Use the same resolver as QwenDirector. This prevents the
+                # orchestrator and critique_plan() from disagreeing about whether
+                # the critic is enabled by the runtime manifest or environment.
+                run_director_critic = director_critic_enabled()
                 if run_director_critic:
                     try:
                         critique = self.director.critique_plan(
