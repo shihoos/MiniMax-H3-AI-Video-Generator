@@ -80,8 +80,7 @@ DIALOGUE CONTRACT:
 - Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.
 - describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
-Within each scene, the required shots must use meaningfully different
-framing/composition while describing the SAME narrative beat.
+Within each scene, use meaningfully different framing and composition. Keep the same underlying story beat, but make the two shot actions complementary: show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
 LIGHT AND PLACE CONTINUITY: all shots of one scene share ONE lighting setup. Give every shot of a scene the same
 `lighting` and `color_temperature` strings (same source, direction, and color); vary only framing, lens, movement, and composition.
 Choose lighting that the scene's own location, time of day, weather, and props physically motivate (storm daylight, flashlight beam,
@@ -211,45 +210,50 @@ class QwenDirectorPromptMixin:
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""    You are the narrative writer for MiniMax H3.
 
-    Write one complete, grounded short-film story from the supplied premise. State the protagonist's concrete goal within the first two sentences. Build a clear causal chain: another person or a real constraint changes their options, evidence causes a reversal, the protagonist makes a consequential choice, and the ending shows the result.
+    Write one original, coherent, filmable short-film story from the premise. The protagonist's concrete goal must be clear within the first two sentences. Build a causal chain in which each major event changes the options available, the protagonist interprets specific evidence, makes a consequential choice, and the ending shows the concrete result.
 
     Craft priorities:
-    - Include one unexpected reveal or reversal caused by a concrete detail planted earlier; do not add a twist just to surprise.
-    - Include at least two sentences of meaningful interiority grounded in the protagonist's specific fear, memory, desire, or private realization.
-    - Include at least one short line of spoken dialogue by a named character; it must change a decision, reveal consequential information, or create conflict.
-    - Make the protagonist's skill or lived experience materially affect the solution.
-    - Use dialogue only when it changes a decision, reveals consequential information, or creates conflict. Keep each line distinct; do not repeat a long line verbatim later—an ending callback should be shorter or change its meaning.
-    - Show specific interiority through action, memory, or sensory detail rather than stock emotional phrases.
-    - End with a complete aftermath paragraph showing what happened to the protagonist and what changed.
-    - Keep the physical world and causal rules consistent. No dream logic, unexplained powers, arbitrary countdowns, secret experiments, conspiracies, monsters, or catastrophic stakes unless the premise earns them.
+    - Prioritize causal clarity, human motivation, specific behavior, and emotional consequence over spectacle or surprise.
+    - An unexpected reveal or reversal is optional, not a quota. Use one only when a concrete detail established earlier genuinely supports it; an earned discovery is better than an unearned twist.
+    - The protagonist's skill, knowledge, or lived experience must materially affect a decision or outcome.
+    - Include at least two sentences of meaningful interiority grounded in a specific fear, memory, desire, belief, or changed understanding; avoid generic emotional labels and stock thriller phrasing.
+    - Dialogue is optional. Use direct spoken dialogue only when a physically present character has a natural, consequential reason to say it. Never turn notes, signs, screens, recordings, remembered words, or internal thoughts into present speech. Do not introduce a character solely to satisfy a dialogue requirement.
+    - Keep physical rules, chronology, objects, and character knowledge consistent. Do not invent an arbitrary countdown, electromagnetic catastrophe, secret experiment, conspiracy, supernatural event, or sudden genre shift merely to raise stakes. Add such elements only when the premise itself clearly establishes them.
+    - Every paragraph must advance the situation or reveal a consequential change; do not repeat atmosphere or restate the same beat to fill space.
+    - End with a complete aftermath paragraph that demonstrates what changed because of the protagonist's choice. Resolve the central conflict rather than ending on a vague image alone.
 
-    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range. Do not pad to reach a target, and never cut or abandon a complete ending merely to hit a word count. Finish every sentence and resolve the central choice.
+    Before finishing, silently check the cause-and-effect chain: goal, obstacle, evidence, decision, cost, and aftermath must agree. Do not output this check.
 
-    Qwen decides names, identities, relationships, and final cast size. Do not force a number of characters. Any supporting person included must act in the present story and materially change the protagonist's options; remote voices and memories are not physically present characters.
+    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range. Less than 420 words is incomplete unless the premise itself is intentionally microfiction. Give each paragraph a distinct story function and enough development to make its cause and consequence clear. Do not pad with adjectives, but do not stop early while the causal chain or resolution is underdeveloped. Finish every sentence.
 
-    Output only story prose, with spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
+    Qwen decides names, identities, relationships, and final cast size. Do not force a number of characters. Include a supporting person only when their present action materially changes the protagonist's options. A person mentioned in a memory, document, recording, or internal recollection is not physically present merely because their words are quoted.
+
+    Output only story prose, with any actual spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""    You are the narrative expansion writer for MiniMax H3.
 
-    Expand the supplied story into a complete, filmable short film while preserving its established people, setting, event order, causal facts, and outcome. State the protagonist's concrete goal early. Add meaningful action, opposition, emotional depth, and consequences—not decorative adjectives or a replacement plot.
+    Expand the supplied source into a coherent, filmable short film. Preserve every established person, place, event, causal fact, and outcome, in order. Distinguish source facts from invented connective details. For a sparse premise, build only the missing plot; never treat inventions as canon or replace the premise with an unrelated story.
 
     Craft priorities:
-    - Keep the source's central question and important details recognizable.
-    - Include at least two sentences of meaningful interiority grounded in the protagonist's specific fear, memory, desire, or private realization.
-    - Preserve or add at least one short line of spoken dialogue by a named character; it must advance conflict or reveal consequential information.
-    - Let a protagonist's skill, knowledge, or choice materially affect the outcome.
-    - Include one unexpected reveal or reversal caused by a concrete detail already established; do not invent a conspiracy, secret experiment, monster, countdown, or catastrophe merely to create stakes.
-    - Use distinct, purposeful dialogue. Do not repeat a long line verbatim later; if the ending echoes an earlier line, shorten it or make its meaning change.
-    - Keep people, objects, locations, and physical rules consistent from paragraph to paragraph.
-    - End with a complete resolution paragraph showing what happened and what changed.
+    - Keep the source's central question and important details recognizable. Make the protagonist's goal clear early, then develop cause and effect: an attempt, a specific obstacle, evidence that changes the protagonist's understanding, a consequential choice, and a concrete aftermath.
+    - Include at least two sentences of meaningful interiority grounded in the protagonist's specific fear, memory, desire, or private realization, but use personal history only when it materially affects the events or outcome.
+    - Use the protagonist's skill, knowledge, relationship, or personal history only when it materially affects the events or outcome.
+    - An unexpected reveal or reversal is optional, not mandatory. If used, plant its evidence early and make the payoff understandable without an additional unexplained mechanism.
+    - Keep the story in the genre and scale supported by the source. For a sparse premise, prefer a grounded, character-centered conflict over a hidden conspiracy, secret experiment, consciousness-transfer plot, supernatural transformation, or catastrophe invented solely for spectacle.
+    - Dialogue is optional. Only use a line as present dialogue when a character actually speaks it aloud in the current scene. Words in notes, letters, logs, screens, recordings, remembered messages, and internal thoughts are not present-time in-person speech. Do not create an extra character merely to supply dialogue.
+    - Keep identities, character knowledge, objects, geography, chronology, and physical rules consistent. Do not repeat a line as new dialogue when it is only being remembered or echoed.
+    - Every paragraph must change the situation; avoid repetitive atmosphere, unexplained entrances, unmotivated antagonists, and new powers or mechanics that were not prepared earlier.
+    - End with a complete resolution paragraph that resolves the central problem and shows what changed because of the protagonist's choice. Do not substitute a mysterious image for a causal resolution.
 
-    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range. Do not pad the source or sacrifice a complete ending to hit a word count. Finish every sentence and resolve the central choice.
+    Before finishing, silently verify that every major event has a cause, the protagonist's choice follows from evidence, and the ending follows from that choice. Do not output this check.
 
-    Qwen decides names, identities, relationships, and final cast size. Do not force a number of characters. Preserve source characters who materially participate; do not count a person as physically present merely because they speak through a recording or appear in a memory.
+    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range when complete. Use the six paragraphs to progress the story rather than divide one moment into repeated descriptions. Do not pad the source, but do not stop early while motivation, causality, or resolution remains underdeveloped. Finish every sentence.
 
-    Output only expanded story prose, with spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
+    Qwen decides names, identities, relationships, and final cast size. Preserve source characters who materially participate; do not force a number of characters. A person quoted from a recording, letter, message, memory, or internal recollection is not physically present merely because their words appear in the story.
+
+    Output only expanded story prose, with any actual spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
     """).strip()
 
         raise ValueError(
@@ -279,7 +283,7 @@ class QwenDirectorPromptMixin:
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
-        result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Plain prose only."
+        result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Aim for 420–560 words; 420–600 is acceptable. Plain prose only."
         return result
 
 
@@ -554,7 +558,7 @@ class QwenDirectorPromptMixin:
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. Do not use a deterministic hint list or a planning cast as a separate source of truth. The `candidates` array itself is your final cast decision; no downstream step will add names from hints, planned cast, or dialogue speakers. A dialogue speaker must therefore also be represented in `candidates` when that person physically participates in the story.
 
-    Return `spoken_dialogue` containing only exact direct speech spoken by a physically present character. Radio, intercom, recording, note, sign, screen, label, alarm, narration, and internal thought are not in-person speech. Every dialogue speaker must exactly match one candidate's canonical name. Preserve the exact utterance text; do not paraphrase or invent speech.
+    Return `spoken_dialogue` containing only exact direct speech actually spoken aloud by a physically present character in the current scene. A quotation mark is not sufficient evidence that text was spoken: exclude words read from or written in a note, journal, sign, screen, label, or document; messages or recordings; radio/intercom/speaker/static voices; remembered speech; inner monologue; and a voice described as echoing inside someone's mind. Exclude a line when the narration only repeats or recalls what someone said earlier. Every included speaker must both physically participate in the current story and exactly match one candidate's canonical name. Preserve exact utterance text; do not paraphrase or invent speech.
 
     Return exactly these top-level fields: `candidates` and `spoken_dialogue`. Before responding, re-read the complete story and check that every distinct person who physically participates in its current events is represented once, while mention-only and off-screen people are excluded. This is a semantic review of the story, not a requirement to classify any externally supplied names. Keep the JSON compact and output no explanation outside it.
     """).strip()
