@@ -28,7 +28,7 @@ You are the CINEMATOGRAPHY DIRECTOR for MiniMax H3.
 
 Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scene.
 
-For each `scene_shots` item, return one `scene_metadata` object that is the canonical semantic setting for that scene. Qwen is the source of truth for location, time_of_day, weather, atmosphere, mood, lighting, color_temperature, environment_details, and key_props. Use the story and the supplied scene prose, not keyword matching or a fixed vocabulary menu. Make the scene visually specific while preserving story facts. Do not invent a weather change, a new time-of-day event, or a prop that changes the plot. If the story does not establish time or weather and a choice is not strongly implied by the physical scene, use `unspecified`. For indoor scenes, weather can be `unspecified` unless it is visibly affecting the interior. All shots in the same scene must agree with this canonical setting; their per-shot location, lighting, color temperature, and mood must be consistent with `scene_metadata`.
+For each `scene_shots` item, return one `scene_metadata` object that is the canonical semantic interpretation of that scene. Qwen is the source of truth for its physical setting, time_of_day, weather, atmosphere, mood, lighting, color_temperature, environment_details, key_props, and dramatic_purpose. Interpret dramatic_purpose from what this specific scene does in the actual story and how it changes the protagonist's situation; write a concise natural-language phrase, not a fixed beat label. Do not infer purpose from scene index or force a conventional setup/catalyst/midpoint/climax sequence. A quiet aftermath, investigation, failed attempt, relationship shift, reveal, transition, or other story-specific function is valid when grounded by the text. Use the story and supplied scene prose, not keyword matching or a fixed vocabulary menu. Make the scene visually specific while preserving story facts. Do not invent a weather change, a new time-of-day event, or a prop that changes the plot. If the story does not establish time or weather and a choice is not strongly implied by the physical scene, use `unspecified`. For indoor scenes, weather can be `unspecified` unless it is visibly affecting the interior. All shots in the same scene must agree with this canonical setting; their per-shot location, lighting, color temperature, and mood must be consistent with `scene_metadata`.
 
 For the `location` field, use ONLY the physical setting where the shot occurs.
 The value must be a concrete place or environment, not an action, object, body part, emotion, event, clause, sentence fragment, or abstract phrase.
@@ -95,16 +95,8 @@ sealed stays sealed; an unnamed object stays unnamed). When a source is short an
 scenes are different COVERAGE of the same moment: vary distance, angle, and detail (approach, threshold, close detail, reaction),
 never advance the plot beyond what the description states, and never repeat the same action/visual in consecutive scenes.
 
-SCENE-FUNCTION DIRECTING:
-Each supplied scene includes scene_function and obligatory_moment.
-Use them as directing constraints, not as new story events.
-setup: establish geography and protagonist context.
-catalyst: reveal the disruptive event, clue, or discovery.
-development: show objective, movement, complication, or escalation.
-midpoint: emphasize new information and changed understanding.
-climax: emphasize danger, decisive action, choice, and consequence.
-finale: emphasize aftermath, resolution, and the closing emotional image.
-Every required shots must visibly serve the supplied obligatory_moment (when it is omitted, the scene description is the obligatory moment).
+PURPOSE-AWARE DIRECTING:
+Infer the scene's actual dramatic purpose from the story context and its own scene description. Do not assume an early scene is necessarily setup, a middle scene is a midpoint, or the last scene is a finale; follow the story's actual causal and emotional function. Keep the purpose grounded in events that are stated or clearly implied, and never add a story event to make the scene fit a template. The supplied obligatory_moment identifies the central visible event or state that the required shots must cover; it is not permission to invent additional plot.
 
 SHOT / FRAMING VOCABULARY:
 framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
@@ -135,7 +127,8 @@ Return JSON only in exactly this structure:
         "lighting": "<physically motivated light source>",
         "color_temperature": "<scene color temperature>",
         "environment_details": [],
-        "key_props": []
+        "key_props": [],
+        "dramatic_purpose": "<what this specific scene changes or accomplishes in the story>"
       },
       "shots": [
         {
@@ -823,11 +816,12 @@ class QwenDirectorPromptMixin:
                     "type": "array", "maxItems": 6,
                     "items": {"type": "string"},
                 },
+                "dramatic_purpose": {"type": "string", "minLength": 1, "maxLength": 180},
             },
             "required": [
                 "location", "time_of_day", "weather", "atmosphere",
                 "mood", "lighting", "color_temperature",
-                "environment_details", "key_props",
+                "environment_details", "key_props", "dramatic_purpose",
             ],
             "additionalProperties": False,
         }
@@ -1133,10 +1127,6 @@ class QwenDirectorPromptMixin:
                     scene.get("continuity_notes", ""),
                     DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS,
                 ),
-                "scene_function": str(
-                    scene.get("scene_function", "development")
-                    or "development"
-                ).strip(),
                 "obligatory_moment": self._limit_text(
                     scene.get("obligatory_moment", scene.get("description", "")),
                     220,
