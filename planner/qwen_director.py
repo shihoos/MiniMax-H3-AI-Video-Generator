@@ -553,11 +553,9 @@ class QwenDirector(
                 f"the required 4-{self.MAX_SCENES} range: {len(scenes)}"
             )
 
-        # Preserve deterministic scene topology and only add the
-        # Director's creative scene annotations if they already exist.
-        scenes = self._annotate_scene_functions(
-            scenes
-        )
+        # Preserve deterministic scene topology. Scene-specific dramatic purpose
+        # is inferred by Qwen in the existing shot-batch call, not guessed by index.
+        scenes = self._annotate_scene_context(scenes)
 
         director_plan = {
             "story": story,
@@ -2282,7 +2280,7 @@ class QwenDirector(
             return
         string_fields = (
             "location", "time_of_day", "weather", "atmosphere", "mood",
-            "lighting", "color_temperature",
+            "lighting", "color_temperature", "dramatic_purpose",
         )
         unset_values = {"", "n/a", "unknown", "not specified", "unspecified"}
         for field in string_fields:
