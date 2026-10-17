@@ -466,12 +466,19 @@ class H3ContextIRCompiler:
 
     @classmethod
     def _summary(cls, plan: dict[str, Any], shot: dict[str, Any], refs: list[dict[str, Any]]) -> str:
+        time_of_day = cls._clean(shot.get("time_of_day"))
+        weather = cls._clean(shot.get("weather"))
+        if time_of_day.casefold() == "unspecified":
+            time_of_day = ""
+        if weather.casefold() == "unspecified":
+            weather = ""
         parts = [
             "[" + " + ".join(cls._task_types(refs, shot)) + "]",
             f"Scene: {cls._clean(shot.get('scene_id'))}",
             f"Shot: {cls._clean(shot.get('shot_id'))}",
             f"Location: {cls._clean(shot.get('location'))}",
-            f"Time: {cls._clean(shot.get('time_of_day'))}",
+            f"Time: {time_of_day}" if time_of_day else "",
+            f"Weather: {weather}" if weather else "",
             f"Duration: {float(shot.get('duration_seconds', 0.0) or 0.0):.3f} seconds",
             f"Continuity mode: {cls._clean(shot.get('continuity_mode') or 'chained')}",
         ]
@@ -684,7 +691,13 @@ class H3ContextIRCompiler:
         if scene_id: ids.append(f"scene={scene_id}")
         if shot_id: ids.append(f"shot={shot_id}")
         if ids: lines.append("Target shot: " + "; ".join(ids) + ".")
-        setting = ", ".join(x for x in (cls._clean(shot.get("location")), cls._clean(shot.get("time_of_day")), cls._clean(shot.get("mood"))) if x)
+        setting_values = (
+            cls._clean(shot.get("location")),
+            cls._clean(shot.get("time_of_day")),
+            cls._clean(shot.get("weather")),
+            cls._clean(shot.get("mood")),
+        )
+        setting = ", ".join(x for x in setting_values if x and x.casefold() != "unspecified")
         if setting: lines.append(f"Setting and tone: {setting}.")
         characters = [cls._clean(x) for x in (shot.get("characters", []) or []) if cls._clean(x)]
         if characters: lines.append("Characters present: " + ", ".join(dict.fromkeys(characters)) + ".")
@@ -849,7 +862,7 @@ class H3ContextIRCompiler:
             "detailed_description":detailed_description,
             "overall_soundscape":overall_soundscape,
             "non_diegetic_music":non_diegetic_music,
-            "scene":{"scene_id":self._clean(shot.get("scene_id")),"location":self._clean(shot.get("location")),"time_of_day":self._clean(shot.get("time_of_day")),"mood":self._clean(shot.get("mood"))},
+            "scene":{"scene_id":self._clean(shot.get("scene_id")),"location":self._clean(shot.get("location")),"time_of_day":self._clean(shot.get("time_of_day")),"weather":self._clean(shot.get("weather")),"mood":self._clean(shot.get("mood"))},
             "context_ir_input":self._canonical_input_prompt(plan,shot,refs),
             "shot":{"shot_id":self._clean(shot.get("shot_id")),"duration_seconds":float(shot.get("duration_seconds",0.0) or 0.0),"camera":{"shot":self._clean(shot.get("camera_shot")),"movement":self._clean(shot.get("camera_movement")),"lens":self._clean(shot.get("lens_and_depth_of_field"))},"composition":self._clean(shot.get("composition_notes")),"lighting":self._clean(shot.get("lighting")),"action":self._clean(shot.get("action"))},
             "continuity":shot.get("continuity_start_state",{}) or {},"references":reference_rows,"speakers":speaker_map,"dialogue":dialogue_rows,"audio":{"soundscape":self._soundscape(shot,refs),"music":self._music(shot,refs)},
