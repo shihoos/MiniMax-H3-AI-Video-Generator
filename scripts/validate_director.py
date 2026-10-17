@@ -47,6 +47,60 @@ def test_shot_schema_tracks_instance_topology():
     _assert(shot_schema["properties"]["shots"]["minItems"] == 3, "shot schema ignored instance SHOTS_PER_SCENE")
     _assert(nested["minItems"] == 3 and nested["maxItems"] == 3, "batch schema ignored instance SHOTS_PER_SCENE")
     _assert(shot_schema["properties"]["shots"]["items"]["properties"]["location"].get("minLength") == 1, "location schema must require a value")
+    scene_entry = batch_schema["properties"]["scene_shots"]["items"]
+    metadata = scene_entry["properties"].get("scene_metadata", {})
+    _assert("scene_metadata" in scene_entry["required"], "Qwen batch must author canonical scene metadata")
+    _assert(set(("location", "time_of_day", "weather", "lighting", "mood")) <= set(metadata.get("properties", {})),
+            "scene metadata schema must include semantic setting and lighting fields")
+    _assert("dramatic_purpose" in metadata.get("required", []),
+            "Qwen must supply story-grounded dramatic purpose in the existing shot batch")
+    from planner.qwen_director_scene import QwenDirectorSceneMixin
+    annotated = QwenDirectorSceneMixin._annotate_scene_functions([
+        {"description": "The witness refuses to identify the person in the photograph."},
+        {"description": "The protagonist quietly returns the key after learning the cost.",
+         "dramatic_purpose": "The protagonist accepts the cost of the choice."},
+    ])
+    _assert(all("scene_function" not in item for item in annotated),
+            "deterministic scene compiler must not force dramatic function by index")
+    _assert(annotated[1].get("dramatic_purpose") == "The protagonist accepts the cost of the choice.",
+            "scene context preparation must preserve story-dependent dramatic purpose")
+    planner_source = (ROOT / "planner/production_planner.py").read_text(encoding="utf-8")
+    _assert("TIME_WORDS" not in planner_source and "WEATHER_WORDS" not in planner_source and "MOOD_WORDS" not in planner_source,
+            "production planner must not infer scene semantics from fixed keyword tables")
+    sample_metadata = {"location": "coastal archive", "time_of_day": "blue hour", "weather": "steady rain",
+                       "atmosphere": "hushed and damp", "mood": "apprehensive", "lighting": "cold window light",
+                       "color_temperature": "cool", "environment_details": ["rain against glass"], "key_props": ["sealed ledger"],
+                       "dramatic_purpose": "The protagonist discovers the archive has been quietly altered."}
+    scene = {"scene_id": "scene_001"}
+    probe._apply_scene_metadata(scene, sample_metadata)
+    _assert(scene.get("time_of_day") == "blue hour" and scene.get("weather") == "steady rain",
+            "Qwen-authored scene time and weather must survive scene metadata normalization")
+    _assert(scene.get("dramatic_purpose") == sample_metadata["dramatic_purpose"],
+            "Qwen-authored dramatic purpose must survive scene metadata normalization")
+    extracted = probe._normalize_batch_scene_metadata_response({
+        "scene_shots": [{"scene_id": "scene_001", "scene_metadata": sample_metadata, "shots": []}]
+    })
+    _assert(extracted.get("scene_001", {}).get("weather") == "steady rain",
+            "scene metadata must be retained separately from shot records")
+    shots = [
+        {"shot_id": "scene_001_shot_001", "scene_id": "scene_001", "location": "coastal archive",
+         "lighting": "cold window light", "color_temperature": "cool", "mood": "apprehensive", "characters": []},
+        {"shot_id": "scene_001_shot_002", "scene_id": "scene_001", "location": "archive room",
+         "lighting": "blue practical light", "color_temperature": "cool", "mood": "tense", "characters": []},
+    ]
+    probe._enforce_scene_coherence([scene], shots, [])
+    _assert(all(item.get("time_of_day") == "blue hour" and item.get("weather") == "steady rain" for item in shots),
+            "scene time/weather must propagate to every shot in the final plan")
+    _assert(all(item.get("location") == "coastal archive" for item in shots),
+            "scene-level canonical location must win over inconsistent shot wording")
+    from schemas.shot import Shot
+    compiled_shot = Shot(shot_id="s1", scene_id="scene_001", order=1, duration_seconds=5.2,
+                         time_of_day="blue hour", weather="steady rain")
+    _assert(compiled_shot.to_dict().get("weather") == "steady rain" and "steady rain" in compiled_shot.h3_prompt(),
+            "scene time/weather must survive Shot serialization into H3's final prompt")
+    empty_scene = _planner().create_scenes("A person enters a place.\n\nThey find a key.\n\nThey make a choice.\n\nThey leave.", [])
+    _assert(all(not item.time_of_day and not item.weather and not item.mood and not item.lighting for item in empty_scene),
+            "ProductionPlanner must leave semantic scene fields to Qwen rather than keyword-filling them")
 
 
 
@@ -261,18 +315,21 @@ def test_relational_owner_must_be_qwen_approved():
 
 def test_relational_character_survives_with_qwen_owner():
     planner = _planner()
-    story = "Eli entered the station. Eli's father waited beside the door and warned him."
+    story = "Eli entered the station. Eli's father waited beside the door and warned him. The woman in the lab coat blocked the exit."
 
     def extractor(_story, _hints):
         return {"candidates": [
             {"name": "Eli", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
-            {"name": "Eli's father", "entity_type": "CHARACTER", "is_character": True, "aliases": ["his father", "father"], "identity_type": "relational_character", "relationship_to": "Eli", "relationship": "father"},
+            # Reproduce the October 16 trace: Qwen approved the identity but mislabeled its type.
+            {"name": "Eli's father", "entity_type": "CHARACTER", "is_character": True, "aliases": [], "identity_type": "named_character"},
+            {"name": "The woman in the lab coat", "entity_type": "PERSON", "is_character": True, "aliases": [], "identity_type": "named_character"},
         ]}
 
     characters = planner.create_characters(story, qwen_character_extractor=extractor)
     names = [c.name for c in characters]
-    _assert(names == ["Eli", "Eli's father"], f"valid Qwen relational character was lost: {names}")
+    _assert(names == ["Eli", "Eli's father", "The woman in the lab coat"], f"Qwen-approved relational/descriptive identities were lost: {names}")
     _assert(characters[1].identity_type == "relational_character", "relational identity type was lost")
+    _assert(characters[2].identity_type == "descriptive_character", "descriptive identity type was lost")
 
 
 def test_director_create_characters_keywords_match_planner_signature():
@@ -359,7 +416,7 @@ def test_story_prompt_does_not_force_cast_size():
         text = " ".join(mixin._story_text_system(mode).lower().split())
         _assert(
             "qwen decides names, identities, relationships, and final cast size" in text
-            and "no hardcoded roster or numeric cast quota" in text,
+            and "do not force a number of characters" in text,
             f"{mode} must leave cast authorship to Qwen",
         )
         _assert("include a second physically present" not in text,
@@ -523,13 +580,13 @@ def test_story_prompt_restores_september_25_craft_contract():
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = " ".join(mixin._story_text_system(mode).lower().split())
         _assert("unexpected reveal or reversal" in text,
-                f"{mode} must preserve the September 25 reversal requirement")
+                f"{mode} must preserve the causal reversal requirement")
         _assert("at least two sentences" in text and "interiority" in text,
-                f"{mode} must preserve the baseline interiority requirement")
+                f"{mode} must preserve meaningful interiority")
         _assert("short line of spoken dialogue by a named character" in text,
                 f"{mode} must preserve purposeful spoken dialogue")
-        _assert("400-650 words" in text,
-                f"{mode} must restore the September 25 word-range guidance")
+        _assert("420–560 words" in text and "420–600 is a safe range" in text,
+                f"{mode} must distinguish preferred word count from safe range")
         _assert(("complete aftermath paragraph" in text if mode == AI_STORY_MODE else "complete resolution paragraph" in text),
                 f"{mode} must require a completed aftermath")
         _assert("include a second physically present" not in text,
@@ -546,8 +603,15 @@ def test_story_contract_remains_six_paragraphs_420_560():
             "story validator must retain the 420-word minimum")
     _assert('minimum_words = int(getattr(self, "_story_min_words", 420) or 420)' in sanitize_source,
             "story validator must use the configured minimum word count")
-    _assert("if not minimum_words <= word_count <= 560:" in sanitize_source,
-            "story validator must enforce the 560-word maximum")
+    _assert("if not minimum_words <= word_count <= 600:" in sanitize_source,
+            "story validator must accept the safe 420-600-word range")
+    from planner.qwen_director import QwenDirector
+    probe = QwenDirector.__new__(QwenDirector)
+    probe._story_min_words = 420
+    counts = [94, 94, 94, 94, 94, 92]
+    safe_story = "\n\n".join(" ".join(["detail"] * (count - (1 if i == 5 else 0)) + (["resolved."] if i == 5 else [])) for i, count in enumerate(counts))
+    # The 562-word trace was complete; it must not fail solely for exceeding 560.
+    probe._validate_story_completion_contract("ai_story", safe_story)
 
 
 def test_story_dialogue_contract_uses_qwen_semantic_spans():
@@ -885,9 +949,9 @@ def test_story_prompt_uses_baseline_per_mode_sampling_and_source_fidelity():
             f"story sampler should match Qwen3's documented thinking-mode baseline: {expected_sampling}")
     ai = " ".join(mixin._story_text_system(AI_STORY_MODE).lower().split())
     expand = " ".join(mixin._story_text_system(EXPAND_USER_STORY_MODE).lower().split())
-    _assert("subvert the obvious" in ai and "specific fear, memory, desire" in ai,
-            "AI Story lost the baseline reversal/interiority craft guidance")
-    _assert("preserving its important characters, events, chronology, setting, outcome" in expand,
+    _assert("unexpected reveal or reversal" in ai and "specific fear, memory, desire" in ai,
+            "AI Story lost causal-reversal/interiority craft guidance")
+    _assert("preserving its established people, setting, event order, causal facts, and outcome" in expand,
             "Expand Story must preserve its source's established plot")
     _assert("qwen decides names, identities, relationships, and final cast size" in ai and
             "qwen decides names, identities, relationships, and final cast size" in expand,
@@ -916,17 +980,17 @@ def test_story_bible_cast_schema_is_unbounded_and_plan_is_not_duplicated():
     _assert("maxItems" not in cast_schema, "Story Bible cast schema must not impose a fixed maximum")
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     prompt_source = (ROOT / "planner/qwen_director_prompts.py").read_text(encoding="utf-8")
-    _assert('max_completion=2800' in prompt_source, "thinking-mode open-cast planning needs a bounded JSON/reasoning budget")
+    _assert('max_completion=1800' in prompt_source, "compact causal planning needs a bounded JSON/reasoning budget")
     _assert("protagonist_name" in schema["properties"] and "causal_mechanism" in schema["properties"],
             "Story Bible must state one protagonist and the causal rule")
-    _assert("not a fixed cast quota" in prompt_source.lower(), "the outline must not force an unnecessary cast")
+    _assert("no fixed count" in prompt_source.lower() and "`cast` may be empty" in prompt_source.lower(), "the outline must not force an unnecessary cast")
     _assert("not automatically sent to editor" in source, "outline discrepancies must stay advisory")
 
 
 def test_editor_uses_same_story_contract_and_can_repair_supported_counterpart():
     from planner.qwen_director import QwenDirector
     editor = QwenDirector._STORY_EDITOR_SYSTEM.lower()
-    _assert("420-560 words" in editor, "editor must match the primary output contract")
+    _assert("420-600 words" in editor and "420-560 preferred" in editor, "editor must distinguish safe and preferred word ranges")
     _assert("story bible is provisional" in editor, "editor must treat the outline as advisory")
     _assert("do not force every outline beat or planned character" in editor, "editor must be free to drop nonessential planned cast")
     _assert("consequential present-day counterpart" in editor, "editor should repair a missing consequential counterpart when premise supports one")
@@ -951,7 +1015,7 @@ def test_story_profile_is_single_pass_and_skips_optional_story_calls():
             "normal story path must make exactly one writer call")
     for stage in ("_collect_story_findings(", "_resample_for_audit(", "_edit_story_draft(", "story_quality_repair_pass"):
         _assert(stage not in normal_path, f"unnecessary story-stage call remains wired into normal path: {stage}")
-    _assert("400-650 words" in prompt, "writing prompt must restore the September 25 word-range guidance")
+    _assert("420–600 is a safe range" in prompt, "writing prompt must state the safe word range")
 def test_story_quality_review_helpers_remain_optional_but_are_not_called_by_story_path():
     from planner.qwen_director import QwenDirector
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
@@ -1103,7 +1167,7 @@ def test_story_plan_precedes_one_writer_and_repair_stays_off_by_default():
     director = QwenDirector.__new__(QwenDirector)
     director._planned_cast = ["stale"]
     calls = []
-    director._plan_story_bible = lambda *args: calls.append(args) or {"cast": [{"name": "Mira"}], "beats": ["b"] * 6}
+    director._plan_story_bible = lambda *args: calls.append(args) or {"protagonist_name": "Mira", "causal_mechanism": "A keyed lock opens once", "cast": [], "beats": ["b"] * 6}
     old = os.environ.pop("H3_STORY_PLAN", None)
     try:
         result = director._maybe_plan_story_bible("ai_story", "premise", [])
