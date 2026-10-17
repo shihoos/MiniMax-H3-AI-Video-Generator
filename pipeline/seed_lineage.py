@@ -20,6 +20,8 @@ def ensure_shot_uid(shot: dict[str, Any], production_id: str) -> str:
         "scene_id": str(shot.get("scene_id", "") or ""),
         "characters": list(shot.get("characters", []) or []),
         "location": str(shot.get("location", "") or ""),
+        "time_of_day": str(shot.get("time_of_day", "") or ""),
+        "weather": str(shot.get("weather", "") or ""),
         "action": str(shot.get("action", "") or ""),
         "camera_shot": str(shot.get("camera_shot", "") or ""),
         "camera_movement": str(shot.get("camera_movement", "") or ""),
@@ -33,7 +35,7 @@ def ensure_shot_uid(shot: dict[str, Any], production_id: str) -> str:
 
 def semantic_content_digest(shot: dict[str, Any]) -> str:
     payload = {key: shot.get(key) for key in (
-        "scene_id", "characters", "location", "action", "camera_shot",
+        "scene_id", "characters", "location", "time_of_day", "weather", "action", "camera_shot",
         "camera_movement", "lens_and_depth_of_field", "composition_notes",
         "lighting", "color_temperature", "mood", "visual_prompt",
     )}
