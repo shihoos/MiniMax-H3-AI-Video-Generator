@@ -581,11 +581,7 @@ def feature_enabled(name: str, default: bool = False) -> bool:
 
 
 def director_critic_enabled() -> bool:
-    """Resolve the Director plan critic setting consistently across all layers.
-
-    H3_DIRECTOR_CRITIQUE is the preferred explicit override. When it is absent,
-    use the legacy H3_DIRECTOR_CRITIC override and then the runtime manifest.
-    """
+    """Resolve Director plan-critic enablement identically across runtime layers."""
     preferred = os.getenv("H3_DIRECTOR_CRITIQUE")
     if preferred is not None:
         return str(preferred).strip().lower() in {"1", "true", "yes", "on"}
