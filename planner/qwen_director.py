@@ -25,8 +25,8 @@ from planner.config import (
     DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
-    director_critic_enabled,
     director_enabled,
+    director_critic_enabled,
 )
 
 from planner.qwen_director_runtime import (
@@ -350,20 +350,11 @@ class QwenDirector(
                 user_input,
                 source_character_names=source_character_names,
             )
-            # One deliberate plan-before-write call is enabled by default because
-            # the October 15 run showed that unplanned prose and the final cast can
-            # diverge. The plan is provisional; it does not constrain cast size or
-            # override Expand Story source canon. Disable with H3_STORY_PLAN=0.
-            story_bible = self._maybe_plan_story_bible(
-                mode,
-                user_input,
-                source_character_names,
-            )
-            bible_block = self._format_story_bible(story_bible)
-            if bible_block:
-                story_user += "\n\n" + bible_block
-            # Exactly one prose-writing request. No automatic story repair/retry is
-            # run in the default path; hard/soft validation behavior stays unchanged.
+            # The extra Story Bible call is deliberately absent from normal generation.
+            # Runtime traces showed it inventing an arbitrary EMP countdown in AI Story
+            # and truncating into a discarded JSON result in Expand Story. It added
+            # latency and injected unreliable causal constraints before the writer.
+            # Keep the writer single-pass: no story retry, challenger, or editor call.
             story, generated_story = self._generate_story_once(
                 mode,
                 user_input,
@@ -2945,7 +2936,38 @@ class QwenDirector(
 
         remote_context_re = re.compile(
             r"\b(?:radio|walkie-talkie|intercom|loudspeaker|speaker|phone|telephone|"
-            r"voicemail|recording|transmission|communicator|through the static|over the line)\b",
+            r"voicemail|recording|transmission|communicator|over the line)\b|"
+            r"\b(?:in|through|amid|from)\s+(?:the\s+)?static\b",
+            flags=re.IGNORECASE,
+        )
+        remembered_context_re = re.compile(
+            r"\b(?:memory surfaced|a memory (?:of|came|returned)|remembered|recalled|"
+            r"replaying|replayed|mind replayed|mind replaying|words echoed\s*:|"
+            r"(?:last|final|previous|earlier|remembered|recorded)\s+(?:words|messages?|voice|line|advice|warning)|"
+            r"(?:voice|words|advice|warning) echoed in (?:his|her|their) (?:mind|head|skull))",
+            flags=re.IGNORECASE,
+        )
+        written_before_re = re.compile(
+            r"\b(?:screen|monitor|terminal)\s+(?:showed|displayed|flashed|read|was frozen on)\b[^.!?]{0,80}$|"
+            r"\b(?:written|scrawled|inscribed|printed|displayed)\s+(?:in|on|beneath)\b[^.!?]{0,60}$|"
+            r"\b(?:journal|diary|note|letter|dossier|file|document|log|margin|entry|handwriting|label|sign|recording|message)"
+            r"\s+(?:read|reads|wrote|had written|scrawled|stated|said|showed|displayed|revealed|listed|contained|recorded|filled)"
+            r"\b[^.!?]{0,90}$|"
+            r"\b(?:journal|diary|note|letter|dossier|file|document|log|margin|entry|handwriting|label|sign|recording|message)"
+            r"\s*[:—-]\s*$",
+            flags=re.IGNORECASE,
+        )
+        named_reader = r"[A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,3}"
+        written_after_re = re.compile(
+            r"^\s*[,;:—-]?\s*(?:(?:she|he|they)\s+(?:read|reads|had read|wrote|had written)\b|"
+            + named_reader + r"\s+(?:read|reads|had read|wrote|had written)\b|"
+            r"(?:a|the|his|her|their)\s+(?:note|journal|diary|letter|dossier|file|document|log|label|screen|monitor)"
+            r"\b.{0,70}\b(?:read|reads|said|stated|showed|displayed|revealed)\b)",
+            flags=re.IGNORECASE,
+        )
+        written_reader_before_re = re.compile(
+            r"(?:\b(?:she|he|they)\s+(?:read|reads|had read|wrote|had written)|"
+            + named_reader + r"\s+(?:read|reads|had read|wrote|had written))\s*[,;:]?\s*$",
             flags=re.IGNORECASE,
         )
         physical_presence_re = re.compile(
@@ -2955,14 +2977,46 @@ class QwenDirector(
             flags=re.IGNORECASE,
         )
 
-        def is_remote_quote(position: int) -> bool:
+        def is_non_present_quote(position: int, end_position: int) -> bool:
             paragraph_start = text.rfind("\n\n", 0, position) + 2
-            context = text[paragraph_start:position]
-            remote_positions = [match.start() for match in remote_context_re.finditer(context)]
-            physical_positions = [match.start() for match in physical_presence_re.finditer(context)]
-            return bool(remote_positions) and (
+            paragraph_end = text.find("\n\n", end_position)
+            if paragraph_end < 0:
+                paragraph_end = len(text)
+            before = text[paragraph_start:position]
+            after = text[end_position:paragraph_end]
+
+            # Classify the quote from its own surrounding sentence, not every cue
+            # in the paragraph. Otherwise an earlier memory/recording can wrongly
+            # suppress a later live line in the same paragraph.
+            prior_boundary = max(before.rfind("."), before.rfind("?"), before.rfind("!"))
+            local_before = before[prior_boundary + 1:][-260:]
+            next_boundaries = [index for index in (after.find("."), after.find("?"), after.find("!")) if index >= 0]
+            local_after = after[:min(next_boundaries) + 1] if next_boundaries else after[:180]
+
+            # Remote-channel lead-ins are often a separate sentence immediately
+            # before the quote (e.g. "Her radio crackled. "Voss, you there?"").
+            # Keep this broader window only for remote-vs-physical attribution; the
+            # memory/document checks remain sentence-local to avoid suppressing a
+            # later live line because of an unrelated earlier event.
+            nearby_before = before[-320:]
+            remote_positions = [match.start() for match in remote_context_re.finditer(nearby_before)]
+            physical_positions = [match.start() for match in physical_presence_re.finditer(nearby_before)]
+            if remote_positions and (
                 not physical_positions or max(remote_positions) > max(physical_positions)
-            )
+            ):
+                return True
+            # A quote explicitly attributed to memory, an echo in someone's mind,
+            # or a written source is not present-time spoken dialogue. Check both
+            # sides of the quote because natural prose often adds "she read" after it.
+            if remembered_context_re.search(local_before) or remembered_context_re.search(local_after):
+                return True
+            if (
+                written_before_re.search(local_before)
+                or written_reader_before_re.search(local_before)
+                or written_after_re.search(local_after)
+            ):
+                return True
+            return False
 
         remote_excluded = 0
         semantic_items: list[dict] = []
@@ -3023,10 +3077,10 @@ class QwenDirector(
             quote_spans.append((match.start(), match.end()))
             if not display or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
-            if is_remote_quote(match.start()):
-                # The shot contract requires visible speakers. Do not bind a voice
-                # from a radio/speaker/recording to a physical shot; live, in-person
-                # lines in later paragraphs remain eligible.
+            if is_non_present_quote(match.start(), match.end()):
+                # A quote from a remote channel, memory/echo, or written source is
+                # not present-time dialogue. Only accepted source speech can later
+                # justify restoring a canonical speaker omitted from a Qwen shot.
                 remote_excluded += 1
                 continue
 
@@ -3332,9 +3386,9 @@ class QwenDirector(
                     normalized_speaker = canonical.lower()
 
                 if normalized_speaker not in bound:
-                    # The speaker already resolved to a canonical identity. If Qwen
-                    # omitted that identity from the shot binding, restore the existing
-                    # canonical entity deterministically rather than deleting dialogue.
+                    # Restore a missing binding only after the exact event matched a
+                    # source quote already accepted as present-time speech above. The
+                    # source filter excludes remote, remembered and written quotations.
                     shot_characters = shot.get("characters")
                     if not isinstance(shot_characters, list):
                         shot_characters = list(shot_characters or [])
@@ -3344,7 +3398,7 @@ class QwenDirector(
                         for value in shot_characters
                         if str(value or "").strip()
                     }
-                    if normalized_speaker not in existing_norm:
+                    if EntityResolver.normalize(canonical) not in existing_norm:
                         shot_characters.append(canonical)
                     bound.add(normalized_speaker)
 
@@ -3360,7 +3414,7 @@ class QwenDirector(
                             for value in scene_characters
                             if str(value or "").strip()
                         }
-                        if normalized_speaker not in scene_norms:
+                        if EntityResolver.normalize(canonical) not in scene_norms:
                             scene_characters.append(canonical)
 
                 repaired = dict(event)
@@ -3553,16 +3607,14 @@ class QwenDirector(
         return critique
 
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict | None:
-        """Run one bounded cinematic critique when the effective feature flag is enabled.
+        """Run the read-only cinematic critique when the shared feature setting enables it.
 
-        The critic itself does not mutate the canonical plan; the orchestrator may
-        apply its whitelisted shot-field patches. H3_DIRECTOR_CRITIQUE overrides the
-        legacy H3_DIRECTOR_CRITIC environment variable and runtime manifest setting.
-        This method deliberately performs no story regeneration or retry.
+        H3_DIRECTOR_CRITIQUE is the preferred explicit override; H3_DIRECTOR_CRITIC
+        remains a legacy override, followed by the runtime manifest default.
         """
         if not director_critic_enabled():
             print(
-                "[QWEN] director_critique skipped (effective director_critic setting is disabled)",
+                "[QWEN] director_critique skipped (set H3_DIRECTOR_CRITIQUE=1 to enable)",
                 flush=True,
             )
             self._print_qwen_summary("FINAL")
@@ -3595,6 +3647,10 @@ class QwenDirector(
        breaks, seals, or destroys an object, later shots must respect that state unless an intervening
        event explains the change. Do not show an object back at an earlier location after it was moved.
     5. FRAMING: shots of one scene must not repeat the same camera_shot and camera_movement.
+    6. ACTION DISTINCTNESS: paired shots in one scene must use complementary actions, not two
+       paraphrases of the same observable action. If they repeat the same beat, identify both shot_ids
+       and quote both action fields. A patch may refine the later shot only by selecting another
+       reaction, evidence detail, or state change already supported by the story/scene; never invent an event.
 
     OUTPUT RULES
     - overall_score is 1 (unusable) to 10 (no defects).
@@ -3602,9 +3658,11 @@ class QwenDirector(
     - Report at most 6 findings and at most 3 shot_patches. Merge repeats of the same defect
       (for example one bad roster name across many shots) into ONE finding.
     - Every finding names a shot_id or scene_id and states one actionable defect concisely; include only the short evidence quote needed to prove it.
-    - Add a shot_patch only for a defect in checks 2, 3, or 5, rewriting only that field in the same
-      style and length. Never change ids, characters, timing, or continuity. If no concrete defect
-      exists, return empty arrays.
+    - Add a shot_patch only for a defect in checks 2, 3, 5, or 6. Patch only `action`, `camera_shot`,
+      `camera_movement`, `lens_and_depth_of_field`, `composition_notes`, `mood`, `visual_prompt`,
+      `overall_soundscape`, or `non_diegetic_music`, using the same style and length. Never patch
+      ids, characters, timing, lighting, color_temperature, or continuity. If no concrete defect exists,
+      return empty arrays.
     """.strip()
         def _slim_shot(shot: dict) -> dict:
             return {
@@ -3614,6 +3672,8 @@ class QwenDirector(
                 "camera_movement": str(shot.get("camera_movement", "") or ""),
                 "lens_and_depth_of_field": str(shot.get("lens_and_depth_of_field", "") or ""),
                 "lighting": str(shot.get("lighting", "") or ""),
+                "color_temperature": str(shot.get("color_temperature", "") or ""),
+                "location": str(shot.get("location", "") or ""),
                 "mood": str(shot.get("mood", "") or ""),
                 "characters": shot.get("characters", []) or [],
                 "visual_prompt": str(shot.get("visual_prompt", "") or "")[:400],
@@ -3698,8 +3758,6 @@ class QwenDirector(
                                     "camera_movement": {"type": "string"},
                                     "lens_and_depth_of_field": {"type": "string"},
                                     "composition_notes": {"type": "string"},
-                                    "lighting": {"type": "string"},
-                                    "color_temperature": {"type": "string"},
                                     "mood": {"type": "string"},
                                     "visual_prompt": {"type": "string"},
                                     "overall_soundscape": {"type": "string"},
