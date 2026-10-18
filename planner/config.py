@@ -151,15 +151,15 @@ DIRECTOR_TOP_P = float(
     )
 )
 
-# Dedicated Qwen3 thinking-mode profile for story planning and prose generation.
-# Keep generic Director JSON/shot defaults separate; story calls must not silently
-# override these values in qwen_director.py.
+# Optional Qwen3 thinking-mode sampler used only by explicit runtime warm-up or
+# diagnostics. Normal prose writing uses the September 25 non-thinking profile.
+# Keep these sampler extras separate from generic Director JSON/shot defaults.
 _story_sampling = dict(RUNTIME["director"].get("story_sampling", {}) or {})
 _story_thinking_sampling = dict(_story_sampling.get("thinking", {}) or {})
 
 DIRECTOR_STORY_MAX_TOKENS = int(os.getenv(
     "H3_DIRECTOR_STORY_MAX_TOKENS",
-    str(RUNTIME["director"].get("story_max_tokens", 3200)),
+    str(RUNTIME["director"].get("story_max_tokens", 2200)),
 ))
 if DIRECTOR_STORY_MAX_TOKENS < 1:
     raise RuntimeError("Story max tokens must be positive.")
