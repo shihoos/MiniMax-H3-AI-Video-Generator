@@ -39,7 +39,7 @@ director:
   vllm_env_dir:  /tmp/h3_qwen_vllm_031_tf517_tok0233
   context: 8192
   max_tokens: 7000
-  story_max_tokens: 3200
+  story_max_tokens: 2200
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
@@ -51,7 +51,7 @@ director:
   speculative_model_path: /kaggle/input/eagle-3
   speculative_tokens: 2
   generation_config: vllm
-  # Qwen3-14B-AWQ documented thinking-mode profile for story planning/writing.
+  # Runtime warmup profile only; normal prose writing uses the Sep-25 non-thinking sampler.
   story_sampling:
     thinking:
       temperature: 0.6
