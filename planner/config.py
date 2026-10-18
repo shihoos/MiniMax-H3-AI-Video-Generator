@@ -377,7 +377,14 @@ DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE = _resolve_bool_env(
 
 # Locked Director topology. Keep this centralized so prompt grammar, Director
 # batching, and validation cannot silently drift apart.
-DIRECTOR_SHOTS_PER_SCENE = 2
+# Target film length = DIRECTOR_STORY_SCENES x DIRECTOR_SHOTS_PER_SCENE x (frames_per_shot / fps).
+# Defaults: 12 scenes x 3 shots x 124/24 s = 36 shots, about 3.1 minutes.
+DIRECTOR_SHOTS_PER_SCENE = int(os.getenv("H3_DIRECTOR_SHOTS_PER_SCENE", "3"))
+DIRECTOR_STORY_SCENES = int(os.getenv("H3_DIRECTOR_STORY_SCENES", "12"))
+if DIRECTOR_STORY_SCENES < 4:
+    raise RuntimeError("H3_DIRECTOR_STORY_SCENES must be >= 4.")
+# Rough words per scene paragraph (about 3 shots of ~5 s each). Used for prompt targets only.
+STORY_WORDS_PER_SCENE = int(os.getenv("H3_STORY_WORDS_PER_SCENE", "85"))
 
 # Quality-safe Qwen prompt controls.
 # These settings reduce repeated prompt text only; they do NOT lower the
@@ -385,14 +392,14 @@ DIRECTOR_SHOTS_PER_SCENE = 2
 DIRECTOR_SHOT_STORY_CONTEXT_CHARS = int(
     os.getenv(
         "H3_DIRECTOR_SHOT_STORY_CONTEXT_CHARS",
-        "2800",
+        "3600",
     )
 )
 
 DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS = int(
     os.getenv(
         "H3_DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS",
-        "900",
+        "1500",
     )
 )
 
@@ -424,7 +431,7 @@ DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS = int(
 DIRECTOR_STORY_CONTEXT_CHARS = int(
     os.getenv(
         "H3_DIRECTOR_STORY_CONTEXT_CHARS",
-        "7000",
+        "12000",
     )
 )
 
