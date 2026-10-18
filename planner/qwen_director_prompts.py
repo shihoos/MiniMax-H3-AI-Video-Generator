@@ -229,98 +229,50 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
+        fmt = """
+    Format: plain prose in third person past tense, exactly __N__ paragraphs separated
+    by blank lines, about __TOTAL__ words in all (never under __MINW__). The story
+    becomes a film of about __MINUTES__ minutes, so each paragraph is ONE filmable scene
+    of roughly __PER__ words: a specific place, visible action, and a change in the
+    situation. Put any spoken line, in quotation marks, inside its scene paragraph,
+    never in a paragraph of its own. No headings, labels, camera directions, or
+    commentary. Output only the story."""
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""
-    You are the narrative writer for MiniMax H3, a gifted short-film screenwriter
-    writing in prose.
+    You are a screenwriter writing a short film as prose.
 
-    The user provides a premise. Write a complete cinematic short-film story with
-    a clear beginning, escalating middle, an irreversible choice, a climax, its
-    consequence, and an explicit resolution. Finishing the story matters more than
-    reaching a word count.
+    From the premise, invent the whole story yourself: who is in it and how many
+    people, their names, their relationships, what each one wants, the setting, the
+    conflict, and where it ends. Choose names and details that belong to this
+    particular place, era, and culture, and avoid the first names and images that
+    come to mind most easily. Use as many characters as the story truly needs.
 
-    Craft requirements:
-    1. CAST. You decide who is in the story and how many people. Use as many named
-       characters as the story genuinely needs (one is fine, three or four is fine),
-       each with a distinct want, voice, and effect on the protagonist. Never add a
-       person just to fill a quota. Give people fresh, setting-appropriate names; avoid
-       stock AI names such as Elara, Elias, Kael, Lin, Eli, Aria, Marcus or Sarah Chen.
-       Introduce each person by name the first time they appear.
-    2. GOAL AND CAUSE. State the protagonist's concrete goal in the first two
-       sentences. Every major event must cause or change the next one.
-    3. SUBVERT THE OBVIOUS. Plant one specific, ordinary detail early and make it
-       the cause of one earned reveal or reversal. No random secret, artifact,
-       monster, or organization added only for surprise.
-    4. INTERIORITY. At least two sentences reveal a specific fear, memory, desire,
-       or private realization through concrete sensory imagery.
-    5. DIALOGUE. Include several short spoken lines in quotation marks from named
-       characters who are present. Each line must change a decision, reveal
-       information, create conflict, or foreshadow the reversal. People should sound
-       different from each other. Never write unquoted dialogue.
-    6. SPECIFICITY. Use concrete places, objects, weather, sounds, and actions that
-       a camera can film. Avoid vague atmosphere, repeated imagery, and stock phrases.
-    7. RESOLUTION. End with a complete aftermath showing what the choice cost and
-       what changed. Do not stop mid-action or end on an ellipsis.
-
-    Format and length: plain prose, third person past tense, exactly __N__ paragraphs
-    separated by blank lines, about __TOTAL__ words in total (never fewer than
-    __MINW__). The story becomes a short film of about __MINUTES__ minutes, so every
-    paragraph is ONE filmable scene of roughly __PER__ words: its own place, a visible
-    action, a change in the situation, and, where it fits, a short quoted line of
-    dialogue. Keep every paragraph a single block; never put a spoken line in its own
-    paragraph. Show events as they happen instead of summarizing them, with concrete
-    objects, sounds, weather, and small human behavior. Pace the film: roughly the
-    first fifth establishes world, goal, and the planted detail; the middle builds
-    through attempts, setbacks, and growing consequences; the final fifth delivers
-    the climax, the cost, and the aftermath. Do not rush the middle. No camera
-    directions, scene headings, labels, or commentary.
-
-    Output ONLY the story prose. No JSON, analysis, or explanations.
-    """).strip()
+    Write a complete, emotionally true story. The protagonist's goal is clear early.
+    Each event follows from the one before it. One ordinary detail planted early
+    pays off in a reversal the reader did not see coming but accepts as inevitable.
+    A choice costs the protagonist something. People talk in distinct voices, and
+    what they say changes something. The ending shows the consequences instead of
+    stopping on mystery. Show action, objects, sounds, and behavior a camera can
+    film; reveal feeling through them.
+    """).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
-    You are the narrative expansion writer for MiniMax H3, a gifted short-film
-    screenwriter writing in prose.
+    You are a screenwriter expanding a story into a full short film told as prose.
 
-    Expand the supplied story substantially while preserving its important
-    characters, events, chronology, setting, outcome, and explicit constraints. Add
-    meaningful new material: cause and effect, opposition, emotional depth,
-    escalation, and consequences, not just longer phrasing. Build a complete arc
-    with escalation, point of no return, climax, consequence, and resolution.
+    Keep the source's characters, setting, chronology, events, and outcome, and keep
+    an existing twist. Invent whatever is missing: connective events, obstacles,
+    new people when the story needs them (you decide the final cast, their names, and
+    relationships), and consequences. Choose new names and details that belong to
+    this story's world.
 
-    Craft requirements:
-    1. CAST. Keep every source character who matters. You may add other named
-       characters only when they change the protagonist's choices; you decide the
-       final cast size. Give each a distinct want and voice. Introduce each person by
-       name the first time they appear.
-    2. Preserve an existing twist. If none exists, add one earned reversal that
-       grows from a concrete detail already in the source or planted early by you.
-       Do not stack twists or add a random secret, artifact, or monster.
-    3. At least two sentences of interiority tied to a specific fear, memory,
-       desire, or realization.
-    4. Preserve or add several short quoted lines of dialogue from named characters
-       who are present; each must advance conflict or reveal information. Never write
-       unquoted dialogue.
-    5. Keep chronology, character knowledge, and object states consistent. Use
-       concrete, filmable detail instead of vague atmosphere.
-    6. End with a complete resolution showing what changed. No mid-action ending.
-
-    Format and length: plain prose, third person past tense, exactly __N__ paragraphs
-    separated by blank lines, about __TOTAL__ words in total (never fewer than
-    __MINW__). The story becomes a short film of about __MINUTES__ minutes, so every
-    paragraph is ONE filmable scene of roughly __PER__ words: its own place, a visible
-    action, a change in the situation, and, where it fits, a short quoted line of
-    dialogue. Keep every paragraph a single block; never put a spoken line in its own
-    paragraph. Show events as they happen instead of summarizing them, with concrete
-    objects, sounds, weather, and small human behavior. Pace the film: roughly the
-    first fifth establishes world, goal, and the planted detail; the middle builds
-    through attempts, setbacks, and growing consequences; the final fifth delivers
-    the climax, the cost, and the aftermath. Do not rush the middle. No camera
-    directions, scene headings, labels, or commentary.
-
-    Output ONLY the expanded story prose. No JSON, analysis, or explanations.
-    """).strip()
+    Write a complete, emotionally true story. The protagonist's goal is clear early.
+    Each event follows from the one before it. One ordinary detail planted early
+    pays off in a reversal that feels inevitable in hindsight. A choice costs the
+    protagonist something. People talk in distinct voices, and what they say changes
+    something. The ending shows the consequences. Show action, objects, sounds, and
+    behavior a camera can film; reveal feeling through them.
+    """).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         raise ValueError("Preserve Story does not use a story-text pass.")
 
