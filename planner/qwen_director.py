@@ -20,9 +20,6 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
-    DIRECTOR_STORY_THINKING_TOP_K,
-    DIRECTOR_STORY_THINKING_MIN_P,
-    DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
@@ -88,7 +85,6 @@ class QwenDirector(
         self._reference_visual_context: dict[str, dict] = {}
         self._character_semantic_calls = 0
         self._semantic_spoken_dialogue: list[dict] = []
-        self._planned_cast: list[str] = []
         self._last_story_draft: str = ""
         self._story_min_words: int = 420
 
@@ -135,7 +131,6 @@ class QwenDirector(
 
         self._character_semantic_calls = 0
         self._semantic_spoken_dialogue = []
-        self._planned_cast = []
         if not director_enabled():
 
             plan = deepcopy(base_plan)
@@ -295,8 +290,8 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
-        # Preserve the September 25 per-mode sampler; thinking remains enabled
-        # only for the single story-writing call in this single-pass profile.
+        # Restore the September 25 per-mode sampler; story writing is explicitly
+        # non-thinking and runs once without the Story Bible or repair stages.
         temperature, top_p = self._sampling_for_mode(mode)
 
         # ----------------------------------------------------
@@ -1233,31 +1228,12 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
-    def _maybe_plan_story_bible(
-        self,
-        mode: str,
-        user_input: str,
-        source_character_names: list[str] | None,
-    ) -> dict | None:
-        """Run one Qwen planning call before prose; optional by explicit opt-out."""
-        self._planned_cast = []
-        if mode not in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-            return None
-        enabled = os.getenv("H3_STORY_PLAN", "1").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
-        if not enabled:
-            print("[QWEN] story_plan skipped (H3_STORY_PLAN=0)", flush=True)
-            return None
-        return self._plan_story_bible(mode, user_input, source_character_names)
-
     def _validate_story_output_contracts(
         self,
         mode: str,
         user_input: str,
         story: str,
         source_character_names: list[str] | None = None,
-        enforce_planned_cast: bool = False,
         *,
         strict: bool = True,
     ) -> str:
@@ -1277,34 +1253,6 @@ class QwenDirector(
             self._validate_mode_output(mode, user_input, working)
         except RuntimeError as exc:
             errors.append(str(exc))
-
-        if enforce_planned_cast and mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and self._planned_cast:
-            try:
-                planner = self._planner()
-                missing_planned_cast = []
-                mention_only_planned_cast = []
-                for name in dict.fromkeys(str(value).strip() for value in self._planned_cast if str(value).strip()):
-                    if planner.identity_presence(working, name) == "absent":
-                        missing_planned_cast.append(name)
-                    elif planner._is_mention_only_identity(working, name):
-                        mention_only_planned_cast.append(name)
-                if missing_planned_cast:
-                    errors.append(
-                        "Story omitted planned on-screen cast member(s): "
-                        + ", ".join(missing_planned_cast[:8])
-                    )
-                if mention_only_planned_cast:
-                    errors.append(
-                        "Story only mentions planned cast member(s) without present-scene action: "
-                        + ", ".join(mention_only_planned_cast[:8])
-                    )
-            except Exception as exc:
-                # Fail closed for a plan/story identity contract error; do not silently
-                # allow a plan whose cast was promised to be present to be ignored.
-                errors.append(
-                    "Could not validate Story Bible on-screen cast contract: "
-                    + type(exc).__name__
-                )
 
         if errors:
             self._last_story_contract_warnings = list(errors)
@@ -1348,7 +1296,7 @@ class QwenDirector(
             )
 
     # ------------------------------------------------------------------
-    # Story generation: one thinking-mode call, deterministic checks, no retries
+    # Story generation: one non-thinking call, deterministic checks, no retries
     # ------------------------------------------------------------------
     def _salvage_runaway_story(self, text: str) -> str:
         """Recover a clean story from a draft that kept generating after it ended."""
@@ -1424,8 +1372,8 @@ class QwenDirector(
     ) -> tuple[str, bool]:
         """Generate the story in one creative Qwen call, with no retry or challenger.
 
-        Paragraph topology is repaired without changing prose. Word-count and source
-        coverage misses are observable warnings; empty or unfinished output fails closed.
+        Paragraph topology is normalized deterministically. Length and completion are
+        hard contracts; source-coverage heuristics stay advisory. Nothing is retried.
         """
         from planner.qwen_director_runtime import (
             DIRECTOR_VLLM_SEED,
@@ -1442,14 +1390,14 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "Expand Story generation failed validation: "
         )
-        # Do not set min_tokens: forcing continuation after a complete story has
-        # previously caused repeated filler. One pass uses a 3,200-token completion
-        # cap with thinking enabled; no retry, alternative candidate, critic, or editor
-        # call is made on this path.
+        # September 25-derived request: non-thinking, 2,200-token ceiling, no forced
+        # output floor, no presence penalty, and exactly one creative writing call.
         story_min_output_tokens = 0
         story_budget = DIRECTOR_STORY_MAX_TOKENS
         print(
-            f"[QWEN] story_thinking=on story_max_tokens={story_budget} temperature={temperature:.2f} top_p={top_p:.2f} top_k={DIRECTOR_STORY_THINKING_TOP_K} min_p={DIRECTOR_STORY_THINKING_MIN_P:.1f} presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.1f} single_pass=true",
+            f"[QWEN] story_profile=sep25_compact source={Path(__file__).resolve()} "
+            f"story_max_tokens={story_budget} temperature={temperature:.2f} "
+            f"top_p={top_p:.2f} thinking=off single_pass=true story_plan=disabled story_repair=disabled",
             flush=True,
         )
 
@@ -1457,15 +1405,15 @@ class QwenDirector(
             raw = self._chat_text(
                 story_system,
                 story_user,
-                minimum_completion=600,
+                minimum_completion=350,
                 minimum_output_tokens=story_min_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=False,
+                disable_thinking=True,
                 seed=DIRECTOR_VLLM_SEED,
-                creative=True,
+                creative=False,
             )
         except StoryTruncated as exc:
             raw = self._salvage_runaway_story(exc.partial)
@@ -1501,7 +1449,6 @@ class QwenDirector(
             user_input,
             candidate,
             source_character_names=source_character_names,
-            enforce_planned_cast=False,
             strict=False,
         )
 
@@ -1518,18 +1465,24 @@ class QwenDirector(
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
+        if not 420 <= word_count <= 600:
+            raise RuntimeError(
+                failure_prefix
+                + f"single-pass draft contains {word_count} words; required range is 420-600. "
+                + "No retry was attempted; the draft was rejected before downstream production."
+            )
+        if paragraph_count != 6:
+            raise RuntimeError(
+                failure_prefix
+                + f"single-pass draft has {paragraph_count} paragraphs after deterministic normalization; expected 6. "
+                + "No retry was attempted; the draft was rejected before downstream production."
+            )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
         issues.extend(
             "contract: " + str(item)
             for item in (getattr(self, "_last_story_contract_warnings", []) or [])
         )
-        # 420-560 is preferred, not a hard rejection boundary. A complete 562-word
-        # story is production-safe; only flag a meaningful departure from the safe band.
-        if not 420 <= word_count <= 600:
-            issues.append(f"word count {word_count} outside safe range 420-600 (preferred 420-560)")
-        if paragraph_count != 6:
-            issues.append(f"paragraph count {paragraph_count} outside target 6")
         if issues:
             print(
                 "[QWEN] story_static_checks=WARN",
@@ -1710,560 +1663,6 @@ class QwenDirector(
         r"choices? that could never be undone|only the weight of|carried no answers)\b",
         flags=re.IGNORECASE,
     )
-
-    def _story_style_findings(self, story: str) -> list[dict]:
-        """Lightweight deterministic style warnings; these are heuristics, not a quality score."""
-        text = self._normalize_story(story)
-        findings: list[dict] = []
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        hits = []
-        for sentence in sentences:
-            match = self._STOCK_PHRASES.search(sentence)
-            if match:
-                hits.append((match.group(0), sentence.strip()))
-        # One familiar phrase may be deliberate; only repeated use is a finding.
-        if len(hits) >= 2:
-            phrases = "; ".join(dict.fromkeys(hit[0].lower() for hit in hits))[:200]
-            findings.append({
-                "code": "repetition_or_generic_beat",
-                "severity": "major",
-                "evidence": hits[0][1][:220],
-                "problem": f"Repeated stock phrasing ({len(hits)} hits): {phrases}.",
-                "repair": "Replace repeated generic phrasing with premise-specific action, evidence, or objects.",
-            })
-        narration = re.sub(r"[\"\u201c][^\"\u201d]*[\"\u201d]", " ", text.lower())
-        words = re.findall(r"[a-z]+(?:'[a-z]+)?", narration.replace("\u2019", "'"))
-        stop = {"the", "a", "an", "and", "of", "to", "in", "on", "at", "his", "her", "was", "were", "it", "he", "she", "with", "as", "that", "from", "had"}
-        grams: dict[str, int] = {}
-        for i in range(len(words) - 2):
-            tri = words[i:i + 3]
-            if sum(1 for word in tri if word not in stop) >= 2:
-                key = " ".join(tri)
-                grams[key] = grams.get(key, 0) + 1
-        repeated = [gram for gram, count in grams.items() if count >= 2]
-        if repeated:
-            gram = repeated[0]
-            sentence = next((item.strip() for item in sentences if gram in item.lower()), "")
-            findings.append({
-                "code": "repetition_or_generic_beat",
-                "severity": "major",
-                "evidence": sentence[:220] or gram,
-                "problem": "Repeated phrasing: " + "; ".join(repeated[:3]),
-                "repair": "Vary or remove repeated phrasing so each beat has its own concrete image.",
-            })
-        return findings[:2]
-
-    @staticmethod
-    def _audit_score(findings: list[dict]) -> int:
-        """Retained for diagnostics only; this score never chooses a story."""
-        weights = {"blocking": 3, "major": 2, "minor": 1, "advisory": 0}
-        return sum(weights.get(str(item.get("severity", "")).lower(), 0) for item in findings)
-
-    def _audit_story(self, mode: str, story: str) -> list[dict]:
-        """Return narrow deterministic style warnings; never treat them as narrative quality."""
-        return self._story_style_findings(story)
-
-    @staticmethod
-    def _candidate_judgment_json_schema() -> dict:
-        """Pairwise preference with evidence spans grounded in both candidate drafts."""
-        return {
-            "type": "object",
-            "properties": {
-                "winner": {"type": "string", "enum": ["A", "B", "tie"]},
-                "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                "reason": {"type": "string", "minLength": 1, "maxLength": 320},
-                "evidence_a": {"type": "string", "minLength": 8, "maxLength": 180},
-                "evidence_b": {"type": "string", "minLength": 8, "maxLength": 180},
-            },
-            "required": ["winner", "confidence", "reason", "evidence_a", "evidence_b"],
-            "additionalProperties": False,
-        }
-
-    _STORY_CANDIDATE_JUDGE_SYSTEM = (
-        "You are a strict pairwise short-film story evaluator. Compare two completed drafts of the same task; do not rewrite either and do not award independent numerical scores. "
-        "Treat source facts as hard constraints. In Expand Story, the user-provided story is canon; in AI Story, preserve the premise's defining facts and constraints while allowing creative development. "
-        "The Story Bible is provisional, so an absent planned character is not a defect unless the actual story establishes that the character's causal role is necessary. "
-        "Reject candidates outside the six-paragraph/420-600 safe contract, those that drop a source-established fact, introduce a material contradiction, or leave the physical outcome of the central choice unresolved; prefer 420-560 words when quality is equal. "
-        "Then compare, in priority order: causal coherence and event order; premise/source fidelity; protagonist agency and understandable opposition; setup/payoff and a visible price for the climax; concrete resolution; premise-specific originality; natural purposeful dialogue; prose style. "
-        "Do not reward extra characters, dialogue quantity, stock genre beats, twists, length, or melodrama by themselves. Treat supplied critic findings as hypotheses and verify them against the actual text. "
-        "Choose A, B, or tie. Give one exact, verbatim evidence span copied from each draft. The evidence should show a meaningful strength or defect relevant to your choice, not merely quote an arbitrary sentence. Never prefer the first or second draft because of its position. Return JSON only."
-    )
-
-    @staticmethod
-    def _quote_is_grounded(quote: str, story: str) -> bool:
-        quote_norm = re.sub(r"\s+", " ", str(quote or "")).strip().casefold()
-        story_norm = re.sub(r"\s+", " ", str(story or "")).strip().casefold()
-        return len(quote_norm) >= 12 and quote_norm in story_norm
-
-    def _pairwise_story_judgment(
-        self,
-        mode: str,
-        user_input: str,
-        story_a: str,
-        story_b: str,
-        findings_a: list[dict],
-        findings_b: list[dict],
-        story_bible: dict | None,
-        *,
-        call_name: str,
-    ) -> dict | None:
-        """Return a grounded comparison, or None so selection safely keeps the incumbent."""
-        try:
-            payload = {
-                "mode": str(mode),
-                "source_premise_or_story": self._compact_story_context(user_input, max_chars=5000),
-                "provisional_story_bible": self._format_story_bible(story_bible),
-                "candidate_a": str(story_a or "").strip(),
-                "candidate_a_review_findings": (findings_a or [])[:5],
-                "candidate_b": str(story_b or "").strip(),
-                "candidate_b_review_findings": (findings_b or [])[:5],
-                "instruction": "Source facts and explicit output contracts outrank style. Compare the actual drafts and ground the reason in both.",
-            }
-            result = self._chat_json(
-                self._STORY_CANDIDATE_JUDGE_SYSTEM,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                minimum_completion=100,
-                temperature=0.0,
-                top_p=0.9,
-                call_name=call_name,
-                max_completion=1000,
-                json_mode=True,
-                disable_thinking=False,
-                response_schema=self._candidate_judgment_json_schema(),
-            )
-            if not isinstance(result, dict):
-                return None
-            winner = str(result.get("winner", "")).strip().lower()
-            confidence = str(result.get("confidence", "")).strip().lower()
-            evidence_a = re.sub(r"\s+", " ", str(result.get("evidence_a", ""))).strip()
-            evidence_b = re.sub(r"\s+", " ", str(result.get("evidence_b", ""))).strip()
-            if winner not in {"a", "b", "tie"} or confidence not in {"high", "medium", "low"}:
-                return None
-            if not self._quote_is_grounded(evidence_a, story_a) or not self._quote_is_grounded(evidence_b, story_b):
-                print(f"[QWEN] {call_name} rejected (ungrounded evidence)", flush=True)
-                return None
-            return {
-                "winner": winner.upper(),
-                "confidence": confidence,
-                "reason": str(result.get("reason", "")).strip()[:320],
-                "evidence_a": evidence_a,
-                "evidence_b": evidence_b,
-            }
-        except Exception as exc:
-            print(f"[QWEN] {call_name} skipped ({type(exc).__name__}: {str(exc)[:140]}); preserving incumbent", flush=True)
-            return None
-
-    @staticmethod
-    def _has_new_hard_candidate_failure(
-        incumbent_findings: list[dict],
-        challenger_findings: list[dict],
-    ) -> bool:
-        """Do not replace a draft with a candidate carrying a new source/blocking failure."""
-        incumbent = incumbent_findings or []
-        challenger = challenger_findings or []
-        incumbent_source_failure = any(str(item.get("code", "")) == "source_fidelity" for item in incumbent)
-        challenger_source_failure = any(str(item.get("code", "")) == "source_fidelity" for item in challenger)
-        if challenger_source_failure and not incumbent_source_failure:
-            return True
-        incumbent_blocking = sum(1 for item in incumbent if str(item.get("severity", "")).lower() == "blocking")
-        challenger_blocking = sum(1 for item in challenger if str(item.get("severity", "")).lower() == "blocking")
-        return challenger_blocking > incumbent_blocking
-
-    def _resample_for_audit(
-        self,
-        mode: str,
-        user_input: str,
-        story: str,
-        story_system: str,
-        story_user: str,
-        *,
-        temperature: float,
-        top_p: float,
-        source_character_names: list[str] | None,
-        story_bible: dict | None = None,
-        initial_findings: list[dict] | None = None,
-    ) -> tuple[str, list[dict]]:
-        """Create at most one alternative when needed; use evidence-grounded pairwise selection.
-
-        Candidate A is the incumbent. A second candidate is generated only when the
-        first draft has a material critic finding or deterministic style warning. It
-        replaces A only when grounded pairwise comparison prefers B and a reversed-
-        order confirmation agrees. On judge failure or disagreement, retain A.
-        """
-        try:
-            attempts = max(1, min(2, int(os.getenv("H3_STORY_CANDIDATES", "1"))))
-        except (TypeError, ValueError):
-            attempts = 2
-        incumbent = str(story or "").strip()
-        incumbent_findings = list(initial_findings or [])
-        style_findings = self._audit_story(mode, incumbent)
-        trigger = bool(incumbent_findings or style_findings)
-        if attempts < 2 or not trigger:
-            print(
-                f"[QWEN] story_candidate selection=incumbent attempts={attempts} "
-                f"material_findings={len(incumbent_findings)} style_findings={len(style_findings)}",
-                flush=True,
-            )
-            return incumbent, incumbent_findings
-
-        self._story_seed_offset = 1
-        try:
-            challenger, _ = self._generate_story_once(
-                mode, user_input, story_system, story_user,
-                temperature=temperature, top_p=top_p,
-                source_character_names=list(source_character_names or []),
-            )
-        except Exception as exc:
-            print(f"[QWEN] story_candidate skipped ({type(exc).__name__}: {str(exc)[:140]})", flush=True)
-            return incumbent, incumbent_findings
-        finally:
-            self._story_seed_offset = 0
-
-        challenger = str(challenger or "").strip()
-        if not challenger or challenger == incumbent:
-            print("[QWEN] story_candidate skipped (empty or identical candidate)", flush=True)
-            return incumbent, incumbent_findings
-
-        challenger_findings = self._collect_story_findings(
-            mode, user_input, challenger, story_bible, source_character_names
-        )
-        if self._has_new_hard_candidate_failure(incumbent_findings, challenger_findings):
-            print("[QWEN] story_candidate rejected (new blocking/source-fidelity finding)", flush=True)
-            return incumbent, incumbent_findings
-
-        first = self._pairwise_story_judgment(
-            mode, user_input, incumbent, challenger,
-            incumbent_findings, challenger_findings, story_bible,
-            call_name="story_candidate_pairwise",
-        )
-        if not first or first.get("winner") != "B" or first.get("confidence") == "low":
-            print("[QWEN] story_candidate selection=incumbent (pairwise did not prefer challenger)", flush=True)
-            return incumbent, incumbent_findings
-
-        # Position-bias check: only accept the challenger if it also wins when the
-        # two drafts swap positions. Disagreement is resolved conservatively in favor
-        # of the already-valid incumbent rather than trusting a biased single vote.
-        reversed_judgment = self._pairwise_story_judgment(
-            mode, user_input, challenger, incumbent,
-            challenger_findings, incumbent_findings, story_bible,
-            call_name="story_candidate_pairwise_swapped",
-        )
-        if not reversed_judgment or reversed_judgment.get("winner") != "A" or reversed_judgment.get("confidence") == "low":
-            print("[QWEN] story_candidate selection=incumbent (position-swap confirmation failed)", flush=True)
-            return incumbent, incumbent_findings
-
-        print(
-            "[QWEN] story_candidate selection=challenger confirmed_by_position_swap "
-            f"findings={len(incumbent_findings)}->{len(challenger_findings)}",
-            flush=True,
-        )
-        return challenger, challenger_findings
-
-    def _planned_cast_findings(self, mode: str, story: str) -> list[dict]:
-        """Deterministic, zero-cost audit of the Story Bible cast against the draft.
-
-        This is the "reliable external feedback" that prompted self-correction needs:
-        it uses the production planner's own presence rules, so it cannot hallucinate.
-        """
-        if mode not in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) or not self._planned_cast:
-            return []
-        findings: list[dict] = []
-        try:
-            planner = self._planner()
-            text = self._normalize_story(story)
-            for name in dict.fromkeys(str(v).strip() for v in self._planned_cast if str(v).strip()):
-                presence = planner.identity_presence(text, name)
-                if presence == "absent":
-                    findings.append({
-                        "code": "planned_cast_presence",
-                        "severity": "advisory",
-                        "evidence": "(name does not appear in the draft)",
-                        "problem": f"Outline-only person {name} is not present in the draft; this is not a defect unless the person's causal role is essential.",
-                        "repair": f"Keep {name} only if their independent action changes the protagonist's options; otherwise leave them out.",
-                    })
-                elif presence == "mention_only":
-                    sentence = next(
-                        (part.strip() for part in re.split(r"(?<=[.!?])\s+", text) if name.casefold() in part.casefold()),
-                        "",
-                    )
-                    findings.append({
-                        "code": "planned_cast_presence",
-                        "severity": "advisory",
-                        "evidence": sentence[:220] or "(name only appears as a reference)",
-                        "problem": f"Outline-only person {name} may be reference-only; check whether this absence weakens the plot before changing the draft.",
-                        "repair": f"Bring {name} on screen only if their independent action changes the protagonist's options; otherwise remove the unnecessary reference.",
-                    })
-        except Exception as exc:
-            print(f"[QWEN] planned_cast_audit skipped ({type(exc).__name__})", flush=True)
-        return findings[:5]
-
-    def _collect_story_findings(
-        self,
-        mode: str,
-        user_input: str,
-        story: str,
-        story_bible: dict | None,
-        source_character_names: list[str] | None,
-    ) -> list[dict]:
-        """Run a semantic story review by default; keep outline drift advisory, not a cast quota."""
-        outline_notes = self._planned_cast_findings(mode, story)
-        if outline_notes:
-            print(
-                "[QWEN] story_outline_drift advisory=" + str(len(outline_notes))
-                + " codes=" + ",".join(item["code"] for item in outline_notes)
-                + " (not automatically sent to editor)",
-                flush=True,
-            )
-        critic = self._review_story_draft(mode, user_input, story, story_bible, source_character_names)
-        if not critic and not outline_notes:
-            print("[QWEN] story_audit no material evidence-backed defects", flush=True)
-        return critic[:5]
-
-    _STORY_REVIEW_SYSTEM = (
-        "You are a skeptical short-film story auditor, not a co-writer or a style judge. Return JSON findings only; do not rewrite the story or award it a self-reported score. "
-        "Audit the actual draft against the user's source and the provisional Story Bible, with source canon taking priority in Expand Story. The Story Bible is a hypothesis, not a compliance contract. "
-        "A planned cast omission is NOT a defect by itself: report it only when the story text makes that person causally necessary and the omission leaves a material gap. Do not force a cast count or retain a weak outline. "
-        "Report only material defects with an exact copied evidence span from the draft and a concrete minimal repair; never invent or paraphrase the evidence quote. "
-        "Prioritize: (1) cause-and-effect gaps, contradictory facts or character motives; (2) a turn that does not arise from earlier evidence; (3) an object/skill with no established function or payoff; (4) a choice whose consequences are not shown; (5) a central conflict or protagonist goal left unresolved; (6) people/objects changing location or state without an event; (7) dialogue that only explains the premise; (8) generic plot machinery that could fit almost any premise; and (9) Expand Story source-fidelity violations. "
-        "Check the ending against what the protagonist actually did: do not accept a lyrical last line as a substitute for showing whether the objective succeeded, what the choice cost, and what happened to the immediate danger. "
-        "Do not demand a twist, a happy ending, extra mysteries, a standard genre structure, or a subjective prose preference. Preserve ambiguity only when the physical/causal outcome is still clear. "
-        "Return no more than five high-impact findings. If there is no material, evidence-backed defect, return an empty findings array."
-    )
-
-    @staticmethod
-    def _story_review_json_schema() -> dict:
-        """Structured, evidence-grounded feedback; this does not define a cast quota."""
-        finding = {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "enum": [
-                        "planned_cast_presence",
-                        "causality_gap",
-                        "unpaid_setup",
-                        "stakes_or_choice",
-                        "unresolved_conflict",
-                        "object_or_location_continuity",
-                        "dialogue_not_live_or_functional",
-                        "source_fidelity",
-                        "repetition_or_generic_beat",
-                        "premise_grounding",
-                    ],
-                },
-                "severity": {"type": "string", "enum": ["blocking", "major", "minor"]},
-                "evidence": {"type": "string", "minLength": 8, "maxLength": 220},
-                "problem": {"type": "string", "minLength": 1, "maxLength": 240},
-                "repair": {"type": "string", "minLength": 1, "maxLength": 240},
-            },
-            "required": ["code", "severity", "evidence", "problem", "repair"],
-            "additionalProperties": False,
-        }
-        return {
-            "type": "object",
-            "properties": {
-                "findings": {
-                    "type": "array",
-                    "maxItems": 5,
-                    "items": finding,
-                }
-            },
-            "required": ["findings"],
-            "additionalProperties": False,
-        }
-
-    def _review_story_draft(
-        self,
-        mode: str,
-        user_input: str,
-        story: str,
-        story_bible: dict | None,
-        source_character_names: list[str] | None,
-    ) -> list[dict]:
-        """Run one bounded Qwen3-thinking story review; return only evidence-backed major findings.
-
-        Critic findings are guidance for the editor, not hard rejection decisions. A
-        finding is accepted only if its quoted evidence occurs in the exact draft.
-        This prevents unsupported generic critique from driving a rewrite.
-        """
-        if os.getenv("H3_STORY_CRITIC", "0").strip().lower() in {"0", "false", "no", "off"}:
-            return []
-        try:
-            plan = self._format_story_bible(story_bible)
-            payload = {
-                "mode": str(mode),
-                "source_premise_or_story": self._compact_story_context(user_input, max_chars=DIRECTOR_CRITIC_STORY_CONTEXT_CHARS),
-                "source_character_anchors": list(dict.fromkeys(
-                    str(value).strip()
-                    for value in (source_character_names or [])
-                    if str(value).strip()
-                ))[:16],
-                "story_bible": plan,
-                "draft": str(story or "").strip(),
-            }
-            result = self._chat_json(
-                self._STORY_REVIEW_SYSTEM,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                minimum_completion=250,
-                temperature=0.25,
-                top_p=0.90,
-                call_name="story_quality_review",
-                max_completion=1800,
-                json_mode=True,
-                disable_thinking=False,
-                response_schema=self._story_review_json_schema(),
-            )
-            raw_findings = result.get("findings", []) if isinstance(result, dict) else []
-            normalized_story = re.sub(r"\s+", " ", str(story or "")).strip().casefold()
-            planned_names: list[str] = []
-            for value in (self._planned_cast or []):
-                full = str(value or "").strip()
-                if not full:
-                    continue
-                planned_names.append(full.casefold())
-                titleless = re.sub(
-                    r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|commander|detective|agent)\.?\s+",
-                    "", full, count=1, flags=re.IGNORECASE,
-                ).strip()
-                if titleless:
-                    planned_names.append(titleless.casefold())
-            accepted: list[dict] = []
-            seen: set[tuple[str, str]] = set()
-            if isinstance(raw_findings, list):
-                for item in raw_findings:
-                    if not isinstance(item, dict):
-                        continue
-                    code = str(item.get("code", "")).strip()
-                    severity = str(item.get("severity", "")).strip().lower()
-                    evidence = re.sub(r"\s+", " ", str(item.get("evidence", ""))).strip()
-                    evidence_norm = evidence.casefold()
-                    # Minor/style-only findings are deliberately not allowed to
-                    # trigger substantive rewriting. The source span must be exact.
-                    if severity not in {"blocking", "major"}:
-                        continue
-                    if len(evidence) < 18 or evidence_norm not in normalized_story:
-                        continue
-                    if code == "planned_cast_presence":
-                        finding_context = (str(item.get("problem", "")) + " " + str(item.get("repair", ""))).casefold()
-                        if not any(name in finding_context for name in planned_names):
-                            continue
-                    key = (code, evidence_norm)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    accepted.append({
-                        "code": code,
-                        "severity": severity,
-                        "evidence": evidence,
-                        "problem": str(item.get("problem", "")).strip()[:240],
-                        "repair": str(item.get("repair", "")).strip()[:240],
-                    })
-                    if len(accepted) >= 5:
-                        break
-            if accepted:
-                print(
-                    "[QWEN] story_quality_review findings="
-                    + str(len(accepted))
-                    + " codes="
-                    + ",".join(item["code"] for item in accepted),
-                    flush=True,
-                )
-            else:
-                print("[QWEN] story_quality_review no evidence-backed major findings", flush=True)
-            return accepted
-        except Exception as exc:
-            print(
-                f"[QWEN] story_quality_review skipped ({type(exc).__name__}: {str(exc)[:180]}); preserving draft",
-                flush=True,
-            )
-            return []
-
-    _STORY_EDITOR_SYSTEM = (
-        "You are the final short-film story editor. Improve the draft without replacing the user's premise or its strongest effective material. "
-        "Return only the finished story: exactly six paragraphs, 420-600 words (420-560 preferred), plain prose. "
-        "In Expand Story, preserve user-established characters, chronology, setting, events, outcome, and defining meaning. The Story Bible is provisional: do not preserve an invented plan detail or character if it makes the actual story less causal or less coherent. "
-        "Do not add decorative people, generic revelations, or a subplot to satisfy a quota. Add or retain a consequential present-day counterpart only when their independent action changes the protagonist's options and the premise supports it. A single-character story is valid when that is the strongest source-grounded choice. "
-        "Repair only high-impact defects: unclear goal/resistance; an event without a causal setup; a turn unrelated to earlier evidence; an object or skill with no concrete function/payoff; contradictory motives or physical states; dialogue that only explains; a choice without a visible cost; an unresolved central conflict; or an ending that obscures what the protagonist's action actually caused. "
-        "Preserve one consistent mechanism/rule, track important objects and locations, give the protagonist specific interiority, keep dialogue natural and in-scene, and show the concrete consequence of the choice in the aftermath. Prefer details tied to this profession and setting; remove generic genre machinery and repeated phrasing. "
-        "Do not change source canon in Expand Story. Do not force every outline beat or planned character when doing so would weaken the story. Maintain the word and paragraph contract, and output only the edited prose."
-    )
-
-    def _edit_story_draft(
-        self,
-        mode: str,
-        user_input: str,
-        story: str,
-        story_bible: dict | None,
-        source_character_names: list[str] | None,
-        *,
-        temperature: float,
-        top_p: float,
-        review_findings: list[dict] | None = None,
-        call_name: str = "story_editor_pass",
-    ) -> str:
-        """One thinking-mode editing pass guided by the Story Bible and evidence-backed review."""
-        editor_mode = os.getenv("H3_STORY_EDITOR", "0").strip().lower()
-        if editor_mode in {"0", "false", "no", "off"}:
-            return story
-        if editor_mode not in {"1", "true", "yes", "on", "always"} and not review_findings:
-            # auto (default): the editor costs a full thinking call, so it runs only
-            # when the audit found a concrete defect to repair.
-            print("[QWEN] story_editor skipped (no audit findings)", flush=True)
-            return story
-        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED
-
-        def count(text: str) -> int:
-            return len(re.findall(r"\b[\w'’-]+\b", text))
-
-        try:
-            plan = self._format_story_bible(story_bible)
-            review_block = ""
-            if review_findings:
-                review_block = (
-                    "\n\nEVIDENCE-BACKED REVIEW FINDINGS (repair these material issues first; preserve all effective material):\n"
-                    + json.dumps(review_findings[:5], ensure_ascii=False, separators=(",", ":"))
-                    + "\nEach evidence span was copied from the draft. Make the smallest change that actually resolves each finding. "
-                    "Do not satisfy a finding by adding a disconnected subplot or forcing a character count."
-                )
-            user = (
-                "MODE: " + str(mode)
-                + "\n\nSOURCE PREMISE / STORY:\n" + self._compact_story_context(user_input, max_chars=5000)
-                + ("\n\n" + plan if plan else "")
-                + review_block
-                + "\n\nDRAFT TO EDIT:\n" + story
-            )
-            edited = self._chat_text(
-                self._STORY_EDITOR_SYSTEM,
-                user,
-                minimum_completion=600,
-                temperature=min(float(temperature), 0.55),
-                top_p=float(top_p),
-                call_name=call_name,
-                max_completion=3200,
-                disable_thinking=False,
-                seed=DIRECTOR_VLLM_SEED,
-                creative=True,
-            )
-            edited = self._reflow_story_paragraphs(edited)
-            self._story_min_words = 420
-            candidate = self._validate_story_output_contracts(
-                mode,
-                user_input,
-                edited,
-                source_character_names=source_character_names,
-                enforce_planned_cast=False,
-            )
-            # The Story Bible is advisory; do not veto a coherent edit simply
-            # because it drops a nonessential plan character. Structural output
-            # contracts and Expand source-canon checks remain authoritative.
-            if len(re.split(r"\n\s*\n+", candidate.strip())) != 6:
-                print("[QWEN] story_editor rejected (paragraph count); keeping draft", flush=True)
-                return story
-            print(f"[QWEN] story_editor accepted words {count(story)} -> {count(candidate)}", flush=True)
-            return candidate
-        except Exception as exc:
-            print(f"[QWEN] story_editor skipped ({type(exc).__name__}: {str(exc)[:200]}); keeping draft", flush=True)
-            return story
 
     @staticmethod
     def _apply_scene_metadata(scene: dict, metadata: dict) -> None:
