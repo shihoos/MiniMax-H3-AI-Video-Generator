@@ -30,6 +30,7 @@ from planner.config import (
     WORKFLOW_REF2VA,
     WORKFLOW_TURBO_REF2VA,
     director_enabled,
+    DIRECTOR_STORY_SCENES,
 )
 from schemas.character import Character
 from schemas.scene import Scene
@@ -454,10 +455,10 @@ class ProductionPlanner:
         if not paragraphs:
             paragraphs = [story]
 
-        # AI Story / Expand Story deliberately emit six scene-sized paragraphs.
+        # AI Story / Expand Story deliberately emit one scene-sized paragraph per scene (DIRECTOR_STORY_SCENES).
         # Preserve those paragraph boundaries as production topology instead of
         # re-splitting them into sentence beats. This is deterministic and source-safe.
-        if 4 <= len(paragraphs) <= 6:
+        if 4 <= len(paragraphs) <= DIRECTOR_STORY_SCENES:
             return [
                 StoryUnit(
                     order=index,
@@ -562,7 +563,7 @@ class ProductionPlanner:
         if not units:
             return []
 
-        if 4 <= len(units) <= 6:
+        if 4 <= len(units) <= DIRECTOR_STORY_SCENES:
             return [
                 StoryUnit(
                     order=index,
@@ -683,7 +684,7 @@ class ProductionPlanner:
             ]
 
         # Four-to-six source sentences are preserved one-to-one.
-        if len(pieces) <= 6:
+        if len(pieces) <= DIRECTOR_STORY_SCENES:
             return [
                 StoryUnit(
                     order=index,
@@ -699,14 +700,14 @@ class ProductionPlanner:
         # deterministic contiguous-ish groups without inventing content.
         buckets: list[list[str]] = [
             []
-            for _ in range(6)
+            for _ in range(DIRECTOR_STORY_SCENES)
         ]
 
         for index, piece in enumerate(pieces):
             bucket = min(
-                5,
+                DIRECTOR_STORY_SCENES - 1,
                 int(
-                    index * 6 / len(pieces)
+                    index * DIRECTOR_STORY_SCENES / len(pieces)
                 ),
             )
             buckets[bucket].append(piece)
