@@ -1478,7 +1478,8 @@ class QwenDirectorRuntimeMixin:
                         "max_tokens": 2,
                         "temperature": DIRECTOR_STORY_THINKING_TEMPERATURE,
                         "top_p": DIRECTOR_STORY_THINKING_TOP_P,
-                        # Match the actual config-driven thinking story sampler.
+                        # Exercise the optional thinking sampler during JIT warm-up;
+                        # production story writing explicitly disables thinking.
                         "top_k": DIRECTOR_STORY_THINKING_TOP_K,
                         "min_p": DIRECTOR_STORY_THINKING_MIN_P,
                         "presence_penalty": DIRECTOR_STORY_PRESENCE_PENALTY,
