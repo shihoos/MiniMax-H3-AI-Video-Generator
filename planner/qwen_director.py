@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import os
 import json
+import random
 import re
 
 from planner.cinematic_compiler import CinematicCompiler
@@ -18,8 +19,12 @@ from planner.config import (
     DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
+    DIRECTOR_STORY_SCENES,
+    STORY_WORDS_PER_SCENE,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
+    DIRECTOR_STORY_THINKING_TEMPERATURE,
+    DIRECTOR_STORY_THINKING_TOP_P,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
@@ -46,7 +51,7 @@ class QwenDirector(
     # Production planning limits. Keep the narrative rich, but bound the
     # production graph so an LLM cannot accidentally explode a short film
     # into dozens of scenes and therefore dozens of expensive Qwen calls.
-    MAX_SCENES = 6
+    MAX_SCENES = DIRECTOR_STORY_SCENES
     SHOTS_PER_SCENE = DIRECTOR_SHOTS_PER_SCENE
     # Creative shot batching may cover up to two fresh adjacent scenes.
     # The runtime selects the largest batch that still fits the 8K context
@@ -86,7 +91,7 @@ class QwenDirector(
         self._character_semantic_calls = 0
         self._semantic_spoken_dialogue: list[dict] = []
         self._last_story_draft: str = ""
-        self._story_min_words: int = 420
+        self._story_min_words: int = DIRECTOR_STORY_SCENES * 55
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -377,7 +382,7 @@ class QwenDirector(
                 for part in re.split(r"\n\s*\n+", story)
                 if part.strip()
             ]
-            if len(paragraphs) != 6:
+            if len(paragraphs) != DIRECTOR_STORY_SCENES:
                 story = self._coerce_story_to_six_paragraphs(story)
             if mode == EXPAND_USER_STORY_MODE:
                 self._validate_expand_story_cast(
@@ -1313,10 +1318,19 @@ class QwenDirector(
                 break  # the loop starts here
             seen.add(key)
             kept.append(part)
-        kept = kept[:6]
+        kept = kept[:DIRECTOR_STORY_SCENES]
         while kept and not self._ends_cleanly(kept[-1]):
             kept.pop()
-        return "\n\n".join(kept) if len(kept) >= 5 else ""
+        return "\n\n".join(kept) if len(kept) >= max(4, int(DIRECTOR_STORY_SCENES * 0.8)) else ""
+
+    def _trim_to_last_sentence(self, text: str) -> str:
+        """Cut a draft back to its last complete sentence; '' if too little remains."""
+        value = str(text or "").replace("\r\n", "\n").strip()
+        matches = list(re.finditer(r"[.!?][\"'\u2019\u201d\u00bb)\]]*(?=\s|$)", value))
+        if not matches:
+            return ""
+        value = value[: matches[-1].end()].strip()
+        return value if len(re.findall(r"\b[\w'’-]+\b", value)) >= DIRECTOR_STORY_SCENES * 45 else ""
 
     def _story_quality_issues(self, story: str) -> list[str]:
         """Log-only structural craft diagnostics; never fail or rewrite the story."""
@@ -1394,10 +1408,18 @@ class QwenDirector(
         # output floor, no presence penalty, and exactly one creative writing call.
         story_min_output_tokens = 0
         story_budget = DIRECTOR_STORY_MAX_TOKENS
+        # Thinking for the ONE story call only (H3_STORY_THINKING=0 turns it off).
+        # The model plans the arc, cause/effect and cast privately, then writes the story.
+        # Thinking tokens share the 8K context, so the ceiling is raised; no retry is made.
+        use_thinking = os.getenv("H3_STORY_THINKING", "1").strip().lower() not in {"0", "false", "off", "no"}
+        if use_thinking:
+            temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
+            top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
+            story_budget = max(story_budget, int(os.getenv("H3_STORY_THINKING_MAX_TOKENS", "6500")))
         print(
             f"[QWEN] story_profile=sep25_compact source={Path(__file__).resolve()} "
             f"story_max_tokens={story_budget} temperature={temperature:.2f} "
-            f"top_p={top_p:.2f} thinking=off single_pass=true story_plan=disabled story_repair=disabled",
+            f"top_p={top_p:.2f} thinking={'on' if use_thinking else 'off'} single_pass=true story_plan=disabled story_repair=disabled",
             flush=True,
         )
 
@@ -1411,12 +1433,12 @@ class QwenDirector(
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=True,
-                seed=DIRECTOR_VLLM_SEED,
+                disable_thinking=not use_thinking,
+                seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
                 creative=False,
             )
         except StoryTruncated as exc:
-            raw = self._salvage_runaway_story(exc.partial)
+            raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
             if not raw:
                 raise RuntimeError(failure_prefix + str(exc)) from exc
 
@@ -1433,7 +1455,7 @@ class QwenDirector(
             if part.strip()
         ]
         candidate = str(raw or "").strip()
-        if len(paragraphs) != 6:
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
             candidate = self._coerce_story_to_six_paragraphs(candidate)
             repaired_count = len([
                 part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
@@ -1452,31 +1474,26 @@ class QwenDirector(
             strict=False,
         )
 
-        # A truncated/incomplete final sentence cannot safely become a story, but
-        # ordinary word-count and source-coverage misses are warnings in this
-        # no-retry profile rather than a trigger for another generation call.
-        if not candidate or not self._ends_cleanly(candidate):
-            raise RuntimeError(
-                failure_prefix + "The single-pass draft is empty or ends mid-sentence. "
-                "No retry was attempted; inspect the draft/trace before rerunning manually."
-            )
-
+        # Never fail a finished story over style heuristics. Only an unusable draft stops
+        # the run: drop a dangling half-sentence, then require a minimum real length.
+        if candidate and not self._ends_cleanly(candidate):
+            trimmed = self._trim_to_last_sentence(candidate)
+            if trimmed:
+                candidate = trimmed
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
+        if word_count < DIRECTOR_STORY_SCENES * 45:
+            raise RuntimeError(
+                failure_prefix + f"Qwen returned only {word_count} usable words (need {DIRECTOR_STORY_SCENES * 45}+); "
+                "check the Qwen server/trace. No retry was attempted."
+            )
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
-        if not 420 <= word_count <= 600:
-            raise RuntimeError(
-                failure_prefix
-                + f"single-pass draft contains {word_count} words; required range is 420-600. "
-                + "No retry was attempted; the draft was rejected before downstream production."
-            )
-        if paragraph_count != 6:
-            raise RuntimeError(
-                failure_prefix
-                + f"single-pass draft has {paragraph_count} paragraphs after deterministic normalization; expected 6. "
-                + "No retry was attempted; the draft was rejected before downstream production."
-            )
+        if paragraph_count != DIRECTOR_STORY_SCENES:
+            candidate = self._coerce_story_to_six_paragraphs(candidate)
+            paragraph_count = len([
+                part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
+            ])
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
         issues.extend(
@@ -1522,11 +1539,11 @@ class QwenDirector(
             for part in re.split(r"\n\s*\n+", self._normalize_story(raw))
             if part.strip()
         ]
-        if len(paragraphs) <= 6:
+        if len(paragraphs) <= DIRECTOR_STORY_SCENES or len(paragraphs) > DIRECTOR_STORY_SCENES + 3:
             return raw
-        head = paragraphs[:6]
+        head = paragraphs[:DIRECTOR_STORY_SCENES]
         words = len(re.findall(r"\b[\w'’-]+\b", " ".join(head)))
-        if not 420 <= words <= 600:
+        if words < DIRECTOR_STORY_SCENES * 55:
             return raw
         return "\n\n".join(head)
 
@@ -1544,9 +1561,9 @@ class QwenDirector(
             for part in re.split(r"\n\s*\n+", value)
             if part.strip()
         ]
-        if len(paragraphs) < 2 or len(paragraphs) == 6:
+        if len(paragraphs) < 2 or len(paragraphs) == DIRECTOR_STORY_SCENES:
             return text
-        if len(paragraphs) > 6 and self._trim_runaway_tail(text) != text:
+        if len(paragraphs) > DIRECTOR_STORY_SCENES and self._trim_runaway_tail(text) != text:
             return text  # a finished story followed by surplus text: handled by the tail trim
 
         def words(part: str) -> int:
@@ -1586,7 +1603,7 @@ class QwenDirector(
             for part in re.split(r"\n\s*\n+", value)
             if part.strip()
         ]
-        if not paragraphs or len(paragraphs) == 6:
+        if not paragraphs or len(paragraphs) == DIRECTOR_STORY_SCENES:
             return "\n\n".join(paragraphs)
 
         original_count = len(paragraphs)
@@ -1600,7 +1617,7 @@ class QwenDirector(
 
         # More than six paragraphs: merge the smallest adjacent interior pair.
         # Keep opening and aftermath paragraphs distinct whenever possible.
-        while len(paragraphs) > 6:
+        while len(paragraphs) > DIRECTOR_STORY_SCENES:
             n = len(paragraphs)
             candidate_starts = list(range(1, n - 2)) or list(range(0, n - 1))
             start = min(
@@ -1617,7 +1634,7 @@ class QwenDirector(
         # Fewer than six paragraphs: split only at an existing sentence boundary.
         # Prefer the longest splittable paragraph and a split that keeps both halves
         # reasonably close to the six-scene target without rewriting any prose.
-        while len(paragraphs) < 6:
+        while len(paragraphs) < DIRECTOR_STORY_SCENES:
             best = None
             for index, paragraph in enumerate(paragraphs):
                 sentences = sentence_spans(paragraph)
@@ -1633,7 +1650,7 @@ class QwenDirector(
                         continue
                     # Avoid creating a tiny final aftermath fragment.
                     final_penalty = 60 if index == len(paragraphs) - 1 and right_words < 25 else 0
-                    target_penalty = abs(left_words - 80) + abs(right_words - 80)
+                    target_penalty = abs(left_words - STORY_WORDS_PER_SCENE) + abs(right_words - STORY_WORDS_PER_SCENE)
                     score = (final_penalty + target_penalty, -total, index, split_index)
                     candidate = (score, index, split_index, left, right)
                     if best is None or score < best[0]:
@@ -2931,7 +2948,7 @@ class QwenDirector(
         count = max(1, int(scene_count))
         return min(
             int(DIRECTOR_MAX_TOKENS),
-            max(320, 1400 * count),
+            max(320, 700 * int(self.SHOTS_PER_SCENE) * count),  # 1400/scene at 2 shots (Sep 25), 2100 at 3
         )
 
     @_with_faulthandler_watchdog
