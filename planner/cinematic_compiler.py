@@ -598,21 +598,31 @@ class CinematicCompiler:
                     "Move attention to the primary action or emotional beat."
                 ),
             },
+            {
+                "camera_shot": "close-up detail",
+                "camera_movement": "gentle drift",
+                "lens_and_depth_of_field": (
+                    "short telephoto with shallow depth of field"
+                ),
+                "composition_notes": (
+                    "tight framing on the telling detail or reaction"
+                ),
+                "retention_analysis": (
+                    "Land the scene's emotional beat on a specific detail."
+                ),
+            },
         )
 
         result: list[dict] = []
 
         for index in range(
-            min(
-                max(
-                    0,
-                    int(count),
-                ),
-                len(templates),
+            max(
+                0,
+                int(count),
             )
         ):
 
-            template = templates[index]
+            template = templates[index % len(templates)]
 
             result.append(
                 {
