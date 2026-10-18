@@ -13,6 +13,7 @@ from planner.config import (
     AI_STORY_MODE,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
+    DIRECTOR_STORY_SCENES,
 )
 
 
@@ -1477,19 +1478,19 @@ class QwenDirectorSanitizeMixin:
         ]
         # Collect every defect so the single fail-closed error reports all of them together.
         errors: list[str] = []
-        if len(paragraphs) != 6:
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
             errors.append(
-                f"Generated story must contain exactly six paragraphs (found {len(paragraphs)})."
+                f"Generated story must contain exactly {DIRECTOR_STORY_SCENES} paragraphs (found {len(paragraphs)})."
             )
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
-        minimum_words = int(getattr(self, "_story_min_words", 420) or 420)
+        minimum_words = int(getattr(self, "_story_min_words", DIRECTOR_STORY_SCENES * 55) or DIRECTOR_STORY_SCENES * 55)
         # 420-560 is a preferred range, not a rejection boundary. Accept a
         # complete 562-word draft; reject only drafts outside the safe 400-600 band.
-        if not minimum_words <= word_count <= 600:
+        if not minimum_words <= word_count <= DIRECTOR_STORY_SCENES * 140:
             errors.append(
-                f"Generated story must contain {minimum_words} to 600 words "
-                f"(preferred 420-560; found {word_count})."
+                f"Generated story must contain {minimum_words} to {DIRECTOR_STORY_SCENES * 140} words "
+                f"(found {word_count})."
             )
 
         if self._story_has_open_ended_finale(result):
