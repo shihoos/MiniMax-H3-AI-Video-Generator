@@ -10,8 +10,6 @@ from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
-    DIRECTOR_STORY_THINKING_TEMPERATURE,
-    DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
     DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
@@ -206,60 +204,80 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
-
+        """Compact September 25-derived prose contract for the one-pass writer."""
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""    You are the narrative writer for MiniMax H3.
 
-    Write one original, coherent, filmable short-film story from the premise. The protagonist's concrete goal must be clear within the first two sentences. Build a causal chain in which each major event changes the options available, the protagonist interprets specific evidence, makes a consequential choice, and the ending shows the concrete result.
+    Write a complete, cinematic, filmable short-film story from the premise. State
+    the protagonist's concrete goal in the opening. Build a causal arc: an attempt,
+    meaningful resistance, specific evidence, a changed understanding, a consequential
+    choice with a cost, and a concrete aftermath.
 
-    Craft priorities:
-    - Prioritize causal clarity, human motivation, specific behavior, and emotional consequence over spectacle or surprise.
-    - An unexpected reveal or reversal is optional, not a quota. Use one only when a concrete detail established earlier genuinely supports it; an earned discovery is better than an unearned twist.
-    - The protagonist's skill, knowledge, or lived experience must materially affect a decision or outcome.
-    - Include at least two sentences of meaningful interiority grounded in a specific fear, memory, desire, belief, or changed understanding; avoid generic emotional labels and stock thriller phrasing.
-    - Dialogue is optional. Use direct spoken dialogue only when a physically present character has a natural, consequential reason to say it. Never turn notes, signs, screens, recordings, remembered words, or internal thoughts into present speech. Do not introduce a character solely to satisfy a dialogue requirement.
-    - Keep physical rules, chronology, objects, and character knowledge consistent. Do not invent an arbitrary countdown, electromagnetic catastrophe, secret experiment, conspiracy, supernatural event, or sudden genre shift merely to raise stakes. Add such elements only when the premise itself clearly establishes them.
-    - Every paragraph must advance the situation or reveal a consequential change; do not repeat atmosphere or restate the same beat to fill space.
-    - End with a complete aftermath paragraph that demonstrates what changed because of the protagonist's choice. Resolve the central conflict rather than ending on a vague image alone.
+    Craft requirements:
+    1. Plant one specific, ordinary detail early and make it matter later. Use one
+       earned reveal or reversal that changes the meaning of that detail; never add
+       an unrelated secret, artifact, organization, catastrophe, or genre shift merely
+       to force surprise.
+    2. Include at least two sentences of specific interiority—fear, memory, desire,
+       belief, or realization—shown through behavior or concrete sensory association.
+    3. Include at least one short, consequential line of direct spoken dialogue in
+       quotation marks. Attribute it to a named character who is physically present.
+       Add a supporting character with their own motive only when that person changes
+       the protagonist's choices; never add a person merely to satisfy a cast quota.
+    4. Keep chronology, character knowledge, physical rules, and object states
+       consistent. Each major event must cause or materially change the next.
+    5. End with a complete aftermath showing what changed because of the choice and
+       resolving the central conflict. Do not end on a vague image instead of an answer.
 
-    Before finishing, silently check the cause-and-effect chain: goal, obstacle, evidence, decision, cost, and aftermath must agree. Do not output this check.
+    Output contract: exactly six filmable scene paragraphs, plain prose, third-person
+    past tense, 420–600 words (prefer roughly 460–530 without padding). Each paragraph
+    must advance the story through a distinct change. Finish every sentence. No camera
+    directions, scene headings, shot descriptions, labels, analysis, or metadata.
 
-    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range. Less than 420 words is incomplete unless the premise itself is intentionally microfiction. Give each paragraph a distinct story function and enough development to make its cause and consequence clear. Do not pad with adjectives, but do not stop early while the causal chain or resolution is underdeveloped. Finish every sentence.
-
-    Qwen decides names, identities, relationships, and final cast size. Do not force a number of characters. Include a supporting person only when their present action materially changes the protagonist's options. A person mentioned in a memory, document, recording, or internal recollection is not physically present merely because their words are quoted.
-
-    Output only story prose, with any actual spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
+    Qwen decides names, identities, relationships, and final cast size; do not force a number of characters. Output only
+    the story prose. Do not output JSON or commentary.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""    You are the narrative expansion writer for MiniMax H3.
 
-    Expand the supplied source into a coherent, filmable short film. Preserve every established person, place, event, causal fact, and outcome, in order. Distinguish source facts from invented connective details. For a sparse premise, build only the missing plot; never treat inventions as canon or replace the premise with an unrelated story.
+    Expand the supplied story into a complete, cinematic, filmable short film. Preserve
+    its established people, setting, chronology, causal facts, defining meaning, and
+    outcome. Add the missing connective plot, opposition, decisions, and consequences;
+    do not replace the source with an unrelated mystery or genre premise.
 
-    Craft priorities:
-    - Keep the source's central question and important details recognizable. Make the protagonist's goal clear early, then develop cause and effect: an attempt, a specific obstacle, evidence that changes the protagonist's understanding, a consequential choice, and a concrete aftermath.
-    - Include at least two sentences of meaningful interiority grounded in the protagonist's specific fear, memory, desire, or private realization, but use personal history only when it materially affects the events or outcome.
-    - Use the protagonist's skill, knowledge, relationship, or personal history only when it materially affects the events or outcome.
-    - An unexpected reveal or reversal is optional, not mandatory. If used, plant its evidence early and make the payoff understandable without an additional unexplained mechanism.
-    - Keep the story in the genre and scale supported by the source. For a sparse premise, prefer a grounded, character-centered conflict over a hidden conspiracy, secret experiment, consciousness-transfer plot, supernatural transformation, or catastrophe invented solely for spectacle.
-    - Dialogue is optional. Only use a line as present dialogue when a character actually speaks it aloud in the current scene. Words in notes, letters, logs, screens, recordings, remembered messages, and internal thoughts are not present-time in-person speech. Do not create an extra character merely to supply dialogue.
-    - Keep identities, character knowledge, objects, geography, chronology, and physical rules consistent. Do not repeat a line as new dialogue when it is only being remembered or echoed.
-    - Every paragraph must change the situation; avoid repetitive atmosphere, unexplained entrances, unmotivated antagonists, and new powers or mechanics that were not prepared earlier.
-    - End with a complete resolution paragraph that resolves the central problem and shows what changed because of the protagonist's choice. Do not substitute a mysterious image for a causal resolution.
+    Craft requirements:
+    1. Keep source facts distinct from new connective details. For a sparse source,
+       invent only details needed to build a coherent causal arc, then establish them
+       before relying on them. Preserve an existing reversal; if a new reveal fits the
+       source, plant its evidence early and pay it off clearly. Do not stack twists.
+    2. Make the protagonist's goal clear early. Develop an attempt, specific resistance,
+       evidence that changes understanding, a consequential choice with a cost, and a
+       concrete aftermath. Every major event must cause or materially change the next.
+    3. Include at least two sentences of specific interiority tied to a fear, memory,
+       desire, belief, or realization that materially affects the protagonist.
+    4. Include at least one short, consequential line of direct spoken dialogue in
+       quotation marks from a named character physically present in the scene. Add a
+       supporting character with a distinct motive only when their actions improve the
+       conflict; do not force a cast size or manufacture a speaker.
+    5. Keep character knowledge, object states, chronology, and physical rules
+       consistent. Avoid repetitive atmosphere, unexplained entrances, unmotivated
+       antagonists, and mechanics that were not established before their payoff.
+    6. End with a complete resolution and aftermath that shows what changed. Do not
+       substitute a mysterious final image for resolving the central problem.
 
-    Before finishing, silently verify that every major event has a cause, the protagonist's choice follows from evidence, and the ending follows from that choice. Do not output this check.
+    Output contract: exactly six filmable scene paragraphs, plain prose, third-person
+    past tense, 420–600 words (prefer roughly 460–530 without padding). Each paragraph
+    must make a distinct narrative change. Finish every sentence. Preserve source
+    characters who materially participate, while allowing Qwen to decide whether other
+    characters are necessary; do not force a number of characters. Qwen decides names,
+    identities, relationships, and final cast size. No camera directions, scene headings, shot descriptions,
+    labels, analysis, or metadata.
 
-    Format: exactly six scene paragraphs, plain prose, third-person past tense. Aim for 420–560 words; 420–600 is a safe range when complete. Use the six paragraphs to progress the story rather than divide one moment into repeated descriptions. Do not pad the source, but do not stop early while motivation, causality, or resolution remains underdeveloped. Finish every sentence.
-
-    Qwen decides names, identities, relationships, and final cast size. Preserve source characters who materially participate; do not force a number of characters. A person quoted from a recording, letter, message, memory, or internal recollection is not physically present merely because their words appear in the story.
-
-    Output only expanded story prose, with any actual spoken dialogue in quotation marks. No JSON, labels, analysis, camera directions, or scene headings.
+    Output only the expanded story prose. Do not output JSON or commentary.
     """).strip()
 
-        raise ValueError(
-            "Preserve Story does not use a story-text pass."
-        )
-
+        raise ValueError("Preserve Story does not use a story-text pass.")
 
     def _story_text_user(
         self,
@@ -287,176 +305,17 @@ class QwenDirectorPromptMixin:
         return result
 
 
-    _STORY_BIBLE_SYSTEM = textwrap.dedent("""    You are planning one specific, coherent short film before the prose is written. Return JSON only. Make one premise-grounded causal plan; do not generate alternative concepts or add twists for novelty alone.
-
-    PROTAGONIST: choose one protagonist and give them a concrete goal, a relevant skill or experience, and a consequential decision. `protagonist_name` is separate from `cast`; do not repeat the protagonist in `cast` unless they independently belong there. `cast` may be empty and has no fixed count. Include only supporting people whose present actions materially change the protagonist's options. Do not invent a person to fill a beat.
-
-    CAUSALITY: state the central physical/social rule, its limit, and what evidence lets the protagonist act. Plant one concrete detail early and pay it off in the climax. Every beat must cause the next. The turn follows from evidence, the choice has a real cost, and the aftermath shows the outcome. Keep source facts and chronology intact in Expand mode.
-
-    Keep fields concise. `beats` must contain exactly six strings: opening, first attempt, pressure, turn, choice, aftermath. Each beat states who acts and what visibly changes. Prefer ordinary physical cause-and-effect over conspiracy, secret experiments, arbitrary countdowns, catastrophe escalation, or supernatural explanations unless the source establishes them. Return no prose or commentary outside JSON.
-    """).strip()
-
-    _STORY_BIBLE_EXPAND_NOTE = (
-        "\n\nEXPAND MODE: the supplied source story is canon. Keep its people, setting, events in order, and outcome. "
-        "The plan deepens it with cause, opposition, evidence, and consequence; it never replaces it with a different plot. "
-        "Source characters are anchors, not a cast limit; add a new person only when the conflict needs them, and bring them on screen."
-    )
-
-    @staticmethod
-    def _story_bible_json_schema() -> dict:
-        def text(limit: int = 220) -> dict:
-            return {"type": "string", "minLength": 1, "maxLength": limit}
-
-        return {
-            "type": "object",
-            "properties": {
-                "protagonist_name": text(64),
-                "causal_mechanism": text(220),
-                "central_conflict": text(240),
-                "planted_detail": text(180),
-                "turn": text(220),
-                "choice_and_price": text(220),
-                "ending_image": text(180),
-                "cast": {
-                    "type": "array",
-                    "minItems": 0,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": text(64),
-                            "role": text(100),
-                            "want": text(140),
-                        },
-                        "required": ["name", "role", "want"],
-                        "additionalProperties": False,
-                    },
-                },
-                "beats": {
-                    "type": "array",
-                    "minItems": 6,
-                    "maxItems": 6,
-                    "items": text(240),
-                },
-            },
-            "required": [
-                "protagonist_name", "causal_mechanism", "central_conflict",
-                "planted_detail", "turn", "choice_and_price", "ending_image", "cast", "beats",
-            ],
-            "additionalProperties": False,
-        }
-
-    def _plan_story_bible(
-        self,
-        mode: str,
-        story: str,
-        source_character_names: list[str] | None = None,
-    ) -> dict | None:
-        """One compact thinking-mode planning call (schema-guided). Never fatal.
-
-        Qwen decides the cast, conflict, planted detail, turn, price and six beats; the
-        prose pass then writes from that plan. Any failure returns None and the prose
-        pass runs exactly as before.
-        """
-        self._planned_cast = []
-        try:
-            system = self._STORY_BIBLE_SYSTEM
-            if mode == EXPAND_USER_STORY_MODE:
-                system += self._STORY_BIBLE_EXPAND_NOTE
-            anchors = list(dict.fromkeys(
-                str(value).strip()
-                for value in (source_character_names or [])
-                if str(value).strip()
-            ))
-            payload = {
-                "mode": str(mode),
-                "premise_or_source_story": self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS),
-                "source_character_anchors": anchors[:16],
-            }
-            print("[QWEN] story_bible_thinking=on", flush=True)
-            bible = self._chat_json(
-                system,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                minimum_completion=300,
-                temperature=DIRECTOR_STORY_THINKING_TEMPERATURE,
-                top_p=DIRECTOR_STORY_THINKING_TOP_P,
-                call_name="story_bible",
-                max_completion=1800,
-                json_mode=True,
-                disable_thinking=False,
-                response_schema=self._story_bible_json_schema(),
-            )
-        except Exception as exc:  # planning is an enhancement, never a hard dependency
-            print(f"[QWEN] story_bible skipped ({type(exc).__name__}: {str(exc)[:160]})", flush=True)
-            return None
-
-        if not isinstance(bible, dict):
-            return None
-        cast = [
-            item for item in (bible.get("cast") or [])
-            if isinstance(item, dict) and str(item.get("name", "") or "").strip()
-        ]
-        beats = [str(item).strip() for item in (bible.get("beats") or []) if str(item).strip()]
-        protagonist_name = str(bible.get("protagonist_name", "") or "").strip()
-        mechanism = str(bible.get("causal_mechanism", "") or "").strip()
-        if not protagonist_name or len(beats) != 6 or not mechanism:
-            print("[QWEN] story_bible skipped (missing protagonist, causal mechanism, or six beats)", flush=True)
-            return None
-        bible["cast"] = cast
-        bible["beats"] = beats
-        self._planned_cast = list(dict.fromkeys(str(item["name"]).strip() for item in cast))
-        print(
-            f"[QWEN] story_bible protagonist={protagonist_name} cast={len(cast)} names={self._planned_cast}",
-            flush=True,
-        )
-        return bible
-
-    @staticmethod
-    def _format_story_bible(bible: dict | None) -> str:
-        if not isinstance(bible, dict) or not bible.get("beats"):
-            return ""
-        lines = [
-            "STORY BIBLE (provisional causal map; improve or simplify it if that produces a more coherent story; not a fixed cast quota):",
-            "PROTAGONIST: " + str(bible.get("protagonist_name", "")),
-            "CAUSAL MECHANISM (keep this rule consistent and show its consequence): " + str(bible.get("causal_mechanism", "")),
-            "CENTRAL CONFLICT: " + str(bible.get("central_conflict", "")),
-            "CANDIDATE SUPPORTING CAST (provisional; use only if materially necessary; no cast quota):",
-        ]
-        for person in bible.get("cast", []) or []:
-            lines.append(
-                f"- {person.get('name', '')}: {person.get('role', '')}. Wants: {person.get('want', '')}."
-            )
-        lines.append("PLANTED EARLY, PAID LATE: " + str(bible.get("planted_detail", "")))
-        lines.append("TURN (paragraph 4): " + str(bible.get("turn", "")))
-        lines.append("CHOICE AND PRICE: " + str(bible.get("choice_and_price", "")))
-        lines.append("ENDING IMAGE: " + str(bible.get("ending_image", "")))
-        lines.append("SCENE BEATS:")
-        for index, beat in enumerate(bible.get("beats", []) or [], start=1):
-            lines.append(f"{index}. {beat}")
-        return "\n".join(lines)
-
     def _sampling_for_mode(
         self,
         mode: str,
     ) -> tuple[float, float]:
-
-        if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
-            # Qwen3's documented thinking-mode profile is config-driven. Keep one
-            # consistent profile for planning and writing while thinking is enabled.
-            return (
-                DIRECTOR_STORY_THINKING_TEMPERATURE,
-                DIRECTOR_STORY_THINKING_TOP_P,
-            )
-
+        if mode == AI_STORY_MODE:
+            return (0.78, 0.90)
+        if mode == EXPAND_USER_STORY_MODE:
+            return (0.62, 0.88)
         if mode == PRESERVE_USER_STORY_MODE:
-            return (
-                0.10,
-                0.80,
-            )
-
-        return (
-            DIRECTOR_TEMPERATURE,
-            DIRECTOR_TOP_P,
-        )
+            return (0.10, 0.80)
+        return (DIRECTOR_TEMPERATURE, DIRECTOR_TOP_P)
 
     def _shot_sampling(
         self,
