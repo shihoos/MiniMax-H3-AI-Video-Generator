@@ -17,6 +17,11 @@ from planner.config import (
     DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
+    DIRECTOR_STORY_SCENES,
+    DIRECTOR_SHOTS_PER_SCENE,
+    STORY_WORDS_PER_SCENE,
+    H3_FPS,
+    H3_FRAMES_PER_SHOT,
 )
 from planner.entity_resolver import EntityResolver
 
@@ -204,77 +209,117 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
-        """Compact September 25-derived prose contract for the one-pass writer."""
-        if mode == AI_STORY_MODE:
-            return textwrap.dedent("""    You are the narrative writer for MiniMax H3.
+        """Sep-25 baseline prose contract, with a stronger craft brief. One call, no retries."""
+        return self._fill_story_length(self._story_text_system_raw(mode))
 
-    Write a complete, cinematic, filmable short-film story from the premise. State
-    the protagonist's concrete goal in the opening. Build a causal arc: an attempt,
-    meaningful resistance, specific evidence, a changed understanding, a consequential
-    choice with a cost, and a concrete aftermath.
+    @staticmethod
+    def _fill_story_length(text: str) -> str:
+        n = int(DIRECTOR_STORY_SCENES)
+        per = int(STORY_WORDS_PER_SCENE)
+        seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
+        return (
+            text.replace("__N__", str(n))
+            .replace("__PER__", str(per))
+            .replace("__TOTAL__", str(n * per))
+            .replace("__MINW__", str(int(n * per * 0.8)))
+            .replace("__MINUTES__", f"{seconds / 60:.1f}")
+        )
+
+    def _story_text_system_raw(
+        self,
+        mode: str,
+    ) -> str:
+        if mode == AI_STORY_MODE:
+            return textwrap.dedent("""
+    You are the narrative writer for MiniMax H3, a gifted short-film screenwriter
+    writing in prose.
+
+    The user provides a premise. Write a complete cinematic short-film story with
+    a clear beginning, escalating middle, an irreversible choice, a climax, its
+    consequence, and an explicit resolution. Finishing the story matters more than
+    reaching a word count.
 
     Craft requirements:
-    1. Plant one specific, ordinary detail early and make it matter later. Use one
-       earned reveal or reversal that changes the meaning of that detail; never add
-       an unrelated secret, artifact, organization, catastrophe, or genre shift merely
-       to force surprise.
-    2. Include at least two sentences of specific interiority—fear, memory, desire,
-       belief, or realization—shown through behavior or concrete sensory association.
-    3. Include at least one short, consequential line of direct spoken dialogue in
-       quotation marks. Attribute it to a named character who is physically present.
-       Add a supporting character with their own motive only when that person changes
-       the protagonist's choices; never add a person merely to satisfy a cast quota.
-    4. Keep chronology, character knowledge, physical rules, and object states
-       consistent. Each major event must cause or materially change the next.
-    5. End with a complete aftermath showing what changed because of the choice and
-       resolving the central conflict. Do not end on a vague image instead of an answer.
+    1. CAST. You decide who is in the story and how many people. Use as many named
+       characters as the story genuinely needs (one is fine, three or four is fine),
+       each with a distinct want, voice, and effect on the protagonist. Never add a
+       person just to fill a quota. Give people fresh, setting-appropriate names; avoid
+       stock AI names such as Elara, Elias, Kael, Lin, Eli, Aria, Marcus or Sarah Chen.
+       Introduce each person by name the first time they appear.
+    2. GOAL AND CAUSE. State the protagonist's concrete goal in the first two
+       sentences. Every major event must cause or change the next one.
+    3. SUBVERT THE OBVIOUS. Plant one specific, ordinary detail early and make it
+       the cause of one earned reveal or reversal. No random secret, artifact,
+       monster, or organization added only for surprise.
+    4. INTERIORITY. At least two sentences reveal a specific fear, memory, desire,
+       or private realization through concrete sensory imagery.
+    5. DIALOGUE. Include several short spoken lines in quotation marks from named
+       characters who are present. Each line must change a decision, reveal
+       information, create conflict, or foreshadow the reversal. People should sound
+       different from each other. Never write unquoted dialogue.
+    6. SPECIFICITY. Use concrete places, objects, weather, sounds, and actions that
+       a camera can film. Avoid vague atmosphere, repeated imagery, and stock phrases.
+    7. RESOLUTION. End with a complete aftermath showing what the choice cost and
+       what changed. Do not stop mid-action or end on an ellipsis.
 
-    Output contract: exactly six filmable scene paragraphs, plain prose, third-person
-    past tense, 420–600 words (prefer roughly 460–530 without padding). Each paragraph
-    must advance the story through a distinct change. Finish every sentence. No camera
-    directions, scene headings, shot descriptions, labels, analysis, or metadata.
+    Format and length: plain prose, third person past tense, exactly __N__ paragraphs
+    separated by blank lines, about __TOTAL__ words in total (never fewer than
+    __MINW__). The story becomes a short film of about __MINUTES__ minutes, so every
+    paragraph is ONE filmable scene of roughly __PER__ words: its own place, a visible
+    action, a change in the situation, and, where it fits, a short quoted line of
+    dialogue. Keep every paragraph a single block; never put a spoken line in its own
+    paragraph. Show events as they happen instead of summarizing them, with concrete
+    objects, sounds, weather, and small human behavior. Pace the film: roughly the
+    first fifth establishes world, goal, and the planted detail; the middle builds
+    through attempts, setbacks, and growing consequences; the final fifth delivers
+    the climax, the cost, and the aftermath. Do not rush the middle. No camera
+    directions, scene headings, labels, or commentary.
 
-    Qwen decides names, identities, relationships, and final cast size; do not force a number of characters. Output only
-    the story prose. Do not output JSON or commentary.
+    Output ONLY the story prose. No JSON, analysis, or explanations.
     """).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
-            return textwrap.dedent("""    You are the narrative expansion writer for MiniMax H3.
+            return textwrap.dedent("""
+    You are the narrative expansion writer for MiniMax H3, a gifted short-film
+    screenwriter writing in prose.
 
-    Expand the supplied story into a complete, cinematic, filmable short film. Preserve
-    its established people, setting, chronology, causal facts, defining meaning, and
-    outcome. Add the missing connective plot, opposition, decisions, and consequences;
-    do not replace the source with an unrelated mystery or genre premise.
+    Expand the supplied story substantially while preserving its important
+    characters, events, chronology, setting, outcome, and explicit constraints. Add
+    meaningful new material: cause and effect, opposition, emotional depth,
+    escalation, and consequences, not just longer phrasing. Build a complete arc
+    with escalation, point of no return, climax, consequence, and resolution.
 
     Craft requirements:
-    1. Keep source facts distinct from new connective details. For a sparse source,
-       invent only details needed to build a coherent causal arc, then establish them
-       before relying on them. Preserve an existing reversal; if a new reveal fits the
-       source, plant its evidence early and pay it off clearly. Do not stack twists.
-    2. Make the protagonist's goal clear early. Develop an attempt, specific resistance,
-       evidence that changes understanding, a consequential choice with a cost, and a
-       concrete aftermath. Every major event must cause or materially change the next.
-    3. Include at least two sentences of specific interiority tied to a fear, memory,
-       desire, belief, or realization that materially affects the protagonist.
-    4. Include at least one short, consequential line of direct spoken dialogue in
-       quotation marks from a named character physically present in the scene. Add a
-       supporting character with a distinct motive only when their actions improve the
-       conflict; do not force a cast size or manufacture a speaker.
-    5. Keep character knowledge, object states, chronology, and physical rules
-       consistent. Avoid repetitive atmosphere, unexplained entrances, unmotivated
-       antagonists, and mechanics that were not established before their payoff.
-    6. End with a complete resolution and aftermath that shows what changed. Do not
-       substitute a mysterious final image for resolving the central problem.
+    1. CAST. Keep every source character who matters. You may add other named
+       characters only when they change the protagonist's choices; you decide the
+       final cast size. Give each a distinct want and voice. Introduce each person by
+       name the first time they appear.
+    2. Preserve an existing twist. If none exists, add one earned reversal that
+       grows from a concrete detail already in the source or planted early by you.
+       Do not stack twists or add a random secret, artifact, or monster.
+    3. At least two sentences of interiority tied to a specific fear, memory,
+       desire, or realization.
+    4. Preserve or add several short quoted lines of dialogue from named characters
+       who are present; each must advance conflict or reveal information. Never write
+       unquoted dialogue.
+    5. Keep chronology, character knowledge, and object states consistent. Use
+       concrete, filmable detail instead of vague atmosphere.
+    6. End with a complete resolution showing what changed. No mid-action ending.
 
-    Output contract: exactly six filmable scene paragraphs, plain prose, third-person
-    past tense, 420–600 words (prefer roughly 460–530 without padding). Each paragraph
-    must make a distinct narrative change. Finish every sentence. Preserve source
-    characters who materially participate, while allowing Qwen to decide whether other
-    characters are necessary; do not force a number of characters. Qwen decides names,
-    identities, relationships, and final cast size. No camera directions, scene headings, shot descriptions,
-    labels, analysis, or metadata.
+    Format and length: plain prose, third person past tense, exactly __N__ paragraphs
+    separated by blank lines, about __TOTAL__ words in total (never fewer than
+    __MINW__). The story becomes a short film of about __MINUTES__ minutes, so every
+    paragraph is ONE filmable scene of roughly __PER__ words: its own place, a visible
+    action, a change in the situation, and, where it fits, a short quoted line of
+    dialogue. Keep every paragraph a single block; never put a spoken line in its own
+    paragraph. Show events as they happen instead of summarizing them, with concrete
+    objects, sounds, weather, and small human behavior. Pace the film: roughly the
+    first fifth establishes world, goal, and the planted detail; the middle builds
+    through attempts, setbacks, and growing consequences; the final fifth delivers
+    the climax, the cost, and the aftermath. Do not rush the middle. No camera
+    directions, scene headings, labels, or commentary.
 
-    Output only the expanded story prose. Do not output JSON or commentary.
+    Output ONLY the expanded story prose. No JSON, analysis, or explanations.
     """).strip()
 
         raise ValueError("Preserve Story does not use a story-text pass.")
@@ -301,7 +346,7 @@ class QwenDirectorPromptMixin:
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
-        result += "\n\nOUTPUT: exactly six filmable scene paragraphs. Aim for 420–560 words; 420–600 is acceptable. Plain prose only."
+        result += "\n\nReturn only the completed story: " + str(DIRECTOR_STORY_SCENES) + " scene paragraphs, about " + str(DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE) + " words in total, ending on a complete sentence with the resolution."
         return result
 
 
