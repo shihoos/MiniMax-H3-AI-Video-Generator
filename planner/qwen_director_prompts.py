@@ -45,7 +45,7 @@ The scenes are part of one coherent film. Use ONLY the supplied characters. Do n
 In `characters` and in every dialogue speaker use the EXACT canonical spelling and capitalization from the supplied `characters` list (never a lower-cased or shortened copy).
 Only list a character in a shot if that character is visible in that shot's framing.
 Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lighting <=12 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, camera_movement <=5 words.
-location must be a specific physical place (e.g., "abandoned station platform", "stairwell", "underground chamber"), never a phrase from the story.
+location must be a specific physical place (e.g., "harbor fish market", "hospital corridor", "rooftop garden"), never a phrase from the story.
 `action` describes only physical/narrative events; never describe camera behavior there.
 `camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.
 Preserve:
@@ -83,7 +83,7 @@ DIALOGUE CONTRACT:
 - Do not pack dialogue into one shot when it can be distributed across the required shots of the same scene while preserving exact text and order.
 - describe the shot's required initial and ending continuity states in continuity_start_state and continuity_end_state.
 
-Within each scene, use meaningfully different framing and composition. Keep the same underlying story beat, but make the two shot actions complementary: show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
+Within each scene, use meaningfully different framing and composition. Keep the same underlying story beat, but make the __SHOTS_PER_SCENE__ shot actions complementary (for example: establish the place, the main action, then a reaction or telling detail): show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
 LIGHT AND PLACE CONTINUITY: all shots of one scene share ONE lighting setup. Give every shot of a scene the same
 `lighting` and `color_temperature` strings (same source, direction, and color); vary only framing, lens, movement, and composition.
 Choose lighting that the scene's own location, time of day, weather, and props physically motivate (storm daylight, flashlight beam,
@@ -92,8 +92,8 @@ never use "practical neon" or "warm tungsten" unless the scene visibly contains 
 `visual_prompt` must name the setting and the light source so the image generator can reproduce it.
 
 STORY FIDELITY: depict only events, objects, and states that the scene description or story context actually states.
-Never add an opening, discovery, collapse, sound, object, or line of speech that the text does not contain (a vault described as
-sealed stays sealed; an unnamed object stays unnamed). When a source is short and the same description appears in several scenes, the
+Never add an opening, discovery, collapse, sound, object, or line of speech that the text does not contain (a door described as
+locked stays locked; an unnamed object stays unnamed). When a source is short and the same description appears in several scenes, the
 scenes are different COVERAGE of the same moment: vary distance, angle, and detail (approach, threshold, close detail, reaction),
 never advance the plot beyond what the description states, and never repeat the same action/visual in consecutive scenes.
 
@@ -433,7 +433,7 @@ class QwenDirectorPromptMixin:
             temperature=0.05,
             top_p=0.70,
             call_name="character_entity_extraction",
-            max_completion=768,
+            max_completion=1536,
             json_mode=True,
             disable_thinking=True,
             response_schema=extraction_schema,
