@@ -39,7 +39,7 @@ director:
   vllm_env_dir:  /tmp/h3_qwen_vllm_031_tf517_tok0233
   context: 8192
   max_tokens: 7000
-  story_max_tokens: 2200
+  story_max_tokens: 3600
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
