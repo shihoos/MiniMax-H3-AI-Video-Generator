@@ -1408,18 +1408,16 @@ class QwenDirector(
         # output floor, no presence penalty, and exactly one creative writing call.
         story_min_output_tokens = 0
         story_budget = DIRECTOR_STORY_MAX_TOKENS
-        # Thinking for the ONE story call only (H3_STORY_THINKING=0 turns it off).
-        # The model plans the arc, cause/effect and cast privately, then writes the story.
-        # Thinking tokens share the 8K context, so the ceiling is raised; no retry is made.
-        use_thinking = os.getenv("H3_STORY_THINKING", "1").strip().lower() not in {"0", "false", "off", "no"}
-        if use_thinking:
-            temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
-            top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
-            story_budget = max(story_budget, int(os.getenv("H3_STORY_THINKING_MAX_TOKENS", "6500")))
+        # One story call, thinking ON (Qwen3 card: temperature 0.6, top_p 0.95, top_k 20, min_p 0).
+        # The model plans cast, arc and cause/effect privately, then writes. Thinking tokens
+        # share the 8K context, so the ceiling is raised. No retry, no repair call.
+        temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
+        top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
+        story_budget = max(story_budget, 6500)
         print(
-            f"[QWEN] story_profile=sep25_compact source={Path(__file__).resolve()} "
+            f"[QWEN] story_profile=thinking_single_pass source={Path(__file__).resolve()} "
             f"story_max_tokens={story_budget} temperature={temperature:.2f} "
-            f"top_p={top_p:.2f} thinking={'on' if use_thinking else 'off'} single_pass=true story_plan=disabled story_repair=disabled",
+            f"top_p={top_p:.2f} thinking=on single_pass=true story_plan=disabled story_repair=disabled",
             flush=True,
         )
 
@@ -1433,9 +1431,11 @@ class QwenDirector(
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=not use_thinking,
+                disable_thinking=False,
                 seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                creative=False,
+                # Qwen3 model card: presence_penalty 1.5 is strongly recommended for quantized (AWQ)
+                # models to prevent repetition loops (H3_DIRECTOR_STORY_PRESENCE_PENALTY overrides).
+                creative=True,
             )
         except StoryTruncated as exc:
             raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
