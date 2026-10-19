@@ -27,7 +27,8 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     STORY_WORDS_PER_SCENE,
     STORY_WRITER_WORDS_PER_SCENE,
-    STORY_SINGLE_THINKING_BUDGET,
+    STORY_PLAN_BEAT_MIN_WORDS,
+    STORY_PLAN_BEAT_MAX_WORDS,
     STORY_TARGET_WORDS,
     STORY_MIN_WORDS,
     DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
@@ -365,8 +366,9 @@ class QwenDirectorPromptMixin:
     ) -> str:
         fmt = """
     Format: plain prose in third person past tense, exactly __N__ paragraphs separated
-    by blank lines, about __TOTAL__ words in all (never under __MINW__). The story
-    becomes a film of about __MINUTES__ minutes, so each paragraph is ONE filmable scene
+    by blank lines, about __TOTAL__ words in all (never under __MINW__). Every scene paragraph
+    should contain 6–8 complete sentences; develop the causal beat instead of compressing it.
+    The story becomes a film of about __MINUTES__ minutes, so each paragraph is ONE filmable scene
     of roughly __PER__ words: a specific place, visible action, and a change in the
     situation. Put any spoken line, in quotation marks, inside its scene paragraph,
     never in a paragraph of its own. No headings, labels, camera directions, or
@@ -393,19 +395,6 @@ class QwenDirectorPromptMixin:
 
         raise ValueError("Preserve Story does not use a story-text pass.")
 
-    def _story_single_call_system(self, mode: str) -> str:
-        """Writer contract plus a compact planning protocol for the one bounded-thinking call."""
-        n = int(DIRECTOR_STORY_SCENES)
-        per = int(STORY_WRITER_WORDS_PER_SCENE)
-        plan = f"""
-    HOW TO USE YOUR THINKING (it is hard-capped at about {STORY_SINGLE_THINKING_BUDGET} tokens, so stay terse and never draft prose there):
-    1. One line: CAST - every core character as Name (role; want; how they speak).
-    2. Then exactly {n} one-line beats. Each beat names who is physically present, the visible action, the causal turn, one concrete sensory detail, and a spoken line for at least six beats.
-    3. Check the planted detail pays off and scene {n} resolves the central conflict. Then stop thinking and write.
-
-    WRITING THE STORY: follow your beats in order, one paragraph per beat. Every paragraph holds 6 to 8 full sentences and about {per} words: expand each beat with action, setting detail, and a spoken exchange between present characters instead of summarizing it. Never shorten a scene to save space; the film needs all {n} paragraphs at full length. Keep names and voices exactly as in your CAST line.
-    """
-        return self._story_text_system(mode) + "\n\n" + textwrap.dedent(plan).strip()
 
     def _story_blueprint_system(self, mode: str) -> str:
         """Build a compact causal beat sheet, not a Story Bible or alternate story."""
@@ -428,9 +417,11 @@ class QwenDirectorPromptMixin:
             First output ONE line beginning `CAST:` that lists every core character as
             `Name (role; what they want; how they speak) | Name (...) | ...` so the writer keeps
             identities and voices consistent. Then output exactly {n} non-empty lines, one per scene,
-            numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly 20–35 words) that
-            states the visible action, the causal turn, who is physically present, and the important
-            knowledge/object state carried forward. The CAST line is the only non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
+            numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly {STORY_PLAN_BEAT_MIN_WORDS}–{STORY_PLAN_BEAT_MAX_WORDS} words) that states who is
+            physically present, their goal or conflicting intent, a specific visible action, one concrete
+            sensory/visual detail, the causal turn, and knowledge/object state carried forward. At least six
+            beats must contain a short, clearly quoted line spoken in person by one of the named characters.
+            Keep recurring characters active in at least two scenes each. The CAST line is the only non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
         """).strip()
 
     def _story_blueprint_user(
@@ -503,8 +494,21 @@ class QwenDirectorPromptMixin:
                     f"Story architect returned an empty beat for scene {number}. No planner retry was attempted."
                 )
             normalized.append(f"SCENE {number:02d}: {text}")
-        # The optional cast line is advisory context for the writer; a missing one is not an error.
-        return "\n".join(([cast_line] if cast_line else []) + normalized)
+        if not cast_line:
+            raise RuntimeError("Story architect omitted the required CAST line. No retry was attempted.")
+        entries = [item.strip() for item in cast_line.split(":", 1)[1].split("|") if item.strip()]
+        names = [re.split(r"[(:,–—-]", item, maxsplit=1)[0].strip(" *_`") for item in entries]
+        names = [name for name in names if name]
+        if not (DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS <= len(names) <= DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS):
+            raise RuntimeError(
+                "Story architect CAST line must list "
+                f"{DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} distinct core characters; "
+                f"got {len(names)}. No retry was attempted."
+            )
+        normalized_names = [re.sub(r"\s+", " ", name).casefold() for name in names]
+        if len(set(normalized_names)) != len(normalized_names):
+            raise RuntimeError("Story architect CAST line contains duplicate names. No retry was attempted.")
+        return "\n".join([cast_line] + normalized)
 
     def _story_text_user(
         self,
