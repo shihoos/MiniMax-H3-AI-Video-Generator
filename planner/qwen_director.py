@@ -23,6 +23,8 @@ from planner.config import (
     STORY_WORDS_PER_SCENE,
     STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
+    STORY_SINGLE_THINKING_BUDGET,
+    STORY_SINGLE_MAX_TOKENS,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_MAX_TOKENS,
@@ -307,12 +309,12 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
-        # One bounded Qwen3 thinking pass plans story architecture; one non-thinking
-        # prose pass writes it. Neither pass is retried or repaired by another model call.
+        # A single bounded-thinking Qwen3 call plans and writes the story; it is never
+        # retried, repaired or supplemented by another model call.
         temperature, top_p = self._sampling_for_mode(mode)
 
         # ----------------------------------------------------
-        # PASS 1A: bounded causal story architecture + single prose-writing pass
+        # PASS 1A: single bounded-thinking call (plan + prose)
         # ----------------------------------------------------
 
         generated_story = False
@@ -351,26 +353,13 @@ class QwenDirector(
 
             story = ""
 
-            story_system = (
-                self._story_text_system(
-                    mode
-                )
-            )
-
-            # One short, bounded causal-planning call feeds one non-thinking prose call.
-            # This is not a Story Bible, best-of-N, retry, or post-hoc editor: Qwen owns
-            # the blueprint and the single author call; deterministic code only checks
-            # the 12 scene labels before passing it forward.
-            story_blueprint = self._generate_story_blueprint(
-                mode,
-                user_input,
-                source_character_names=source_character_names,
-            )
+            # ONE Qwen call: bounded thinking plans cast + beats, then the same response writes
+            # the prose. No separate architecture pass, retry, repair or rescue call exists.
+            story_system = self._story_single_call_system(mode)
             story_user = self._story_text_user(
                 mode,
                 user_input,
                 source_character_names=source_character_names,
-                story_blueprint=story_blueprint,
             )
             story, generated_story = self._generate_story_once(
                 mode,
@@ -380,7 +369,7 @@ class QwenDirector(
                 temperature=temperature,
                 top_p=top_p,
                 source_character_names=source_character_names,
-                story_blueprint=story_blueprint,
+                single_call=True,
             )
 
         # ----------------------------------------------------
@@ -1561,6 +1550,7 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
         story_blueprint: str | None = None,
+        single_call: bool = False,
     ) -> tuple[str, bool]:
         """Write the story once in non-thinking mode from the bounded causal blueprint.
 
@@ -1592,26 +1582,39 @@ class QwenDirector(
         )
         temperature = float(temperature)
         top_p = float(top_p)
-        print(
-            f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
-            f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
-            "single_pass=true retries=0 repairs=0",
-            flush=True,
-        )
+        if single_call:
+            thinking_budget = int(STORY_SINGLE_THINKING_BUDGET)
+            story_budget = min(int(DIRECTOR_STORY_MAX_TOKENS), int(STORY_SINGLE_MAX_TOKENS))
+            temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
+            top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
+            print(
+                f"[QWEN] story_writer=single_call thinking_budget={thinking_budget} max_tokens={story_budget} "
+                f"temperature={temperature:.2f} top_p={top_p:.2f} single_pass=true retries=0 repairs=0",
+                flush=True,
+            )
+        else:
+            thinking_budget = None
+            print(
+                f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
+                f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
+                "single_pass=true retries=0 repairs=0",
+                flush=True,
+            )
 
         try:
             raw = self._chat_text(
                 story_system,
                 story_user,
-                minimum_completion=350,
+                minimum_completion=(500 if single_call else 350),
                 minimum_output_tokens=story_min_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=True,
+                disable_thinking=not single_call,
                 seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                creative=True,
+                creative=not single_call,
+                thinking_token_budget=thinking_budget,
             )
         except StoryTruncated as exc:
             raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
@@ -1756,6 +1759,17 @@ class QwenDirector(
                 return names
         return []
 
+    @staticmethod
+    def _story_recurring_names(paragraphs: list[str]) -> list[str]:
+        """Capitalised words used mid-sentence in 2+ scenes: a model-free proxy for the cast."""
+        counts: dict[str, set[int]] = {}
+        for i, paragraph in enumerate(paragraphs):
+            for match in re.finditer(r"(?<![.!?\"\u201c\u2018]\s)(?<!^)\b([A-Z][a-z]{2,})\b", paragraph):
+                counts.setdefault(match.group(1), set()).add(i)
+        stop = {"The", "She", "He", "They", "Her", "His", "Their", "When", "Then", "But", "And", "With", "Without",
+                "After", "Before", "Outside", "Inside", "As", "That", "This", "There", "What", "Where", "Why", "How"}
+        return [n for n, scenes in counts.items() if len(scenes) >= 2 and n not in stop][:8]
+
     def _story_cast_contract_issues(self, story: str, story_blueprint: str | None) -> list[str]:
         """Deterministic, model-free check of the multi-character contract; log-only.
 
@@ -1763,10 +1777,10 @@ class QwenDirector(
         scene paragraphs, and at least two scenes hold quoted dialogue with two or more
         core characters present. Never rewrites or retries.
         """
-        names = self._blueprint_cast_names(story_blueprint)
-        if not names:
-            return ["cast: planner returned no CAST line, so cast distribution was not verified"]
         paragraphs = [p for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
+        names = self._blueprint_cast_names(story_blueprint) or self._story_recurring_names(paragraphs)
+        if not names:
+            return ["cast: no recurring named characters found in the story"]
         issues: list[str] = []
         presence = {
             name: [i for i, p in enumerate(paragraphs) if re.search(r"\b" + re.escape(name) + r"\b", p)]
@@ -1783,7 +1797,7 @@ class QwenDirector(
         if dialogue_scenes < 2:
             issues.append(f"cast: only {dialogue_scenes} scene(s) pair 2+ core characters with spoken dialogue, need 2+")
         if len(names) < int(DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS):
-            issues.append(f"cast: planner listed {len(names)} core characters, need {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}+")
+            issues.append(f"cast: found {len(names)} core characters, need {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}+")
         return issues
 
     def _story_craft_issues(self, story: str) -> list[str]:
