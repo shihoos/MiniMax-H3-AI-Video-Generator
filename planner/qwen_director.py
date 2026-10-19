@@ -28,6 +28,7 @@ from planner.config import (
     DIRECTOR_STORY_PLAN_THINKING_BUDGET,
     DIRECTOR_STORY_WRITER_MAX_TOKENS,
     DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+    DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_STORY_THINKING_TOP_K,
@@ -522,6 +523,7 @@ class QwenDirector(
             raise RuntimeError(
                 "No canonical characters could be derived from the final story."
             )
+        self._validate_generated_story_cast_size(mode, characters)
 
         character_names = {
             str(character.get("name", "")).strip().lower()
@@ -1285,6 +1287,29 @@ class QwenDirector(
             print("[QWEN] story_contract=WARNING " + detail[:900], flush=True)
         return working
 
+    @staticmethod
+    def _validate_generated_story_cast_size(mode: str, characters: list[dict]) -> None:
+        """Stop weak generated/expanded stories before expensive shot-batch planning."""
+        if mode not in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            return
+        names = []
+        seen = set()
+        for item in characters or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            key = EntityResolver.normalize(name)
+            if name and key and key not in seen:
+                names.append(name)
+                seen.add(key)
+        if len(names) < DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS:
+            raise RuntimeError(
+                f"Generated-story cast contract failed: need at least {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS} "
+                f"named, physically active characters after canonicalization; found {len(names)} "
+                f"({', '.join(names)}). The story must include more active participants; "
+                "no shot batches were launched and no story retry was attempted."
+            )
+
     def _validate_expand_story_cast(
         self,
         source_story: str,
@@ -1591,10 +1616,23 @@ class QwenDirector(
             if not raw:
                 raise RuntimeError(failure_prefix + str(exc)) from exc
 
+        raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
+        if cleanup_reason:
+            print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
         self._last_story_draft = raw
         if not str(raw or "").strip():
-            raise RuntimeError(failure_prefix + "Qwen returned an empty story.")
+            raise RuntimeError(failure_prefix + "Qwen returned an empty story after non-prose cleanup.")
+
+        # Length is measured only over the cleaned narrative, before paragraph repair.
+        # Never let checklists, fake word counts, or duplicated blocks satisfy the contract.
+        usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
+        if usable_words < self._story_min_words:
+            raise RuntimeError(
+                failure_prefix + f"Qwen returned only {usable_words} usable story words "
+                f"after removing non-story output (need {self._story_min_words}+). "
+                "The single writer call ended under-length; no retry was attempted."
+            )
 
         # One paragraph per configured scene is a production-topology requirement.
         # Repair boundaries deterministically; never ask the model to rewrite prose.
@@ -1630,12 +1668,7 @@ class QwenDirector(
             strict=False,
         )
 
-        # Never fail a finished story over style heuristics. Only an unusable draft stops
-        # the run: drop a dangling half-sentence, then require a minimum real length.
-        if candidate and not self._ends_cleanly(candidate):
-            trimmed = self._trim_to_last_sentence(candidate)
-            if trimmed:
-                candidate = trimmed
+        # Never accept a dangling generation tail. Word-count is rechecked after any safe trim.
         candidate, removed_duplicate_ending = self._trim_repeated_terminal_sentence(candidate)
         if removed_duplicate_ending:
             print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
@@ -1647,6 +1680,20 @@ class QwenDirector(
                 f"(need {self._story_min_words}+ to satisfy the configured story-length contract); "
                 "check the Qwen server/trace. No retry was attempted."
             )
+        if candidate and not self._ends_cleanly(candidate):
+            trimmed = self._trim_to_last_sentence(candidate)
+            if not trimmed:
+                raise RuntimeError(
+                    failure_prefix + "The cleaned story ends mid-sentence and cannot be safely trimmed "
+                    "while preserving the minimum word count. No retry was attempted."
+                )
+            candidate = trimmed
+            word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
+            if word_count < self._story_min_words:
+                raise RuntimeError(
+                    failure_prefix + f"Safe sentence-boundary cleanup leaves only {word_count} words "
+                    f"(need {self._story_min_words}+). No retry was attempted."
+                )
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
@@ -1697,6 +1744,64 @@ class QwenDirector(
         if absent:
             issues.append("named people who are never on screen: " + ", ".join(absent[:3]))
         return issues
+
+    @staticmethod
+    def _strip_story_nonprose_tail(raw: str) -> tuple[str, str]:
+        """Remove recognizable author commentary or an exact repeated story block.
+
+        The writer is contractually prose-only. This sanitizer is intentionally narrow:
+        it removes clear postscript markers after a substantial story, and an exact
+        repeated run of three or more whole paragraphs. It never rewrites story prose.
+        """
+        value = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", value) if part.strip()]
+        if not paragraphs:
+            return "", ""
+
+        kept: list[str] = []
+        word_count = 0
+        meta_start = re.compile(
+            r"(?ix)^\s*(?:"
+            r"\(?\s*(?:word|paragraph)\s+count\b|"
+            r"final\s+word\s+count\b|"
+            r"note\s*:\s*this\s+story\b|"
+            r"story\s+complete\b|"
+            r"this\s+concludes\s+the\s+ai[- ]generated\s+story\b|"
+            r"\[\s*(?:end\s+of\s+story|word\s+count\s+check)\s*\]|"
+            r"total\s*:\s*[*_`]*\d+\s+words\b|"
+            r"all\s+requirements\s+met\b|"
+            r"here\s+is\s+the\s+(?:completed\s+)?story\b"
+            r")"
+        )
+        separator = re.compile(r"^(?:-{3,}|_{3,}|\*{3,})$")
+        for part in paragraphs:
+            # Only treat a separator/checklist as a postscript after a meaningful story body.
+            if len(kept) >= 6 and word_count >= 350 and separator.fullmatch(part.strip()):
+                return "\n\n".join(kept), "removed_nonprose_postscript"
+            if len(kept) >= 6 and word_count >= 350 and meta_start.match(part):
+                return "\n\n".join(kept), "removed_nonprose_postscript"
+            kept.append(part)
+            word_count += len(re.findall(r"\b[\w'’-]+\b", part))
+
+        # Catch runaway exact duplication, e.g. all 11 scenes emitted a second time
+        # to satisfy an incorrect min_tokens floor. Require a repeated block of >=3
+        # exact whole paragraphs after at least 350 narrative words.
+        normalized = [re.sub(r"\s+", " ", part).strip().casefold() for part in kept]
+        prefix_words = [0]
+        for part in kept:
+            prefix_words.append(prefix_words[-1] + len(re.findall(r"\b[\w'’-]+\b", part)))
+        for second in range(6, len(kept) - 2):
+            if prefix_words[second] < 350:
+                continue
+            for first in range(0, second):
+                run = 0
+                max_run = min(second - first, len(kept) - second)
+                while run < max_run and normalized[first + run] == normalized[second + run]:
+                    run += 1
+                if run >= 3:
+                    return "\n\n".join(kept[:second]), "removed_exact_repeated_story_block"
+
+        return "\n\n".join(kept), ""
 
     def _trim_runaway_tail(self, raw: str) -> str:
         """Return the configured scene paragraphs when complete and in range; otherwise unchanged."""
@@ -2514,10 +2619,10 @@ class QwenDirector(
 
     @staticmethod
     def _story_has_explicit_dialogue_surface(story: str) -> bool:
-        """Return whether the story contains an explicit surface that can carry spoken dialogue.
+        """Return whether prose has evidence of an actually attributed speech line.
 
-        This is intentionally syntax-only: it recognizes quotation-delimited text and explicit
-        screenplay-style speaker labels, but it never infers dialogue from English vocabulary.
+        Quoted signs, labels, notes, and document text are not a spoken-dialogue surface.
+        This remains an advisory predicate, not a dialogue extractor.
         """
         text = str(story or "")
         if not text.strip():
@@ -2526,12 +2631,20 @@ class QwenDirector(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
             flags=re.UNICODE,
         )
-        if any(
-            str(value or "").strip()
-            for match in quote_pattern.finditer(text)
-            for value in match.groups()
-        ):
-            return True
+        speech_attribution = re.compile(
+            r"\b(?:said|asks?|asked|repl(?:y|ied)|whisper(?:s|ed)|shout(?:s|ed)|"
+            r"mutter(?:s|ed)|answer(?:s|ed)|warn(?:s|ed)|tell(?:s|t)|"
+            r"cr(?:y|ies|ied)|yell(?:s|ed)|bark(?:s|ed))\b",
+            flags=re.IGNORECASE,
+        )
+        for match in quote_pattern.finditer(text):
+            if not any(str(value or "").strip() for value in match.groups()):
+                continue
+            before = text[max(0, match.start() - 110):match.start()]
+            after = text[match.end():min(len(text), match.end() + 110)]
+            local = before + " " + after
+            if speech_attribution.search(local):
+                return True
         label_pattern = re.compile(
             r"(?m)^\s*([A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*){0,4})\s*(?::|—|–)\s*([^\n]+?)\s*$"
         )
@@ -2609,6 +2722,11 @@ class QwenDirector(
             r"\b(?:through|from|over)\s+(?:(?:a|the)\s+)?(?:long-dead\s+)?speaker\b",
             flags=re.IGNORECASE,
         )
+        anonymous_voice_re = re.compile(
+            r"\b(?:a|an|the)\s+(?:unseen|unidentified|disembodied|unknown\s+)?voice\s+"
+            r"(?:boomed|echoed|rang\s+out|called\s+out|announced|spoke|said)\b",
+            flags=re.IGNORECASE,
+        )
         remembered_context_re = re.compile(
             r"\b(?:memory surfaced|a memory (?:of|came|returned)|remembered|recalled|"
             r"replaying|replayed|mind replayed|mind replaying|words echoed\s*:|"
@@ -2653,7 +2771,8 @@ class QwenDirector(
         remote_channel_end_by_paragraph: dict[int, int] = {}
 
         def is_non_present_quote(position: int, end_position: int) -> bool:
-            paragraph_start = text.rfind("\n\n", 0, position) + 2
+            paragraph_break = text.rfind("\n\n", 0, position)
+            paragraph_start = paragraph_break + 2 if paragraph_break >= 0 else 0
             paragraph_end = text.find("\n\n", end_position)
             if paragraph_end < 0:
                 paragraph_end = len(text)
@@ -2679,6 +2798,11 @@ class QwenDirector(
             local_before = before[prior_boundary + 1:][-260:]
             next_boundaries = [index for index in (after.find("."), after.find("?"), after.find("!")) if index >= 0]
             local_after = after[:min(next_boundaries) + 1] if next_boundaries else after[:180]
+
+            # Anonymous generic voice-over lines are not attributable to a visible,
+            # canonical character and must not be assigned to the protagonist by guess.
+            if anonymous_voice_re.search(local_before):
+                return True
 
             # Remote evidence is quote-local. A preceding sentence is considered
             # only when this quote has no local lead-in (e.g. "Her radio crackled.
