@@ -3232,10 +3232,12 @@ class QwenDirector(
 
     @staticmethod
     def _shot_batch_completion_budget(scene_count: int) -> int:
-        """Return the completion-token cap for one batched shot request.
+        """Return the token cap for a batched shot request.
 
-        SHOTS_PER_SCENE is a topology constraint, not a token budget.
-        Never use it as a completion-token cap.
+        The 700-token per-shot estimate is multiplied by the configured
+        shots-per-scene and the number of scenes in this batch, then capped
+        by the global Director token ceiling. The shot count alone is not a
+        completion-token budget.
         """
         count = max(1, int(scene_count))
         return min(
