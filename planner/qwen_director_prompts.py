@@ -31,8 +31,7 @@ from planner.config import (
     STORY_PLAN_BEAT_MAX_WORDS,
     STORY_TARGET_WORDS,
     STORY_MIN_WORDS,
-    DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
-    DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS,
+    DIRECTOR_STORY_CAST_SIZE_POLICY,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
 )
@@ -375,7 +374,7 @@ class QwenDirectorPromptMixin:
     commentary. Do not append word counts, checklists, markdown separators, summaries,
     meta-commentary, or a postscript after the final sentence. Output only the story."""
         ensemble = f"""
-    CAST CONTRACT (mandatory): Build a recurring ensemble of {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} named core characters, including the protagonist. Qwen chooses every name, identity, relationship, and role; do not use preset names or a hard-coded cast. All core characters must physically participate in present-time scenes, take consequential actions, and appear in at least two different scenes. Each has a specific want and a different point of view. At least two separate scenes contain direct in-person dialogue between different core characters; the exchanges must change a decision, reveal a conflict, or shift trust. The plot must turn because of interactions among these people, not only because the protagonist discovers objects or reads records. A person mentioned only in backstory or visible only in a photo, label, document, recording, screen, or anonymous remote voice does NOT count as an active cast member.
+    CAST CONTRACT (mandatory; policy={DIRECTOR_STORY_CAST_SIZE_POLICY}): Qwen determines the cast size from the story's actual needs. There is NO fixed minimum, target, or maximum number of characters. Include the protagonist and every additional character needed to make the conflict, causal turns, relationships, and resolution work; add as many as the story genuinely needs. Do not add characters merely to hit a quota or restrict a strong story to a small ensemble. Qwen chooses every name, identity, relationship, motive, and role; never use preset names or a hard-coded cast. Recurring core characters should physically participate in present-time scenes, take consequential actions, and recur where the plot needs them. A one-scene supporting character is valid when that character materially changes an event. Give important characters distinct wants and points of view. At least two separate scenes should contain direct in-person dialogue between named characters when it fits the premise; those exchanges must change a decision, reveal a conflict, or shift trust. Let the plot turn through character actions and consequences, not only discoveries or records. A person mentioned only in backstory or visible only in a photo, label, document, recording, screen, or anonymous remote voice does NOT count as physically active.
     """
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""
@@ -388,9 +387,9 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the screenwriter expanding the supplied story into a complete short film told as prose. Preserve established source characters, the setting, chronology, key events, any twist, and the source's outcome. Do not erase a source character or contradict an established fact.
 
-    Where the source has fewer than the required active cast, invent names and relationships for named, physically present allies or opponents whose choices materially change the protagonist's actions and the path to the existing outcome. Preserve all source-established names and relationships. Do not count a person who appears only in a message, document, memory, photo, recording, monitor, or anonymous remote voice. Any added character must serve the source conflict, have a clear motive, and appear in more than one scene. Build cause-and-effect between the existing plot points instead of padding the prose or repeating paragraphs.
+    Preserve the source's established character identities, relationships, and story-relevant canon, but do not impose a fixed cast size. Add as many new named characters as the causal development genuinely needs, including allies, opponents, witnesses, or other participants whose choices materially change the path to the existing outcome. Do not add characters merely to meet a quota, and do not replace source anchors with new identities. A useful supporting character may appear in one scene; recurring characters should recur when their role in the plot calls for it. Do not count a person who appears only in a message, document, memory, photo, recording, monitor, or anonymous remote voice as physically present. Build cause-and-effect between existing plot points instead of padding the prose or repeating paragraphs.
 
-    The protagonist's goal must be clear early. Use visible actions and decisions; plant a detail that pays off; make at least two in-person dialogue exchanges change the conflict or trust between characters; and resolve the main question in the final scene consistently with the source outcome.
+    The protagonist's goal must be clear early. Determine cast size from the premise and causal plan, with no numeric quota; recurring and supporting characters are allowed whenever they materially affect events. Use visible actions and decisions; plant a detail that pays off; make at least two in-person dialogue exchanges change the conflict or trust between characters when compatible with the premise; and resolve the main question in the final scene consistently with the source outcome.
     """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         raise ValueError("Preserve Story does not use a story-text pass.")
@@ -400,9 +399,9 @@ class QwenDirectorPromptMixin:
         """Build a compact causal beat sheet, not a Story Bible or alternate story."""
         n = int(DIRECTOR_STORY_SCENES)
         task_rule = (
-            f"Invent {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} recurring named, physically present core characters, including the protagonist. Qwen chooses all names and roles. Ensure each core character materially acts in at least two scenes and at least two beats contain face-to-face dialogue or conflict between named characters. Do not count labels, records, memories, screens, recordings, or anonymous remote voices as active people."
+            "Determine the cast from the premise and causal plot; there is no fixed minimum, target, or maximum character count. Include the protagonist and any additional named people the story genuinely needs. Recurring core characters should act across multiple beats; functional one-scene supporting characters are allowed. Do not add characters to meet a quota. At least two beats should contain face-to-face dialogue or conflict between named characters when appropriate to the premise. Do not count labels, records, memories, screens, recordings, or anonymous remote voices as physically active people."
             if mode == AI_STORY_MODE
-            else f"Preserve established source characters, setting, chronology, key events, twists, and outcome, while ensuring {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} named people physically participate in present-time events. If the source has fewer, add named allies/opponents who materially affect the path to the same outcome; retain source anchors. Ensure core characters act across multiple beats and at least two beats include direct interpersonal conflict or dialogue."
+            else "Preserve source character identities and story-relevant canon, setting, chronology, key events, twists, and outcome. There is no fixed minimum, target, or maximum character count. Add any number of named allies, opponents, witnesses, or other participants whose choices materially change the causal path to the same outcome. Do not add people only to meet a quota; preserve source anchors. Recurring characters should act across multiple beats when their role calls for it, while useful one-scene supporting characters are valid. At least two beats should include direct interpersonal conflict or dialogue where the premise supports it."
         )
         return textwrap.dedent(f"""            You are the story architect for a short film, not the prose writer.
             Produce a concise, causally complete blueprint of exactly {n} scenes for the source premise.
@@ -439,7 +438,7 @@ class QwenDirectorPromptMixin:
                 if str(value).strip()
             ))
             if anchors:
-                result += "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n" + ", ".join(anchors[:16])
+                result += "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n" + ", ".join(anchors)
         result += (
             f"\n\nCreate the {DIRECTOR_STORY_SCENES}-scene causal blueprint only. "
             "Every scene must change the situation and establish what causes the next scene."
@@ -454,7 +453,7 @@ class QwenDirectorPromptMixin:
         for _line in str(raw or "").splitlines():
             _m = re.match(r"^\s*\**\s*CAST\s*\**\s*:\s*(.+?)\s*$", _line, re.IGNORECASE)
             if _m and not cast_line:
-                cast_line = "CAST: " + re.sub(r"\bSCENE\b", "Scene", _m.group(1))[:700]
+                cast_line = "CAST: " + re.sub(r"\bSCENE\b", "Scene", _m.group(1)).strip()
         header = re.compile(
             r"^\s*(?:SCENE\s*)?0*(\d{1,2})\s*[:.)\-–—]\s*(.*?)\s*$",
             re.IGNORECASE,
@@ -497,13 +496,17 @@ class QwenDirectorPromptMixin:
         if not cast_line:
             raise RuntimeError("Story architect omitted the required CAST line. No retry was attempted.")
         entries = [item.strip() for item in cast_line.split(":", 1)[1].split("|") if item.strip()]
-        names = [item.split("(", 1)[0].strip(" *_`") for item in entries]
-        names = [name for name in names if name]
-        if not (DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS <= len(names) <= DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS):
+        # Split role/metadata separators, but preserve ordinary hyphens in names such as Anne-Marie.
+        names = []
+        for item in entries:
+            name = re.split(r"[:,(–—]", item, maxsplit=1)[0].strip(" *_`")
+            name = re.split(r"\s-\s", name, maxsplit=1)[0].strip(" *_`")
+            if name:
+                names.append(name)
+        if not names:
             raise RuntimeError(
-                "Story architect CAST line must list "
-                f"{DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} distinct core characters; "
-                f"got {len(names)}. No retry was attempted."
+                "Story architect CAST line must contain at least one non-empty character name. "
+                "No retry was attempted."
             )
         normalized_names = [re.sub(r"\s+", " ", name).casefold() for name in names]
         if len(set(normalized_names)) != len(normalized_names):
@@ -531,7 +534,7 @@ class QwenDirectorPromptMixin:
             if anchors:
                 result += (
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
-                    + ", ".join(anchors[:16])
+                    + ", ".join(anchors)
                 )
         if str(story_blueprint or "").strip():
             result += (
@@ -547,7 +550,7 @@ class QwenDirectorPromptMixin:
             + " words; a paragraph under " + str(STORY_WORDS_PER_SCENE - 15) + " words is too short), about "
             + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
             + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
-            + f" Include at least {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS} named, physically active core characters; each must appear in more than one scene."
+            + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
             + " End with the actual causal resolution in scene 12 and a complete sentence. Output only those 12 story paragraphs."
             + " Do not output headings, scene labels, planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or any postscript after the final scene. Count words silently; never print a word-count report."
