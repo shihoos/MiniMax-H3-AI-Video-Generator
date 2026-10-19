@@ -78,7 +78,7 @@ director:
   prompt_limits:
     story_context_chars: 12000
     critic_story_context_chars: 3500
-    shot_story_context_chars: 3600
+    shot_story_context_chars: 3000
     shot_scene_description_chars: 1500
     shot_scene_objective_chars: 220
     shot_scene_continuity_chars: 180
