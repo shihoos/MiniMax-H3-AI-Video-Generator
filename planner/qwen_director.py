@@ -23,8 +23,6 @@ from planner.config import (
     STORY_WORDS_PER_SCENE,
     STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
-    STORY_SINGLE_THINKING_BUDGET,
-    STORY_SINGLE_MAX_TOKENS,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_MAX_TOKENS,
@@ -309,12 +307,12 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
-        # A single bounded-thinking Qwen3 call plans and writes the story; it is never
-        # retried, repaired or supplemented by another model call.
+        # Two distinct, bounded stages: Architect (thinking ON), then Author (thinking OFF).
+        # Each stage is invoked exactly once. No retries, repairs, best-of-N or rescue calls.
         temperature, top_p = self._sampling_for_mode(mode)
 
         # ----------------------------------------------------
-        # PASS 1A: single bounded-thinking call (plan + prose)
+        # PASS 1A: bounded-thinking Architect + single non-thinking Author
         # ----------------------------------------------------
 
         generated_story = False
@@ -353,13 +351,19 @@ class QwenDirector(
 
             story = ""
 
-            # ONE Qwen call: bounded thinking plans cast + beats, then the same response writes
-            # the prose. No separate architecture pass, retry, repair or rescue call exists.
-            story_system = self._story_single_call_system(mode)
+            # Architect request (thinking ON): one normalized 12-scene causal plan + CAST line.
+            story_blueprint = self._generate_story_blueprint(
+                mode,
+                user_input,
+                source_character_names=source_character_names,
+            )
+            # Author request (thinking OFF): one complete prose draft grounded in the plan.
+            story_system = self._story_text_system(mode)
             story_user = self._story_text_user(
                 mode,
                 user_input,
                 source_character_names=source_character_names,
+                story_blueprint=story_blueprint,
             )
             story, generated_story = self._generate_story_once(
                 mode,
@@ -369,7 +373,7 @@ class QwenDirector(
                 temperature=temperature,
                 top_p=top_p,
                 source_character_names=source_character_names,
-                single_call=True,
+                story_blueprint=story_blueprint,
             )
 
         # ----------------------------------------------------
@@ -1534,10 +1538,7 @@ class QwenDirector(
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
                     f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
                 ) from plan_error
-        blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
-        if not blueprint.startswith("CAST:"):
-            print("[QWEN] story_architecture=WARN no CAST line returned; writer proceeds without a cast sheet", flush=True)
-        return blueprint
+        return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
 
     def _generate_story_once(
         self,
@@ -1550,7 +1551,6 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
         story_blueprint: str | None = None,
-        single_call: bool = False,
     ) -> tuple[str, bool]:
         """Write the story once in non-thinking mode from the bounded causal blueprint.
 
@@ -1582,39 +1582,26 @@ class QwenDirector(
         )
         temperature = float(temperature)
         top_p = float(top_p)
-        if single_call:
-            thinking_budget = int(STORY_SINGLE_THINKING_BUDGET)
-            story_budget = min(int(DIRECTOR_STORY_MAX_TOKENS), int(STORY_SINGLE_MAX_TOKENS))
-            temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
-            top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
-            print(
-                f"[QWEN] story_writer=single_call thinking_budget={thinking_budget} max_tokens={story_budget} "
-                f"temperature={temperature:.2f} top_p={top_p:.2f} single_pass=true retries=0 repairs=0",
-                flush=True,
-            )
-        else:
-            thinking_budget = None
-            print(
-                f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
-                f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
-                "single_pass=true retries=0 repairs=0",
-                flush=True,
-            )
+        print(
+            f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
+            f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
+            "single_pass=true retries=0 repairs=0",
+            flush=True,
+        )
 
         try:
             raw = self._chat_text(
                 story_system,
                 story_user,
-                minimum_completion=(500 if single_call else 350),
+                minimum_completion=350,
                 minimum_output_tokens=story_min_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=not single_call,
+                disable_thinking=True,
                 seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                creative=not single_call,
-                thinking_token_budget=thinking_budget,
+                creative=True,
             )
         except StoryTruncated as exc:
             raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
@@ -4153,3 +4140,4 @@ def _h3_apply_kaggle_runtime_fix_20261010():
     QwenDirector._H3_KAGGLE_RUNTIME_FIX_20261010 = True
 
 _h3_apply_kaggle_runtime_fix_20261010()
+
