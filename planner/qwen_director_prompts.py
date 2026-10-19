@@ -415,7 +415,7 @@ class QwenDirectorPromptMixin:
             identities and voices consistent. Then output exactly {n} non-empty lines, one per scene,
             numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly 20–35 words) that
             states the visible action, the causal turn, who is physically present, and the important
-            knowledge/object state carried forward. No preamble, JSON, character roster, prose paragraphs, or commentary.
+            knowledge/object state carried forward. The CAST line is the only non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
         """).strip()
 
     def _story_blueprint_user(
