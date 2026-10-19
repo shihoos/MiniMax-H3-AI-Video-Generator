@@ -971,22 +971,51 @@ def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes
     _assert(len(calls) == 1, f"topology failure must not trigger retry, got {len(calls)} calls")
 
 
-def test_story_uses_one_bounded_plan_and_one_writer_without_retry_or_repair():
-    """Guard the normal fresh-story path against extra expensive model calls."""
+def test_story_uses_exactly_one_model_call_without_retry_or_repair():
+    """Guard the normal fresh-story path: ONE bounded-thinking call, no planner pass."""
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    generate_start = source.index("story_blueprint = self._generate_story_blueprint(", source.index("def generate("))
+    generate_start = source.index("story_system = self._story_single_call_system(mode)", source.index("def generate("))
     normal_path_end = source.index("# PASS 1B: deterministic production foundation", generate_start)
     normal_path = source[generate_start:normal_path_end]
     _assert("_maybe_plan_story_bible" not in source and "_format_story_bible" not in source,
             "the removed Story Bible must not return")
-    _assert(normal_path.count("self._generate_story_blueprint(") == 1,
-            "normal fresh generation must create one causal blueprint")
-    _assert(normal_path.count("self._generate_story_once(") == 1,
-            "normal fresh generation must make one prose-writing call")
+    _assert("_generate_story_blueprint(" not in normal_path, "normal path must not run a separate planning call")
+    _assert(normal_path.count("self._generate_story_once(") == 1 and "single_call=True" in normal_path,
+            "normal fresh generation must make exactly one single_call writer request")
+    _assert("_rescue_short_scenes" not in source, "no rescue calls may exist")
     _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
             "normal path must not retry or automatically repair the story")
     _assert("_resample_for_audit(" not in normal_path and "_pairwise_story_judgment(" not in normal_path,
             "normal path must not add challenger or judge calls")
+
+
+def test_single_call_story_uses_bounded_thinking_in_one_request():
+    from planner.qwen_director import QwenDirector
+    from planner.config import (
+        AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_SINGLE_THINKING_BUDGET,
+        STORY_SINGLE_MAX_TOKENS, DIRECTOR_STORY_THINKING_TEMPERATURE,
+    )
+    from contextlib import redirect_stdout
+    from io import StringIO
+    paras = [" ".join([f"Ines{k}", "and", "Tomas", "crossed", "the", "yard."] + [f"w{k}x{i}" for i in range(95)]) + "." for k in range(DIRECTOR_STORY_SCENES)]
+    director = QwenDirector.__new__(QwenDirector)
+    director._story_min_words = 612
+    calls = []
+    def fake_chat(*a, **k):
+        calls.append(k)
+        return "\n\n".join(paras)
+    director._chat_text = fake_chat
+    system = director._story_single_call_system(AI_STORY_MODE)
+    _assert("CAST" in system and "thinking" in system.lower(), "single-call prompt must define the planning protocol")
+    with redirect_stdout(StringIO()):
+        director._generate_story_once(AI_STORY_MODE, "premise", system, "user", temperature=0.7, top_p=0.8,
+                                      source_character_names=[], single_call=True)
+    _assert(len(calls) == 1, f"exactly one request expected, got {len(calls)}")
+    c = calls[0]
+    _assert(c.get("disable_thinking") is False and c.get("thinking_token_budget") == STORY_SINGLE_THINKING_BUDGET,
+            f"single call must enable thinking with a hard budget: {c}")
+    _assert(c.get("max_completion") == min(STORY_SINGLE_MAX_TOKENS, 6500) and c.get("temperature") == DIRECTOR_STORY_THINKING_TEMPERATURE,
+            f"single call must use the thinking sampler and configured ceiling: {c}")
 
 
 def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
@@ -1344,7 +1373,8 @@ def main():
         test_story_length_is_single_call_soft_floor_never_retried,
         test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
-        test_story_uses_one_bounded_plan_and_one_writer_without_retry_or_repair,
+        test_story_uses_exactly_one_model_call_without_retry_or_repair,
+        test_single_call_story_uses_bounded_thinking_in_one_request,
         test_topology_is_driven_by_scene_and_shot_settings,
         test_shot_batch_completion_budget_uses_runtime_topology,
         test_story_scene_coercion_keeps_quoted_dialogue_intact,
