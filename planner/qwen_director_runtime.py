@@ -1808,6 +1808,12 @@ class QwenDirectorRuntimeMixin:
         url = self._vllm_base_url() + "/chat/completions"
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
         response = self._vllm_session.post(url, json=payload, timeout=timeout)
+        if response.status_code == 400 and "min_tokens" in response.text and int(min_tokens or 0) > 0:
+            raise RuntimeError(
+                "vLLM rejected the required min_tokens writer floor; refusing to retry "
+                "without it because that could silently reintroduce under-length stories. "
+                f"Server response: {response.text[:2000]}"
+            )
         if response.status_code == 400 and any(
             key in response.text for key in ("presence_penalty", "top_k", "min_p")
         ):
