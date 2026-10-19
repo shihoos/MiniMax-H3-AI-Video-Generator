@@ -27,6 +27,7 @@ from planner.config import (
     DIRECTOR_STORY_PLAN_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_THINKING_BUDGET,
     DIRECTOR_STORY_WRITER_MAX_TOKENS,
+    DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_STORY_THINKING_TOP_K,
@@ -1553,7 +1554,7 @@ class QwenDirector(
         # The YAML global ceiling remains authoritative; the dedicated non-thinking
         # author cap keeps output bounded without spending its allowance on reasoning.
         # The runtime further clamps each request to available 8K-context headroom.
-        story_min_output_tokens = 0
+        story_min_output_tokens = DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
         story_budget = min(
             int(DIRECTOR_STORY_MAX_TOKENS),
             int(DIRECTOR_STORY_WRITER_MAX_TOKENS),
@@ -1565,7 +1566,8 @@ class QwenDirector(
             f"story_max_tokens={story_budget} temperature={temperature:.2f} "
             f"top_p={top_p:.2f} thinking=off top_k={DIRECTOR_STORY_WRITER_TOP_K} "
             f"min_p={DIRECTOR_STORY_WRITER_MIN_P:g} "
-            f"presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.2f} min_output_tokens=0 "
+            f"presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.2f} "
+            f"min_output_tokens={story_min_output_tokens} "
             "writer_passes=1 story_retries=0 story_repairs=0",
             flush=True,
         )
