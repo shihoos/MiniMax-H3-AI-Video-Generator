@@ -28,6 +28,8 @@ from planner.config import (
     STORY_WORDS_PER_SCENE,
     STORY_TARGET_WORDS,
     STORY_MIN_WORDS,
+    DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
+    DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
 )
@@ -365,43 +367,26 @@ class QwenDirectorPromptMixin:
     of roughly __PER__ words: a specific place, visible action, and a change in the
     situation. Put any spoken line, in quotation marks, inside its scene paragraph,
     never in a paragraph of its own. No headings, labels, camera directions, or
-    commentary. Output only the story."""
+    commentary. Do not append word counts, checklists, markdown separators, summaries,
+    meta-commentary, or a postscript after the final sentence. Output only the story."""
+        ensemble = f"""
+    CAST CONTRACT (mandatory): Build a recurring ensemble of {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} named core characters, including the protagonist. Qwen chooses every name, identity, relationship, and role; do not use preset names or a hard-coded cast. All core characters must physically participate in present-time scenes, take consequential actions, and appear in at least two different scenes. Each has a specific want and a different point of view. At least two separate scenes contain direct in-person dialogue between different core characters; the exchanges must change a decision, reveal a conflict, or shift trust. The plot must turn because of interactions among these people, not only because the protagonist discovers objects or reads records. A person mentioned only in backstory or visible only in a photo, label, document, recording, screen, or anonymous remote voice does NOT count as an active cast member.
+    """
         if mode == AI_STORY_MODE:
             return textwrap.dedent("""
-    You are a screenwriter writing a short film as prose.
+    You are the screenwriter expanding the supplied causal blueprint into a complete short film told as prose. The blueprint is the binding story plan: preserve its named identities, relationships, scene order, causes, object states, and intended resolution. Do not invent a different story or silently omit a planned active character. If any cast detail is underspecified, complete it consistently rather than changing the plot.
 
-    From the premise, invent the whole story yourself: who is in it and how many
-    people, their names, their relationships, what each one wants, the setting, the
-    conflict, and where it ends. Choose names and details that belong to this
-    particular place, era, and culture, and avoid the first names and images that
-    come to mind most easily. Use as many characters as the story truly needs.
-
-    Write a complete, emotionally true story. The protagonist's goal is clear early.
-    Each event follows from the one before it. One ordinary detail planted early
-    pays off in a reversal the reader did not see coming but accepts as inevitable.
-    A choice costs the protagonist something. People talk in distinct voices, and
-    what they say changes something. The ending shows the consequences instead of
-    stopping on mystery. Show action, objects, sounds, and behavior a camera can
-    film; reveal feeling through them.
-    """).strip() + "\n\n" + textwrap.dedent(fmt).strip()
+    Write a compelling ensemble thriller/drama, not a solitary discovery tour. Establish the protagonist's concrete goal in scene 1; give the opposing force and allies understandable motives; make choices create consequences; plant an ordinary detail that pays off in a fair reversal; give characters distinct voices; and resolve the central conflict visibly in scene 12. Every scene must change who has leverage, what someone knows, or what action becomes necessary. No unexplained disappearances, convenient keys without setup, or ending that merely says the truth is out while leaving the main question unanswered.
+    """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         if mode == EXPAND_USER_STORY_MODE:
             return textwrap.dedent("""
-    You are a screenwriter expanding a story into a full short film told as prose.
+    You are the screenwriter expanding the supplied story into a complete short film told as prose. Preserve established source characters, the setting, chronology, key events, any twist, and the source's outcome. Do not erase a source character or contradict an established fact.
 
-    Keep the source's characters, setting, chronology, events, and outcome, and keep
-    an existing twist. Invent whatever is missing: connective events, obstacles,
-    new people when the story needs them (you decide the final cast, their names, and
-    relationships), and consequences. Choose new names and details that belong to
-    this story's world.
+    Where the source has fewer than the required active cast, invent names and relationships for named, physically present allies or opponents whose choices materially change the protagonist's actions and the path to the existing outcome. Preserve all source-established names and relationships. Do not count a person who appears only in a message, document, memory, photo, recording, monitor, or anonymous remote voice. Any added character must serve the source conflict, have a clear motive, and appear in more than one scene. Build cause-and-effect between the existing plot points instead of padding the prose or repeating paragraphs.
 
-    Write a complete, emotionally true story. The protagonist's goal is clear early.
-    Each event follows from the one before it. One ordinary detail planted early
-    pays off in a reversal that feels inevitable in hindsight. A choice costs the
-    protagonist something. People talk in distinct voices, and what they say changes
-    something. The ending shows the consequences. Show action, objects, sounds, and
-    behavior a camera can film; reveal feeling through them.
-    """).strip() + "\n\n" + textwrap.dedent(fmt).strip()
+    The protagonist's goal must be clear early. Use visible actions and decisions; plant a detail that pays off; make at least two in-person dialogue exchanges change the conflict or trust between characters; and resolve the main question in the final scene consistently with the source outcome.
+    """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         raise ValueError("Preserve Story does not use a story-text pass.")
 
@@ -409,11 +394,9 @@ class QwenDirectorPromptMixin:
         """Build a compact causal beat sheet, not a Story Bible or alternate story."""
         n = int(DIRECTOR_STORY_SCENES)
         task_rule = (
-            "Invent the cast, names, relationships, setting, conflict, and ending from the premise. "
-            "Qwen owns all creative identity decisions; do not impose a fixed cast size."
+            f"Invent {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} recurring named, physically present core characters, including the protagonist. Qwen chooses all names and roles. Ensure each core character materially acts in at least two scenes and at least two beats contain face-to-face dialogue or conflict between named characters. Do not count labels, records, memories, screens, recordings, or anonymous remote voices as active people."
             if mode == AI_STORY_MODE
-            else "Preserve the source's established characters, setting, chronology, key events, and outcome. "
-                 "Keep any existing twist; add only connective causality needed to film it."
+            else f"Preserve established source characters, setting, chronology, key events, twists, and outcome, while ensuring {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}–{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS} named people physically participate in present-time events. If the source has fewer, add named allies/opponents who materially affect the path to the same outcome; retain source anchors. Ensure core characters act across multiple beats and at least two beats include direct interpersonal conflict or dialogue."
         )
         return textwrap.dedent(f"""            You are the story architect for a short film, not the prose writer.
             Produce a concise, causally complete blueprint of exactly {n} scenes for the source premise.
@@ -528,7 +511,16 @@ class QwenDirectorPromptMixin:
                 + "\n\nExpand every beat into vivid, natural filmable prose. Preserve its cause-and-effect, "
                   "character knowledge, and object/location continuity. Do not explain the blueprint or add headings."
             )
-        result += "\n\nReturn only the completed story: " + str(DIRECTOR_STORY_SCENES) + " scene paragraphs, about " + str(STORY_TARGET_WORDS) + " words in total, never under " + str(STORY_MIN_WORDS) + " words, ending on a complete sentence with the resolution."
+        result += (
+            "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(DIRECTOR_STORY_SCENES)
+            + " scene paragraphs, one for each beat in order, each about " + str(STORY_WORDS_PER_SCENE)
+            + " words (roughly 75–95 words), about " + str(STORY_TARGET_WORDS)
+            + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
+            + f" Include at least {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS} named, physically active core characters; each must appear in more than one scene."
+            + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
+            + " End with the actual causal resolution in scene 12 and a complete sentence. Output only those 12 story paragraphs."
+            + " Do not output headings, scene labels, planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or any postscript after the final scene. Count words silently; never print a word-count report."
+        )
         return result
 
 
@@ -642,7 +634,7 @@ class QwenDirectorPromptMixin:
 
     Read the COMPLETE final story from its first paragraph to its last. Determine the actual production cast from the story itself. `candidates` is the set of people who physically participate in present-time story events: people who act, speak in person, oppose/help another character, touch or rescue someone, wake up and interact, enter or leave, or otherwise take part in an event shown happening now. Include a person first introduced as missing or in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
 
-    Review every paragraph for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Qwen alone decides the identities and number of production characters. There is no minimum cast target beyond the protagonist required for a story, no preference for one-person or multi-person stories, and no cast-count quota. Return the actual cast that the final prose depicts. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
+    Review every paragraph for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Do not bias toward a protagonist-only roster or stop after the first candidate: include every distinct person who actually acts or speaks in person in the present-time story. There is no cast-count quota during extraction; classify actual participants without omissions or additions. Return the actual cast that the final prose depicts. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. Do not use a deterministic hint list or a planning cast as a separate source of truth. The `candidates` array itself is your final cast decision; no downstream step will add names from hints, planned cast, or dialogue speakers. A dialogue speaker must therefore also be represented in `candidates` when that person physically participates in the story.
 
