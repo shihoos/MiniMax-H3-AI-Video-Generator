@@ -497,7 +497,7 @@ class QwenDirectorPromptMixin:
         if not cast_line:
             raise RuntimeError("Story architect omitted the required CAST line. No retry was attempted.")
         entries = [item.strip() for item in cast_line.split(":", 1)[1].split("|") if item.strip()]
-        names = [re.split(r"[(:,–—-]", item, maxsplit=1)[0].strip(" *_`") for item in entries]
+        names = [item.split("(", 1)[0].strip(" *_`") for item in entries]
         names = [name for name in names if name]
         if not (DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS <= len(names) <= DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS):
             raise RuntimeError(
