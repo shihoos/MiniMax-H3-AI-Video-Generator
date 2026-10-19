@@ -10,6 +10,8 @@ from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
+    DIRECTOR_SHOT_TEMPERATURE,
+    DIRECTOR_SHOT_TOP_P,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_STORY_WRITER_TEMPERATURE,
@@ -547,10 +549,10 @@ class QwenDirectorPromptMixin:
     def _shot_sampling(
         self,
     ) -> tuple[float, float]:
-
+        """Return the shot-batch sampler configured in runtime_versions.yaml."""
         return (
-            0.60,
-            0.90,
+            float(DIRECTOR_SHOT_TEMPERATURE),
+            float(DIRECTOR_SHOT_TOP_P),
         )
 
     @staticmethod
