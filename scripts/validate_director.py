@@ -700,16 +700,22 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert(f"exactly {DIRECTOR_STORY_SCENES} paragraphs" in text, f"{mode}: scene count missing from prompt")
         low = text.lower()
         _assert("names" in low and "relationships" in low, f"{mode}: Qwen must own cast, names and relationships")
-        from planner.config import DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS, DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS
-        _assert(f"{DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}" in text and f"{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS}" in text,
-                f"{mode}: cast floor/target must be sourced from runtime manifest")
-        _assert("physically" in low and "at least two" in low and "dialogue" in low,
-                f"{mode}: prompt must require active ensemble interactions")
+        from planner.config import DIRECTOR_STORY_CAST_SIZE_POLICY, RUNTIME
+        _assert(DIRECTOR_STORY_CAST_SIZE_POLICY == "plot_driven"
+                and RUNTIME["director"]["story_contract"].get("cast_size_policy") == "plot_driven",
+                f"{mode}: cast-size policy must be plot-driven and runtime-authoritative")
+        _assert("no fixed minimum" in low and "no fixed" in low and "maximum" in low,
+                f"{mode}: prompt must explicitly reject a fixed numeric cast quota")
+        _assert("physically" in low and "dialogue" in low,
+                f"{mode}: prompt must require active character participation and interactions")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
         blueprint = q._story_blueprint_system(mode).lower()
-        _assert(("physically present" in blueprint or "physically participate" in blueprint) and "at least two beats" in blueprint,
-                f"{mode}: architecture prompt must seed recurring active characters and interactions")
+        _assert("no fixed minimum" in blueprint and "maximum" in blueprint,
+                f"{mode}: Architect must use a plot-driven, unbounded cast size")
+        _assert(("physically present" in blueprint or "physically active" in blueprint)
+                and "at least two beats" in blueprint,
+                f"{mode}: architecture prompt must seed active characters and interactions")
 
 
 def test_shot_sampler_uses_runtime_manifest_values():
@@ -841,20 +847,50 @@ def test_story_dialogue_surface_does_not_confuse_labels_with_speech():
     ), "an anonymous voice must not be attributed to the protagonist")
 
 
-def test_generated_story_cast_contract_is_enforced_before_shot_planning():
+def test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE, DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS, RUNTIME
-    single = [{"name": "Elena Voss"}]
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE, DIRECTOR_STORY_CAST_SIZE_POLICY, RUNTIME
+
+    contract = RUNTIME["director"]["story_contract"]
+    _assert(DIRECTOR_STORY_CAST_SIZE_POLICY == "plot_driven", "cast policy must be plot-driven")
+    _assert("minimum_active_characters" not in contract and "target_active_characters" not in contract,
+            "runtime contract must not define a fixed cast minimum or target")
+
+    # Small and large casts are both structurally valid; no artificial 3–4-person cap.
+    for size in (1, 2, 3, 4, 7, 12, 24):
+        cast = [{"name": f"Character {index}"} for index in range(1, size + 1)]
+        for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
+            QwenDirector._validate_generated_story_cast_size(mode, cast)
+
     try:
-        QwenDirector._validate_generated_story_cast_size(AI_STORY_MODE, single)
+        QwenDirector._validate_generated_story_cast_size(AI_STORY_MODE, [])
     except RuntimeError as exc:
-        _assert("no shot batches were launched" in str(exc).lower(), f"wrong single-cast error: {exc}")
+        _assert("non-empty cast" in str(exc).lower(), f"wrong empty-cast error: {exc}")
     else:
-        raise AssertionError("one-person generated story must fail before shot planning")
-    ensemble = [{"name": "Elena Voss"}, {"name": "Dr. Renn"}, {"name": "Mara"}]
-    QwenDirector._validate_generated_story_cast_size(EXPAND_USER_STORY_MODE, ensemble)
-    _assert(RUNTIME["director"]["story_contract"]["minimum_active_characters"] == DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS >= 3,
-            "minimum active-cast contract must be defined by runtime_versions.yaml")
+        raise AssertionError("an empty cast must fail because production cannot plan with no characters")
+
+
+def test_story_blueprint_normalization_accepts_dynamic_cast_sizes_and_hyphenated_names():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    director = QwenDirector.__new__(QwenDirector)
+    beats = "\n".join(
+        f"SCENE {i:02d}: Beat {i} changes the story and carries the state forward."
+        for i in range(1, DIRECTOR_STORY_SCENES + 1)
+    )
+    for size in (1, 2, 4, 9, 18):
+        entries = [f"Anne-Marie {i} (role {i}; distinct motive)" for i in range(1, size + 1)]
+        raw = "CAST: " + " | ".join(entries) + "\n" + beats
+        normalized = director._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+        _assert(normalized.splitlines()[0].count("|") == size - 1,
+                f"CAST normalization lost characters for dynamic cast size {size}")
+    duplicate = "CAST: Anne-Marie (protagonist) | Anne-Marie (duplicate)\n" + beats
+    try:
+        director._normalize_story_blueprint(duplicate, DIRECTOR_STORY_SCENES)
+    except RuntimeError as exc:
+        _assert("duplicate names" in str(exc).lower(), f"wrong duplicate-cast error: {exc}")
+    else:
+        raise AssertionError("duplicate character names must remain invalid")
 
 
 def test_story_blueprint_normalization_requires_ordered_scene_beats():
@@ -870,22 +906,6 @@ def test_story_blueprint_normalization_requires_ordered_scene_beats():
     normalized = director._normalize_story_blueprint(source, DIRECTOR_STORY_SCENES)
     lines = normalized.splitlines()
     _assert(len(lines) == DIRECTOR_STORY_SCENES + 1, "blueprint must have a CAST line plus one line per scene")
-    hyphenated = (
-        "CAST: Anne-Marie O'Neil (protagonist; protect the archive; direct) | "
-        "Tomas Reed (ally; expose the theft; blunt) | "
-        "Mara Quinn (opponent; protect her family; guarded)\n" + beats
-    )
-    hyphenated_normalized = director._normalize_story_blueprint(hyphenated, DIRECTOR_STORY_SCENES)
-    _assert(
-        QwenDirector._blueprint_cast_names(hyphenated_normalized)
-        == ["Anne-Marie O'Neil", "Tomas Reed", "Mara Quinn"],
-        "CAST parsing must preserve hyphenated and apostrophe-containing character names",
-    )
-    source_code = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    _assert(
-        "_extract_story_spoken_texts" not in source_code,
-        "unused legacy spoken-text compatibility helper must not remain",
-    )
     _assert(lines[0].startswith("CAST:") and lines[1].startswith("SCENE 01:")
             and lines[-1].startswith(f"SCENE {DIRECTOR_STORY_SCENES:02d}:"),
             "CAST must lead and scene numbering must be normalized and ordered")
@@ -1427,7 +1447,8 @@ def main():
         test_story_writer_minimum_output_tokens_uses_runtime_manifest,
         test_story_tail_cleanup_removes_metadata_and_duplicate_blocks,
         test_story_dialogue_surface_does_not_confuse_labels_with_speech,
-        test_generated_story_cast_contract_is_enforced_before_shot_planning,
+        test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
+        test_story_blueprint_normalization_accepts_dynamic_cast_sizes_and_hyphenated_names,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_length_soft_floor_uses_one_author_call_without_retry,
