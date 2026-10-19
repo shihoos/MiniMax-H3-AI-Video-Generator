@@ -123,67 +123,59 @@ DIRECTOR_MODEL_PATH = Path(
 # Kept as compatibility aliases for existing diagnostics; the Director runtime
 # now loads a sharded AWQ checkpoint directory rather than a GGUF file.
 
-DIRECTOR_N_CTX = int(
-    os.getenv(
-        "H3_DIRECTOR_N_CTX",
-        str(RUNTIME["director"].get("context", 8192)),
-    )
-)
+# Authoritative Director generation defaults and context ceiling. These are
+# pinned to the runtime manifest; environment variables must not silently
+# change completion/context budgets or sampling behind a production run.
+DIRECTOR_N_CTX = int(RUNTIME["director"]["context"])
+DIRECTOR_MAX_TOKENS = int(RUNTIME["director"]["max_tokens"])
+DIRECTOR_TEMPERATURE = float(RUNTIME["director"]["temperature"])
+DIRECTOR_TOP_P = float(RUNTIME["director"]["top_p"])
 
-DIRECTOR_MAX_TOKENS = int(
-    os.getenv(
-        "H3_DIRECTOR_MAX_TOKENS",
-        str(RUNTIME["director"].get("max_tokens", 7000)),
-    )
-)
+# Story generation configuration is owned by configs/runtime_versions.yaml.
+# Do not read story sampler/budget/topology overrides from environment variables:
+# runtime_versions.yaml is the single authoritative production source of truth.
+_story_sampling = RUNTIME["director"]["story_sampling"]
+_story_thinking_sampling = _story_sampling["thinking"]
+_story_writing_sampling = _story_sampling["writing"]
+_story_architecture = RUNTIME["director"]["story_architecture"]
+_story_contract = RUNTIME["director"]["story_contract"]
 
-DIRECTOR_TEMPERATURE = float(
-    os.getenv(
-        "H3_DIRECTOR_TEMPERATURE",
-        str(RUNTIME["director"].get("temperature", 0.2)),
-    )
-)
+DIRECTOR_STORY_MAX_TOKENS = int(RUNTIME["director"]["story_max_tokens"])
+DIRECTOR_STORY_PLAN_MAX_TOKENS = int(_story_architecture["max_tokens"])
+DIRECTOR_STORY_PLAN_THINKING_BUDGET = int(_story_architecture["thinking_token_budget"])
+DIRECTOR_STORY_WRITER_MAX_TOKENS = int(_story_writing_sampling["max_tokens"])
+DIRECTOR_STORY_THINKING_TEMPERATURE = float(_story_thinking_sampling["temperature"])
+DIRECTOR_STORY_THINKING_TOP_P = float(_story_thinking_sampling["top_p"])
+DIRECTOR_STORY_THINKING_TOP_K = int(_story_thinking_sampling["top_k"])
+DIRECTOR_STORY_THINKING_MIN_P = float(_story_thinking_sampling["min_p"])
+DIRECTOR_STORY_WRITER_TEMPERATURE = float(_story_writing_sampling["temperature"])
+DIRECTOR_STORY_WRITER_TOP_P = float(_story_writing_sampling["top_p"])
+DIRECTOR_STORY_WRITER_TOP_K = int(_story_writing_sampling["top_k"])
+DIRECTOR_STORY_WRITER_MIN_P = float(_story_writing_sampling["min_p"])
+DIRECTOR_STORY_PRESENCE_PENALTY = float(_story_writing_sampling["presence_penalty"])
 
-DIRECTOR_TOP_P = float(
-    os.getenv(
-        "H3_DIRECTOR_TOP_P",
-        str(RUNTIME["director"].get("top_p", 0.85)),
-    )
-)
+# Story length and scene topology are also runtime-manifest values, not prompts
+# or environment defaults. The target must agree with the per-scene contract.
+DIRECTOR_STORY_SCENES = int(_story_contract["scene_count"])
+DIRECTOR_SHOTS_PER_SCENE = int(_story_contract["shots_per_scene"])
+STORY_WORDS_PER_SCENE = int(_story_contract["words_per_scene"])
+STORY_TARGET_WORDS = int(_story_contract["target_words"])
+STORY_MIN_WORDS = int(_story_contract["minimum_words"])
 
-# Optional Qwen3 thinking-mode sampler used only by explicit runtime warm-up or
-# diagnostics. Normal prose writing uses the September 25 non-thinking profile.
-# Keep these sampler extras separate from generic Director JSON/shot defaults.
-_story_sampling = dict(RUNTIME["director"].get("story_sampling", {}) or {})
-_story_thinking_sampling = dict(_story_sampling.get("thinking", {}) or {})
-
-DIRECTOR_STORY_MAX_TOKENS = int(os.getenv(
-    "H3_DIRECTOR_STORY_MAX_TOKENS",
-    str(RUNTIME["director"].get("story_max_tokens", 2200)),
-))
 if DIRECTOR_STORY_MAX_TOKENS < 1:
-    raise RuntimeError("Story max tokens must be positive.")
-
-DIRECTOR_STORY_THINKING_TEMPERATURE = float(os.getenv(
-    "H3_DIRECTOR_STORY_TEMPERATURE",
-    str(_story_thinking_sampling["temperature"]),
-))
-DIRECTOR_STORY_THINKING_TOP_P = float(os.getenv(
-    "H3_DIRECTOR_STORY_TOP_P",
-    str(_story_thinking_sampling["top_p"]),
-))
-DIRECTOR_STORY_THINKING_TOP_K = int(os.getenv(
-    "H3_DIRECTOR_STORY_TOP_K",
-    str(_story_thinking_sampling["top_k"]),
-))
-DIRECTOR_STORY_THINKING_MIN_P = float(os.getenv(
-    "H3_DIRECTOR_STORY_MIN_P",
-    str(_story_thinking_sampling["min_p"]),
-))
-DIRECTOR_STORY_PRESENCE_PENALTY = float(os.getenv(
-    "H3_DIRECTOR_STORY_PRESENCE_PENALTY",
-    str(_story_thinking_sampling["presence_penalty"]),
-))
+    raise RuntimeError("runtime_versions.yaml director.story_max_tokens must be positive.")
+if DIRECTOR_STORY_PLAN_MAX_TOKENS < 1 or DIRECTOR_STORY_PLAN_THINKING_BUDGET < 1024:
+    raise RuntimeError("runtime_versions.yaml story planning ceiling must be positive and thinking budget must be >= 1024.")
+if DIRECTOR_STORY_PLAN_THINKING_BUDGET >= DIRECTOR_STORY_PLAN_MAX_TOKENS:
+    raise RuntimeError("runtime_versions.yaml story thinking budget must be below the planning completion ceiling.")
+if DIRECTOR_STORY_WRITER_MAX_TOKENS < 1:
+    raise RuntimeError("runtime_versions.yaml story writing ceiling must be positive.")
+if DIRECTOR_STORY_SCENES < 4 or DIRECTOR_SHOTS_PER_SCENE < 1 or STORY_WORDS_PER_SCENE < 1:
+    raise RuntimeError("runtime_versions.yaml story_contract topology values are invalid.")
+if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
+    raise RuntimeError("runtime_versions.yaml story_contract target_words must equal scene_count * words_per_scene.")
+if not 1 <= STORY_MIN_WORDS <= STORY_TARGET_WORDS:
+    raise RuntimeError("runtime_versions.yaml story_contract minimum_words must be between 1 and target_words.")
 
 if not 0.0 <= DIRECTOR_STORY_THINKING_TEMPERATURE <= 2.0:
     raise RuntimeError("Story thinking temperature must be in [0, 2].")
@@ -193,6 +185,14 @@ if DIRECTOR_STORY_THINKING_TOP_K < 1:
     raise RuntimeError("Story thinking top_k must be >= 1.")
 if not 0.0 <= DIRECTOR_STORY_THINKING_MIN_P <= 1.0:
     raise RuntimeError("Story thinking min_p must be in [0, 1].")
+if not 0.0 <= DIRECTOR_STORY_WRITER_TEMPERATURE <= 2.0:
+    raise RuntimeError("Story writer temperature must be in [0, 2].")
+if not 0.0 < DIRECTOR_STORY_WRITER_TOP_P <= 1.0:
+    raise RuntimeError("Story writer top_p must be in (0, 1].")
+if DIRECTOR_STORY_WRITER_TOP_K < 1:
+    raise RuntimeError("Story writer top_k must be >= 1.")
+if not 0.0 <= DIRECTOR_STORY_WRITER_MIN_P <= 1.0:
+    raise RuntimeError("Story writer min_p must be in [0, 1].")
 if not -2.0 <= DIRECTOR_STORY_PRESENCE_PENALTY <= 2.0:
     raise RuntimeError("Story presence_penalty must be in [-2, 2].")
 
@@ -210,12 +210,7 @@ DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION = float(
     )
 )
 
-DIRECTOR_VLLM_MAX_MODEL_LEN = int(
-    os.getenv(
-        "H3_DIRECTOR_VLLM_MAX_MODEL_LEN",
-        str(RUNTIME["director"].get("context", 8192)),
-    )
-)
+DIRECTOR_VLLM_MAX_MODEL_LEN = int(RUNTIME["director"]["context"])
 
 DIRECTOR_VLLM_HOST = os.getenv(
     "H3_DIRECTOR_VLLM_HOST",
@@ -375,72 +370,18 @@ DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE = _resolve_bool_env(
     False,
 )
 
-# Locked Director topology. Keep this centralized so prompt grammar, Director
-# batching, and validation cannot silently drift apart.
-# Target film length = DIRECTOR_STORY_SCENES x DIRECTOR_SHOTS_PER_SCENE x (frames_per_shot / fps).
-# Defaults: 12 scenes x 3 shots x 124/24 s = 36 shots, about 3.1 minutes.
-DIRECTOR_SHOTS_PER_SCENE = int(os.getenv("H3_DIRECTOR_SHOTS_PER_SCENE", "3"))
-DIRECTOR_STORY_SCENES = int(os.getenv("H3_DIRECTOR_STORY_SCENES", "12"))
-if DIRECTOR_STORY_SCENES < 4:
-    raise RuntimeError("H3_DIRECTOR_STORY_SCENES must be >= 4.")
-# Rough words per scene paragraph (about 3 shots of ~5 s each). Used for prompt targets only.
-STORY_WORDS_PER_SCENE = int(os.getenv("H3_STORY_WORDS_PER_SCENE", "85"))
+# Story topology and length constants are defined above from runtime_versions.yaml.
 
-# Quality-safe Qwen prompt controls.
-# These settings reduce repeated prompt text only; they do NOT lower the
-# story or shot completion token budgets.
-DIRECTOR_SHOT_STORY_CONTEXT_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_SHOT_STORY_CONTEXT_CHARS",
-        "3600",
-    )
-)
-
-DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS",
-        "1500",
-    )
-)
-
-DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS",
-        "220",
-    )
-)
-
-DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS",
-        "180",
-    )
-)
-
-DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS",
-        "180",
-    )
-)
-
-# Semantic story-context budgets shared by character/entity extraction,
-# dialogue validation, and critic payload construction. Keep these bounded
-# for the 8K Director context window; callers should prefer complete
-# sentence boundaries where possible.
-DIRECTOR_STORY_CONTEXT_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_STORY_CONTEXT_CHARS",
-        "12000",
-    )
-)
-
-DIRECTOR_CRITIC_STORY_CONTEXT_CHARS = int(
-    os.getenv(
-        "H3_DIRECTOR_CRITIC_STORY_CONTEXT_CHARS",
-        "3500",
-    )
-)
+# Prompt-compaction limits are production behavior, so they are also owned by
+# runtime_versions.yaml instead of environment defaults in this module.
+_prompt_limits = RUNTIME["director"]["prompt_limits"]
+DIRECTOR_SHOT_STORY_CONTEXT_CHARS = int(_prompt_limits["shot_story_context_chars"])
+DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS = int(_prompt_limits["shot_scene_description_chars"])
+DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS = int(_prompt_limits["shot_scene_objective_chars"])
+DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS = int(_prompt_limits["shot_scene_continuity_chars"])
+DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS = int(_prompt_limits["shot_scene_atmosphere_chars"])
+DIRECTOR_STORY_CONTEXT_CHARS = int(_prompt_limits["story_context_chars"])
+DIRECTOR_CRITIC_STORY_CONTEXT_CHARS = int(_prompt_limits["critic_story_context_chars"])
 
 
 _configured_input_root = os.getenv("H3_INPUT_ROOT", "").strip()
@@ -488,12 +429,7 @@ H3_HEIGHT = int(
     )
 )
 
-H3_FRAMES_PER_SHOT = int(
-    os.getenv(
-        "H3_FRAMES_PER_SHOT",
-        str(RUNTIME["generation"]["frames_per_shot"]),
-    )
-)
+H3_FRAMES_PER_SHOT = int(RUNTIME["generation"]["frames_per_shot"])
 
 H3_STEPS = int(RUNTIME["generation"]["normal_steps"])
 TURBO_STEPS = int(RUNTIME["generation"]["turbo_steps"])
