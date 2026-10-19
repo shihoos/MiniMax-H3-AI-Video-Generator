@@ -60,10 +60,18 @@ class DialogueTimeline:
             cls.MIN_REQUESTED_SECONDS,
             min(cls.MAX_REQUESTED_SECONDS, float(requested_seconds or 0.0)),
         )
-        requested_frames = max(5, round(seconds * cls.FPS))
-        n = max(0, (requested_frames - 5 + 16) // 17)
-        frames = 17 * n + 5
-        return max(cls.MIN_FRAMES, min(cls.MAX_FRAMES, frames))
+        requested_frames = seconds * cls.FPS
+        # duration_seconds is a target, not a lower-bound requirement. Select the
+        # nearest legal H3 frame count so a 5.2 s target resolves to 124 frames
+        # (5.1667 s), instead of jumping to 141 frames (5.875 s). DialogueTimeline
+        # separately uses _minimum_h3_duration_for_required_seconds() to round UP
+        # when exact dialogue runtime must fit; that safety rule is unchanged.
+        first_n = max(0, math.ceil((cls.MIN_FRAMES - 5) / 17.0))
+        last_n = (cls.MAX_FRAMES - 5) // 17
+        legal_frames = [17 * n + 5 for n in range(first_n, last_n + 1)]
+        if not legal_frames:
+            raise RuntimeError("Configured H3 frame bounds contain no legal 17*n+5 frame count.")
+        return min(legal_frames, key=lambda frames: (abs(frames - requested_frames), -frames))
 
     @classmethod
     def h3_effective_duration_seconds(cls, requested_seconds: float) -> float:
