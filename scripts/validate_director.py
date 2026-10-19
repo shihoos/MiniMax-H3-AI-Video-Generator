@@ -1086,7 +1086,7 @@ def test_story_contract_comes_only_from_runtime_manifest():
 
     runtime_text = (ROOT / "configs/runtime_versions.yaml").read_text(encoding="utf-8")
     config_text = (ROOT / "planner/config.py").read_text(encoding="utf-8")
-    _assert("max_tokens: 3600" in runtime_text, "runtime YAML must own the writer cap")
+    _assert("max_tokens: 3000" in runtime_text, "runtime YAML must own the writer cap")
     _assert("scene_count: 12" in runtime_text and "target_words: 1020" in runtime_text
             and "minimum_words: 816" in runtime_text,
             "runtime YAML must own story topology and word-length contract")
@@ -1110,7 +1110,7 @@ def test_story_contract_comes_only_from_runtime_manifest():
     ):
         _assert(env_name not in config_text,
                 f"story production config must not read environment override {env_name}")
-    _assert(config.DIRECTOR_STORY_WRITER_MAX_TOKENS == 3600, "writer cap source mismatch")
+    _assert(config.DIRECTOR_STORY_WRITER_MAX_TOKENS == 3000, "writer cap source mismatch")
     _assert(config.DIRECTOR_N_CTX == 8192 and config.DIRECTOR_VLLM_MAX_MODEL_LEN == 8192
             and config.DIRECTOR_MAX_TOKENS == 7000,
             "runtime YAML must own Director context and global token ceiling")
@@ -1154,7 +1154,7 @@ def test_story_thinking_and_writing_samplers_reach_vllm_payload():
         messages=[{"role": "user", "content": "Test literary story writer."}],
         temperature=0.7,
         top_p=0.8,
-        max_tokens=3600,
+        max_tokens=3000,
         enable_thinking=False,
         creative=True,
     )
@@ -1179,8 +1179,8 @@ def test_story_thinking_and_writing_samplers_reach_vllm_payload():
     _assert(write_payload["presence_penalty"] == DIRECTOR_STORY_PRESENCE_PENALTY == 1.5,
             f"AWQ prose writer should retain Qwen's official quantized-model penalty default: {write_payload}")
     from planner.config import DIRECTOR_STORY_WRITER_MAX_TOKENS
-    _assert(DIRECTOR_STORY_WRITER_MAX_TOKENS == 3600,
-            "writer completion ceiling must come from runtime_versions.yaml and equal 3600")
+    _assert(DIRECTOR_STORY_WRITER_MAX_TOKENS == 3000,
+            "writer completion ceiling must come from runtime_versions.yaml and equal 3000")
 
 
 def test_story_blueprint_normalization_requires_ordered_scene_beats():
@@ -1348,7 +1348,7 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
     _assert(calls[0].get("temperature") == DIRECTOR_STORY_WRITER_TEMPERATURE == 0.7
             and calls[0].get("top_p") == DIRECTOR_STORY_WRITER_TOP_P == 0.8,
             f"prose writer must use the Qwen3 non-thinking sampler: {calls[0]}")
-    _assert(calls[0].get("max_completion") == min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS) == 3600,
+    _assert(calls[0].get("max_completion") == min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS) == 3000,
             f"prose writer must use its dedicated ceiling: {calls[0]}")
     _assert(STORY_MIN_WORDS == int(DIRECTOR_STORY_SCENES * 85 * 0.8) == 816,
             f"story minimum must match prompt's 80% target: {STORY_MIN_WORDS}")
