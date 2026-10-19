@@ -136,6 +136,7 @@ DIRECTOR_TOP_P = float(RUNTIME["director"]["top_p"])
 # runtime_versions.yaml is the single authoritative production source of truth.
 _story_sampling = RUNTIME["director"]["story_sampling"]
 _story_thinking_sampling = _story_sampling["thinking"]
+_story_shot_sampling = _story_sampling["shots"]
 _story_writing_sampling = _story_sampling["writing"]
 _story_architecture = RUNTIME["director"]["story_architecture"]
 _story_contract = RUNTIME["director"]["story_contract"]
@@ -144,6 +145,8 @@ DIRECTOR_STORY_MAX_TOKENS = int(RUNTIME["director"]["story_max_tokens"])
 DIRECTOR_STORY_PLAN_MAX_TOKENS = int(_story_architecture["max_tokens"])
 DIRECTOR_STORY_PLAN_THINKING_BUDGET = int(_story_architecture["thinking_token_budget"])
 DIRECTOR_STORY_WRITER_MAX_TOKENS = int(_story_writing_sampling["max_tokens"])
+DIRECTOR_SHOT_TEMPERATURE = float(_story_shot_sampling["temperature"])
+DIRECTOR_SHOT_TOP_P = float(_story_shot_sampling["top_p"])
 DIRECTOR_STORY_THINKING_TEMPERATURE = float(_story_thinking_sampling["temperature"])
 DIRECTOR_STORY_THINKING_TOP_P = float(_story_thinking_sampling["top_p"])
 DIRECTOR_STORY_THINKING_TOP_K = int(_story_thinking_sampling["top_k"])
@@ -170,6 +173,10 @@ if DIRECTOR_STORY_PLAN_THINKING_BUDGET >= DIRECTOR_STORY_PLAN_MAX_TOKENS:
     raise RuntimeError("runtime_versions.yaml story thinking budget must be below the planning completion ceiling.")
 if DIRECTOR_STORY_WRITER_MAX_TOKENS < 1:
     raise RuntimeError("runtime_versions.yaml story writing ceiling must be positive.")
+if not 0.0 <= DIRECTOR_SHOT_TEMPERATURE <= 2.0:
+    raise RuntimeError("Shot temperature must be in [0, 2].")
+if not 0.0 < DIRECTOR_SHOT_TOP_P <= 1.0:
+    raise RuntimeError("Shot top_p must be in (0, 1].")
 if DIRECTOR_STORY_SCENES < 4 or DIRECTOR_SHOTS_PER_SCENE < 1 or STORY_WORDS_PER_SCENE < 1:
     raise RuntimeError("runtime_versions.yaml story_contract topology values are invalid.")
 if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
