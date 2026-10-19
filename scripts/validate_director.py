@@ -704,6 +704,24 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must not impose a cast quota")
 
 
+def test_shot_sampler_uses_runtime_manifest_values():
+    from planner.config import (
+        DIRECTOR_SHOT_TEMPERATURE,
+        DIRECTOR_SHOT_TOP_P,
+        RUNTIME,
+    )
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+
+    configured = RUNTIME["director"]["story_sampling"]["shots"]
+    _assert(DIRECTOR_SHOT_TEMPERATURE == float(configured["temperature"]),
+            "shot temperature must come from runtime_versions.yaml")
+    _assert(DIRECTOR_SHOT_TOP_P == float(configured["top_p"]),
+            "shot top_p must come from runtime_versions.yaml")
+    sampler = QwenDirectorPromptMixin()
+    _assert(sampler._shot_sampling() == (DIRECTOR_SHOT_TEMPERATURE, DIRECTOR_SHOT_TOP_P),
+            "shot sampler must return the YAML-resolved values")
+
+
 def test_story_thinking_and_writing_samplers_reach_vllm_payload():
     from planner.qwen_director import QwenDirector
     from planner.config import DIRECTOR_STORY_PRESENCE_PENALTY
@@ -1219,6 +1237,7 @@ def main():
         # Story pipeline
         test_story_prompt_is_open_cast_and_fully_filled,
         test_story_thinking_and_writing_samplers_reach_vllm_payload,
+        test_shot_sampler_uses_runtime_manifest_values,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_short_story_below_prompt_minimum_fails_without_retry,
