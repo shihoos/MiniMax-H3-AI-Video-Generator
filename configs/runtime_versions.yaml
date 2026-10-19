@@ -72,6 +72,7 @@ director:
       min_p: 0.0
       presence_penalty: 1.5
       max_tokens: 3000
+      minimum_output_tokens: 1350
   story_contract:
     scene_count: 12
     shots_per_scene: 3
