@@ -700,8 +700,16 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert(f"exactly {DIRECTOR_STORY_SCENES} paragraphs" in text, f"{mode}: scene count missing from prompt")
         low = text.lower()
         _assert("names" in low and "relationships" in low, f"{mode}: Qwen must own cast, names and relationships")
-        _assert(not re.search(r"(at least|exactly|minimum of)\s+(two|three|four|\d)\s+(named\s+)?characters", low),
-                f"{mode}: prompt must not impose a cast quota")
+        from planner.config import DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS, DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS
+        _assert(f"{DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}" in text and f"{DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS}" in text,
+                f"{mode}: cast floor/target must be sourced from runtime manifest")
+        _assert("physically" in low and "at least two" in low and "dialogue" in low,
+                f"{mode}: prompt must require active ensemble interactions")
+        _assert("word counts" in low and "postscript" in low,
+                f"{mode}: prompt must forbid count reports and output after the story")
+        blueprint = q._story_blueprint_system(mode).lower()
+        _assert(("physically present" in blueprint or "physically participate" in blueprint) and "at least two beats" in blueprint,
+                f"{mode}: architecture prompt must seed recurring active characters and interactions")
 
 
 def test_shot_sampler_uses_runtime_manifest_values():
@@ -733,11 +741,11 @@ def test_story_writer_minimum_output_tokens_uses_runtime_manifest():
     writing = RUNTIME["director"]["story_sampling"]["writing"]
     _assert(
         DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
-        == int(writing["minimum_output_tokens"]) == 1350,
-        "writer minimum-output floor must be owned by runtime_versions.yaml",
+        == int(writing["minimum_output_tokens"]) == 0,
+        "writer minimum-output floor must remain disabled; min_tokens forces EOS suppression, not useful prose",
     )
     _assert(
-        1 <= DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
+        0 <= DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
         <= min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS),
         "writer minimum-output floor must fit within the effective completion ceiling",
     )
@@ -798,8 +806,55 @@ def test_story_thinking_and_writing_samplers_reach_vllm_payload():
             f"Qwen3 non-thinking sampler not passed through: {write_payload}")
     _assert(write_payload["presence_penalty"] == DIRECTOR_STORY_PRESENCE_PENALTY == 1.5,
             f"AWQ prose writer should retain Qwen's official quantized-model penalty default: {write_payload}")
-    _assert(write_payload["min_tokens"] == DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-            f"writer minimum-output floor must reach the vLLM payload: {write_payload}")
+    _assert("min_tokens" not in write_payload,
+            f"zero writer minimum-output floor must be omitted from the vLLM payload: {write_payload}")
+
+
+def test_story_tail_cleanup_removes_metadata_and_duplicate_blocks():
+    from planner.qwen_director import QwenDirector
+    body = [
+        f"Scene {i} paragraph describes an active character taking a concrete action that changes the situation and causes the next event. "
+        + "The other named character objects and reveals a conflicting objective through a direct exchange. " * 2
+        for i in range(1, 12)
+    ]
+    duplicate = "\n\n".join(body + body)
+    cleaned, reason = QwenDirector._strip_story_nonprose_tail(duplicate)
+    _assert(reason == "removed_exact_repeated_story_block", f"exact duplicated narrative block not detected: {reason}")
+    _assert(cleaned == "\n\n".join(part.strip() for part in body), "duplicate block sanitizer must preserve first story and discard only repetition")
+
+    with_postscript = "\n\n".join(body[:10] + ["---", "Note: This story meets every requirement.", "Total: **1020 words**"])
+    cleaned, reason = QwenDirector._strip_story_nonprose_tail(with_postscript)
+    _assert(reason == "removed_nonprose_postscript", f"prose-only postscript not detected: {reason}")
+    _assert(cleaned == "\n\n".join(part.strip() for part in body[:10]), "postscript sanitizer changed story or kept checklist text")
+
+
+def test_story_dialogue_surface_does_not_confuse_labels_with_speech():
+    from planner.qwen_director import QwenDirector
+    _assert(not QwenDirector._story_has_explicit_dialogue_surface('The door was marked “Project Permafrost.” A tag read “Subject 12.”'),
+            "written tags and labels must not trigger a missing-spoken-dialogue recovery")
+    _assert(QwenDirector._story_has_explicit_dialogue_surface('Elena said, “Do not open the vault.”'),
+            "attributed in-person dialogue should be recognized")
+    _assert(not QwenDirector._extract_story_spoken_segments(
+        'A voice boomed through the chamber: “You have three minutes to evacuate.”',
+        [{"text": "You have three minutes to evacuate", "speaker": "Eli"}],
+        allowed_speakers={"Eli"},
+    ), "an anonymous voice must not be attributed to the protagonist")
+
+
+def test_generated_story_cast_contract_is_enforced_before_shot_planning():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE, DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS, RUNTIME
+    single = [{"name": "Elena Voss"}]
+    try:
+        QwenDirector._validate_generated_story_cast_size(AI_STORY_MODE, single)
+    except RuntimeError as exc:
+        _assert("no shot batches were launched" in str(exc).lower(), f"wrong single-cast error: {exc}")
+    else:
+        raise AssertionError("one-person generated story must fail before shot planning")
+    ensemble = [{"name": "Elena Voss"}, {"name": "Dr. Renn"}, {"name": "Mara"}]
+    QwenDirector._validate_generated_story_cast_size(EXPAND_USER_STORY_MODE, ensemble)
+    _assert(RUNTIME["director"]["story_contract"]["minimum_active_characters"] == DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS >= 3,
+            "minimum active-cast contract must be defined by runtime_versions.yaml")
 
 
 def test_story_blueprint_normalization_requires_ordered_scene_beats():
@@ -1269,6 +1324,9 @@ def main():
         test_story_thinking_and_writing_samplers_reach_vllm_payload,
         test_shot_sampler_uses_runtime_manifest_values,
         test_story_writer_minimum_output_tokens_uses_runtime_manifest,
+        test_story_tail_cleanup_removes_metadata_and_duplicate_blocks,
+        test_story_dialogue_surface_does_not_confuse_labels_with_speech,
+        test_generated_story_cast_contract_is_enforced_before_shot_planning,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_short_story_below_prompt_minimum_fails_without_retry,
