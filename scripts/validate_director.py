@@ -47,6 +47,10 @@ def test_shot_schema_tracks_instance_topology():
     _assert(shot_schema["properties"]["shots"]["minItems"] == 3, "shot schema ignored instance SHOTS_PER_SCENE")
     _assert(nested["minItems"] == 3 and nested["maxItems"] == 3, "batch schema ignored instance SHOTS_PER_SCENE")
     _assert(shot_schema["properties"]["shots"]["items"]["properties"]["location"].get("minLength") == 1, "location schema must require a value")
+    _assert(shot_schema["properties"]["shots"]["items"]["properties"]["camera_shot"].get("enum"),
+            "camera_shot must be constrained to the canonical framing vocabulary")
+    _assert(shot_schema["properties"]["shots"]["items"]["properties"]["camera_movement"].get("enum"),
+            "camera_movement must be constrained to the canonical movement vocabulary")
     scene_entry = batch_schema["properties"]["scene_shots"]["items"]
     metadata = scene_entry["properties"].get("scene_metadata", {})
     _assert("scene_metadata" in scene_entry["required"], "Qwen batch must author canonical scene metadata")
@@ -539,6 +543,37 @@ def test_story_dialogue_contract_uses_qwen_semantic_spans():
         "a preceding document mention must not suppress subsequent present-time speech",
     )
 
+    speaker_contamination_story = (
+        'A voice crackled through a long-dead speaker: “You shouldn’t be here.” '
+        'Lena turned and found Dr. Elias standing beside the vault. '
+        'He warned her that opening it would release something no one was prepared for. '
+        '“The storm is the first warning,” he said, his voice frayed with urgency.'
+    )
+    speaker_contamination = QwenDirector._extract_story_spoken_segments(
+        speaker_contamination_story,
+        [
+            {"text": "You shouldn’t be here", "speaker": "Dr. Elias"},
+            {"text": "The storm is the first warning", "speaker": "Dr. Elias"},
+        ],
+        allowed_speakers={"Lena", "Dr. Elias"},
+    )
+    _assert(
+        [item["text"] for item in speaker_contamination] == ["the storm is the first warning"],
+        f"remote 'speaker' context incorrectly removed later in-person dialogue: {speaker_contamination!r}",
+    )
+
+
+def test_bare_radio_prop_does_not_make_following_live_quote_remote():
+    from planner.qwen_director import QwenDirector
+
+    segments = QwenDirector._extract_story_spoken_segments(
+        'A radio sat on the shelf. “I locked the vault,” Dr. Elias said.',
+        [{"text": "I locked the vault", "speaker": "Dr. Elias"}],
+        allowed_speakers={"Dr. Elias"},
+    )
+    _assert(len(segments) == 1 and segments[0]["source_speakers"] == {"dr. elias"},
+            f"a bare radio mention must not classify live dialogue as remote: {segments!r}")
+
 
 def test_semantic_dialogue_is_persisted_and_restored_across_resume():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
@@ -884,17 +919,23 @@ def test_best_of_n_is_not_wired_into_normal_story_generation():
     _assert("_resample_for_audit(" not in normal_path, "normal path must not generate a challenger story")
     _assert("_pairwise_story_judgment(" not in normal_path, "normal path must not call pairwise story judge")
     _assert(normal_path.count("self._generate_story_once(") == 1, "story writer must be called once")
-def test_story_writer_skips_story_plan_and_uses_one_pass_without_repair():
-    """Normal generation skips the costly Story Bible and makes exactly one writer call."""
+def test_story_uses_one_bounded_plan_and_one_writer_without_retry_or_repair():
+    """Use one bounded architecture pass and one writer pass; never regenerate prose."""
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    start = source.index("story_user = self._story_text_user(", source.index("def generate("))
+    start = source.index("story_blueprint = self._generate_story_blueprint(", source.index("def generate("))
     end = source.index("# PASS 1B: deterministic production foundation", start)
     normal_path = source[start:end]
     _assert("_maybe_plan_story_bible" not in source and "_format_story_bible" not in source,
-            "Story Bible code must be removed, not merely bypassed")
-    _assert(normal_path.count("self._generate_story_once(") == 1, "exactly one prose-writing call")
+            "the old Story Bible must remain removed")
+    _assert(normal_path.count("self._generate_story_blueprint(") == 1,
+            "normal fresh generation must create one causal blueprint")
+    _assert(normal_path.count("self._generate_story_once(") == 1,
+            "normal fresh generation must have exactly one prose-writing call")
     _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
             "default path must not retry or automatically repair the story")
+    _assert("best-of-n" not in normal_path.lower() and "pairwise_story_judgment" not in normal_path,
+            "normal path must not add challenger/judge calls")
+
 
 def test_shot_critique_checks_object_state_across_story():
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
@@ -1040,16 +1081,253 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must not impose a cast quota")
 
 
-def test_story_writer_is_one_thinking_call_and_never_rejects_on_style():
+def test_story_contract_comes_only_from_runtime_manifest():
+    from planner import config
+
+    runtime_text = (ROOT / "configs/runtime_versions.yaml").read_text(encoding="utf-8")
+    config_text = (ROOT / "planner/config.py").read_text(encoding="utf-8")
+    _assert("max_tokens: 3600" in runtime_text, "runtime YAML must own the writer cap")
+    _assert("scene_count: 12" in runtime_text and "target_words: 1020" in runtime_text
+            and "minimum_words: 816" in runtime_text,
+            "runtime YAML must own story topology and word-length contract")
+    _assert("prompt_limits:" in runtime_text and "story_context_chars: 12000" in runtime_text,
+            "runtime YAML must own story context compaction limits")
+    for env_name in (
+        "H3_DIRECTOR_STORY_MAX_TOKENS", "H3_DIRECTOR_STORY_PLAN_MAX_TOKENS",
+        "H3_DIRECTOR_STORY_PLAN_THINKING_BUDGET", "H3_DIRECTOR_STORY_WRITER_MAX_TOKENS",
+        "H3_DIRECTOR_STORY_TEMPERATURE", "H3_DIRECTOR_STORY_TOP_P",
+        "H3_DIRECTOR_STORY_TOP_K", "H3_DIRECTOR_STORY_MIN_P",
+        "H3_DIRECTOR_STORY_WRITER_TEMPERATURE", "H3_DIRECTOR_STORY_WRITER_TOP_P",
+        "H3_DIRECTOR_STORY_WRITER_TOP_K", "H3_DIRECTOR_STORY_WRITER_MIN_P",
+        "H3_DIRECTOR_STORY_PRESENCE_PENALTY", "H3_DIRECTOR_STORY_SCENES",
+        "H3_DIRECTOR_SHOTS_PER_SCENE", "H3_STORY_WORDS_PER_SCENE",
+        "H3_DIRECTOR_STORY_CONTEXT_CHARS", "H3_DIRECTOR_CRITIC_STORY_CONTEXT_CHARS",
+        "H3_DIRECTOR_SHOT_STORY_CONTEXT_CHARS", "H3_DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS",
+        "H3_DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS", "H3_DIRECTOR_SHOT_SCENE_CONTINUITY_CHARS",
+        "H3_DIRECTOR_SHOT_SCENE_ATMOSPHERE_CHARS", "H3_DIRECTOR_N_CTX",
+        "H3_DIRECTOR_MAX_TOKENS", "H3_DIRECTOR_TEMPERATURE", "H3_DIRECTOR_TOP_P",
+        "H3_DIRECTOR_VLLM_MAX_MODEL_LEN",
+    ):
+        _assert(env_name not in config_text,
+                f"story production config must not read environment override {env_name}")
+    _assert(config.DIRECTOR_STORY_WRITER_MAX_TOKENS == 3600, "writer cap source mismatch")
+    _assert(config.DIRECTOR_N_CTX == 8192 and config.DIRECTOR_VLLM_MAX_MODEL_LEN == 8192
+            and config.DIRECTOR_MAX_TOKENS == 7000,
+            "runtime YAML must own Director context and global token ceiling")
+    _assert(config.DIRECTOR_STORY_SCENES == 12 and config.DIRECTOR_SHOTS_PER_SCENE == 3,
+            "story topology must come from runtime YAML")
+    _assert(config.STORY_TARGET_WORDS == 1020 and config.STORY_MIN_WORDS == 816,
+            "story length contract must come from runtime YAML")
+
+
+def test_story_thinking_and_writing_samplers_reach_vllm_payload():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES
+    from planner.config import DIRECTOR_STORY_PRESENCE_PENALTY
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+        def json(self):
+            return {"id": "test"}
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+        def post(self, url, json, timeout):
+            self.calls.append({"url": url, "payload": json, "timeout": timeout})
+            return FakeResponse()
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._vllm_session = FakeSession()
+    director._vllm_model_name = lambda: "qwen3-14b-awq"
+    director._vllm_base_url = lambda: "http://127.0.0.1:8000/v1"
+    director._post_chat(
+        messages=[{"role": "user", "content": "Test bounded story architect."}],
+        temperature=0.6,
+        top_p=0.95,
+        max_tokens=2200,
+        enable_thinking=True,
+        creative=False,
+        thinking_token_budget=1280,
+    )
+    director._post_chat(
+        messages=[{"role": "user", "content": "Test literary story writer."}],
+        temperature=0.7,
+        top_p=0.8,
+        max_tokens=3600,
+        enable_thinking=False,
+        creative=True,
+    )
+    _assert(len(director._vllm_session.calls) == 2, "architect and writer payloads should be issued independently")
+    plan_payload = director._vllm_session.calls[0]["payload"]
+    _assert(plan_payload["chat_template_kwargs"]["enable_thinking"] is True,
+            f"architect must explicitly enable Qwen3 thinking: {plan_payload}")
+    _assert(plan_payload["temperature"] == 0.6 and plan_payload["top_p"] == 0.95
+            and plan_payload["top_k"] == 20 and plan_payload["min_p"] == 0.0,
+            f"Qwen3 thinking sampler not passed through: {plan_payload}")
+    _assert(plan_payload["thinking_token_budget"] == 1280,
+            f"architect reasoning must have a hard budget: {plan_payload}")
+    _assert("presence_penalty" not in plan_payload,
+            f"planning pass should not apply the prose repetition penalty: {plan_payload}")
+
+    write_payload = director._vllm_session.calls[1]["payload"]
+    _assert(write_payload["chat_template_kwargs"]["enable_thinking"] is False,
+            f"prose writer must explicitly disable thinking: {write_payload}")
+    _assert(write_payload["temperature"] == 0.7 and write_payload["top_p"] == 0.8
+            and write_payload["top_k"] == 20 and write_payload["min_p"] == 0.0,
+            f"Qwen3 non-thinking sampler not passed through: {write_payload}")
+    _assert(write_payload["presence_penalty"] == DIRECTOR_STORY_PRESENCE_PENALTY == 1.5,
+            f"AWQ prose writer should retain Qwen's official quantized-model penalty default: {write_payload}")
+    from planner.config import DIRECTOR_STORY_WRITER_MAX_TOKENS
+    _assert(DIRECTOR_STORY_WRITER_MAX_TOKENS == 3600,
+            "writer completion ceiling must come from runtime_versions.yaml and equal 3600")
+
+
+def test_story_blueprint_normalization_requires_ordered_scene_beats():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    director = QwenDirector.__new__(QwenDirector)
+    source = "\n".join(f"SCENE {i:02d}: Beat {i} changes the story and carries the state forward." for i in range(1, DIRECTOR_STORY_SCENES + 1))
+    normalized = director._normalize_story_blueprint(source, DIRECTOR_STORY_SCENES)
+    lines = normalized.splitlines()
+    _assert(len(lines) == DIRECTOR_STORY_SCENES, "blueprint must have one line per scene")
+    _assert(lines[0].startswith("SCENE 01:") and lines[-1].startswith(f"SCENE {DIRECTOR_STORY_SCENES:02d}:"),
+            "blueprint numbering must be normalized and ordered")
+    try:
+        director._normalize_story_blueprint("SCENE 01: only one beat", DIRECTOR_STORY_SCENES)
+    except RuntimeError as exc:
+        _assert("missing" in str(exc).lower(), f"unexpected invalid-blueprint error: {exc}")
+    else:
+        raise AssertionError("incomplete story blueprint must fail closed without a retry")
+    duplicate = source + "\nSCENE 12: duplicate final beat that must not be silently merged."
+    try:
+        director._normalize_story_blueprint(duplicate, DIRECTOR_STORY_SCENES)
+    except RuntimeError as exc:
+        _assert("repeated scene label" in str(exc).lower(), f"unexpected duplicate-beat error: {exc}")
+    else:
+        raise AssertionError("duplicate scene labels must fail closed without a retry")
+
+
+def test_vllm_native_thinking_budget_runtime_configuration():
+    from pathlib import Path
+    runtime_source = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
+    _assert('"--reasoning-parser",\n                "qwen3"' in runtime_source,
+            "vLLM reasoning parser must be enabled for native Qwen3 thinking budget")
+    _assert('"--reasoning-config"' in runtime_source and '"reasoning_start_str": "<think>"' in runtime_source,
+            "vLLM reasoning boundaries must be configured for native thinking-budget closure")
+    _assert('"reasoning_end_str"' in runtime_source and "</think>" in runtime_source,
+            "vLLM reasoning config must close the Qwen3 thinking block")
+    config_source = (ROOT / "configs/runtime_versions.yaml").read_text(encoding="utf-8")
+    _assert("thinking_token_budget: 1280" in config_source and "max_tokens: 2200" in config_source,
+            "runtime must cap architect reasoning and total completion independently")
+
+
+def test_story_architect_uses_native_bounded_thinking_and_no_retry():
+    from planner.qwen_director import QwenDirector
+    from planner.config import (
+        AI_STORY_MODE,
+        DIRECTOR_STORY_PLAN_MAX_TOKENS,
+        DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+        DIRECTOR_STORY_THINKING_TEMPERATURE,
+        DIRECTOR_STORY_THINKING_TOP_P,
+        DIRECTOR_STORY_SCENES,
+    )
+    director = QwenDirector.__new__(QwenDirector)
+    calls = []
+    raw = "\n".join(f"SCENE {i:02d}: Beat {i} changes the situation and causes the next event." for i in range(1, DIRECTOR_STORY_SCENES + 1))
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return raw
+    director._chat_text = fake_chat
+    blueprint = director._generate_story_blueprint(AI_STORY_MODE, "A premise.")
+    _assert(len(calls) == 1, "architect pass must be single-call with no retry")
+    _assert(calls[0].get("disable_thinking") is False, "architect must use thinking mode")
+    _assert(calls[0].get("thinking_token_budget") == DIRECTOR_STORY_PLAN_THINKING_BUDGET == 1280,
+            f"architect must use its configured reasoning budget: {calls[0]}")
+    _assert(calls[0].get("max_completion") == DIRECTOR_STORY_PLAN_MAX_TOKENS == 2200,
+            f"architect must use its configured hard output ceiling: {calls[0]}")
+    _assert(calls[0].get("temperature") == DIRECTOR_STORY_THINKING_TEMPERATURE == 0.6
+            and calls[0].get("top_p") == DIRECTOR_STORY_THINKING_TOP_P == 0.95,
+            f"architect must use the official Qwen3 thinking sampler: {calls[0]}")
+    _assert(blueprint.count("SCENE ") == DIRECTOR_STORY_SCENES,
+            "normalized blueprint should include all configured scenes")
+
+
+def test_short_story_below_prompt_minimum_fails_without_retry():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS
+
+    # Twelve complete paragraphs with 60 words each: valid topology, intentionally
+    # below the prompt's 816-word minimum. It must fail closed after the one call.
+    paragraph = " ".join(["Ines"] + [f"word{i}" for i in range(59)]) + "."
+    story = "\n\n".join(paragraph for _ in range(DIRECTOR_STORY_SCENES))
+    director = QwenDirector.__new__(QwenDirector)
+    director._story_min_words = STORY_MIN_WORDS
+    calls = []
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return story
+    director._chat_text = fake_chat
+    temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
+    try:
+        director._generate_story_once(
+            AI_STORY_MODE, "premise", "system", "user",
+            temperature=temperature, top_p=top_p, source_character_names=[],
+        )
+    except RuntimeError as exc:
+        _assert("need 816+" in str(exc), f"unexpected short-story rejection: {exc}")
+    else:
+        raise AssertionError("story below prompt's 816-word minimum should fail closed")
+    _assert(len(calls) == 1, f"short story must not trigger retry, got {len(calls)} calls")
+
+
+def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE, STORY_MIN_WORDS
+
+    # A long single sentence has sufficient words but cannot safely be divided into
+    # scene paragraphs without inventing boundaries or splitting dialogue.
+    story = " ".join(f"word{index}" for index in range(STORY_MIN_WORDS)) + "."
+    director = QwenDirector.__new__(QwenDirector)
+    director._story_min_words = STORY_MIN_WORDS
+    calls = []
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return story
+    director._chat_text = fake_chat
+    temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
+    try:
+        director._generate_story_once(
+            AI_STORY_MODE, "premise", "system", "user",
+            temperature=temperature, top_p=top_p, source_character_names=[],
+        )
+    except RuntimeError as exc:
+        _assert("Could not normalize the story to exactly" in str(exc),
+                f"unexpected topology failure: {exc}")
+    else:
+        raise AssertionError("story without sufficient sentence boundaries must not be accepted")
+    _assert(len(calls) == 1, f"topology failure must not trigger retry, got {len(calls)} calls")
+
+
+def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
+    from planner.qwen_director import QwenDirector
+    from planner.config import (
+        AI_STORY_MODE,
+        DIRECTOR_STORY_SCENES,
+        DIRECTOR_STORY_MAX_TOKENS,
+        DIRECTOR_STORY_WRITER_MAX_TOKENS,
+        DIRECTOR_STORY_WRITER_TEMPERATURE,
+        DIRECTOR_STORY_WRITER_TOP_P,
+        STORY_MIN_WORDS,
+    )
     paragraphs = [
         " ".join([f"Scene{i}", "Ines", "carried", "the", "lantern", "down", "the", "cellar", "stairs", "and", "counted", "each", "step."]
                  + ["She", "listened", "for", "the", "door", "above", "her", "head."] * 8)
-        for i in range(DIRECTOR_STORY_SCENES + 3)   # wrong paragraph count on purpose
+        for i in range(DIRECTOR_STORY_SCENES + 3)
     ]
     story = "\n\n".join(paragraphs)
     director = QwenDirector.__new__(QwenDirector)
+    director._story_min_words = STORY_MIN_WORDS
     calls = []
     def fake_chat(*args, **kwargs):
         calls.append(kwargs.copy())
@@ -1057,15 +1335,23 @@ def test_story_writer_is_one_thinking_call_and_never_rejects_on_style():
     director._chat_text = fake_chat
     from contextlib import redirect_stdout
     from io import StringIO
+    temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
     with redirect_stdout(StringIO()):
         result, generated = director._generate_story_once(
-            AI_STORY_MODE, "premise", "system", "user", temperature=0.6, top_p=0.95, source_character_names=[],
+            AI_STORY_MODE, "premise", "system", "user",
+            temperature=temperature, top_p=top_p, source_character_names=[],
         )
     count = len([p for p in re.split(r"\n\s*\n+", result) if p.strip()])
-    _assert(generated and len(calls) == 1, f"story must be exactly one model call: {len(calls)}")
-    _assert(calls[0].get("disable_thinking") is False, "story call must run with thinking on")
-    _assert(calls[0].get("creative") is True, "story call must use the Qwen3 presence penalty for the AWQ model")
-    _assert(calls[0].get("max_completion", 0) >= 6000, f"thinking needs a large completion ceiling: {calls[0]}")
+    _assert(generated and len(calls) == 1, f"story must have exactly one prose-writing call: {len(calls)}")
+    _assert(calls[0].get("disable_thinking") is True, "prose writer must explicitly disable Qwen3 thinking")
+    _assert(calls[0].get("creative") is True, "prose writer must use the configured creative-writing penalty")
+    _assert(calls[0].get("temperature") == DIRECTOR_STORY_WRITER_TEMPERATURE == 0.7
+            and calls[0].get("top_p") == DIRECTOR_STORY_WRITER_TOP_P == 0.8,
+            f"prose writer must use the Qwen3 non-thinking sampler: {calls[0]}")
+    _assert(calls[0].get("max_completion") == min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS) == 3600,
+            f"prose writer must use its dedicated ceiling: {calls[0]}")
+    _assert(STORY_MIN_WORDS == int(DIRECTOR_STORY_SCENES * 85 * 0.8) == 816,
+            f"story minimum must match prompt's 80% target: {STORY_MIN_WORDS}")
     _assert(count == DIRECTOR_STORY_SCENES, f"paragraphs must be normalized to {DIRECTOR_STORY_SCENES}, got {count}")
 
 
@@ -1081,6 +1367,228 @@ def test_topology_is_driven_by_scene_and_shot_settings():
     _assert(len(shots) == DIRECTOR_STORY_SCENES * DIRECTOR_SHOTS_PER_SCENE,
             f"fallback compile must yield scenes x shots, got {len(shots)}")
 
+
+def test_story_scene_coercion_keeps_quoted_dialogue_intact():
+    from planner.qwen_director import QwenDirector
+
+    examples = [
+        ('Lena said, "Stop. Wait for me." Then she ran into the tunnel.', '"Stop. Wait for me."'),
+        ('Eli opened the box. “Do not touch it. I mean it,” Mara said. The light changed.', '“Do not touch it. I mean it,” Mara said.'),
+        ("Mara whispered, ‘Leave now. Do not look back.’ Then the door closed.", '‘Leave now. Do not look back.’'),
+        ('He said, "Stop." Mara asked, "Why?" The alarm sounded.', '"Stop." Mara asked, "Why?"'),
+    ]
+    for source, expected_span in examples:
+        normalized = QwenDirector._coerce_story_to_scene_paragraphs(source)
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", normalized) if p.strip()]
+        _assert(expected_span in normalized, f"quoted dialogue was altered: {normalized!r}")
+        _assert(any(expected_span in paragraph for paragraph in paragraphs),
+                f"quoted dialogue/speaker attribution was split across scene paragraphs: {paragraphs!r}")
+        _assert(not any(paragraph.startswith(('Wait for me.', 'I mean it,', 'Do not look back.')) for paragraph in paragraphs),
+                f"a quoted fragment became a scene paragraph: {paragraphs!r}")
+
+
+def test_checkpoint_fingerprint_tracks_runtime_topology_and_frame_policy():
+    from pipeline.production_checkpoint import ProductionCheckpoint
+    from pipeline.production_orchestrator import ProductionOrchestrator
+
+    keys = ("H3_DIRECTOR_STORY_SCENES", "H3_DIRECTOR_SHOTS_PER_SCENE", "H3_FPS", "H3_FRAMES_PER_SHOT")
+    previous = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in keys:
+            os.environ.pop(key, None)
+        store = ProductionCheckpoint(ROOT)
+        baseline = ProductionOrchestrator._director_fingerprint(ROOT, store)
+        # These legacy variables must not alter the YAML-governed production contract.
+        os.environ.update({"H3_DIRECTOR_STORY_SCENES": "19", "H3_DIRECTOR_SHOTS_PER_SCENE": "9",
+                           "H3_FPS": "60", "H3_FRAMES_PER_SHOT": "141"})
+        overridden = ProductionOrchestrator._director_fingerprint(ROOT, store)
+        _assert(baseline == overridden,
+                "environment variables must not override runtime-manifest story topology/frame settings")
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+
+def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
+    from planner.qwen_director import QwenDirector
+    from planner.qwen_director_prompts import CAMERA_SHOT_OPTIONS, CAMERA_MOVEMENT_OPTIONS
+
+    director = QwenDirector.__new__(QwenDirector)
+    scene = {
+        "scene_id": "scene_001", "description": "Lena watches the sealed vault under cold emergency lights.",
+        "lighting": "cold emergency lights", "color_temperature": "cool", "mood": "tense",
+        "location": "vault chamber", "characters": ["Lena"],
+    }
+    shots = [
+        {"scene_id": "scene_001", "shot_id": "scene_001_shot_001", "location": "vault chamber",
+         "action": "Lena examines the sealed vault door.", "visual_prompt": "Lena examines the sealed vault door under cold emergency light.",
+         "characters": ["Lena"], "camera_shot": "wide shot", "camera_movement": "slow pan", "dialogue_events": []},
+        {"scene_id": "scene_001", "shot_id": "scene_001_shot_002", "location": "vault chamber",
+         "action": "Lena turns toward the rattling door.", "visual_prompt": "Lena turns toward the rattling vault door under cold emergency light.",
+         "characters": ["Lena"], "camera_shot": "tracking shot", "camera_movement": "dolly in", "dialogue_events": []},
+        {"scene_id": "scene_001", "shot_id": "scene_001_shot_003", "location": "vault chamber",
+         "action": "Lena studies the control panel.", "visual_prompt": "Lena studies the control panel beneath cold emergency lights.",
+         "characters": ["Lena"], "camera_shot": "nonsense framing", "camera_movement": "slow drift", "dialogue_events": []},
+    ]
+    sanitized = director._sanitize_shots(shots, scene, {"lena"})
+    _assert([item["camera_shot"] for item in sanitized] == ["wide", "medium wide", "medium wide"],
+            f"camera framing was not normalized/fail-closed: {[item['camera_shot'] for item in sanitized]!r}")
+    _assert([item["camera_movement"] for item in sanitized] == ["pan", "push-in", "static"],
+            f"camera movement was not normalized/fail-closed: {[item['camera_movement'] for item in sanitized]!r}")
+    _assert(all(item["camera_shot"] in CAMERA_SHOT_OPTIONS for item in sanitized), "sanitizer emitted illegal camera framing")
+    _assert(all(item["camera_movement"] in CAMERA_MOVEMENT_OPTIONS for item in sanitized), "sanitizer emitted illegal camera movement")
+
+
+def test_cinematic_compiler_fallback_camera_vocabulary_is_canonical():
+    from planner.cinematic_compiler import CinematicCompiler
+    from planner.qwen_director_prompts import CAMERA_SHOT_OPTIONS, CAMERA_MOVEMENT_OPTIONS
+
+    scene = {
+        "scene_id": "scene_001",
+        "description": "Lena watches the sealed vault under cold emergency lights.",
+        "location": "vault chamber",
+        "lighting": "cold emergency lights",
+        "color_temperature": "cool",
+        "mood": "tense",
+        "characters": ["Lena"],
+    }
+    # An empty Qwen result activates the compiler's fallback shot templates.  These
+    # templates historically contained noncanonical labels such as "wide establishing
+    # shot" and "gentle drift", bypassing the Qwen shot sanitizer entirely.
+    shots = CinematicCompiler(character_names={"Lena"}).compile_all([scene], [])
+    _assert(bool(shots), "compiler fallback unexpectedly produced no shots")
+    invalid_shots = [
+        str(item.get("shot_id", ""))
+        for item in shots
+        if str(item.get("camera_shot", "")) not in CAMERA_SHOT_OPTIONS
+        or str(item.get("camera_movement", "")) not in CAMERA_MOVEMENT_OPTIONS
+    ]
+    _assert(not invalid_shots, f"compiler fallback emitted noncanonical camera vocabulary: {invalid_shots!r}")
+
+
+def test_camera_directive_in_action_is_replaced_from_scene_evidence():
+    from planner.qwen_director import QwenDirector
+
+    scene_description = (
+        "The aftermath came in the form of a frozen silence. Lena’s body was found days later, encased in ice, the vault resealed. "
+        "The storm passed, leaving the Arctic station untouched. The data was lost, but so was the vortex. "
+        "The world moved on, unaware of the choice that had saved them. "
+        "The compass remained in the vault, its needle finally still. The storm was gone. So was Lena."
+    )
+    director = QwenDirector.__new__(QwenDirector)
+    scene = {
+        "scene_id": "scene_006", "description": scene_description,
+        "lighting": "dim ambient light from distant storm", "color_temperature": "cold blue",
+        "mood": "resigned", "location": "abandoned Arctic station", "characters": ["Lena"],
+    }
+    shot = {
+        "scene_id": "scene_006", "shot_id": "scene_006_shot_002",
+        "location": "abandoned Arctic station", "characters": ["Lena"],
+        "action": "The camera pans slowly across the frozen station, ending on the vault with the compass inside, its needle finally still.",
+        "visual_prompt": "Frozen Arctic station with the sealed vault and compass beneath cold ambient storm light, empty and quiet.",
+        "camera_shot": "wide", "camera_movement": "pan", "dialogue_events": [],
+    }
+    result = director._sanitize_shots([shot], scene, {"lena"})
+    _assert(len(result) == 1, "sanitizer unexpectedly dropped a recoverable shot")
+    action = result[0]["action"]
+    _assert(not re.search(r"\b(?:the\s+)?camera\s+(?:pans?|tilts?|tracks?|dollies|pushes?|pulls?|cranes?|orbits?|zooms?)\b", action, re.I),
+            f"camera direction remained in the narrative action: {action!r}")
+    _assert("compass" in action.casefold() and "needle" in action.casefold(),
+            f"grounded action fallback lost the shot's evidenced subject/state: {action!r}")
+
+
+def test_unique_story_paragraph_recovers_unmatched_source_dialogue():
+    """A source quote omitted from expanded scene prose must still map to its owner scene."""
+    import json
+    from planner.qwen_director import QwenDirector
+
+    story = (
+        "Lena drove through the storm toward the station.\n\n"
+        "Inside, Lena found the sealed vault and a cracked compass.\n\n"
+        "A voice crackled through a long-dead speaker: “You shouldn’t be here.” "
+        "Lena turned, startled, and found a man in a faded lab coat. He called himself Dr. Elias. "
+        "He warned her that opening the vault would release something no one was prepared for. "
+        "“The storm is the first warning,” he said, his voice frayed with urgency."
+    )
+    director = QwenDirector.__new__(QwenDirector)
+    director._reference_visual_context = {}
+    director._semantic_spoken_dialogue = [
+        {"text": "You shouldn’t be here.", "speaker": "Dr. Elias"},
+        {"text": "The storm is the first warning.", "speaker": "Dr. Elias"},
+    ]
+    # Scene description intentionally omits the exact spoken phrase. Its unique source
+    # paragraph and scene_003 ordinal are sufficient to bind it without a model retry.
+    payload = json.loads(director._shot_director_batch_user(
+        story,
+        [{"name": "Lena Korsakov"}, {"name": "Dr. Elias"}],
+        [{"scene_id": "scene_003", "title": "At the vault", "location": "Arctic station",
+          "description": "Lena finds an older scientist by the sealed vault.",
+          "characters": ["Lena Korsakov", "Dr. Elias"]}],
+    ))
+    source_dialogue = payload["scenes"][0].get("source_dialogue", [])
+    normalized = [
+        (str(item.get("speaker", "")), re.sub(r"[^a-z0-9]+", " ", str(item.get("text", "")).casefold()).strip())
+        for item in source_dialogue
+    ]
+    _assert(("Dr. Elias", "the storm is the first warning") in normalized,
+            f"unmatched in-person dialogue was not recovered from its unique story paragraph: {source_dialogue!r}")
+    _assert(all("you shouldn t be here" not in text for _, text in normalized),
+            f"remote loudspeaker dialogue leaked into scene-local visible speech: {source_dialogue!r}")
+
+
+def test_exact_duplicate_terminal_sentence_is_removed_without_retry():
+    from planner.qwen_director import QwenDirector
+    repeated = "The station was quiet, and for the first time in years it was peaceful."
+    story = (
+        "The engineer reached the station door. She learned the failure had been deliberate. "
+        "She chose to seal the vault. The storm finally weakened. "
+        + repeated + " The records were lost, but the people survived. " + repeated
+    )
+    repaired, changed = QwenDirector._trim_repeated_terminal_sentence(story)
+    _assert(changed, "exact duplicate final sentence was not detected")
+    _assert(repaired.count(repeated) == 1, "exact duplicate final sentence was not removed exactly once")
+    _assert(repaired.endswith("The records were lost, but the people survived."),
+            f"prior resolution was not preserved: {repaired!r}")
+    unchanged, changed = QwenDirector._trim_repeated_terminal_sentence(
+        "The station was quiet. The records survived."
+    )
+    _assert(not changed and unchanged.endswith("The records survived."), "non-repeated ending was edited")
+
+
+def test_critic_filters_only_case_cross_scene_false_positives_and_noop_patches():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    plan = {
+        "characters": [{"name": "Eli"}], "scenes": [],
+        "shots": [
+            {"shot_id": "scene_001_shot_001", "scene_id": "scene_001", "characters": ["Eli"],
+             "camera_shot": "wide", "camera_movement": "static", "lighting": "blue", "location": "station", "action": "Eli enters."},
+            {"shot_id": "scene_002_shot_001", "scene_id": "scene_002", "characters": ["Eli"],
+             "camera_shot": "medium", "camera_movement": "pan", "lighting": "blue", "location": "station", "action": "Eli studies the lock."},
+        ],
+    }
+    critique = {
+        "overall_score": 6, "status": "review",
+        "findings": [
+            "Roster mismatch: shot character 'Eli' but roster lists 'eli' (case-insensitive mismatch).",
+            "Action distinctness: scene_001_shot_001 and scene_002_shot_001 use similar action coverage across scenes.",
+            "Fidelity mismatch: scene_001_shot_001 invents a visible explosion.",
+        ],
+        "shot_findings": [], "recommended_focus": [],
+        "shot_patches": [
+            {"shot_id": "scene_001_shot_001", "patch": {"camera_shot": "wide"}},
+            {"shot_id": "scene_001_shot_001", "patch": {"camera_movement": "slow pan"}},
+        ],
+    }
+    result = director._reconcile_critique(critique, plan)
+    _assert(len(result["findings"]) == 1 and "explosion" in result["findings"][0],
+            f"unsupported false-positive findings were not filtered safely: {result['findings']!r}")
+    _assert(result["shot_patches"] == [{"shot_id": "scene_001_shot_001", "patch": {"camera_movement": "pan"}}],
+            f"no-op patch or invalid camera value survived filtering: {result['shot_patches']!r}")
 
 def main():
     tests = [
@@ -1104,6 +1612,7 @@ def main():
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
         test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
         test_ai_story_does_not_inherit_template_cast_anchors,
+        test_bare_radio_prop_does_not_make_following_live_quote_remote,
         test_semantic_dialogue_is_persisted_and_restored_across_resume,
         test_preserve_story_uses_the_single_semantic_pass_without_overriding_roster,
         test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally,
@@ -1141,12 +1650,27 @@ def main():
         test_sanitize_scene_alias_fallback_does_not_bind_descriptive_by_article,
         test_identity_presence_accepts_title_free_and_given_name_surfaces,
         test_story_prompt_is_open_cast_and_fully_filled,
-        test_story_writer_is_one_thinking_call_and_never_rejects_on_style,
+        test_story_contract_comes_only_from_runtime_manifest,
+        test_story_thinking_and_writing_samplers_reach_vllm_payload,
+        test_story_blueprint_normalization_requires_ordered_scene_beats,
+        test_vllm_native_thinking_budget_runtime_configuration,
+        test_story_architect_uses_native_bounded_thinking_and_no_retry,
+        test_short_story_below_prompt_minimum_fails_without_retry,
+        test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes,
+        test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_topology_is_driven_by_scene_and_shot_settings,
         test_best_of_n_is_not_wired_into_normal_story_generation,
-        test_story_writer_skips_story_plan_and_uses_one_pass_without_repair,
+        test_story_uses_one_bounded_plan_and_one_writer_without_retry_or_repair,
         test_shot_critique_checks_object_state_across_story,
         test_short_visual_prompts_are_normalized_to_15_40_words_without_model_call,
+        test_story_scene_coercion_keeps_quoted_dialogue_intact,
+        test_checkpoint_fingerprint_tracks_runtime_topology_and_frame_policy,
+        test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
+        test_cinematic_compiler_fallback_camera_vocabulary_is_canonical,
+        test_camera_directive_in_action_is_replaced_from_scene_evidence,
+        test_unique_story_paragraph_recovers_unmatched_source_dialogue,
+        test_exact_duplicate_terminal_sentence_is_removed_without_retry,
+        test_critic_filters_only_case_cross_scene_false_positives_and_noop_patches,
     ]
     for test in tests:
         test()
