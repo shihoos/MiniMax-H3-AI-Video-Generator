@@ -72,13 +72,16 @@ director:
       min_p: 0.0
       presence_penalty: 1.5
       max_tokens: 3000
-      minimum_output_tokens: 1350
+      # Keep zero: vLLM min_tokens suppresses EOS, not semantic under-length output.
+      minimum_output_tokens: 0
   story_contract:
     scene_count: 12
     shots_per_scene: 3
     words_per_scene: 85
     target_words: 1020
     minimum_words: 816
+    minimum_active_characters: 3
+    target_active_characters: 4
   prompt_limits:
     story_context_chars: 12000
     critic_story_context_chars: 3500
