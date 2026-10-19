@@ -3240,7 +3240,7 @@ class QwenDirector(
         count = max(1, int(scene_count))
         return min(
             int(DIRECTOR_MAX_TOKENS),
-            max(320, 700 * int(self.SHOTS_PER_SCENE) * count),  # 1400/scene at 2 shots (Sep 25), 2100 at 3
+            max(320, 700 * int(DIRECTOR_SHOTS_PER_SCENE) * count),
         )
 
     @_with_faulthandler_watchdog
