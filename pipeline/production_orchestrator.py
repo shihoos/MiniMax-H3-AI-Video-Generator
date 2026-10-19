@@ -1046,18 +1046,34 @@ class ProductionOrchestrator:
             f"{path.as_posix()}:{checkpoint.digest_file(project_root / path)}\n"
             for path in tracked
         )
-        # Environment overrides are part of the effective production contract.
-        # A checkpoint from one topology/frame policy must not resume under another.
-        effective_settings = (
-            "H3_DIRECTOR_STORY_SCENES",
-            "H3_DIRECTOR_SHOTS_PER_SCENE",
-            "H3_FPS",
-            "H3_FRAMES_PER_SHOT",
+        # The runtime manifest is the only production source of truth for story
+        # topology and frame policy. Fingerprint the resolved YAML-backed values,
+        # never environment variables that are intentionally unable to override them.
+        from planner.config import (
+            DIRECTOR_STORY_SCENES,
+            DIRECTOR_SHOTS_PER_SCENE,
+            H3_FPS,
+            H3_FRAMES_PER_SHOT,
+            STORY_TARGET_WORDS,
+            STORY_MIN_WORDS,
+            DIRECTOR_STORY_MAX_TOKENS,
+            DIRECTOR_STORY_PLAN_MAX_TOKENS,
+            DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+            DIRECTOR_STORY_WRITER_MAX_TOKENS,
         )
-        material += "".join(
-            f"env:{name}={os.environ.get(name, '<unset>')}\n"
-            for name in effective_settings
-        )
+        effective_settings = {
+            "story_scenes": DIRECTOR_STORY_SCENES,
+            "shots_per_scene": DIRECTOR_SHOTS_PER_SCENE,
+            "fps": H3_FPS,
+            "frames_per_shot": H3_FRAMES_PER_SHOT,
+            "story_target_words": STORY_TARGET_WORDS,
+            "story_minimum_words": STORY_MIN_WORDS,
+            "story_max_tokens": DIRECTOR_STORY_MAX_TOKENS,
+            "story_plan_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
+            "story_thinking_token_budget": DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+            "story_writer_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
+        }
+        material += "runtime-settings:" + repr(sorted(effective_settings.items())) + "\n"
         return checkpoint.digest_text(material)
 
     def _save_checkpoint(
