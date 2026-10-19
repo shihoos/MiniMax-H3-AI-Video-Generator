@@ -10,6 +10,10 @@ from planner.config import (
     AI_STORY_MODE,
     DIRECTOR_TEMPERATURE,
     DIRECTOR_TOP_P,
+    DIRECTOR_STORY_THINKING_TEMPERATURE,
+    DIRECTOR_STORY_THINKING_TOP_P,
+    DIRECTOR_STORY_WRITER_TEMPERATURE,
+    DIRECTOR_STORY_WRITER_TOP_P,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_SHOT_SCENE_DESCRIPTION_CHARS,
     DIRECTOR_SHOT_SCENE_OBJECTIVE_CHARS,
@@ -20,10 +24,133 @@ from planner.config import (
     DIRECTOR_STORY_SCENES,
     DIRECTOR_SHOTS_PER_SCENE,
     STORY_WORDS_PER_SCENE,
+    STORY_TARGET_WORDS,
+    STORY_MIN_WORDS,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
 )
 from planner.entity_resolver import EntityResolver
+
+
+# Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
+import re
+
+CAMERA_SHOT_OPTIONS = (
+    "extreme wide",
+    "wide",
+    "full",
+    "medium wide",
+    "medium",
+    "medium close-up",
+    "close-up",
+    "extreme close-up",
+    "over-the-shoulder",
+    "two-shot",
+    "pov",
+    "insert",
+)
+
+CAMERA_MOVEMENT_OPTIONS = (
+    "static",
+    "pan",
+    "tilt",
+    "dolly",
+    "tracking",
+    "handheld",
+    "crane",
+    "push-in",
+    "orbit",
+)
+
+DEFAULT_CAMERA_SHOT = "medium wide"
+DEFAULT_CAMERA_MOVEMENT = "static"
+
+
+def _camera_key(value: object) -> str:
+    text = str(value or "").strip().casefold()
+    text = text.replace("‐", "-").replace("‑", "-").replace("‒", "-")
+    text = text.replace("–", "-").replace("—", "-").replace("−", "-")
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"[.!;,]+$", "", text).strip()
+    return text
+
+
+def normalize_camera_shot(value: object) -> tuple[str, str]:
+    """Return (canonical value, status) where status is unchanged/normalized/fallback."""
+    raw = _camera_key(value)
+    aliases = {
+        "wide establishing shot": "extreme wide",
+        "establishing shot": "extreme wide",
+        "extreme wide shot": "extreme wide",
+        "wide shot": "wide",
+        "full shot": "full",
+        "medium wide shot": "medium wide",
+        "medium shot": "medium",
+        "medium close up": "medium close-up",
+        "medium closeup": "medium close-up",
+        "medium close-up shot": "medium close-up",
+        "close up": "close-up",
+        "closeup": "close-up",
+        "close-up shot": "close-up",
+        "close-up detail": "close-up",
+        "extreme close up": "extreme close-up",
+        "extreme closeup": "extreme close-up",
+        "extreme close-up shot": "extreme close-up",
+        "over the shoulder": "over-the-shoulder",
+        "over-the-shoulder shot": "over-the-shoulder",
+        "two shot": "two-shot",
+        "two shot framing": "two-shot",
+        "point of view": "pov",
+        "p.o.v.": "pov",
+        "insert shot": "insert",
+    }
+    candidate = aliases.get(raw, raw)
+    # Remove a generic trailing word only when the remainder is itself canonical.
+    if candidate.endswith(" shot") and candidate[:-5].strip() in CAMERA_SHOT_OPTIONS:
+        candidate = candidate[:-5].strip()
+    if candidate in CAMERA_SHOT_OPTIONS:
+        return candidate, "unchanged" if candidate == raw else "normalized"
+    return DEFAULT_CAMERA_SHOT, "fallback"
+
+
+def normalize_camera_movement(value: object) -> tuple[str, str]:
+    """Normalize clear camera-movement aliases; unknown values fail closed to static."""
+    raw = _camera_key(value)
+    aliases = {
+        "static shot": "static",
+        "no movement": "static",
+        "locked off": "static",
+        "locked-off": "static",
+        "slow pan": "pan",
+        "gentle pan": "pan",
+        "slow tilt": "tilt",
+        "tracking shot": "tracking",
+        "camera tracking": "tracking",
+        "dolly in": "push-in",
+        "dolly forward": "push-in",
+        "slow dolly in": "push-in",
+        "slow dolly forward": "push-in",
+        "slow push in": "push-in",
+        "slow push-in": "push-in",
+        "slow controlled push-in": "push-in",
+        "gentle push-in": "push-in",
+        "push in": "push-in",
+        "dolly back": "dolly",
+        "dolly out": "dolly",
+        "slow dolly back": "dolly",
+        "slow dolly out": "dolly",
+        "pull back": "dolly",
+        "camera orbit": "orbit",
+        "crane shot": "crane",
+        "hand-held": "handheld",
+    }
+    candidate = aliases.get(raw, raw)
+    if candidate.endswith(" shot") and candidate[:-5].strip() in CAMERA_MOVEMENT_OPTIONS:
+        candidate = candidate[:-5].strip()
+    if candidate in CAMERA_MOVEMENT_OPTIONS:
+        return candidate, "unchanged" if candidate == raw else "normalized"
+    return DEFAULT_CAMERA_MOVEMENT, "fallback"
+
 
 
 SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT = """
@@ -101,7 +228,7 @@ PURPOSE-AWARE DIRECTING:
 Infer the scene's actual dramatic purpose from the story context and its own scene description. Do not assume an early scene is necessarily setup, a middle scene is a midpoint, or the last scene is a finale; follow the story's actual causal and emotional function. Keep the purpose grounded in events that are stated or clearly implied, and never add a story event to make the scene fit a template. The supplied obligatory_moment identifies the central visible event or state that the required shots must cover; it is not permission to invent additional plot.
 
 SHOT / FRAMING VOCABULARY:
-framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, POV, insert.
+framing: extreme wide, wide, full, medium wide, medium, medium close-up, close-up, extreme close-up, over-the-shoulder, two-shot, pov, insert.
 
 CAMERA MOVEMENT VOCABULARY:
 movement: static, pan, tilt, dolly, tracking, handheld, crane, push-in, orbit.
@@ -209,7 +336,7 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
-        """Sep-25 baseline prose contract, with a stronger craft brief. One call, no retries."""
+        """Configured scene-length prose contract with a craft brief; one author call, no retries."""
         return self._fill_story_length(self._story_text_system_raw(mode))
 
     @staticmethod
@@ -220,8 +347,8 @@ class QwenDirectorPromptMixin:
         return (
             text.replace("__N__", str(n))
             .replace("__PER__", str(per))
-            .replace("__TOTAL__", str(n * per))
-            .replace("__MINW__", str(int(n * per * 0.8)))
+            .replace("__TOTAL__", str(STORY_TARGET_WORDS))
+            .replace("__MINW__", str(STORY_MIN_WORDS))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
         )
 
@@ -276,11 +403,105 @@ class QwenDirectorPromptMixin:
 
         raise ValueError("Preserve Story does not use a story-text pass.")
 
+    def _story_blueprint_system(self, mode: str) -> str:
+        """Build a compact causal beat sheet, not a Story Bible or alternate story."""
+        n = int(DIRECTOR_STORY_SCENES)
+        task_rule = (
+            "Invent the cast, names, relationships, setting, conflict, and ending from the premise. "
+            "Qwen owns all creative identity decisions; do not impose a fixed cast size."
+            if mode == AI_STORY_MODE
+            else "Preserve the source's established characters, setting, chronology, key events, and outcome. "
+                 "Keep any existing twist; add only connective causality needed to film it."
+        )
+        return textwrap.dedent(f"""            You are the story architect for a short film, not the prose writer.
+            Produce a concise, causally complete blueprint of exactly {n} scenes for the source premise.
+            {task_rule}
+
+            Plan for a finished, emotionally credible story: make the protagonist's goal concrete early;
+            ensure each scene is caused by a previous choice or event; track who knows what; keep the
+            location and important object states consistent; plant one ordinary detail early and pay it
+            off in a fair reversal; make a consequential choice cost something; give the ending a clear,
+            observable resolution in the final scene. Avoid unrelated subplots and unexplained turns.
+
+            Output exactly {n} non-empty lines, one per scene, numbered `SCENE 01:` through
+            `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly 20–35 words) that
+            states the visible action, the causal turn, and the important knowledge/object state carried
+            forward. No preamble, JSON, character roster, prose paragraphs, or commentary.
+        """).strip()
+
+    def _story_blueprint_user(
+        self,
+        mode: str,
+        story: str,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        source_text = self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS)
+        result = "MODE: " + str(mode) + "\n\nSOURCE STORY / PREMISE:\n" + source_text
+        if mode == EXPAND_USER_STORY_MODE:
+            anchors = list(dict.fromkeys(
+                str(value).strip()
+                for value in (source_character_names or [])
+                if str(value).strip()
+            ))
+            if anchors:
+                result += "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n" + ", ".join(anchors[:16])
+        result += (
+            f"\n\nCreate the {DIRECTOR_STORY_SCENES}-scene causal blueprint only. "
+            "Every scene must change the situation and establish what causes the next scene."
+        )
+        return result
+
+    @staticmethod
+    def _normalize_story_blueprint(raw: str, expected_scenes: int | None = None) -> str:
+        """Normalize scene-label formatting without regenerating or inventing beats."""
+        count = int(expected_scenes or DIRECTOR_STORY_SCENES)
+        header = re.compile(
+            r"^\s*(?:SCENE\s*)?0*(\d{1,2})\s*[:.)\-–—]\s*(.*?)\s*$",
+            re.IGNORECASE,
+        )
+        beats: dict[int, list[str]] = {}
+        current: int | None = None
+        for raw_line in str(raw or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            match = header.match(line)
+            if match:
+                number = int(match.group(1))
+                if 1 <= number <= count:
+                    if number in beats:
+                        raise RuntimeError(
+                            f"Story architect repeated scene label {number}; blueprint must contain "
+                            f"exactly one beat per scene. No planner retry was attempted."
+                        )
+                    current = number
+                    beats[number] = [match.group(2).strip()]
+                else:
+                    current = None
+            elif current is not None:
+                beats[current].append(line)
+        if set(beats) != set(range(1, count + 1)):
+            missing = sorted(set(range(1, count + 1)) - set(beats))
+            raise RuntimeError(
+                f"Story architect did not return all {count} numbered scene beats "
+                f"(missing {missing}). No planner retry was attempted."
+            )
+        normalized = []
+        for number in range(1, count + 1):
+            text = " ".join(part for part in beats[number] if part).strip()
+            if not text:
+                raise RuntimeError(
+                    f"Story architect returned an empty beat for scene {number}. No planner retry was attempted."
+                )
+            normalized.append(f"SCENE {number:02d}: {text}")
+        return "\n".join(normalized)
+
     def _story_text_user(
         self,
         mode: str,
         story: str,
         source_character_names: list[str] | None = None,
+        story_blueprint: str | None = None,
     ) -> str:
         source_text = self._compact_story_context(
             story,
@@ -298,7 +519,14 @@ class QwenDirectorPromptMixin:
                     "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
                     + ", ".join(anchors[:16])
                 )
-        result += "\n\nReturn only the completed story: " + str(DIRECTOR_STORY_SCENES) + " scene paragraphs, about " + str(DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE) + " words in total, ending on a complete sentence with the resolution."
+        if str(story_blueprint or "").strip():
+            result += (
+                "\n\nCAUSAL SCENE BLUEPRINT (structural reference; do not reproduce these labels):\n"
+                + str(story_blueprint).strip()
+                + "\n\nExpand every beat into vivid, natural filmable prose. Preserve its cause-and-effect, "
+                  "character knowledge, and object/location continuity. Do not explain the blueprint or add headings."
+            )
+        result += "\n\nReturn only the completed story: " + str(DIRECTOR_STORY_SCENES) + " scene paragraphs, about " + str(STORY_TARGET_WORDS) + " words in total, never under " + str(STORY_MIN_WORDS) + " words, ending on a complete sentence with the resolution."
         return result
 
 
@@ -306,10 +534,12 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> tuple[float, float]:
-        if mode == AI_STORY_MODE:
-            return (0.78, 0.90)
-        if mode == EXPAND_USER_STORY_MODE:
-            return (0.62, 0.88)
+        if mode in {AI_STORY_MODE, EXPAND_USER_STORY_MODE}:
+            # The prose author runs non-thinking after the bounded thinking architect pass.
+            return (
+                float(DIRECTOR_STORY_WRITER_TEMPERATURE),
+                float(DIRECTOR_STORY_WRITER_TOP_P),
+            )
         if mode == PRESERVE_USER_STORY_MODE:
             return (0.10, 0.80)
         return (DIRECTOR_TEMPERATURE, DIRECTOR_TOP_P)
@@ -532,8 +762,8 @@ class QwenDirectorPromptMixin:
             },
             "location": {"type": "string", "minLength": 1},
             "action": {"type": "string"},
-            "camera_shot": {"type": "string"},
-            "camera_movement": {"type": "string"},
+            "camera_shot": {"type": "string", "enum": list(CAMERA_SHOT_OPTIONS), "maxLength": 24},
+            "camera_movement": {"type": "string", "enum": list(CAMERA_MOVEMENT_OPTIONS), "maxLength": 12},
             "lens_and_depth_of_field": {"type": "string"},
             "composition_notes": {"type": "string"},
             "lighting": {"type": "string"},
@@ -1059,6 +1289,12 @@ class QwenDirectorPromptMixin:
                     r"[^a-z0-9]+", " ", str(value or "").casefold()
                 ).strip()
 
+            _story_paragraphs = [
+                _part.strip()
+                for _part in re.split(r"\n\s*\n+", str(story or ""))
+                if _part.strip()
+            ]
+
             # Canonical speaker map includes the approved roster and its aliases.
             _canonical_by_norm = {
                 EntityResolver.normalize(str(item.get("name", ""))): str(item.get("name", "")).strip()
@@ -1087,7 +1323,6 @@ class QwenDirectorPromptMixin:
             _scene_cursor = 0
             _unmapped_speakers = set()
             _unmatched_utterances = 0
-            _full_story_key = _dialogue_phrase_key(story)
             for _segment in source_dialogue:
                 _display = str(_segment.get("display", "") or _segment.get("text", "") or "").strip()
                 _phrase = _dialogue_phrase_key(_display)
@@ -1135,12 +1370,50 @@ class QwenDirectorPromptMixin:
                     break
 
                 if not _attached:
-                    # A line from another scene is expected to be absent from this
-                    # two-scene batch. Count only a real source-mapping miss, not a
-                    # correctly attributed utterance belonging to a different batch.
-                    if (" " + _full_story_key + " ").count(" " + _phrase + " ") > 0:
-                        continue
-                    _unmatched_utterances += 1
+                    # The batch receives only one/two scenes, but the story contains every
+                    # source scene. First identify the paragraph(s) containing this exact
+                    # utterance. If it uniquely belongs to a scene in this batch, attach it
+                    # to that scene even if the expanded scene description omitted the line.
+                    # If it belongs only to another batch, skip it intentionally. A phrase
+                    # found in the story but not assignable to a scene is a real mapping miss
+                    # and must not disappear silently.
+                    story_paragraph_matches = []
+                    for _paragraph_index, _paragraph in enumerate(_story_paragraphs):
+                        _paragraph_key = _dialogue_phrase_key(_paragraph)
+                        if (" " + _paragraph_key + " ").count(" " + _phrase + " ") > 0:
+                            story_paragraph_matches.append(_paragraph_index)
+
+                    batch_matches = []
+                    for _scene_payload in scene_payloads:
+                        _scene_match = re.search(r"(\d+)$", str(_scene_payload.get("scene_id", "")))
+                        if not _scene_match:
+                            continue
+                        _paragraph_index = int(_scene_match.group(1)) - 1
+                        if _paragraph_index in story_paragraph_matches:
+                            batch_matches.append((_paragraph_index, _scene_payload))
+
+                    if len(story_paragraph_matches) == 1 and len(batch_matches) == 1:
+                        _paragraph_index, _target_scene = batch_matches[0]
+                        _use_key = (str(_target_scene.get("scene_id", "") or ""), _phrase)
+                        _already_used = _used_phrases.get(_use_key, 0)
+                        _target_paragraph_key = _dialogue_phrase_key(_story_paragraphs[_paragraph_index])
+                        _available = (" " + _target_paragraph_key + " ").count(" " + _phrase + " ")
+                        if _already_used < _available:
+                            _target_scene["source_dialogue"].append({
+                                "speaker": _canonical_speaker,
+                                "text": _display,
+                            })
+                            _used_phrases[_use_key] = _already_used + 1
+                            _scene_cursor = max(_scene_cursor, scene_payloads.index(_target_scene))
+                            _attached = True
+
+                    if not _attached:
+                        # A uniquely located utterance in a different scene batch is
+                        # expected. Other cases remain visible as diagnostic misses.
+                        if len(story_paragraph_matches) == 1 and not batch_matches:
+                            # Uniquely maps to a different batch; its owner will handle it.
+                            continue
+                        _unmatched_utterances += 1
 
             if _unmapped_speakers:
                 print(
