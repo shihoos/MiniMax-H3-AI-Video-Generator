@@ -68,7 +68,7 @@ director:
       top_k: 20
       min_p: 0.0
       presence_penalty: 1.5
-      max_tokens: 3600
+      max_tokens: 3000
   story_contract:
     scene_count: 12
     shots_per_scene: 3
@@ -78,7 +78,7 @@ director:
   prompt_limits:
     story_context_chars: 12000
     critic_story_context_chars: 3500
-    shot_story_context_chars: 3000
+    shot_story_context_chars: 3600
     shot_scene_description_chars: 1500
     shot_scene_objective_chars: 220
     shot_scene_continuity_chars: 180
