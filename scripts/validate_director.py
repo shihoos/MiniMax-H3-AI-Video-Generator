@@ -870,6 +870,22 @@ def test_story_blueprint_normalization_requires_ordered_scene_beats():
     normalized = director._normalize_story_blueprint(source, DIRECTOR_STORY_SCENES)
     lines = normalized.splitlines()
     _assert(len(lines) == DIRECTOR_STORY_SCENES + 1, "blueprint must have a CAST line plus one line per scene")
+    hyphenated = (
+        "CAST: Anne-Marie O'Neil (protagonist; protect the archive; direct) | "
+        "Tomas Reed (ally; expose the theft; blunt) | "
+        "Mara Quinn (opponent; protect her family; guarded)\n" + beats
+    )
+    hyphenated_normalized = director._normalize_story_blueprint(hyphenated, DIRECTOR_STORY_SCENES)
+    _assert(
+        QwenDirector._blueprint_cast_names(hyphenated_normalized)
+        == ["Anne-Marie O'Neil", "Tomas Reed", "Mara Quinn"],
+        "CAST parsing must preserve hyphenated and apostrophe-containing character names",
+    )
+    source_code = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
+    _assert(
+        "_extract_story_spoken_texts" not in source_code,
+        "unused legacy spoken-text compatibility helper must not remain",
+    )
     _assert(lines[0].startswith("CAST:") and lines[1].startswith("SCENE 01:")
             and lines[-1].startswith(f"SCENE {DIRECTOR_STORY_SCENES:02d}:"),
             "CAST must lead and scene numbering must be normalized and ordered")
