@@ -29,7 +29,6 @@ from planner.config import (
     DIRECTOR_STORY_PLAN_THINKING_BUDGET,
     DIRECTOR_STORY_WRITER_MAX_TOKENS,
     DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-    DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_STORY_THINKING_TOP_K,
@@ -1284,7 +1283,7 @@ class QwenDirector(
 
     @staticmethod
     def _validate_generated_story_cast_size(mode: str, characters: list[dict]) -> None:
-        """Stop weak generated/expanded stories before expensive shot-batch planning."""
+        """Validate that a cast exists without imposing a numeric cast-size quota."""
         if mode not in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
             return
         names = []
@@ -1297,12 +1296,11 @@ class QwenDirector(
             if name and key and key not in seen:
                 names.append(name)
                 seen.add(key)
-        if len(names) < DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS:
+        if not names:
             raise RuntimeError(
-                f"Generated-story cast contract failed: need at least {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS} "
-                f"named, physically active characters after canonicalization; found {len(names)} "
-                f"({', '.join(names)}). The story must include more active participants; "
-                "no shot batches were launched and no story retry was attempted."
+                "Generated-story cast contract failed: no named character could be canonicalized. "
+                "A non-empty cast is required for production planning; there is no numeric cast-size quota. "
+                "No shot batches were launched and no story retry was attempted."
             )
 
     def _validate_expand_story_cast(
@@ -1740,7 +1738,7 @@ class QwenDirector(
             if line.upper().startswith("CAST:"):
                 names = []
                 for entry in line[5:].split("|"):
-                    name = entry.split("(", 1)[0].strip(" *_`")
+                    name = re.split(r"[(\[:,\u2013\u2014-]", entry, maxsplit=1)[0].strip(" *_`")
                     if 1 < len(name) <= 40 and name not in names:
                         names.append(name)
                 return names
@@ -1783,8 +1781,6 @@ class QwenDirector(
                 dialogue_scenes += 1
         if dialogue_scenes < 2:
             issues.append(f"cast: only {dialogue_scenes} scene(s) pair 2+ core characters with spoken dialogue, need 2+")
-        if len(names) < int(DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS):
-            issues.append(f"cast: found {len(names)} core characters, need {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}+")
         return issues
 
     def _story_craft_issues(self, story: str) -> list[str]:
@@ -3034,6 +3030,25 @@ class QwenDirector(
                 flush=True,
             )
         return segments
+
+    @classmethod
+    def _extract_story_spoken_texts(
+        cls,
+        story: str,
+        semantic_spoken_dialogue: list[dict] | None = None,
+    ) -> dict[str, set[str]]:
+        """Return source dialogue anchors for compatibility with existing callers."""
+        anchors: dict[str, set[str]] = {}
+        for segment in cls._extract_story_spoken_segments(story, semantic_spoken_dialogue):
+            anchor = str(segment.get("text", "") or "").strip()
+            if not anchor:
+                continue
+            anchors.setdefault(anchor, set()).update(
+                str(value).strip()
+                for value in (segment.get("source_speakers", set()) or set())
+                if str(value).strip()
+            )
+        return anchors
 
     def _normalize_dialogue_speakers(
         self,
