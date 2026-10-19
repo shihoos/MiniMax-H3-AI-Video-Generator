@@ -88,8 +88,8 @@ director:
     writer_words_per_scene: 100
     # Single-generation policy: 612-word hard floor; 816-word target/minimum warns if missed.
     accept_min_words: 612
-    minimum_active_characters: 3
-    target_active_characters: 4
+    # The narrative determines the cast size; no numeric minimum, target, or maximum.
+    cast_size_policy: plot_driven
   prompt_limits:
     story_context_chars: 12000
     critic_story_context_chars: 3500
