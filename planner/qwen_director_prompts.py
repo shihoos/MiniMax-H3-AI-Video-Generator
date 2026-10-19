@@ -26,6 +26,7 @@ from planner.config import (
     DIRECTOR_STORY_SCENES,
     DIRECTOR_SHOTS_PER_SCENE,
     STORY_WORDS_PER_SCENE,
+    STORY_WRITER_WORDS_PER_SCENE,
     STORY_TARGET_WORDS,
     STORY_MIN_WORDS,
     DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
@@ -346,12 +347,13 @@ class QwenDirectorPromptMixin:
     @staticmethod
     def _fill_story_length(text: str) -> str:
         n = int(DIRECTOR_STORY_SCENES)
-        per = int(STORY_WORDS_PER_SCENE)
+        # Ask for the writer overshoot; validation still uses STORY_MIN_WORDS.
+        per = int(STORY_WRITER_WORDS_PER_SCENE)
         seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
         return (
             text.replace("__N__", str(n))
             .replace("__PER__", str(per))
-            .replace("__TOTAL__", str(STORY_TARGET_WORDS))
+            .replace("__TOTAL__", str(n * per))
             .replace("__MINW__", str(STORY_MIN_WORDS))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
         )
@@ -408,10 +410,12 @@ class QwenDirectorPromptMixin:
             off in a fair reversal; make a consequential choice cost something; give the ending a clear,
             observable resolution in the final scene. Avoid unrelated subplots and unexplained turns.
 
-            Output exactly {n} non-empty lines, one per scene, numbered `SCENE 01:` through
-            `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly 20–35 words) that
-            states the visible action, the causal turn, and the important knowledge/object state carried
-            forward. No preamble, JSON, character roster, prose paragraphs, or commentary.
+            First output ONE line beginning `CAST:` that lists every core character as
+            `Name (role; what they want; how they speak) | Name (...) | ...` so the writer keeps
+            identities and voices consistent. Then output exactly {n} non-empty lines, one per scene,
+            numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly 20–35 words) that
+            states the visible action, the causal turn, who is physically present, and the important
+            knowledge/object state carried forward. No preamble, JSON, character roster, prose paragraphs, or commentary.
         """).strip()
 
     def _story_blueprint_user(
@@ -440,6 +444,11 @@ class QwenDirectorPromptMixin:
     def _normalize_story_blueprint(raw: str, expected_scenes: int | None = None) -> str:
         """Normalize scene-label formatting without regenerating or inventing beats."""
         count = int(expected_scenes or DIRECTOR_STORY_SCENES)
+        cast_line = ""
+        for _line in str(raw or "").splitlines():
+            _m = re.match(r"^\s*\**\s*CAST\s*\**\s*:\s*(.+?)\s*$", _line, re.IGNORECASE)
+            if _m and not cast_line:
+                cast_line = "CAST: " + re.sub(r"\bSCENE\b", "Scene", _m.group(1))[:700]
         header = re.compile(
             r"^\s*(?:SCENE\s*)?0*(\d{1,2})\s*[:.)\-–—]\s*(.*?)\s*$",
             re.IGNORECASE,
@@ -479,7 +488,8 @@ class QwenDirectorPromptMixin:
                     f"Story architect returned an empty beat for scene {number}. No planner retry was attempted."
                 )
             normalized.append(f"SCENE {number:02d}: {text}")
-        return "\n".join(normalized)
+        # The optional cast line is advisory context for the writer; a missing one is not an error.
+        return "\n".join(([cast_line] if cast_line else []) + normalized)
 
     def _story_text_user(
         self,
@@ -506,15 +516,17 @@ class QwenDirectorPromptMixin:
                 )
         if str(story_blueprint or "").strip():
             result += (
-                "\n\nCAUSAL SCENE BLUEPRINT (structural reference; do not reproduce these labels):\n"
+                "\n\nCAUSAL SCENE BLUEPRINT (structural reference; do not reproduce these labels; the CAST line lists the recurring characters whose names and voices must stay consistent):\n"
                 + str(story_blueprint).strip()
                 + "\n\nExpand every beat into vivid, natural filmable prose. Preserve its cause-and-effect, "
                   "character knowledge, and object/location continuity. Do not explain the blueprint or add headings."
             )
         result += (
             "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(DIRECTOR_STORY_SCENES)
-            + " scene paragraphs, one for each beat in order, each about " + str(STORY_WORDS_PER_SCENE)
-            + " words (roughly 75–95 words), about " + str(STORY_TARGET_WORDS)
+            + " scene paragraphs, one for each beat in order, each about " + str(STORY_WRITER_WORDS_PER_SCENE)
+            + " words (roughly " + str(STORY_WRITER_WORDS_PER_SCENE - 15) + "–" + str(STORY_WRITER_WORDS_PER_SCENE + 20)
+            + " words; a paragraph under " + str(STORY_WORDS_PER_SCENE - 15) + " words is too short), about "
+            + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
             + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
             + f" Include at least {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS} named, physically active core characters; each must appear in more than one scene."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
