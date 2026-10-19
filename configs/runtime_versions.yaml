@@ -54,13 +54,12 @@ director:
   # Bounded Qwen3 hybrid story flow: reason about structure, then write clean prose.
   # Native thinking_token_budget is supported by this vLLM 0.31.0 runtime.
   story_architecture:
-    max_tokens: 2200
+    # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
+    max_tokens: 2600
     thinking_token_budget: 1280
-  # ONE model call writes the whole story: Qwen3 thinks briefly (hard-capped by vLLM's
-  # thinking_token_budget) to plan cast and 12 beats, then writes the prose in the same response.
-  story_single_call:
-    thinking_token_budget: 900
-    max_tokens: 3800
+    beat_words_min: 45
+    beat_words_max: 60
+  # Two-stage story flow: Architect thinks/plans once; Author writes once without thinking.
   story_sampling:
     thinking:
       temperature: 0.6
@@ -85,11 +84,9 @@ director:
     words_per_scene: 85
     target_words: 1020
     minimum_words: 816
-    # Prompt-only overshoot. Qwen3 non-thinking writers routinely land ~20-25% under the
-    # requested length, so ask for ~100 words/scene to land comfortably above minimum_words.
+    # Prompt-only overshoot; validation target remains 1,020 with an 816-word warning floor.
     writer_words_per_scene: 100
-    # Single-generation policy: no retries, repairs or rescue calls. Drafts under minimum_words but at
-    # or above accept_min_words are accepted with a warning; only truncated output fails.
+    # Single-generation policy: 612-word hard floor; 816-word target/minimum warns if missed.
     accept_min_words: 612
     minimum_active_characters: 3
     target_active_characters: 4
