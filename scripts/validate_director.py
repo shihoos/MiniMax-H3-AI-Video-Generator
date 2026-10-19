@@ -861,18 +861,30 @@ def test_story_blueprint_normalization_requires_ordered_scene_beats():
     from planner.qwen_director import QwenDirector
     from planner.config import DIRECTOR_STORY_SCENES
     director = QwenDirector.__new__(QwenDirector)
-    source = "\n".join(f"SCENE {i:02d}: Beat {i} changes the story and carries the state forward." for i in range(1, DIRECTOR_STORY_SCENES + 1))
+    cast = "CAST: Ines Vale (protagonist; save the archive; precise) | Tomas Reed (ally; expose theft; blunt) | Mara Quinn (opponent; protect family; guarded)"
+    beats = "\n".join(
+        f"SCENE {i:02d}: Beat {i} changes the story and carries the state forward."
+        for i in range(1, DIRECTOR_STORY_SCENES + 1)
+    )
+    source = cast + "\n" + beats
     normalized = director._normalize_story_blueprint(source, DIRECTOR_STORY_SCENES)
     lines = normalized.splitlines()
-    _assert(len(lines) == DIRECTOR_STORY_SCENES, "blueprint must have one line per scene")
-    _assert(lines[0].startswith("SCENE 01:") and lines[-1].startswith(f"SCENE {DIRECTOR_STORY_SCENES:02d}:"),
-            "blueprint numbering must be normalized and ordered")
+    _assert(len(lines) == DIRECTOR_STORY_SCENES + 1, "blueprint must have a CAST line plus one line per scene")
+    _assert(lines[0].startswith("CAST:") and lines[1].startswith("SCENE 01:")
+            and lines[-1].startswith(f"SCENE {DIRECTOR_STORY_SCENES:02d}:"),
+            "CAST must lead and scene numbering must be normalized and ordered")
     try:
-        director._normalize_story_blueprint("SCENE 01: only one beat", DIRECTOR_STORY_SCENES)
+        director._normalize_story_blueprint(cast + "\nSCENE 01: only one beat", DIRECTOR_STORY_SCENES)
     except RuntimeError as exc:
         _assert("missing" in str(exc).lower(), f"unexpected invalid-blueprint error: {exc}")
     else:
         raise AssertionError("incomplete story blueprint must fail closed without a retry")
+    try:
+        director._normalize_story_blueprint(beats, DIRECTOR_STORY_SCENES)
+    except RuntimeError as exc:
+        _assert("cast" in str(exc).lower(), f"missing CAST line must fail closed: {exc}")
+    else:
+        raise AssertionError("a blueprint without the CAST line must fail closed without a retry")
     duplicate = source + "\nSCENE 12: duplicate final beat that must not be silently merged."
     try:
         director._normalize_story_blueprint(duplicate, DIRECTOR_STORY_SCENES)
@@ -880,7 +892,6 @@ def test_story_blueprint_normalization_requires_ordered_scene_beats():
         _assert("repeated scene label" in str(exc).lower(), f"unexpected duplicate-beat error: {exc}")
     else:
         raise AssertionError("duplicate scene labels must fail closed without a retry")
-
 
 def test_story_architect_uses_native_bounded_thinking_and_no_retry():
     from planner.qwen_director import QwenDirector
@@ -890,7 +901,11 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
     )
     director = QwenDirector.__new__(QwenDirector)
     calls = []
-    raw = "\n".join(f"SCENE {i:02d}: Beat {i} changes the situation and causes the next event." for i in range(1, DIRECTOR_STORY_SCENES + 1))
+    cast = "CAST: Ines Vale (protagonist; save the archive; precise) | Tomas Reed (ally; expose the theft; blunt) | Mara Quinn (opponent; protect her family; guarded)"
+    raw = cast + "\n" + "\n".join(
+        f"SCENE {i:02d}: Ines acts with Tomas and Mara; a visible choice changes the evidence and causes the next beat."
+        for i in range(1, DIRECTOR_STORY_SCENES + 1)
+    )
     def fake_chat(*args, **kwargs):
         calls.append(kwargs.copy())
         return raw
@@ -900,7 +915,7 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
     _assert(calls[0].get("disable_thinking") is False, "architect must use thinking mode")
     _assert(calls[0].get("thinking_token_budget") == DIRECTOR_STORY_PLAN_THINKING_BUDGET == 1280,
             f"architect must use its configured reasoning budget: {calls[0]}")
-    _assert(calls[0].get("max_completion") == DIRECTOR_STORY_PLAN_MAX_TOKENS == 2200,
+    _assert(calls[0].get("max_completion") == DIRECTOR_STORY_PLAN_MAX_TOKENS == 2600,
             f"architect must use its configured hard output ceiling: {calls[0]}")
     _assert(calls[0].get("temperature") == DIRECTOR_STORY_THINKING_TEMPERATURE == 0.6
             and calls[0].get("top_p") == DIRECTOR_STORY_THINKING_TOP_P == 0.95,
@@ -909,7 +924,7 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
             "normalized blueprint should include all configured scenes")
 
 
-def test_story_length_is_single_call_soft_floor_never_retried():
+def test_story_length_soft_floor_uses_one_author_call_without_retry():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
     from contextlib import redirect_stdout
@@ -971,17 +986,20 @@ def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes
     _assert(len(calls) == 1, f"topology failure must not trigger retry, got {len(calls)} calls")
 
 
-def test_story_uses_exactly_one_model_call_without_retry_or_repair():
-    """Guard the normal fresh-story path: ONE bounded-thinking call, no planner pass."""
+def test_story_uses_one_architect_and_one_author_without_retry_or_repair():
+    """Normal generation must have one thinking Architect and one non-thinking Author."""
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
-    generate_start = source.index("story_system = self._story_single_call_system(mode)", source.index("def generate("))
+    generate_start = source.index("story_blueprint = self._generate_story_blueprint(", source.index("def generate("))
     normal_path_end = source.index("# PASS 1B: deterministic production foundation", generate_start)
     normal_path = source[generate_start:normal_path_end]
-    _assert("_maybe_plan_story_bible" not in source and "_format_story_bible" not in source,
-            "the removed Story Bible must not return")
-    _assert("_generate_story_blueprint(" not in normal_path, "normal path must not run a separate planning call")
-    _assert(normal_path.count("self._generate_story_once(") == 1 and "single_call=True" in normal_path,
-            "normal fresh generation must make exactly one single_call writer request")
+    _assert(normal_path.count("self._generate_story_blueprint(") == 1,
+            "normal path must make one Architect request")
+    _assert(normal_path.count("self._generate_story_once(") == 1,
+            "normal path must make one Author request")
+    _assert("story_blueprint=story_blueprint" in normal_path,
+            "Author must receive the validated Architect blueprint and CAST line")
+    _assert("_story_single_call_system" not in source and "single_call=True" not in source,
+            "combined thinking/write call must not remain")
     _assert("_rescue_short_scenes" not in source, "no rescue calls may exist")
     _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
             "normal path must not retry or automatically repair the story")
@@ -989,33 +1007,59 @@ def test_story_uses_exactly_one_model_call_without_retry_or_repair():
             "normal path must not add challenger or judge calls")
 
 
-def test_single_call_story_uses_bounded_thinking_in_one_request():
+def test_author_is_one_nonthinking_call_and_receives_planned_cast():
     from planner.qwen_director import QwenDirector
-    from planner.config import (
-        AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_SINGLE_THINKING_BUDGET,
-        STORY_SINGLE_MAX_TOKENS, DIRECTOR_STORY_THINKING_TEMPERATURE,
-    )
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_WRITER_MAX_TOKENS, STORY_ACCEPT_MIN_WORDS
     from contextlib import redirect_stdout
     from io import StringIO
-    paras = [" ".join([f"Ines{k}", "and", "Tomas", "crossed", "the", "yard."] + [f"w{k}x{i}" for i in range(95)]) + "." for k in range(DIRECTOR_STORY_SCENES)]
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+
+    blueprint = (
+        "CAST: Ines Vale (protagonist; save the archive; precise) | "
+        "Tomas Reed (ally; expose the theft; blunt) | "
+        "Mara Quinn (opponent; protect her family; guarded)\n" +
+        "\n".join(f"SCENE {i:02d}: Ines chooses an action with Tomas and Mara, changing the stakes." for i in range(1, 13))
+    )
+    mixin = QwenDirectorPromptMixin()
+    writer_user = mixin._story_text_user(
+        AI_STORY_MODE, "The archive is threatened.", story_blueprint=blueprint
+    )
+    _assert("CAST: Ines Vale" in writer_user and "SCENE 12:" in writer_user,
+            "the normalized CAST and all 12 beats must reach the prose writer")
+
+    paragraphs = [" ".join([f"Scene{i}", "Ines", "and", "Tomas", "acted."] + [f"word{i}_{j}" for j in range(75)]) + "."
+                  for i in range(12)]
     director = QwenDirector.__new__(QwenDirector)
-    director._story_min_words = 612
+    director._story_min_words = STORY_ACCEPT_MIN_WORDS
     calls = []
-    def fake_chat(*a, **k):
-        calls.append(k)
-        return "\n\n".join(paras)
+    def fake_chat(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return "\n\n".join(paragraphs)
     director._chat_text = fake_chat
-    system = director._story_single_call_system(AI_STORY_MODE)
-    _assert("CAST" in system and "thinking" in system.lower(), "single-call prompt must define the planning protocol")
     with redirect_stdout(StringIO()):
-        director._generate_story_once(AI_STORY_MODE, "premise", system, "user", temperature=0.7, top_p=0.8,
-                                      source_character_names=[], single_call=True)
-    _assert(len(calls) == 1, f"exactly one request expected, got {len(calls)}")
-    c = calls[0]
-    _assert(c.get("disable_thinking") is False and c.get("thinking_token_budget") == STORY_SINGLE_THINKING_BUDGET,
-            f"single call must enable thinking with a hard budget: {c}")
-    _assert(c.get("max_completion") == min(STORY_SINGLE_MAX_TOKENS, 6500) and c.get("temperature") == DIRECTOR_STORY_THINKING_TEMPERATURE,
-            f"single call must use the thinking sampler and configured ceiling: {c}")
+        story, generated = director._generate_story_once(
+            AI_STORY_MODE, "premise", mixin._story_text_system(AI_STORY_MODE), writer_user,
+            temperature=0.7, top_p=0.8, source_character_names=[], story_blueprint=blueprint,
+        )
+    _assert(generated and len(calls) == 1, f"Author must make exactly one request, got {len(calls)}")
+    call = calls[0]
+    _assert(call.get("disable_thinking") is True, f"Author must run with thinking off: {call}")
+    _assert(call.get("max_completion") == min(6500, DIRECTOR_STORY_WRITER_MAX_TOKENS) == 3000,
+            f"Author must use the dedicated writer completion ceiling: {call}")
+    _assert("thinking_token_budget" not in call,
+            "Author request must not reuse the Architect thinking budget")
+
+
+def test_story_plan_uses_richer_beats_and_required_cast_line():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    from planner.config import AI_STORY_MODE, STORY_PLAN_BEAT_MIN_WORDS, STORY_PLAN_BEAT_MAX_WORDS
+    prompt = QwenDirectorPromptMixin()._story_blueprint_system(AI_STORY_MODE)
+    _assert(STORY_PLAN_BEAT_MIN_WORDS == 45 and STORY_PLAN_BEAT_MAX_WORDS == 60,
+            "Architect beat targets must be 45–60 words from runtime YAML")
+    _assert("45–60 words" in prompt, "Architect prompt must request richer 45–60-word beats")
+    lowered = prompt.lower()
+    _assert("cast:" in lowered and "at least six" in lowered,
+            "Architect prompt must specify a CAST line and dialogue anchors across at least six beats")
 
 
 def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
@@ -1370,11 +1414,12 @@ def main():
         test_generated_story_cast_contract_is_enforced_before_shot_planning,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
-        test_story_length_is_single_call_soft_floor_never_retried,
+        test_story_length_soft_floor_uses_one_author_call_without_retry,
         test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
-        test_story_uses_exactly_one_model_call_without_retry_or_repair,
-        test_single_call_story_uses_bounded_thinking_in_one_request,
+        test_story_uses_one_architect_and_one_author_without_retry_or_repair,
+        test_author_is_one_nonthinking_call_and_receives_planned_cast,
+        test_story_plan_uses_richer_beats_and_required_cast_line,
         test_topology_is_driven_by_scene_and_shot_settings,
         test_shot_batch_completion_budget_uses_runtime_topology,
         test_story_scene_coercion_keeps_quoted_dialogue_intact,
