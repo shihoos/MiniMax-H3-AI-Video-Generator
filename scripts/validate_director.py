@@ -722,9 +722,33 @@ def test_shot_sampler_uses_runtime_manifest_values():
             "shot sampler must return the YAML-resolved values")
 
 
+def test_story_writer_minimum_output_tokens_uses_runtime_manifest():
+    from planner.config import (
+        DIRECTOR_STORY_MAX_TOKENS,
+        DIRECTOR_STORY_WRITER_MAX_TOKENS,
+        DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+        RUNTIME,
+    )
+
+    writing = RUNTIME["director"]["story_sampling"]["writing"]
+    _assert(
+        DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
+        == int(writing["minimum_output_tokens"]) == 1350,
+        "writer minimum-output floor must be owned by runtime_versions.yaml",
+    )
+    _assert(
+        1 <= DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
+        <= min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS),
+        "writer minimum-output floor must fit within the effective completion ceiling",
+    )
+
+
 def test_story_thinking_and_writing_samplers_reach_vllm_payload():
     from planner.qwen_director import QwenDirector
-    from planner.config import DIRECTOR_STORY_PRESENCE_PENALTY
+    from planner.config import (
+        DIRECTOR_STORY_PRESENCE_PENALTY,
+        DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+    )
 
     class FakeResponse:
         status_code = 200
@@ -751,6 +775,7 @@ def test_story_thinking_and_writing_samplers_reach_vllm_payload():
     director._post_chat(
         messages=[{"role": "user", "content": "Test literary story writer."}],
         temperature=0.7, top_p=0.8, max_tokens=3000,
+        min_tokens=DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
         enable_thinking=False, creative=True,
     )
     _assert(len(director._vllm_session.calls) == 2, "architect and writer payloads should be issued independently")
@@ -773,6 +798,8 @@ def test_story_thinking_and_writing_samplers_reach_vllm_payload():
             f"Qwen3 non-thinking sampler not passed through: {write_payload}")
     _assert(write_payload["presence_penalty"] == DIRECTOR_STORY_PRESENCE_PENALTY == 1.5,
             f"AWQ prose writer should retain Qwen's official quantized-model penalty default: {write_payload}")
+    _assert(write_payload["min_tokens"] == DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+            f"writer minimum-output floor must reach the vLLM payload: {write_payload}")
 
 
 def test_story_blueprint_normalization_requires_ordered_scene_beats():
@@ -899,7 +926,8 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
     from planner.qwen_director import QwenDirector
     from planner.config import (
         AI_STORY_MODE, DIRECTOR_STORY_SCENES, DIRECTOR_STORY_MAX_TOKENS,
-        DIRECTOR_STORY_WRITER_MAX_TOKENS, DIRECTOR_STORY_WRITER_TEMPERATURE,
+        DIRECTOR_STORY_WRITER_MAX_TOKENS, DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+        DIRECTOR_STORY_WRITER_TEMPERATURE,
         DIRECTOR_STORY_WRITER_TOP_P, STORY_MIN_WORDS,
     )
     paragraphs = [
@@ -933,6 +961,8 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
     expected_ceiling = min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS)
     _assert(calls[0].get("max_completion") == expected_ceiling,
             f"prose writer must use its runtime-configured ceiling ({expected_ceiling}): {calls[0]}")
+    _assert(calls[0].get("minimum_output_tokens") == DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
+            f"prose writer must use the runtime-configured minimum output floor: {calls[0]}")
     _assert(STORY_MIN_WORDS == int(DIRECTOR_STORY_SCENES * 85 * 0.8) == 816,
             f"story minimum must match prompt's 80% target: {STORY_MIN_WORDS}")
     _assert(count == DIRECTOR_STORY_SCENES, f"paragraphs must be normalized to {DIRECTOR_STORY_SCENES}, got {count}")
@@ -1238,6 +1268,7 @@ def main():
         test_story_prompt_is_open_cast_and_fully_filled,
         test_story_thinking_and_writing_samplers_reach_vllm_payload,
         test_shot_sampler_uses_runtime_manifest_values,
+        test_story_writer_minimum_output_tokens_uses_runtime_manifest,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_short_story_below_prompt_minimum_fails_without_retry,
