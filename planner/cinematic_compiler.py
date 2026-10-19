@@ -1,6 +1,10 @@
 from __future__ import annotations
 from planner.entity_resolver import EntityResolver
 from planner.config import DIRECTOR_SHOTS_PER_SCENE
+from planner.qwen_director_prompts import (
+    normalize_camera_movement,
+    normalize_camera_shot,
+)
 
 import json
 from copy import deepcopy
@@ -715,6 +719,18 @@ class CinematicCompiler:
 
         shot = deepcopy(
             qwen_shot
+        )
+
+        # This is the final compilation boundary.  In particular, shots supplied by
+        # _fallback_shots_for_scene() do not pass through QwenDirector._sanitize_shots,
+        # so normalize the vocabulary here as well.  Doing this before required-field
+        # validation also gives legacy/cached inputs the same fail-closed behavior as
+        # newly generated shots.
+        shot["camera_shot"], _camera_shot_status = normalize_camera_shot(
+            shot.get("camera_shot", "")
+        )
+        shot["camera_movement"], _camera_movement_status = normalize_camera_movement(
+            shot.get("camera_movement", "")
         )
 
         self._validate_creative_fields(
