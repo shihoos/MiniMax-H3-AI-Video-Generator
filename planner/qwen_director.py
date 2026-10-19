@@ -1740,7 +1740,7 @@ class QwenDirector(
             if line.upper().startswith("CAST:"):
                 names = []
                 for entry in line[5:].split("|"):
-                    name = re.split(r"[(\[:,\u2013\u2014-]", entry, maxsplit=1)[0].strip(" *_`")
+                    name = entry.split("(", 1)[0].strip(" *_`")
                     if 1 < len(name) <= 40 and name not in names:
                         names.append(name)
                 return names
@@ -3034,25 +3034,6 @@ class QwenDirector(
                 flush=True,
             )
         return segments
-
-    @classmethod
-    def _extract_story_spoken_texts(
-        cls,
-        story: str,
-        semantic_spoken_dialogue: list[dict] | None = None,
-    ) -> dict[str, set[str]]:
-        """Return source dialogue anchors for compatibility with existing callers."""
-        anchors: dict[str, set[str]] = {}
-        for segment in cls._extract_story_spoken_segments(story, semantic_spoken_dialogue):
-            anchor = str(segment.get("text", "") or "").strip()
-            if not anchor:
-                continue
-            anchors.setdefault(anchor, set()).update(
-                str(value).strip()
-                for value in (segment.get("source_speakers", set()) or set())
-                if str(value).strip()
-            )
-        return anchors
 
     def _normalize_dialogue_speakers(
         self,
