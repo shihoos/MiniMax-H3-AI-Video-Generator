@@ -253,8 +253,8 @@ def main() -> None:
     assert abs(DialogueTimeline.h3_effective_duration_seconds(5.0) - 124 / 24.0) < 1e-9
     assert DialogueTimeline.h3_legal_frames(15.0) == 362
 
-    # Requested shot timing must be canonicalized to the exact H3 frame-grid
-    # duration so the plan/timeline/ComfyUI render cannot silently diverge.
+    # Requested shot timing is a target and rounds to the nearest legal frame count.
+    # The separate required-speech helper still rounds UP to avoid dialogue truncation.
     timing_plan = {
         "shots": [
             {
@@ -267,9 +267,12 @@ def main() -> None:
     }
     ProductionTimeline(timing_plan).build()
     timing_shot = timing_plan["shots"][0]
-    assert abs(timing_shot["duration_seconds"] - 141 / 24.0) < 1e-9
-    assert timing_shot["frames_per_shot"] == 141
-    assert abs(timing_shot["h3_effective_duration_seconds"] - timing_shot["duration_seconds"]) < 1e-9
+    assert abs(timing_shot["duration_seconds"] - 124 / 24.0) < 5e-5
+    assert timing_shot["frames_per_shot"] == 124
+    assert DialogueTimeline._minimum_h3_duration_for_required_seconds(5.2) == (141, 141 / 24.0)
+    from execution.h3_workflow_builder import H3WorkflowBuilder
+    assert H3WorkflowBuilder._legal_frames(5.2) == 124
+    assert abs(timing_shot["h3_effective_duration_seconds"] - timing_shot["duration_seconds"]) < 5e-5
     assert abs(timing_shot["requested_duration_seconds"] - 5.2) < 1e-9
 
     max_timing_plan = {
