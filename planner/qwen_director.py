@@ -21,10 +21,19 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
     STORY_WORDS_PER_SCENE,
+    STORY_MIN_WORDS,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
+    DIRECTOR_STORY_PLAN_MAX_TOKENS,
+    DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+    DIRECTOR_STORY_WRITER_MAX_TOKENS,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
+    DIRECTOR_STORY_THINKING_TOP_K,
+    DIRECTOR_STORY_THINKING_MIN_P,
+    DIRECTOR_STORY_WRITER_TOP_K,
+    DIRECTOR_STORY_WRITER_MIN_P,
+    DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
@@ -91,7 +100,7 @@ class QwenDirector(
         self._character_semantic_calls = 0
         self._semantic_spoken_dialogue: list[dict] = []
         self._last_story_draft: str = ""
-        self._story_min_words: int = DIRECTOR_STORY_SCENES * 55
+        self._story_min_words: int = STORY_MIN_WORDS
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -295,12 +304,12 @@ class QwenDirector(
                     and str(item.get("speaker", "") or "").strip()
                 ]
 
-        # Restore the September 25 per-mode sampler; story writing is explicitly
-        # non-thinking and runs once without the Story Bible or repair stages.
+        # One bounded Qwen3 thinking pass plans story architecture; one non-thinking
+        # prose pass writes it. Neither pass is retried or repaired by another model call.
         temperature, top_p = self._sampling_for_mode(mode)
 
         # ----------------------------------------------------
-        # PASS 1A: narrative
+        # PASS 1A: bounded causal story architecture + single prose-writing pass
         # ----------------------------------------------------
 
         generated_story = False
@@ -345,16 +354,21 @@ class QwenDirector(
                 )
             )
 
-            story_user = self._story_text_user(
+            # One short, bounded causal-planning call feeds one non-thinking prose call.
+            # This is not a Story Bible, best-of-N, retry, or post-hoc editor: Qwen owns
+            # the blueprint and the single author call; deterministic code only checks
+            # the 12 scene labels before passing it forward.
+            story_blueprint = self._generate_story_blueprint(
                 mode,
                 user_input,
                 source_character_names=source_character_names,
             )
-            # The extra Story Bible call is deliberately absent from normal generation.
-            # Runtime traces showed it inventing an arbitrary EMP countdown in AI Story
-            # and truncating into a discarded JSON result in Expand Story. It added
-            # latency and injected unreliable causal constraints before the writer.
-            # Keep the writer single-pass: no story retry, challenger, or editor call.
+            story_user = self._story_text_user(
+                mode,
+                user_input,
+                source_character_names=source_character_names,
+                story_blueprint=story_blueprint,
+            )
             story, generated_story = self._generate_story_once(
                 mode,
                 user_input,
@@ -376,14 +390,14 @@ class QwenDirector(
         if mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE) and not generated_story:
             # Resume/checkpoint safety only: generated stories have already passed the
             # authoritative raw-story validation above. Older checkpoints may predate
-            # the six-paragraph contract, so repair topology here without changing prose.
+            # the configured scene-paragraph contract; repair without changing prose.
             paragraphs = [
                 part.strip()
                 for part in re.split(r"\n\s*\n+", story)
                 if part.strip()
             ]
             if len(paragraphs) != DIRECTOR_STORY_SCENES:
-                story = self._coerce_story_to_six_paragraphs(story)
+                story = self._coerce_story_to_scene_paragraphs(story)
             if mode == EXPAND_USER_STORY_MODE:
                 self._validate_expand_story_cast(
                     user_input,
@@ -1301,7 +1315,7 @@ class QwenDirector(
             )
 
     # ------------------------------------------------------------------
-    # Story generation: one non-thinking call, deterministic checks, no retries
+    # Story generation: one thinking-enabled call, deterministic checks, no retries
     # ------------------------------------------------------------------
     def _salvage_runaway_story(self, text: str) -> str:
         """Recover a clean story from a draft that kept generating after it ended."""
@@ -1330,7 +1344,78 @@ class QwenDirector(
         if not matches:
             return ""
         value = value[: matches[-1].end()].strip()
-        return value if len(re.findall(r"\b[\w'’-]+\b", value)) >= DIRECTOR_STORY_SCENES * 45 else ""
+        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
+        return value if len(re.findall(r"\b[\w'’-]+\b", value)) >= minimum_words else ""
+
+    @staticmethod
+    def _trim_repeated_terminal_sentence(story: str) -> tuple[str, bool]:
+        """Remove only an exact duplicate of the final sentence in its final paragraph.
+
+        This is a narrow deterministic safeguard for the observed duplicated ending. It
+        performs no semantic rewrite, does not remove repeated phrases elsewhere, and
+        never triggers a second model call. Ambiguous or quoted boundaries fail closed.
+        """
+        value = str(story or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", value) if part.strip()]
+        if not paragraphs:
+            return value, False
+        paragraph = paragraphs[-1]
+
+        # Split only at sentence punctuation outside balanced straight/curly quotes.
+        closing_for = {"“": "”", "‘": "’"}
+        quote_stack: list[str] = []
+        spans: list[str] = []
+        start = 0
+        for index, char in enumerate(paragraph):
+            if char in closing_for:
+                quote_stack.append(closing_for[char])
+                continue
+            if char in {"\"", "'", "”", "’"}:
+                if char == "'" and index > 0 and index + 1 < len(paragraph):
+                    if paragraph[index - 1].isalnum() and paragraph[index + 1].isalnum():
+                        continue
+                if quote_stack and char == quote_stack[-1]:
+                    quote_stack.pop()
+                elif not quote_stack and char in {"\"", "'"}:
+                    previous = paragraph[index - 1] if index else " "
+                    following = paragraph[index + 1] if index + 1 < len(paragraph) else " "
+                    if (previous.isspace() or previous in "([{—–:;") and not following.isspace():
+                        quote_stack.append(char)
+                continue
+            if char not in ".!?" or quote_stack:
+                continue
+            if index + 1 < len(paragraph) and paragraph[index + 1].isspace():
+                span = paragraph[start:index + 1].strip()
+                if span:
+                    spans.append(span)
+                cursor = index + 1
+                while cursor < len(paragraph) and paragraph[cursor].isspace():
+                    cursor += 1
+                start = cursor
+        tail = paragraph[start:].strip()
+        if tail:
+            spans.append(tail)
+        if len(spans) < 2:
+            return value, False
+
+        def normalized(sentence: str) -> str:
+            # Ignore only whitespace and capitalization; punctuation/content must match.
+            return re.sub(r"\s+", " ", sentence.strip()).casefold()
+
+        final_key = normalized(spans[-1])
+        if len(final_key.split()) < 5 or not any(normalized(item) == final_key for item in spans[:-1]):
+            return value, False
+
+        # Remove the final sentence from the final paragraph only; preserve every
+        # other sentence and all other paragraphs verbatim.
+        cut = paragraph.rfind(spans[-1])
+        if cut < 0:
+            return value, False
+        updated_paragraph = paragraph[:cut].rstrip()
+        if not updated_paragraph:
+            return value, False
+        paragraphs[-1] = updated_paragraph
+        return "\n\n".join(paragraphs), True
 
     def _story_quality_issues(self, story: str) -> list[str]:
         """Log-only structural craft diagnostics; never fail or rewrite the story."""
@@ -1373,6 +1458,67 @@ class QwenDirector(
 
         return issues
 
+    def _generate_story_blueprint(
+        self,
+        mode: str,
+        user_input: str,
+        *,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        """Create one compact 12-scene plan with a hard Qwen reasoning-token budget."""
+        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, StoryTruncated
+
+        call_name = (
+            "ai_story_architecture_pass"
+            if mode == AI_STORY_MODE
+            else "expand_story_architecture_pass"
+        )
+        system_prompt = self._story_blueprint_system(mode)
+        user_prompt = self._story_blueprint_user(
+            mode,
+            user_input,
+            source_character_names=source_character_names,
+        )
+        print(
+            f"[QWEN] story_architecture=bounded thinking_budget={DIRECTOR_STORY_PLAN_THINKING_BUDGET} "
+            f"max_tokens={DIRECTOR_STORY_PLAN_MAX_TOKENS} "
+            f"scenes={DIRECTOR_STORY_SCENES} retry=false",
+            flush=True,
+        )
+        try:
+            raw = self._chat_text(
+                system_prompt,
+                user_prompt,
+                minimum_completion=400,
+                temperature=float(DIRECTOR_STORY_THINKING_TEMPERATURE),
+                top_p=float(DIRECTOR_STORY_THINKING_TOP_P),
+                call_name=call_name,
+                max_completion=min(
+                    int(DIRECTOR_STORY_PLAN_MAX_TOKENS),
+                    int(DIRECTOR_STORY_MAX_TOKENS),
+                ),
+                disable_thinking=False,
+                seed=(
+                    DIRECTOR_VLLM_SEED
+                    if mode == EXPAND_USER_STORY_MODE
+                    else random.randint(1, 2**31 - 1)
+                ),
+                creative=False,
+                thinking_token_budget=int(DIRECTOR_STORY_PLAN_THINKING_BUDGET),
+            )
+        except StoryTruncated as exc:
+            # Accept a complete 12-beat plan salvaged from a capped response; never
+            # make another planning request. Incomplete plans fail explicitly.
+            raw = str(exc.partial or "")
+            try:
+                return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+            except RuntimeError as plan_error:
+                raise RuntimeError(
+                    f"{call_name} hit its token ceiling and the partial output was not a complete "
+                    f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
+                ) from plan_error
+        return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+
     def _generate_story_once(
         self,
         mode: str,
@@ -1384,7 +1530,7 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
     ) -> tuple[str, bool]:
-        """Generate the story in one creative Qwen call, with no retry or challenger.
+        """Write the story once in non-thinking mode from the bounded causal blueprint.
 
         Paragraph topology is normalized deterministically. Length and completion are
         hard contracts; source-coverage heuristics stay advisory. Nothing is retried.
@@ -1404,20 +1550,23 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "Expand Story generation failed validation: "
         )
-        # September 25-derived request: non-thinking, 2,200-token ceiling, no forced
-        # output floor, no presence penalty, and exactly one creative writing call.
+        # The YAML global ceiling remains authoritative; the dedicated non-thinking
+        # author cap keeps output bounded without spending its allowance on reasoning.
+        # The runtime further clamps each request to available 8K-context headroom.
         story_min_output_tokens = 0
-        story_budget = DIRECTOR_STORY_MAX_TOKENS
-        # One story call, thinking ON (Qwen3 card: temperature 0.6, top_p 0.95, top_k 20, min_p 0).
-        # The model plans cast, arc and cause/effect privately, then writes. Thinking tokens
-        # share the 8K context, so the ceiling is raised. No retry, no repair call.
-        temperature = float(DIRECTOR_STORY_THINKING_TEMPERATURE)
-        top_p = float(DIRECTOR_STORY_THINKING_TOP_P)
-        story_budget = max(story_budget, 6500)
+        story_budget = min(
+            int(DIRECTOR_STORY_MAX_TOKENS),
+            int(DIRECTOR_STORY_WRITER_MAX_TOKENS),
+        )
+        temperature = float(temperature)
+        top_p = float(top_p)
         print(
-            f"[QWEN] story_profile=thinking_single_pass source={Path(__file__).resolve()} "
+            f"[QWEN] story_profile=qwen3-nonthinking-writer source={Path(__file__).resolve()} "
             f"story_max_tokens={story_budget} temperature={temperature:.2f} "
-            f"top_p={top_p:.2f} thinking=on single_pass=true story_plan=disabled story_repair=disabled",
+            f"top_p={top_p:.2f} thinking=off top_k={DIRECTOR_STORY_WRITER_TOP_K} "
+            f"min_p={DIRECTOR_STORY_WRITER_MIN_P:g} "
+            f"presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.2f} min_output_tokens=0 "
+            "writer_passes=1 story_retries=0 story_repairs=0",
             flush=True,
         )
 
@@ -1431,10 +1580,8 @@ class QwenDirector(
                 top_p=top_p,
                 call_name=call_name,
                 max_completion=story_budget,
-                disable_thinking=False,
+                disable_thinking=True,
                 seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                # Qwen3 model card: presence_penalty 1.5 is strongly recommended for quantized (AWQ)
-                # models to prevent repetition loops (H3_DIRECTOR_STORY_PRESENCE_PENALTY overrides).
                 creative=True,
             )
         except StoryTruncated as exc:
@@ -1447,8 +1594,8 @@ class QwenDirector(
         if not str(raw or "").strip():
             raise RuntimeError(failure_prefix + "Qwen returned an empty story.")
 
-        # Six scene paragraphs are a production-topology requirement. Repair only
-        # their boundaries deterministically; never ask the model to rewrite prose.
+        # One paragraph per configured scene is a production-topology requirement.
+        # Repair boundaries deterministically; never ask the model to rewrite prose.
         paragraphs = [
             part.strip()
             for part in re.split(r"\n\s*\n+", str(raw or ""))
@@ -1456,14 +1603,21 @@ class QwenDirector(
         ]
         candidate = str(raw or "").strip()
         if len(paragraphs) != DIRECTOR_STORY_SCENES:
-            candidate = self._coerce_story_to_six_paragraphs(candidate)
+            candidate = self._coerce_story_to_scene_paragraphs(candidate)
             repaired_count = len([
                 part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
             ])
             print(
-                f"[DIRECTOR] story topology normalized without regeneration: {len(paragraphs)} -> {repaired_count} paragraphs",
+                f"[DIRECTOR] story topology normalization attempted without regeneration: {len(paragraphs)} -> {repaired_count} paragraphs",
                 flush=True,
             )
+            if repaired_count != DIRECTOR_STORY_SCENES:
+                raise RuntimeError(
+                    failure_prefix
+                    + f"Could not normalize the story to exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
+                    f"without splitting a sentence or dialogue quote (got {repaired_count}). "
+                    "No retry was attempted."
+                )
 
         self._last_story_contract_warnings = []
         candidate = self._validate_story_output_contracts(
@@ -1480,20 +1634,31 @@ class QwenDirector(
             trimmed = self._trim_to_last_sentence(candidate)
             if trimmed:
                 candidate = trimmed
+        candidate, removed_duplicate_ending = self._trim_repeated_terminal_sentence(candidate)
+        if removed_duplicate_ending:
+            print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
+
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
-        if word_count < DIRECTOR_STORY_SCENES * 45:
+        if word_count < self._story_min_words:
             raise RuntimeError(
-                failure_prefix + f"Qwen returned only {word_count} usable words (need {DIRECTOR_STORY_SCENES * 45}+); "
+                failure_prefix + f"Qwen returned only {word_count} usable words "
+                f"(need {self._story_min_words}+ to satisfy the configured story-length contract); "
                 "check the Qwen server/trace. No retry was attempted."
             )
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
         if paragraph_count != DIRECTOR_STORY_SCENES:
-            candidate = self._coerce_story_to_six_paragraphs(candidate)
+            candidate = self._coerce_story_to_scene_paragraphs(candidate)
             paragraph_count = len([
                 part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
             ])
+            if paragraph_count != DIRECTOR_STORY_SCENES:
+                raise RuntimeError(
+                    failure_prefix
+                    + f"Final story topology must contain exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
+                    f"(got {paragraph_count}). No retry was attempted."
+                )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
         issues.extend(
@@ -1532,8 +1697,7 @@ class QwenDirector(
         return issues
 
     def _trim_runaway_tail(self, raw: str) -> str:
-        """Return the first six paragraphs when they are a complete in-range story and the
-        model kept writing afterwards; otherwise return `raw` unchanged."""
+        """Return the configured scene paragraphs when complete and in range; otherwise unchanged."""
         paragraphs = [
             part.strip()
             for part in re.split(r"\n\s*\n+", self._normalize_story(raw))
@@ -1543,7 +1707,8 @@ class QwenDirector(
             return raw
         head = paragraphs[:DIRECTOR_STORY_SCENES]
         words = len(re.findall(r"\b[\w'’-]+\b", " ".join(head)))
-        if words < DIRECTOR_STORY_SCENES * 55:
+        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
+        if words < minimum_words:
             return raw
         return "\n\n".join(head)
 
@@ -1592,8 +1757,8 @@ class QwenDirector(
         return "\n\n".join(merged)
 
     @staticmethod
-    def _coerce_story_to_six_paragraphs(text: str) -> str:
-        """Last-resort topology adapter; never changes story prose tokens."""
+    def _coerce_story_to_scene_paragraphs(text: str) -> str:
+        """Normalize to the configured number of scene paragraphs without rewriting prose."""
         value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not value:
             return ""
@@ -1612,10 +1777,65 @@ class QwenDirector(
             return len(re.findall(r"\b[\w'’-]+\b", part))
 
         def sentence_spans(part: str) -> list[str]:
-            pieces = re.split(r"(?<=[.!?])\s+", part.strip())
-            return [piece.strip() for piece in pieces if piece.strip()]
+            """Split only at sentence punctuation outside quoted dialogue.
 
-        # More than six paragraphs: merge the smallest adjacent interior pair.
+            Keeping an entire quoted utterance together is more important than
+            maximizing the number of split points: downstream scene boundaries
+            must not bisect a character's line or separate it from attribution.
+            """
+            value = part.strip()
+            if not value:
+                return []
+
+            opening_to_closing = {"“": "”", "‘": "’"}
+            quote_stack: list[str] = []
+            spans: list[str] = []
+            start = 0
+
+            for index, char in enumerate(value):
+                if char in opening_to_closing:
+                    quote_stack.append(opening_to_closing[char])
+                    continue
+
+                if char in {'"', "'", "”", "’"}:
+                    # Do not treat apostrophes in contractions/possessives as
+                    # quote delimiters. Curly closing quotes always close.
+                    if char == "'" and index > 0 and index + 1 < len(value):
+                        if value[index - 1].isalnum() and value[index + 1].isalnum():
+                            continue
+                    if quote_stack:
+                        expected = quote_stack[-1]
+                        if char == expected or (expected == '"' and char == '"'):
+                            quote_stack.pop()
+                        elif char in {'"', "'"} and expected == char:
+                            quote_stack.pop()
+                    elif char in {'"', "'"}:
+                        # Straight quotes toggle only when they look like an
+                        # opening quote, not when they follow a word.
+                        previous = value[index - 1] if index else " "
+                        following = value[index + 1] if index + 1 < len(value) else " "
+                        if previous.isspace() or previous in "([{—–:;":
+                            if not following.isspace():
+                                quote_stack.append(char)
+                    continue
+
+                if char not in ".!?" or quote_stack:
+                    continue
+                if index + 1 < len(value) and value[index + 1].isspace():
+                    span = value[start:index + 1].strip()
+                    if span:
+                        spans.append(span)
+                    cursor = index + 1
+                    while cursor < len(value) and value[cursor].isspace():
+                        cursor += 1
+                    start = cursor
+
+            tail = value[start:].strip()
+            if tail:
+                spans.append(tail)
+            return spans
+
+        # Too many paragraphs: merge the smallest adjacent interior pair.
         # Keep opening and aftermath paragraphs distinct whenever possible.
         while len(paragraphs) > DIRECTOR_STORY_SCENES:
             n = len(paragraphs)
@@ -1631,9 +1851,9 @@ class QwenDirector(
             paragraphs[start] = paragraphs[start] + " " + paragraphs[start + 1]
             del paragraphs[start + 1]
 
-        # Fewer than six paragraphs: split only at an existing sentence boundary.
+        # Too few paragraphs: split only at an existing sentence boundary.
         # Prefer the longest splittable paragraph and a split that keeps both halves
-        # reasonably close to the six-scene target without rewriting any prose.
+        # reasonably close to the configured per-scene target without rewriting prose.
         while len(paragraphs) < DIRECTOR_STORY_SCENES:
             best = None
             for index, paragraph in enumerate(paragraphs):
@@ -2335,25 +2555,56 @@ class QwenDirector(
         segments: list[dict] = []
 
         alias_map = {
-            EntityResolver.normalize(str(key)): EntityResolver.normalize(str(value))
+            EntityResolver.normalize(str(key)): str(value).strip()
             for key, value in (speaker_aliases or {}).items()
             if str(key or "").strip() and str(value or "").strip()
+        }
+        allowed_surface_map = {
+            EntityResolver.normalize(str(value)): str(value).strip()
+            for value in (allowed_speakers or [])
+            if str(value or "").strip()
+        }
+        allowed_titleless_map = {
+            EntityResolver.normalize(EntityResolver.strip_honorific(normalized)): display
+            for normalized, display in allowed_surface_map.items()
         }
 
         def canonicalize_speaker(surface: str) -> str:
             normalized = EntityResolver.normalize(surface)
-            # The extraction model commonly returns a title-bearing surface
-            # ("Dr. Renn") while the production roster deliberately stores the
-            # canonical name ("Renn"). Resolve the title-free form BEFORE the
-            # allowed-speaker gate, not later after the source line was discarded.
-            titleless = EntityResolver.strip_honorific(normalized)
+            # Prefer exact approved roster spelling; only strip an honorific when
+            # that title-free surface is itself in the approved roster or alias map.
+            # This avoids dropping a valid "Dr. Elias" speaker by comparing "Elias"
+            # against an allowed-speaker set that contains only "Dr. Elias".
+            if normalized in allowed_surface_map:
+                return EntityResolver.normalize(allowed_surface_map[normalized])
+            titleless = EntityResolver.normalize(EntityResolver.strip_honorific(normalized))
+            if titleless in allowed_titleless_map:
+                return EntityResolver.normalize(allowed_titleless_map[titleless])
             resolved = alias_map.get(normalized) or alias_map.get(titleless)
             return EntityResolver.normalize(resolved or titleless or normalized)
 
+        # A device noun by itself is not evidence that the quoted character is
+        # off-screen: a radio or phone may simply be a prop in the room. Require
+        # an audio-route phrase or an explicit audio action on the device.
+        remote_device = (
+            r"radio|walkie-talkie|intercom|phone|telephone|voicemail|"
+            r"recording|transmission|communicator|speaker"
+        )
         remote_context_re = re.compile(
-            r"\b(?:radio|walkie-talkie|intercom|loudspeaker|speaker|phone|telephone|"
-            r"voicemail|recording|transmission|communicator|over the line)\b|"
-            r"\b(?:in|through|amid|from)\s+(?:the\s+)?static\b",
+            rf"\b(?:{remote_device})\b[^.!?]{{0,80}}"
+            r"\b(?:crackled|hissed|buzzed|played|transmitted|relayed|repeated|"
+            r"announced|said|spoke|came through|was heard|sounded)\b|"
+            rf"\b(?:voice|words|message|signal|someone|he|she|they)\b[^.!?]{{0,80}}"
+            r"\b(?:came|crackled|hissed|buzzed|played|transmitted|relayed|repeated|"
+            r"announced|said|spoke|was heard|sounded)\b[^.!?]{{0,80}}"
+            rf"\b(?:through|over|from|on)\s+(?:the|a|an)?\s*(?:{remote_device})\b|"
+            rf"\b(?:through|over|from|on)\s+(?:the|a|an)?\s*(?:{remote_device})\b|"
+            r"\b(?:in|through|amid|from)\s+(?:the\s+)?static\b|"
+            r"\bover the line\b",
+            flags=re.IGNORECASE,
+        )
+        remote_speaker_phrase_re = re.compile(
+            r"\b(?:through|from|over)\s+(?:(?:a|the)\s+)?(?:long-dead\s+)?speaker\b",
             flags=re.IGNORECASE,
         )
         remembered_context_re = re.compile(
@@ -2388,10 +2639,16 @@ class QwenDirector(
         )
         physical_presence_re = re.compile(
             r"\b(?:appeared|arrived|entered|stood|stepped|walked|emerged|joined|"
-            r"came in|came closer|was standing|stood beside|stood at|in person|"
-            r"gripped|grabbed|took her arm|took his arm)\b",
+            r"came in|came closer|was standing|standing beside|standing at|stood beside|stood at|in person|"
+            r"gripped|grabbed|took her arm|took his arm)\b|"
+            r"\bfound\s+(?:a|an|the)\s+(?:man|woman|person|figure|scientist|stranger|doctor)\b",
             flags=re.IGNORECASE,
         )
+        # Carry an explicitly established off-screen audio source across dialogue
+        # turns in the same paragraph, but stop carrying it as soon as narration
+        # places a character physically in the scene. Arbitrary earlier device nouns
+        # do not establish this state.
+        remote_channel_end_by_paragraph: dict[int, int] = {}
 
         def is_non_present_quote(position: int, end_position: int) -> bool:
             paragraph_start = text.rfind("\n\n", 0, position) + 2
@@ -2401,6 +2658,18 @@ class QwenDirector(
             before = text[paragraph_start:position]
             after = text[end_position:paragraph_end]
 
+            active_remote_end = remote_channel_end_by_paragraph.get(paragraph_start)
+            if active_remote_end is not None and active_remote_end <= position:
+                intervening_text = text[active_remote_end:position]
+                if physical_presence_re.search(intervening_text):
+                    remote_channel_end_by_paragraph.pop(paragraph_start, None)
+                else:
+                    # Multiple consecutive quoted lines can belong to the same
+                    # radio/phone voice even when the second line has no repeated
+                    # device wording. Paragraph boundaries and physical appearances
+                    # end this carry-over, preventing it from poisoning later scenes.
+                    return True
+
             # Classify the quote from its own surrounding sentence, not every cue
             # in the paragraph. Otherwise an earlier memory/recording can wrongly
             # suppress a later live line in the same paragraph.
@@ -2409,18 +2678,41 @@ class QwenDirector(
             next_boundaries = [index for index in (after.find("."), after.find("?"), after.find("!")) if index >= 0]
             local_after = after[:min(next_boundaries) + 1] if next_boundaries else after[:180]
 
-            # Remote-channel lead-ins are often a separate sentence immediately
-            # before the quote (e.g. "Her radio crackled. "Voss, you there?"").
-            # Keep this broader window only for remote-vs-physical attribution; the
-            # memory/document checks remain sentence-local to avoid suppressing a
-            # later live line because of an unrelated earlier event.
-            nearby_before = before[-320:]
-            remote_positions = [match.start() for match in remote_context_re.finditer(nearby_before)]
-            physical_positions = [match.start() for match in physical_presence_re.finditer(nearby_before)]
+            # Remote evidence is quote-local. A preceding sentence is considered
+            # only when this quote has no local lead-in (e.g. "Her radio crackled.
+            # ‘Voss, you there?’"). Never carry arbitrary device mentions across
+            # multiple sentences in the paragraph.
+            remote_positions = [match.start() for match in remote_context_re.finditer(local_before)]
+            physical_positions = [match.start() for match in physical_presence_re.finditer(local_before)]
+            local_speaker_positions = [match.start() for match in remote_speaker_phrase_re.finditer(local_before)]
+            local_physical_positions = [match.start() for match in physical_presence_re.finditer(local_before)]
+            if local_speaker_positions and (
+                not local_physical_positions or max(local_speaker_positions) > max(local_physical_positions)
+            ):
+                remote_channel_end_by_paragraph[paragraph_start] = end_position
+                return True
             if remote_positions and (
                 not physical_positions or max(remote_positions) > max(physical_positions)
             ):
+                remote_channel_end_by_paragraph[paragraph_start] = end_position
                 return True
+
+            # Example kept valid: "Her radio crackled. \"Voss, you there?\"".
+            # When the quote's own lead-in is empty, check only the immediately
+            # preceding complete sentence—not older generic objects in the paragraph.
+            if not local_before.strip() and before.strip():
+                prior_sentence_match = re.search(r"([^.!?]+[.!?])\s*$", before.strip())
+                if prior_sentence_match:
+                    prior_sentence = prior_sentence_match.group(1)
+                    prior_remote = list(remote_context_re.finditer(prior_sentence))
+                    prior_speaker = list(remote_speaker_phrase_re.finditer(prior_sentence))
+                    prior_physical = list(physical_presence_re.finditer(prior_sentence))
+                    if (prior_remote or prior_speaker) and (
+                        not prior_physical
+                        or max((m.start() for m in prior_remote + prior_speaker), default=-1) > prior_physical[-1].start()
+                    ):
+                        remote_channel_end_by_paragraph[paragraph_start] = end_position
+                        return True
             # A quote explicitly attributed to memory, an echo in someone's mind,
             # or a written source is not present-time spoken dialogue. Check both
             # sides of the quote because natural prose often adds "she read" after it.
@@ -2449,9 +2741,9 @@ class QwenDirector(
                 "speaker": canonicalize_speaker(speaker),
             })
 
-        allowed = {
-            EntityResolver.normalize(value)
-            for value in (allowed_speakers or [])
+        allowed = set(allowed_surface_map) | {
+            EntityResolver.normalize(EntityResolver.strip_honorific(value))
+            for value in allowed_surface_map.values()
             if str(value or "").strip()
         }
 
@@ -2999,6 +3291,78 @@ class QwenDirector(
                 shot_findings.append({"shot_id": str(group[0].get("shot_id", "") or scene_id), "severity": "warning",
                                       "finding": f"Scene {scene_id} repeats the same framing and movement."})
 
+        def _is_case_only_roster_false_positive(finding: str) -> bool:
+            lowered = str(finding or "").casefold()
+            if "roster" not in lowered or not re.search(r"\b(mismatch|different|missing|not in)\b", lowered):
+                return False
+            quoted = re.findall(r"['\"]([^'\"]{1,80})['\"]", str(finding or ""))
+            if len(quoted) < 2:
+                return False
+            return EntityResolver.normalize(quoted[0]) == EntityResolver.normalize(quoted[1])
+
+        def _is_cross_scene_coverage_false_positive(finding: str) -> bool:
+            lowered = str(finding or "").casefold()
+            if not re.search(r"\b(framing|action|distinct|similar|repeat|repeated|coverage)\b", lowered):
+                return False
+            scene_ids = re.findall(r"\b(scene_\d+)_shot_\d+\b", lowered)
+            return len(scene_ids) >= 2 and len(set(scene_ids)) > 1
+
+        def _is_unsupported_finding(finding: str) -> bool:
+            return _is_case_only_roster_false_positive(finding) or _is_cross_scene_coverage_false_positive(finding)
+
+        original_finding_count = len(findings) + len(shot_findings)
+        findings = [item for item in findings if not _is_unsupported_finding(item)]
+        shot_findings = [
+            item for item in shot_findings
+            if not _is_unsupported_finding(str(item.get("finding", "") or ""))
+        ]
+        filtered_finding_count = original_finding_count - (len(findings) + len(shot_findings))
+        if filtered_finding_count:
+            print(
+                f"[DIRECTOR] critic post-filter removed {filtered_finding_count} unsupported case/cross-scene finding(s)",
+                flush=True,
+            )
+
+        # Reject no-op and out-of-vocabulary camera patches before the orchestrator
+        # sees them. Valid aliases are canonicalized; unknown labels are not applied.
+        from planner.qwen_director_prompts import (
+            CAMERA_MOVEMENT_OPTIONS, CAMERA_SHOT_OPTIONS,
+            normalize_camera_movement, normalize_camera_shot,
+        )
+        shot_by_id = {str(item.get("shot_id", "") or "").strip(): item for item in shots
+                       if str(item.get("shot_id", "") or "").strip()}
+        patchable_fields = {
+            "action", "camera_shot", "camera_movement", "lens_and_depth_of_field",
+            "composition_notes", "mood", "visual_prompt", "overall_soundscape", "non_diegetic_music",
+        }
+        filtered_patches = []
+        for patch_item in critique.get("shot_patches", []) or []:
+            if not isinstance(patch_item, dict):
+                continue
+            shot_id = str(patch_item.get("shot_id", "") or "").strip()
+            current_shot = shot_by_id.get(shot_id)
+            patch = patch_item.get("patch", {})
+            if current_shot is None or not isinstance(patch, dict):
+                continue
+            changed = {}
+            for field, raw_value in patch.items():
+                if field not in patchable_fields or not isinstance(raw_value, str) or not raw_value.strip():
+                    continue
+                value = raw_value.strip()
+                if field == "camera_shot":
+                    value, status = normalize_camera_shot(value)
+                    if status == "fallback" or value not in CAMERA_SHOT_OPTIONS:
+                        continue
+                elif field == "camera_movement":
+                    value, status = normalize_camera_movement(value)
+                    if status == "fallback" or value not in CAMERA_MOVEMENT_OPTIONS:
+                        continue
+                if value != str(current_shot.get(field, "") or "").strip():
+                    changed[field] = value
+            if changed:
+                filtered_patches.append({"shot_id": shot_id, "patch": changed})
+        critique["shot_patches"] = filtered_patches
+
         critique["shot_findings"] = shot_findings
         has_findings = bool(findings or shot_findings)
         try:
@@ -3020,6 +3384,7 @@ class QwenDirector(
             critique["status"] = "review"
             ceiling = max(1.0, 10.0 - 1.5 * len(shot_findings) - len(findings))
             critique["overall_score"] = round(min(score or ceiling, ceiling), 1)
+        critique["findings"] = findings
         return critique
 
     def critique_plan(self, *, mode: str, user_input: str, plan: dict) -> dict | None:
@@ -3071,8 +3436,8 @@ class QwenDirector(
     OUTPUT RULES
     - overall_score is 1 (unusable) to 10 (no defects).
     - status is "review" if there is at least one finding, otherwise "pass".
-    - Report at most 6 findings and at most 3 shot_patches. Merge repeats of the same defect
-      (for example one bad roster name across many shots) into ONE finding.
+    - Report at most 3 findings, 3 shot_findings, and 1 shot_patch. Merge repeats of the same
+      defect into ONE finding. Keep each finding concise. Never return a patch identical to the current field.
     - Every finding names a shot_id or scene_id and states one actionable defect concisely; include only the short evidence quote needed to prove it.
     - Add a shot_patch only for a defect in checks 2, 3, 5, or 6. Patch only `action`, `camera_shot`,
       `camera_movement`, `lens_and_depth_of_field`, `composition_notes`, `mood`, `visual_prompt`,
@@ -3137,29 +3502,32 @@ class QwenDirector(
                 if isinstance(shot, dict)
             ],
         }
+        from planner.qwen_director_prompts import CAMERA_MOVEMENT_OPTIONS, CAMERA_SHOT_OPTIONS
         schema = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
                 "overall_score": {"type": "number"},
                 "status": {"type": "string", "enum": ["pass", "review"]},
-                "findings": {"type": "array", "items": {"type": "string"}},
+                "findings": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 280}},
                 "shot_findings": {
                     "type": "array",
+                    "maxItems": 3,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
                         "properties": {
                             "shot_id": {"type": "string"},
                             "severity": {"type": "string", "enum": ["info", "warning", "critical"]},
-                            "finding": {"type": "string"},
+                            "finding": {"type": "string", "maxLength": 280},
                         },
                         "required": ["shot_id", "severity", "finding"],
                     },
                 },
-                "recommended_focus": {"type": "array", "items": {"type": "string"}},
+                "recommended_focus": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 120}},
                 "shot_patches": {
                     "type": "array",
+                    "maxItems": 1,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -3170,8 +3538,8 @@ class QwenDirector(
                                 "additionalProperties": False,
                                 "properties": {
                                     "action": {"type": "string"},
-                                    "camera_shot": {"type": "string"},
-                                    "camera_movement": {"type": "string"},
+                                    "camera_shot": {"type": "string", "enum": list(CAMERA_SHOT_OPTIONS), "maxLength": 24},
+                                    "camera_movement": {"type": "string", "enum": list(CAMERA_MOVEMENT_OPTIONS), "maxLength": 12},
                                     "lens_and_depth_of_field": {"type": "string"},
                                     "composition_notes": {"type": "string"},
                                     "mood": {"type": "string"},
@@ -3195,7 +3563,7 @@ class QwenDirector(
                 temperature=0.10,
                 top_p=0.75,
                 call_name="director_critique",
-                max_completion=1000,
+                max_completion=1400,
                 json_mode=True,
                 disable_thinking=True,
                 response_schema=schema,
