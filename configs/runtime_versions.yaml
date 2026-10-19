@@ -56,6 +56,11 @@ director:
   story_architecture:
     max_tokens: 2200
     thinking_token_budget: 1280
+  # ONE model call writes the whole story: Qwen3 thinks briefly (hard-capped by vLLM's
+  # thinking_token_budget) to plan cast and 12 beats, then writes the prose in the same response.
+  story_single_call:
+    thinking_token_budget: 900
+    max_tokens: 3800
   story_sampling:
     thinking:
       temperature: 0.6
