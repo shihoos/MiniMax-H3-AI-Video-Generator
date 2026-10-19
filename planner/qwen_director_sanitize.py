@@ -8,12 +8,19 @@ from pathlib import Path
 from pipeline.production_checkpoint import ProductionCheckpoint
 
 from planner.entity_resolver import EntityResolver
+from planner.qwen_director_prompts import (
+    DEFAULT_CAMERA_MOVEMENT,
+    DEFAULT_CAMERA_SHOT,
+    normalize_camera_movement,
+    normalize_camera_shot,
+)
 
 from planner.config import (
     AI_STORY_MODE,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     DIRECTOR_STORY_SCENES,
+    STORY_MIN_WORDS,
 )
 
 
@@ -24,6 +31,63 @@ from planner.config import (
 # This module contains no speech-verb, machine-word, UI-word, or story-domain
 # vocabulary list. Deterministic code only reconciles Qwen's semantic spans to
 # the final canonical character roster.
+
+_CAMERA_DIRECTIVE_IN_ACTION = re.compile(
+    r"\b(?:the\s+)?camera\s+(?:(?:slowly|gently|smoothly|deliberately|steadily)\s+)?"
+    r"(?:pans?|tilts?|tracks?|dollies|pushes?|pulls?|cranes?|orbits?|zooms?|moves?|follows?)\b|"
+    r"\b(?:tracking|establishing|wide|extreme\s+wide|medium\s+wide|medium\s+close[- ]?up|"
+    r"close[- ]?up|extreme\s+close[- ]?up|over[- ]the[- ]shoulder|two[- ]shot)\s+shot\b|"
+    r"\b(?:slow|gentle|smooth|controlled)\s+pan\b|"
+    r"\bdolly\s+(?:in|out|back|forward)\b|"
+    r"\b(?:push|pull)\s*[- ]?(?:in|back)\b",
+    flags=re.IGNORECASE,
+)
+
+_ACTION_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "of", "for", "from",
+    "with", "by", "as", "is", "was", "were", "be", "been", "being", "it", "its", "that",
+    "this", "then", "there", "across", "slowly", "gently", "smoothly", "deliberately",
+    "camera", "pan", "pans", "tilt", "tilts", "track", "tracks", "tracking", "dolly", "ending",
+}
+
+
+def _grounded_action_fallback(action: str, scene_description: str, visual_prompt: str) -> str:
+    """Choose a source-grounded, camera-free sentence when action contains camera direction."""
+    action_tokens = {
+        word for word in re.findall(r"[a-z][a-z'’-]*", str(action or "").casefold())
+        if len(word) > 2 and word not in _ACTION_STOPWORDS
+    }
+    candidates = []
+    for source_priority, source in enumerate((scene_description, visual_prompt)):
+        normalized_source = re.sub(r"\s+", " ", str(source or "").strip())
+        if not normalized_source:
+            continue
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", normalized_source)
+            if sentence.strip()
+        ]
+        for sentence in sentences:
+            if _CAMERA_DIRECTIVE_IN_ACTION.search(sentence):
+                continue
+            words = re.findall(r"[\w'’-]+", sentence)
+            if len(words) > 30:
+                sentence = " ".join(words[:30]).rstrip(" ,;:") + "."
+                words = re.findall(r"[\w'’-]+", sentence)
+            tokens = {
+                word.casefold() for word in re.findall(r"[a-z][a-z'’-]*", sentence.casefold())
+                if len(word) > 2 and word not in _ACTION_STOPWORDS
+            }
+            overlap = len(action_tokens & tokens)
+            in_contract_range = 10 <= len(words) <= 30
+            # Prefer story sentences overlapping the original shot's actual subjects
+            # and state. Prefer the scene description to the visual prompt on ties.
+            candidates.append((overlap, int(in_contract_range), -abs(len(words) - 18), -source_priority, sentence))
+    if not candidates:
+        return ""
+    chosen = max(candidates, key=lambda item: item[:4])
+    return chosen[-1]
+
 
 class QwenDirectorSanitizeMixin:
     def _valid_character_name(
@@ -832,6 +896,9 @@ class QwenDirectorSanitizeMixin:
 
         result: list[dict] = []
         visual_prompts_normalized = 0
+        camera_fields_normalized = 0
+        camera_fields_defaulted = 0
+        camera_actions_normalized = 0
 
         for value in (
             shots
@@ -871,8 +938,8 @@ class QwenDirectorSanitizeMixin:
             scene_mood = str(scene.get("mood", "") or "").strip() or "cinematic"
 
             defaults = {
-                "camera_shot": "medium wide",
-                "camera_movement": "static",
+                "camera_shot": DEFAULT_CAMERA_SHOT,
+                "camera_movement": DEFAULT_CAMERA_MOVEMENT,
                 "lens_and_depth_of_field": "normal lens, moderate depth of field",
                 "composition_notes": "Clear subject separation with readable spatial depth.",
                 "lighting": scene_lighting,
@@ -884,6 +951,36 @@ class QwenDirectorSanitizeMixin:
             for field, fallback in defaults.items():
                 if not str(candidate.get(field, "") or "").strip():
                     candidate[field] = fallback
+
+            # Structured output schemas constrain Qwen at generation time, but a
+            # fallback/legacy/cached shot can bypass that schema. Normalize only
+            # well-understood aliases; unknown labels fail closed to canonical defaults.
+            for _field, _normalizer in (
+                ("camera_shot", normalize_camera_shot),
+                ("camera_movement", normalize_camera_movement),
+            ):
+                _raw_camera_value = str(candidate.get(_field, "") or "").strip()
+                _canonical_camera_value, _camera_status = _normalizer(_raw_camera_value)
+                if _camera_status != "unchanged":
+                    candidate[_field] = _canonical_camera_value
+                    if _camera_status == "fallback":
+                        camera_fields_defaulted += 1
+                    else:
+                        camera_fields_normalized += 1
+
+            raw_action = str(candidate.get("action", "") or "").strip()
+            if _CAMERA_DIRECTIVE_IN_ACTION.search(raw_action):
+                grounded_action = _grounded_action_fallback(
+                    raw_action,
+                    scene_description,
+                    str(candidate.get("visual_prompt", "") or ""),
+                )
+                if not grounded_action:
+                    # Do not ship camera instructions in the narrative-action field
+                    # when no source-grounded replacement exists.
+                    continue
+                candidate["action"] = grounded_action
+                camera_actions_normalized += 1
 
             shot_location = str(
                 candidate.get("location", "") or ""
@@ -1103,6 +1200,18 @@ class QwenDirectorSanitizeMixin:
         if visual_prompts_normalized:
             print(
                 f"[DIRECTOR] visual_prompt word range normalized for {visual_prompts_normalized} shot(s) in {scene_id}; no model retry",
+                flush=True,
+            )
+        if camera_fields_normalized or camera_fields_defaulted:
+            print(
+                f"[DIRECTOR] camera vocabulary normalized in {scene_id}: "
+                f"aliases={camera_fields_normalized}, defaulted_invalid={camera_fields_defaulted}; no model retry",
+                flush=True,
+            )
+        if camera_actions_normalized:
+            print(
+                f"[DIRECTOR] removed camera direction from narrative action in {scene_id}: "
+                f"{camera_actions_normalized} grounded replacement(s); no model retry",
                 flush=True,
             )
 
@@ -1484,9 +1593,8 @@ class QwenDirectorSanitizeMixin:
             )
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
-        minimum_words = int(getattr(self, "_story_min_words", DIRECTOR_STORY_SCENES * 55) or DIRECTOR_STORY_SCENES * 55)
-        # 420-560 is a preferred range, not a rejection boundary. Accept a
-        # complete 562-word draft; reject only drafts outside the safe 400-600 band.
+        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
+        # Keep the hard completion check aligned with the prompt's 80%-of-target minimum.
         if not minimum_words <= word_count <= DIRECTOR_STORY_SCENES * 140:
             errors.append(
                 f"Generated story must contain {minimum_words} to {DIRECTOR_STORY_SCENES * 140} words "
