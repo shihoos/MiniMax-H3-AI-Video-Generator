@@ -80,6 +80,14 @@ director:
     words_per_scene: 85
     target_words: 1020
     minimum_words: 816
+    # Prompt-only overshoot. Qwen3 non-thinking writers routinely land ~20-25% under the
+    # requested length, so ask for ~100 words/scene to land comfortably above minimum_words.
+    writer_words_per_scene: 100
+    # Bounded length rescue: if the single writer call is still under minimum_words, expand
+    # ONLY the shortest scenes (one short non-thinking call each) instead of failing the run.
+    rescue_enabled: true
+    rescue_max_scene_calls: 6
+    rescue_scene_max_tokens: 380
     minimum_active_characters: 3
     target_active_characters: 4
   prompt_limits:
