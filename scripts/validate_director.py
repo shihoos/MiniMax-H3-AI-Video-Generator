@@ -909,29 +909,41 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
             "normalized blueprint should include all configured scenes")
 
 
-def test_short_story_below_prompt_minimum_fails_without_retry():
+def test_story_length_is_single_call_soft_floor_never_retried():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS
-    paragraph = " ".join(["Ines"] + [f"word{i}" for i in range(59)]) + "."
-    story = "\n\n".join(paragraph for _ in range(DIRECTOR_STORY_SCENES))
-    director = QwenDirector.__new__(QwenDirector)
-    director._story_min_words = STORY_MIN_WORDS
-    calls = []
-    def fake_chat(*args, **kwargs):
-        calls.append(kwargs.copy())
-        return story
-    director._chat_text = fake_chat
-    temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
+    from contextlib import redirect_stdout
+    from io import StringIO
+    temperature, top_p = QwenDirector.__new__(QwenDirector)._sampling_for_mode(AI_STORY_MODE)
+
+    def run(words_per_scene):
+        paras = [" ".join([f"Ines{k}"] + [f"w{k}x{i}" for i in range(words_per_scene - 1)]) + "." for k in range(DIRECTOR_STORY_SCENES)]
+        director = QwenDirector.__new__(QwenDirector)
+        director._story_min_words = STORY_ACCEPT_MIN_WORDS
+        calls = []
+        def fake_chat(*a, **k):
+            calls.append(k)
+            return "\n\n".join(paras)
+        director._chat_text = fake_chat
+        with redirect_stdout(StringIO()):
+            out = director._generate_story_once(
+                AI_STORY_MODE, "premise", "system", "user",
+                temperature=temperature, top_p=top_p, source_character_names=[],
+            )
+        return out, calls
+
+    # 65 words/scene = 780 words: under the 816 prompt target but above the hard floor -> accepted, 1 call.
+    (story, generated), calls = run(65)
+    _assert(generated and len(calls) == 1, f"slightly short story must be accepted with one call: {len(calls)}")
+    # 30 words/scene = 360 words: truncated/off-task -> fails closed, still exactly 1 call.
+    calls_seen = []
     try:
-        director._generate_story_once(
-            AI_STORY_MODE, "premise", "system", "user",
-            temperature=temperature, top_p=top_p, source_character_names=[],
-        )
+        run(30)
     except RuntimeError as exc:
-        _assert("need 816+" in str(exc), f"unexpected short-story rejection: {exc}")
+        _assert(str(STORY_ACCEPT_MIN_WORDS) in str(exc) or "hard floor" in str(exc), f"unexpected rejection: {exc}")
     else:
-        raise AssertionError("story below prompt's 816-word minimum should fail closed")
-    _assert(len(calls) == 1, f"short story must not trigger retry, got {len(calls)} calls")
+        raise AssertionError("truncated story must fail closed")
+    _assert(STORY_ACCEPT_MIN_WORDS < STORY_MIN_WORDS, "accept floor must sit below the prompt minimum")
 
 
 def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes():
@@ -1329,7 +1341,7 @@ def main():
         test_generated_story_cast_contract_is_enforced_before_shot_planning,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
-        test_short_story_below_prompt_minimum_fails_without_retry,
+        test_story_length_is_single_call_soft_floor_never_retried,
         test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_story_uses_one_bounded_plan_and_one_writer_without_retry_or_repair,
