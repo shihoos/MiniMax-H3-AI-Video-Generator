@@ -1026,19 +1026,37 @@ class ProductionOrchestrator:
     def _director_fingerprint(project_root: Path, checkpoint: ProductionCheckpoint) -> str:
         """Return a stable fingerprint covering the complete split Director."""
         director_root = Path(project_root).resolve() / "planner"
+        project_root = Path(project_root).resolve()
         tracked = (
             (Path("planner") / "qwen_director.py"),
             (Path("planner") / "qwen_director_runtime.py"),
             (Path("planner") / "qwen_director_prompts.py"),
             (Path("planner") / "qwen_director_scene.py"),
             (Path("planner") / "qwen_director_sanitize.py"),
+            (Path("planner") / "cinematic_compiler.py"),
             (Path("planner") / "production_planner.py"),
             (Path("planner") / "entity_resolver.py"),
+            (Path("planner") / "config.py"),
+            (Path("configs") / "runtime_versions.yaml"),
+            (Path("pipeline") / "dialogue_timeline.py"),
+            (Path("execution") / "h3_workflow_builder.py"),
             (Path("schemas") / "character.py"),
         )
         material = "".join(
-            f"{path.as_posix()}:{checkpoint.digest_file(Path(project_root).resolve() / path)}\n"
+            f"{path.as_posix()}:{checkpoint.digest_file(project_root / path)}\n"
             for path in tracked
+        )
+        # Environment overrides are part of the effective production contract.
+        # A checkpoint from one topology/frame policy must not resume under another.
+        effective_settings = (
+            "H3_DIRECTOR_STORY_SCENES",
+            "H3_DIRECTOR_SHOTS_PER_SCENE",
+            "H3_FPS",
+            "H3_FRAMES_PER_SHOT",
+        )
+        material += "".join(
+            f"env:{name}={os.environ.get(name, '<unset>')}\n"
+            for name in effective_settings
         )
         return checkpoint.digest_text(material)
 
