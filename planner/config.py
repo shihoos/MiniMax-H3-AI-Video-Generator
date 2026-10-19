@@ -145,6 +145,9 @@ DIRECTOR_STORY_MAX_TOKENS = int(RUNTIME["director"]["story_max_tokens"])
 DIRECTOR_STORY_PLAN_MAX_TOKENS = int(_story_architecture["max_tokens"])
 DIRECTOR_STORY_PLAN_THINKING_BUDGET = int(_story_architecture["thinking_token_budget"])
 DIRECTOR_STORY_WRITER_MAX_TOKENS = int(_story_writing_sampling["max_tokens"])
+DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS = int(
+    _story_writing_sampling["minimum_output_tokens"]
+)
 DIRECTOR_SHOT_TEMPERATURE = float(_story_shot_sampling["temperature"])
 DIRECTOR_SHOT_TOP_P = float(_story_shot_sampling["top_p"])
 DIRECTOR_STORY_THINKING_TEMPERATURE = float(_story_thinking_sampling["temperature"])
@@ -173,6 +176,13 @@ if DIRECTOR_STORY_PLAN_THINKING_BUDGET >= DIRECTOR_STORY_PLAN_MAX_TOKENS:
     raise RuntimeError("runtime_versions.yaml story thinking budget must be below the planning completion ceiling.")
 if DIRECTOR_STORY_WRITER_MAX_TOKENS < 1:
     raise RuntimeError("runtime_versions.yaml story writing ceiling must be positive.")
+if not 1 <= DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS <= min(
+    DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS
+):
+    raise RuntimeError(
+        "runtime_versions.yaml story_sampling.writing.minimum_output_tokens must be "
+        "between 1 and the effective writer completion ceiling."
+    )
 if not 0.0 <= DIRECTOR_SHOT_TEMPERATURE <= 2.0:
     raise RuntimeError("Shot temperature must be in [0, 2].")
 if not 0.0 < DIRECTOR_SHOT_TOP_P <= 1.0:
