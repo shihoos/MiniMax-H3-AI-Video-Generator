@@ -140,11 +140,12 @@ _story_shot_sampling = _story_sampling["shots"]
 _story_writing_sampling = _story_sampling["writing"]
 _story_architecture = RUNTIME["director"]["story_architecture"]
 _story_contract = RUNTIME["director"]["story_contract"]
-_story_single = RUNTIME["director"].get("story_single_call", {})
 
 DIRECTOR_STORY_MAX_TOKENS = int(RUNTIME["director"]["story_max_tokens"])
 DIRECTOR_STORY_PLAN_MAX_TOKENS = int(_story_architecture["max_tokens"])
 DIRECTOR_STORY_PLAN_THINKING_BUDGET = int(_story_architecture["thinking_token_budget"])
+STORY_PLAN_BEAT_MIN_WORDS = int(_story_architecture["beat_words_min"])
+STORY_PLAN_BEAT_MAX_WORDS = int(_story_architecture["beat_words_max"])
 DIRECTOR_STORY_WRITER_MAX_TOKENS = int(_story_writing_sampling["max_tokens"])
 DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS = int(
     _story_writing_sampling["minimum_output_tokens"]
@@ -172,11 +173,6 @@ STORY_MIN_WORDS = int(_story_contract["minimum_words"])
 STORY_WRITER_WORDS_PER_SCENE = int(
     _story_contract.get("writer_words_per_scene", STORY_WORDS_PER_SCENE)
 )
-# Single-call story generation: bounded thinking (plan) + prose in ONE vLLM request.
-STORY_SINGLE_THINKING_BUDGET = int(_story_single.get("thinking_token_budget", 900))
-STORY_SINGLE_MAX_TOKENS = int(_story_single.get("max_tokens", 3800))
-if STORY_SINGLE_THINKING_BUDGET < 256 or STORY_SINGLE_MAX_TOKENS < STORY_SINGLE_THINKING_BUDGET + 1500:
-    raise RuntimeError("runtime_versions.yaml story_single_call needs max_tokens >= thinking_token_budget + 1500.")
 
 # Hard acceptance floor: only truncated/off-task output below this fails. Between this and
 # STORY_MIN_WORDS the single draft is accepted with a warning (no retry, no repair).
@@ -192,6 +188,8 @@ if DIRECTOR_STORY_PLAN_MAX_TOKENS < 1 or DIRECTOR_STORY_PLAN_THINKING_BUDGET < 1
     raise RuntimeError("runtime_versions.yaml story planning ceiling must be positive and thinking budget must be >= 1024.")
 if DIRECTOR_STORY_PLAN_THINKING_BUDGET >= DIRECTOR_STORY_PLAN_MAX_TOKENS:
     raise RuntimeError("runtime_versions.yaml story thinking budget must be below the planning completion ceiling.")
+if not 1 <= STORY_PLAN_BEAT_MIN_WORDS <= STORY_PLAN_BEAT_MAX_WORDS <= 120:
+    raise RuntimeError("runtime_versions.yaml story architecture beat word bounds are invalid.")
 if DIRECTOR_STORY_WRITER_MAX_TOKENS < 1:
     raise RuntimeError("runtime_versions.yaml story writing ceiling must be positive.")
 if not 0 <= DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS <= min(
