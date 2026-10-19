@@ -27,6 +27,7 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     STORY_WORDS_PER_SCENE,
     STORY_WRITER_WORDS_PER_SCENE,
+    STORY_SINGLE_THINKING_BUDGET,
     STORY_TARGET_WORDS,
     STORY_MIN_WORDS,
     DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS,
@@ -391,6 +392,20 @@ class QwenDirectorPromptMixin:
     """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
 
         raise ValueError("Preserve Story does not use a story-text pass.")
+
+    def _story_single_call_system(self, mode: str) -> str:
+        """Writer contract plus a compact planning protocol for the one bounded-thinking call."""
+        n = int(DIRECTOR_STORY_SCENES)
+        per = int(STORY_WRITER_WORDS_PER_SCENE)
+        plan = f"""
+    HOW TO USE YOUR THINKING (it is hard-capped at about {STORY_SINGLE_THINKING_BUDGET} tokens, so stay terse and never draft prose there):
+    1. One line: CAST - every core character as Name (role; want; how they speak).
+    2. Then exactly {n} one-line beats. Each beat names who is physically present, the visible action, the causal turn, one concrete sensory detail, and a spoken line for at least six beats.
+    3. Check the planted detail pays off and scene {n} resolves the central conflict. Then stop thinking and write.
+
+    WRITING THE STORY: follow your beats in order, one paragraph per beat. Every paragraph holds 6 to 8 full sentences and about {per} words: expand each beat with action, setting detail, and a spoken exchange between present characters instead of summarizing it. Never shorten a scene to save space; the film needs all {n} paragraphs at full length. Keep names and voices exactly as in your CAST line.
+    """
+        return self._story_text_system(mode) + "\n\n" + textwrap.dedent(plan).strip()
 
     def _story_blueprint_system(self, mode: str) -> str:
         """Build a compact causal beat sheet, not a Story Bible or alternate story."""
