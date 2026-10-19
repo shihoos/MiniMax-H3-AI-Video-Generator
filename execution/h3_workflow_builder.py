@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 from pathlib import Path
 
 from planner.config import (
     H3_AUDIO_VAE,
     H3_FPS,
+    H3_FRAMES_PER_SHOT,
     H3_HEIGHT,
     H3_MAX_REFERENCE_AUDIO,
     H3_MAX_REFERENCE_FILES,
@@ -874,29 +876,17 @@ class H3WorkflowBuilder:
         if seconds > 15.0:
             seconds = 15.0
 
-        requested = round(
-            seconds * H3_FPS
-        )
+        requested = seconds * H3_FPS
 
-        # H3 VAE frame grid = 17*n + 5.
-        n = max(
-            0,
-            (requested - 5 + 16) // 17,
-        )
-
-        frames = 17 * n + 5
-
-        frames = max(
-            124,
-            frames,
-        )
-
-        frames = min(
-            362,
-            frames,
-        )
-
-        return frames
+        # Match DialogueTimeline's nearest-target conversion. The minimum frame
+        # setting is configuration-owned, not a hard-coded 124. Speech scheduling
+        # uses its separate upward-rounding helper when a line requires more time.
+        first_n = max(0, int(math.ceil((H3_FRAMES_PER_SHOT - 5) / 17.0)))
+        last_n = (362 - 5) // 17
+        legal_frames = [17 * n + 5 for n in range(first_n, last_n + 1)]
+        if not legal_frames:
+            raise RuntimeError("Configured H3 frame bounds contain no legal 17*n+5 frame count.")
+        return min(legal_frames, key=lambda frames: (abs(frames - requested), -frames))
 
     # ============================================================
     # PROMPT / SEED
