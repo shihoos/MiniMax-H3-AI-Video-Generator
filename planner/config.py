@@ -167,6 +167,13 @@ DIRECTOR_SHOTS_PER_SCENE = int(_story_contract["shots_per_scene"])
 STORY_WORDS_PER_SCENE = int(_story_contract["words_per_scene"])
 STORY_TARGET_WORDS = int(_story_contract["target_words"])
 STORY_MIN_WORDS = int(_story_contract["minimum_words"])
+# Prompt-only overshoot (see runtime_versions.yaml); never used as a validation threshold.
+STORY_WRITER_WORDS_PER_SCENE = int(
+    _story_contract.get("writer_words_per_scene", STORY_WORDS_PER_SCENE)
+)
+STORY_RESCUE_ENABLED = bool(_story_contract.get("rescue_enabled", True))
+STORY_RESCUE_MAX_SCENE_CALLS = int(_story_contract.get("rescue_max_scene_calls", 6))
+STORY_RESCUE_SCENE_MAX_TOKENS = int(_story_contract.get("rescue_scene_max_tokens", 380))
 DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS = int(_story_contract["minimum_active_characters"])
 DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS = int(_story_contract["target_active_characters"])
 
@@ -189,6 +196,8 @@ if not 0.0 <= DIRECTOR_SHOT_TEMPERATURE <= 2.0:
     raise RuntimeError("Shot temperature must be in [0, 2].")
 if not 0.0 < DIRECTOR_SHOT_TOP_P <= 1.0:
     raise RuntimeError("Shot top_p must be in (0, 1].")
+if STORY_WRITER_WORDS_PER_SCENE < STORY_WORDS_PER_SCENE or STORY_RESCUE_MAX_SCENE_CALLS < 0 or STORY_RESCUE_SCENE_MAX_TOKENS < 128:
+    raise RuntimeError("runtime_versions.yaml story_contract writer/rescue values are invalid.")
 if DIRECTOR_STORY_SCENES < 4 or DIRECTOR_SHOTS_PER_SCENE < 1 or STORY_WORDS_PER_SCENE < 1:
     raise RuntimeError("runtime_versions.yaml story_contract topology values are invalid.")
 if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
