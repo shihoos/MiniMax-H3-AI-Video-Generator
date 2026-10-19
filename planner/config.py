@@ -179,8 +179,8 @@ STORY_WRITER_WORDS_PER_SCENE = int(
 STORY_ACCEPT_MIN_WORDS = int(
     _story_contract.get("accept_min_words", int(STORY_TARGET_WORDS * 0.6))
 )
-DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS = int(_story_contract["minimum_active_characters"])
-DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS = int(_story_contract["target_active_characters"])
+# Cast count is a narrative decision, not a numeric runtime contract.
+DIRECTOR_STORY_CAST_SIZE_POLICY = str(_story_contract.get("cast_size_policy", "")).strip().lower()
 
 if DIRECTOR_STORY_MAX_TOKENS < 1:
     raise RuntimeError("runtime_versions.yaml director.story_max_tokens must be positive.")
@@ -211,8 +211,11 @@ if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
     raise RuntimeError("runtime_versions.yaml story_contract target_words must equal scene_count * words_per_scene.")
 if not 1 <= STORY_MIN_WORDS <= STORY_TARGET_WORDS:
     raise RuntimeError("runtime_versions.yaml story_contract minimum_words must be between 1 and target_words.")
-if DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS < 2 or DIRECTOR_STORY_TARGET_ACTIVE_CHARACTERS < DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS:
-    raise RuntimeError("runtime_versions.yaml story_contract active-character target is invalid.")
+if DIRECTOR_STORY_CAST_SIZE_POLICY != "plot_driven":
+    raise RuntimeError(
+        "runtime_versions.yaml story_contract cast_size_policy must be 'plot_driven'; "
+        "fixed numeric character-count quotas are not supported."
+    )
 
 if not 0.0 <= DIRECTOR_STORY_THINKING_TEMPERATURE <= 2.0:
     raise RuntimeError("Story thinking temperature must be in [0, 2].")
