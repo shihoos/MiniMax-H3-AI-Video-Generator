@@ -31,6 +31,8 @@ from planner.config import (
     DIRECTOR_STORY_THINKING_TOP_P,
     DIRECTOR_STORY_THINKING_TOP_K,
     DIRECTOR_STORY_THINKING_MIN_P,
+    DIRECTOR_STORY_WRITER_TOP_K,
+    DIRECTOR_STORY_WRITER_MIN_P,
     DIRECTOR_STORY_PRESENCE_PENALTY,
     DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION,
     DIRECTOR_VLLM_MAX_MODEL_LEN,
@@ -1305,6 +1307,14 @@ class QwenDirectorRuntimeMixin:
                 DIRECTOR_VLLM_GENERATION_CONFIG,
                 "--reasoning-parser",
                 "qwen3",
+                "--reasoning-config",
+                json.dumps({
+                    "reasoning_start_str": "<think>",
+                    "reasoning_end_str": (
+                        "Considering the limited time by the user, I have to give "
+                        "the solution based on the thinking directly now.</think>"
+                    ),
+                }, ensure_ascii=False, separators=(",", ":")),
                 "--speculative-config",
                 speculative_config,
                 "--trust-remote-code",
@@ -1478,11 +1488,10 @@ class QwenDirectorRuntimeMixin:
                         "max_tokens": 2,
                         "temperature": DIRECTOR_STORY_THINKING_TEMPERATURE,
                         "top_p": DIRECTOR_STORY_THINKING_TOP_P,
-                        # Exercise the optional thinking sampler during JIT warm-up;
-                        # production story writing explicitly disables thinking.
+                        # Exercise the bounded architect's Qwen3 thinking sampler;
+                        # the actual per-request reasoning budget is applied on its call.
                         "top_k": DIRECTOR_STORY_THINKING_TOP_K,
                         "min_p": DIRECTOR_STORY_THINKING_MIN_P,
-                        "presence_penalty": DIRECTOR_STORY_PRESENCE_PENALTY,
                         "chat_template_kwargs": {"enable_thinking": True},
                     }
                     try:
@@ -1779,13 +1788,17 @@ class QwenDirectorRuntimeMixin:
             "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
         }
         if enable_thinking:
-            # Qwen3 thinking-mode sampler from runtime_versions.yaml. min_p=0 is
-            # the documented default but is sent explicitly for reproducibility.
+            # Qwen3 documented thinking-mode sampler; keep these extras explicit.
             payload["top_k"] = int(DIRECTOR_STORY_THINKING_TOP_K)
             payload["min_p"] = float(DIRECTOR_STORY_THINKING_MIN_P)
+        elif creative:
+            # Separate Qwen3 non-thinking writing sampler for clean prose output.
+            payload["top_k"] = int(DIRECTOR_STORY_WRITER_TOP_K)
+            payload["min_p"] = float(DIRECTOR_STORY_WRITER_MIN_P)
         if creative:
-            # The Qwen3 technical report used presence_penalty=1.5 on Creative
-            # Writing/WritingBench. Scope it to prose writing, not structured JSON.
+            # Qwen recommends 1.5 for quantized checkpoints but notes a language-mixing
+            # tradeoff at higher values. Keep the model-card default configurable and
+            # inspect real output traces before tuning it; architect calls stay unpenalized.
             payload["presence_penalty"] = float(DIRECTOR_STORY_PRESENCE_PENALTY)
         if int(min_tokens or 0) > 0:
             payload["min_tokens"] = int(min_tokens)
