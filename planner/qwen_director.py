@@ -22,10 +22,7 @@ from planner.config import (
     DIRECTOR_STORY_SCENES,
     STORY_WORDS_PER_SCENE,
     STORY_MIN_WORDS,
-    STORY_WRITER_WORDS_PER_SCENE,
-    STORY_RESCUE_ENABLED,
-    STORY_RESCUE_MAX_SCENE_CALLS,
-    STORY_RESCUE_SCENE_MAX_TOKENS,
+    STORY_ACCEPT_MIN_WORDS,
     DIRECTOR_N_CTX,
     DIRECTOR_STORY_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_MAX_TOKENS,
@@ -106,7 +103,7 @@ class QwenDirector(
         self._character_semantic_calls = 0
         self._semantic_spoken_dialogue: list[dict] = []
         self._last_story_draft: str = ""
-        self._story_min_words: int = STORY_MIN_WORDS
+        self._story_min_words: int = STORY_ACCEPT_MIN_WORDS
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -1548,7 +1545,10 @@ class QwenDirector(
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
                     f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
                 ) from plan_error
-        return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+        blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+        if not blueprint.startswith("CAST:"):
+            print("[QWEN] story_architecture=WARN no CAST line returned; writer proceeds without a cast sheet", flush=True)
+        return blueprint
 
     def _generate_story_once(
         self,
@@ -1593,13 +1593,9 @@ class QwenDirector(
         temperature = float(temperature)
         top_p = float(top_p)
         print(
-            f"[QWEN] story_profile=qwen3-nonthinking-writer source={Path(__file__).resolve()} "
-            f"story_max_tokens={story_budget} temperature={temperature:.2f} "
-            f"top_p={top_p:.2f} thinking=off top_k={DIRECTOR_STORY_WRITER_TOP_K} "
-            f"min_p={DIRECTOR_STORY_WRITER_MIN_P:g} "
-            f"presence_penalty={DIRECTOR_STORY_PRESENCE_PENALTY:.2f} "
-            f"min_output_tokens={story_min_output_tokens} "
-            "writer_passes=1 story_retries=0 story_repairs=0",
+            f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
+            f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
+            "single_pass=true retries=0 repairs=0",
             flush=True,
         )
 
@@ -1630,15 +1626,21 @@ class QwenDirector(
         if not str(raw or "").strip():
             raise RuntimeError(failure_prefix + "Qwen returned an empty story after non-prose cleanup.")
 
-        # Length is measured only over the cleaned narrative. Never let checklists, fake word
-        # counts, or duplicated blocks satisfy the contract. An under-length draft is no longer
-        # fatal here: after paragraph topology is normalized, a bounded scene-level rescue
-        # expands only the shortest scenes. The authoritative length check runs afterwards.
+        # Length is measured only over the cleaned narrative, so checklists, fake word counts
+        # or duplicated blocks can never satisfy it. The prompt asks for STORY_MIN_WORDS+; the
+        # hard floor (STORY_ACCEPT_MIN_WORDS) only rejects genuinely truncated output. A draft
+        # between the two is accepted with a warning: no retry, repair or extra call, ever.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
         if usable_words < self._story_min_words:
+            raise RuntimeError(
+                failure_prefix + f"Qwen returned only {usable_words} usable story words "
+                f"after removing non-story output (hard floor {self._story_min_words}+). "
+                "The single writer call was truncated or off-task; no retry was attempted."
+            )
+        if usable_words < STORY_MIN_WORDS:
             print(
-                f"[QWEN] story_under_length words={usable_words} need={self._story_min_words}; "
-                "scene-level rescue will run after topology normalization",
+                f"[QWEN] story_length=WARN words={usable_words} prompt_target_min={STORY_MIN_WORDS} "
+                "accepted_without_retry=true",
                 flush=True,
             )
 
@@ -1667,15 +1669,6 @@ class QwenDirector(
                     "No retry was attempted."
                 )
 
-        if len(re.findall(r"\b[\w'’-]+\b", candidate)) < self._story_min_words:
-            candidate = self._rescue_short_scenes(
-                candidate,
-                story_blueprint,
-                temperature=temperature,
-                top_p=top_p,
-                call_name=call_name,
-            )
-
         self._last_story_contract_warnings = []
         candidate = self._validate_story_output_contracts(
             mode,
@@ -1695,7 +1688,7 @@ class QwenDirector(
             raise RuntimeError(
                 failure_prefix + f"Qwen returned only {word_count} usable words "
                 f"(need {self._story_min_words}+ to satisfy the configured story-length contract) "
-                "even after the bounded scene-level rescue; check the Qwen server/trace."
+                "check the Qwen server/trace. No retry was attempted."
             )
         if candidate and not self._ends_cleanly(candidate):
             trimmed = self._trim_to_last_sentence(candidate)
@@ -1727,6 +1720,7 @@ class QwenDirector(
                 )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_craft_issues(candidate))
+        issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
         issues.extend(
             "contract: " + str(item)
             for item in (getattr(self, "_last_story_contract_warnings", []) or [])
@@ -1749,121 +1743,48 @@ class QwenDirector(
             )
         return candidate, True
 
-    def _rescue_short_scenes(
-        self,
-        story: str,
-        story_blueprint: str | None,
-        *,
-        temperature: float,
-        top_p: float,
-        call_name: str,
-    ) -> str:
-        """Expand only the shortest scene paragraphs until the story clears its minimum.
-
-        Bounded and deterministic in shape: at most STORY_RESCUE_MAX_SCENE_CALLS short
-        non-thinking calls, shortest scene first, each seeing its blueprint beat, the cast
-        line and neighbouring prose. A rewrite is accepted only if it is a single clean
-        paragraph that is longer than the original; otherwise the original scene is kept.
-        """
-        from planner.qwen_director_runtime import StoryTruncated
-
-        if not bool(getattr(self, "_story_rescue_enabled", STORY_RESCUE_ENABLED)):
-            return story
-        max_calls = int(getattr(self, "_story_rescue_max_calls", STORY_RESCUE_MAX_SCENE_CALLS))
-        if max_calls <= 0:
-            return story
-
-        def wc(text: str) -> int:
-            return len(re.findall(r"\b[\w'’-]+\b", text))
-
-        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", story) if p.strip()]
-        if len(paragraphs) != DIRECTOR_STORY_SCENES:
-            return story
-
-        beats: dict[int, str] = {}
-        cast_line = ""
+    @staticmethod
+    def _blueprint_cast_names(story_blueprint: str | None) -> list[str]:
+        """Names from the planner's CAST line (text before the first parenthesis of each entry)."""
         for line in str(story_blueprint or "").splitlines():
-            match = re.match(r"^\s*SCENE\s*0*(\d{1,2})\s*:\s*(.+)$", line, re.IGNORECASE)
-            if match:
-                beats[int(match.group(1))] = match.group(2).strip()
-            elif line.upper().startswith("CAST:"):
-                cast_line = line.strip()
+            if line.upper().startswith("CAST:"):
+                names = []
+                for entry in line[5:].split("|"):
+                    name = re.split(r"[(\[:,\u2013\u2014-]", entry, maxsplit=1)[0].strip(" *_`")
+                    if 1 < len(name) <= 40 and name not in names:
+                        names.append(name)
+                return names
+        return []
 
-        goal = int(self._story_min_words * 1.05)
-        per_scene = int(STORY_WRITER_WORDS_PER_SCENE)
-        order = sorted(range(len(paragraphs)), key=lambda i: wc(paragraphs[i]))
-        calls = 0
-        expanded = 0
-        for index in order:
-            total = sum(wc(p) for p in paragraphs)
-            if total >= goal or calls >= max_calls:
-                break
-            original = paragraphs[index]
-            original_words = wc(original)
-            if original_words >= per_scene:
-                break  # every remaining scene is already at the writer target
-            before = paragraphs[index - 1] if index > 0 else ""
-            after = paragraphs[index + 1] if index + 1 < len(paragraphs) else ""
-            system_prompt = (
-                "You are a screenwriter polishing one scene of a short film told as prose. "
-                "Rewrite the scene paragraph so it is richer and longer while changing NO facts: keep every "
-                "name, relationship, object, place, outcome and every spoken line already present. Add "
-                "concrete visible action, sensory detail, and a brief in-person exchange or reaction between "
-                "characters who are already in the scene. Third person, past tense, one paragraph, no headings, "
-                "labels, notes or word counts. Output only the rewritten paragraph."
-            )
-            parts = []
-            if cast_line:
-                parts.append(cast_line)
-            if beats.get(index + 1):
-                parts.append(f"THIS SCENE'S PLANNED BEAT: {beats[index + 1]}")
-            if before:
-                parts.append("PREVIOUS SCENE (context only, do not rewrite): " + " ".join(before.split()[-70:]))
-            if after:
-                parts.append("NEXT SCENE (context only, do not rewrite): " + " ".join(after.split()[:50]))
-            parts.append(f"SCENE PARAGRAPH TO EXPAND ({original_words} words; rewrite to about {per_scene} words):\n" + original)
-            calls += 1
-            try:
-                rewritten = self._chat_text(
-                    system_prompt,
-                    "\n\n".join(parts),
-                    minimum_completion=200,
-                    minimum_output_tokens=0,
-                    temperature=float(temperature),
-                    top_p=float(top_p),
-                    call_name=f"{call_name}_scene_rescue_{index + 1:02d}",
-                    max_completion=int(STORY_RESCUE_SCENE_MAX_TOKENS),
-                    disable_thinking=True,
-                    seed=random.randint(1, 2**31 - 1),
-                    creative=True,
-                )
-            except StoryTruncated as exc:
-                rewritten = self._trim_to_last_sentence(exc.partial) or ""
-            except Exception as exc:  # a failed rescue call must never be worse than no rescue
-                print(f"[QWEN] story_rescue scene={index + 1} call failed: {exc}", flush=True)
-                continue
-            rewritten = re.sub(r"^\s*(?:SCENE\s*\d+\s*[:.\-–—]\s*)", "", str(rewritten or ""), flags=re.IGNORECASE)
-            rewritten = re.sub(r"\s*\n+\s*", " ", rewritten).strip().strip("`*").strip()
-            new_words = wc(rewritten)
-            if (
-                rewritten
-                and self._ends_cleanly(rewritten)
-                and original_words + 10 <= new_words <= per_scene * 2
-            ):
-                paragraphs[index] = rewritten
-                expanded += 1
-            else:
-                print(
-                    f"[QWEN] story_rescue scene={index + 1} rejected rewrite ({new_words} words); original kept",
-                    flush=True,
-                )
-        result = "\n\n".join(paragraphs)
-        print(
-            f"[QWEN] story_rescue scene_calls={calls} expanded={expanded} "
-            f"words={wc(result)} min={self._story_min_words}",
-            flush=True,
-        )
-        return result
+    def _story_cast_contract_issues(self, story: str, story_blueprint: str | None) -> list[str]:
+        """Deterministic, model-free check of the multi-character contract; log-only.
+
+        Verifies the finished prose: each planned core character appears in at least two
+        scene paragraphs, and at least two scenes hold quoted dialogue with two or more
+        core characters present. Never rewrites or retries.
+        """
+        names = self._blueprint_cast_names(story_blueprint)
+        if not names:
+            return ["cast: planner returned no CAST line, so cast distribution was not verified"]
+        paragraphs = [p for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
+        issues: list[str] = []
+        presence = {
+            name: [i for i, p in enumerate(paragraphs) if re.search(r"\b" + re.escape(name) + r"\b", p)]
+            for name in names
+        }
+        for name, scenes in presence.items():
+            if len(scenes) < 2:
+                issues.append(f"cast: '{name}' appears in {len(scenes)} scene(s), need 2+")
+        dialogue_scenes = 0
+        for i, paragraph in enumerate(paragraphs):
+            present = [n for n in names if i in presence[n]]
+            if len(present) >= 2 and re.search(r"[\"\u201c][^\"\u201d]{3,}[\"\u201d]", paragraph):
+                dialogue_scenes += 1
+        if dialogue_scenes < 2:
+            issues.append(f"cast: only {dialogue_scenes} scene(s) pair 2+ core characters with spoken dialogue, need 2+")
+        if len(names) < int(DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS):
+            issues.append(f"cast: planner listed {len(names)} core characters, need {DIRECTOR_STORY_MIN_ACTIVE_CHARACTERS}+")
+        return issues
 
     def _story_craft_issues(self, story: str) -> list[str]:
         """Log-only craft diagnostics; hard contract defects remain separate."""
