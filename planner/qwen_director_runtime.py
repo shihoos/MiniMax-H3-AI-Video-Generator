@@ -69,8 +69,6 @@ def _stage_mode() -> str:
     )
 
 
-def _stage_enabled() -> bool:
-    return _stage_mode() == "on"
 
 
 def _filesystem_type(path: Path) -> str:
