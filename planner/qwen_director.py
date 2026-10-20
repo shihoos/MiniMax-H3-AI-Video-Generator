@@ -1320,10 +1320,10 @@ class QwenDirector(
     ) -> str:
         """Validate the current story without rewriting its topology.
 
-        Raw model output is authoritative. In strict mode every detected defect raises;
-        the single-pass writer uses strict=False so soft word/source-coverage misses are
-        logged while the already-generated draft continues without a second Qwen call.
-        Paragraph topology is normalized deterministically before this validation.
+        Raw model output is authoritative. The single-pass production writer uses strict=True:
+        detected premise-coverage, sentence-depth, completion, or ending-contract defects fail
+        before entity extraction and shot batches. No retry, repair call, or paragraph reshaping is allowed.
+        Paragraph topology is validated after explicit scene markers are normalized.
         """
         working = self._normalize_story(story)
         errors: list[str] = []
@@ -1710,24 +1710,17 @@ class QwenDirector(
             )
         self._last_story_draft = raw
 
-        # Length is measured only over the cleaned narrative, so checklists, fake word counts
-        # or duplicated blocks can never satisfy it. The prompt asks for STORY_MIN_WORDS+; the
-        # hard floor (STORY_ACCEPT_MIN_WORDS) only rejects genuinely truncated output. A draft
-        # between the two is accepted with a warning: no retry, repair or extra call, ever.
+        # Length is measured only over cleaned narrative, so checklists, fake word counts,
+        # and duplicated blocks cannot satisfy the contract. The acceptance floor equals
+        # STORY_MIN_WORDS: an under-length single-pass draft is rejected before any
+        # character-extraction or shot-batch calls are spent. No retry or repair call.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
         if usable_words < self._story_min_words:
             raise RuntimeError(
                 failure_prefix + f"Qwen returned only {usable_words} usable story words "
-                f"after removing non-story output (hard floor {self._story_min_words}+). "
-                "The single writer call was truncated or off-task; no retry was attempted."
+                f"after removing non-story output (minimum production contract {self._story_min_words}+). "
+                "The single writer call is not retried and no downstream Qwen calls are launched."
             )
-        if usable_words < STORY_MIN_WORDS:
-            print(
-                f"[QWEN] story_length=WARN words={usable_words} prompt_target_min={STORY_MIN_WORDS} "
-                "accepted_without_retry=true",
-                flush=True,
-            )
-
         # One paragraph per configured scene is enforced before quality checks. The
         # scene marker parser above never manufactures missing beats from prose.
         candidate = str(raw or "").strip()
@@ -1738,7 +1731,7 @@ class QwenDirector(
             user_input,
             candidate,
             source_character_names=source_character_names,
-            strict=False,
+            strict=True,
         )
 
         # Never accept a dangling generation tail. Word-count is rechecked after any safe trim.
@@ -2776,7 +2769,10 @@ class QwenDirector(
             if titleless in allowed_titleless_map:
                 return EntityResolver.normalize(allowed_titleless_map[titleless])
             resolved = alias_map.get(normalized) or alias_map.get(titleless)
-            return EntityResolver.normalize(resolved or titleless or normalized)
+            # Preserve the source spelling for an unrostered speaker so a valid
+            # explicitly-remote audio source can remain named without becoming a
+            # visual character. Such surfaces are admitted below only for remote turns.
+            return EntityResolver.normalize(resolved) if resolved else str(surface or "").strip()
 
         # A device noun by itself is not evidence that the quoted character is
         # off-screen: a radio or phone may simply be a prop in the room. Require
@@ -2944,6 +2940,19 @@ class QwenDirector(
             for value in allowed_surface_map.values()
             if str(value or "").strip()
         }
+        remote_only_speaker_keys = set()
+        for item in (semantic_spoken_dialogue or []):
+            if not isinstance(item, dict) or str(item.get("delivery", "in_person")).strip().lower() != "remote":
+                continue
+            surface = str(item.get("speaker", "") or "").strip()
+            if not surface:
+                continue
+            resolved_surface = canonicalize_speaker(surface)
+            resolved_key = EntityResolver.normalize(resolved_surface)
+            raw_key = EntityResolver.normalize(surface)
+            titleless_key = EntityResolver.normalize(EntityResolver.strip_honorific(surface))
+            if resolved_key not in allowed and raw_key not in allowed and titleless_key not in allowed:
+                remote_only_speaker_keys.add(resolved_key or raw_key)
 
         # Deterministic fallback only for an explicit local attribution that names an
         # already-approved canonical person. It does not classify arbitrary quotations.
@@ -3042,7 +3051,12 @@ class QwenDirector(
                 continue
 
             if allowed:
-                speakers = {speaker for speaker in speakers if speaker in allowed}
+                is_remote_turn = str(semantic_delivery or "in_person").strip().lower() == "remote"
+                speakers = {
+                    speaker for speaker in speakers
+                    if speaker in allowed
+                    or (is_remote_turn and EntityResolver.normalize(speaker) in remote_only_speaker_keys)
+                }
                 if not speakers:
                     quote_spans.append((match.start(), match.end()))
                     continue
@@ -3148,6 +3162,40 @@ class QwenDirector(
             )
         return anchors
 
+    def _remote_only_dialogue_speakers(self, characters: list[dict]) -> list[str]:
+        """Return explicit remote speakers not represented in the visual/canonical cast.
+
+        This is a derived audio whitelist, not a character-discovery path: it never
+        mutates or supplements ``characters``. Only the one semantic extraction's
+        explicitly remote, source-anchored speaker labels can enter this list.
+        """
+        canonical = {
+            EntityResolver.normalize(str(item.get("name", "")))
+            for item in (characters or [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        }
+        canonical |= {
+            EntityResolver.normalize(EntityResolver.strip_honorific(str(item.get("name", ""))))
+            for item in (characters or [])
+            if isinstance(item, dict) and str(item.get("name", "")).strip()
+        }
+        aliases = EntityResolver.build_character_alias_map(characters or [])
+        known = canonical | set(aliases) | {
+            EntityResolver.normalize(value) for value in aliases.values() if str(value).strip()
+        }
+        remote = {}
+        for item in (getattr(self, "_semantic_spoken_dialogue", []) or []):
+            if not isinstance(item, dict) or str(item.get("delivery", "in_person")).strip().lower() != "remote":
+                continue
+            speaker = str(item.get("speaker", "") or "").strip()
+            if not speaker:
+                continue
+            key = EntityResolver.normalize(speaker)
+            titleless = EntityResolver.normalize(EntityResolver.strip_honorific(speaker))
+            if key not in known and titleless not in known:
+                remote.setdefault(key, speaker)
+        return list(remote.values())
+
     def _normalize_dialogue_speakers(
         self,
         story: str,
@@ -3172,6 +3220,9 @@ class QwenDirector(
         }
 
         canonical_by_norm = {name.lower(): name for name in allowed_names}
+        for remote_name in self._remote_only_dialogue_speakers(characters):
+            canonical_by_norm.setdefault(remote_name.lower(), remote_name)
+            canonical_by_norm.setdefault(EntityResolver.normalize(remote_name), remote_name)
         aliases = EntityResolver.build_character_alias_map(characters)
         spoken_segments = self._extract_story_spoken_segments(
             story,
@@ -3694,6 +3745,12 @@ class QwenDirector(
             if isinstance(value, dict)
             and str(value.get("name", "")).strip()
         }
+        remote_only_names = {
+            str(value).strip().lower()
+            for value in self._remote_only_dialogue_speakers(characters)
+            if str(value).strip()
+        }
+        allowed_names |= remote_only_names
         if not allowed_names:
             return
 
@@ -3723,11 +3780,16 @@ class QwenDirector(
                     raise RuntimeError(
                         f"Shot {shot_id} contains an empty dialogue speaker/text."
                     )
+                remote_delivery = str(event.get("delivery", "in_person")).strip().lower() == "remote"
                 if speaker not in allowed_names:
                     raise RuntimeError(
                         f"Shot {shot_id} contains unknown dialogue speaker '{event.get('speaker', '')}'."
                     )
-                if speaker not in bound and str(event.get("delivery", "in_person")).strip().lower() != "remote":
+                if speaker in remote_only_names and not remote_delivery:
+                    raise RuntimeError(
+                        f"Shot {shot_id} uses audio-only remote speaker '{event.get('speaker', '')}' for in-person dialogue."
+                    )
+                if speaker not in bound and not remote_delivery:
                     raise RuntimeError(
                         f"Shot {shot_id} has in-person dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
                     )
