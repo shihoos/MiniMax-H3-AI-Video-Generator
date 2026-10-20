@@ -84,10 +84,11 @@ director:
     words_per_scene: 85
     target_words: 1020
     minimum_words: 816
-    # Prompt-only overshoot; validation target remains 1,020 with an 816-word warning floor.
+    # Prompt-only overshoot; the 816-word minimum is enforced as a hard single-pass floor.
     writer_words_per_scene: 100
-    # Single-generation policy: 612-word hard floor; 816-word target/minimum warns if missed.
-    accept_min_words: 612
+    # A story below the configured 816-word minimum is rejected before character
+    # extraction or shot generation. There is no automatic retry or repair call.
+    accept_min_words: 816
     # The narrative determines the cast size; no numeric minimum, target, or maximum.
     cast_size_policy: plot_driven
   prompt_limits:
