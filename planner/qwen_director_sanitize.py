@@ -858,6 +858,34 @@ class QwenDirectorSanitizeMixin:
                     if not str(candidate.get("shot_id", "") or "").strip():
                         candidate["shot_id"] = f"{scene_id}_shot_{shot_index:03d}"
                     normalized_shots.append(candidate)
+
+                # In the current compact contract, each scene owns one keyed assignment
+                # per source utterance. JSON object keys cannot duplicate, so a line cannot
+                # accidentally be assigned to three shots. Expand the 1-based shot number
+                # into the legacy compact-ID event shape consumed by the existing validator.
+                assignments = entry.get("dialogue_assignments", {})
+                if isinstance(assignments, dict):
+                    for raw_dialogue_id, raw_shot_number in assignments.items():
+                        dialogue_id = str(raw_dialogue_id or "").strip()
+                        if not dialogue_id or raw_shot_number is None:
+                            continue
+                        if isinstance(raw_shot_number, bool):
+                            continue
+                        try:
+                            shot_number = int(raw_shot_number)
+                        except (TypeError, ValueError):
+                            continue
+                        if str(raw_shot_number).strip() != str(shot_number):
+                            continue
+                        if not 1 <= shot_number <= len(normalized_shots):
+                            continue
+                        target = normalized_shots[shot_number - 1]
+                        events = target.get("dialogue_events", [])
+                        if not isinstance(events, list):
+                            events = []
+                        events.append({"source_dialogue_id": dialogue_id})
+                        target["dialogue_events"] = events
+
                 result[scene_id] = normalized_shots
                 continue
             if isinstance(shots, list):
@@ -1106,8 +1134,13 @@ class QwenDirectorSanitizeMixin:
                 if lowered in character_names:
                     selected_characters.append(name)
 
-            if not selected_characters:
-
+            if not selected_characters and (
+                "characters" not in candidate or not isinstance(candidate.get("characters"), list)
+            ):
+                # Compatibility fallback is only for legacy payloads that omitted the
+                # field. An explicit [] is meaningful: this shot may be a setting/detail
+                # shot with no visible person, or show only a receiver for remote dialogue.
+                # Never turn an audio-only speaker or the whole scene cast into visible bodies.
                 selected_characters = [
                     name
                     for name in scene_characters
@@ -1130,12 +1163,15 @@ class QwenDirectorSanitizeMixin:
                 text = str(event.get("text", "") or "")
                 if not speaker or not text.strip():
                     continue
-                normalized_dialogue.append({
+                normalized_event = {
                     "speaker": speaker,
                     "text": text,
                     "continues_from_previous_shot": bool(event.get("continues_from_previous_shot", False)),
                     "continues_to_next_shot": bool(event.get("continues_to_next_shot", False)),
-                })
+                }
+                if str(event.get("delivery", "in_person")).strip().lower() == "remote":
+                    normalized_event["delivery"] = "remote"
+                normalized_dialogue.append(normalized_event)
             if not normalized_dialogue:
                 legacy_speakers = candidate.get("speaking_characters", []) or []
                 legacy_text = str(candidate.get("speech_text", "") or "").strip()
@@ -1851,11 +1887,6 @@ class QwenDirectorSanitizeMixin:
                 if str(name).strip()
             ]
 
-            if not shot_characters:
-                raise RuntimeError(
-                    f"Shot {shot.get('shot_id', '')} has no character binding."
-                )
-
             for field in (
                 "characters",
                 "speaking_characters",
@@ -1880,14 +1911,27 @@ class QwenDirectorSanitizeMixin:
                 )
                 if str(name).strip()
             }
-            if not speakers.issubset(
-                {
-                    name.lower()
-                    for name in shot_characters
-                }
-            ):
+            visible = {name.lower() for name in shot_characters}
+            events = [event for event in (shot.get("dialogue_events", []) or []) if isinstance(event, dict)]
+            remote_speakers = {
+                str(event.get("speaker", "") or "").strip().lower()
+                for event in events
+                if str(event.get("delivery", "in_person")).strip().lower() == "remote"
+                and str(event.get("speaker", "") or "").strip()
+            }
+            in_person_speakers = {
+                str(event.get("speaker", "") or "").strip().lower()
+                for event in events
+                if str(event.get("delivery", "in_person")).strip().lower() != "remote"
+                and str(event.get("speaker", "") or "").strip()
+            }
+            if not in_person_speakers.issubset(visible):
                 raise RuntimeError(
-                    f"Shot {shot.get('shot_id', '')} has a speaker not present in its character bindings."
+                    f"Shot {shot.get('shot_id', '')} has an in-person speaker not present in its visible character bindings."
+                )
+            if not speakers.issubset(visible | remote_speakers):
+                raise RuntimeError(
+                    f"Shot {shot.get('shot_id', '')} has an in-person speaker not present in its character bindings."
                 )
 
     @staticmethod
@@ -1987,10 +2031,9 @@ class QwenDirectorSanitizeMixin:
                     raise RuntimeError(f"Shot {shot_id} is missing {field}.")
             shot_characters = shot.get("characters", []) or []
             speakers = shot.get("speaking_characters", []) or []
-            if allowed and not shot_characters:
-                raise RuntimeError(
-                    f"Shot {shot_id} has no character binding."
-                )
+            # Empty visible-character bindings are valid for environment/detail shots
+            # and for shots that carry only remote audio. In-person visibility is enforced
+            # against dialogue_events by _validate_shot_character_contract.
             for name in [*shot_characters, *speakers]:
                 if allowed and str(name).strip().lower() not in allowed:
                     raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
