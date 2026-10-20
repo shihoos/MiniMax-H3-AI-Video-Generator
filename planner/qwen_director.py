@@ -826,7 +826,7 @@ class QwenDirector(
                             "global-story recap compaction; used deterministic shot fallback.",
                         )
                     else:
-                        batch_dialogue_index, batch_dialogue_ids = self._shot_batch_dialogue_index(
+                        batch_dialogue_index, _batch_dialogue_ids = self._shot_batch_dialogue_index(
                             batch_user
                         )
                         try:
@@ -847,7 +847,10 @@ class QwenDirector(
                                 disable_thinking=True,
                                 response_schema=self._shot_batch_json_schema(
                                     scene_count=len(batch_scenes),
-                                    dialogue_ids=batch_dialogue_ids,
+                                    dialogue_ids_by_scene={
+                                        scene_id: list(source_index.keys())
+                                        for scene_id, source_index in batch_dialogue_index.items()
+                                    },
                                 ),
                             )
                         except RuntimeError as batch_error:
@@ -1537,6 +1540,25 @@ class QwenDirector(
         if len(lengths) >= 8 and (max(lengths) - min(lengths)) < 9:
             issues.append("monotone sentence rhythm")
 
+        # Log repeated substantial quoted dialogue across different scene paragraphs.
+        # This is deliberately advisory: repeated lines may be a purposeful callback,
+        # so never delete dialogue or trigger an extra model call from this diagnostic.
+        paragraphs = [part for part in re.split(r"\n\s*\n+", text) if part.strip()]
+        quote_pattern = re.compile(
+            r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
+            flags=re.UNICODE,
+        )
+        quote_scenes: dict[str, set[int]] = {}
+        for scene_index, paragraph in enumerate(paragraphs):
+            for match in quote_pattern.finditer(paragraph):
+                quoted = next((value for value in match.groups() if value is not None), "")
+                normalized = re.sub(r"[^a-z0-9]+", " ", quoted.casefold()).strip()
+                if len(normalized.split()) < 5:
+                    continue
+                quote_scenes.setdefault(normalized, set()).add(scene_index)
+        if any(len(scene_indexes) > 1 for scene_indexes in quote_scenes.values()):
+            issues.append("substantial quoted dialogue repeats across scenes")
+
         return issues
 
     def _generate_story_blueprint(
@@ -1673,9 +1695,20 @@ class QwenDirector(
         if cleanup_reason:
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
-        self._last_story_draft = raw
+        try:
+            raw = self._coerce_story_to_scene_paragraphs(raw)
+        except ValueError as exc:
+            raise RuntimeError(failure_prefix + str(exc)) from exc
         if not str(raw or "").strip():
             raise RuntimeError(failure_prefix + "Qwen returned an empty story after non-prose cleanup.")
+        initial_scene_count = len([part for part in re.split(r"\n\s*\n+", raw) if part.strip()])
+        if initial_scene_count != DIRECTOR_STORY_SCENES:
+            raise RuntimeError(
+                failure_prefix
+                + f"Author returned {initial_scene_count} scene paragraphs; exactly {DIRECTOR_STORY_SCENES} are required. "
+                "Scene boundaries were preserved; no split, merge, retry, or repair call was attempted."
+            )
+        self._last_story_draft = raw
 
         # Length is measured only over the cleaned narrative, so checklists, fake word counts
         # or duplicated blocks can never satisfy it. The prompt asks for STORY_MIN_WORDS+; the
@@ -1695,30 +1728,9 @@ class QwenDirector(
                 flush=True,
             )
 
-        # One paragraph per configured scene is a production-topology requirement.
-        # Repair boundaries deterministically; never ask the model to rewrite prose.
-        paragraphs = [
-            part.strip()
-            for part in re.split(r"\n\s*\n+", str(raw or ""))
-            if part.strip()
-        ]
+        # One paragraph per configured scene is enforced before quality checks. The
+        # scene marker parser above never manufactures missing beats from prose.
         candidate = str(raw or "").strip()
-        if len(paragraphs) != DIRECTOR_STORY_SCENES:
-            candidate = self._coerce_story_to_scene_paragraphs(candidate)
-            repaired_count = len([
-                part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
-            ])
-            print(
-                f"[DIRECTOR] story topology normalization attempted without regeneration: {len(paragraphs)} -> {repaired_count} paragraphs",
-                flush=True,
-            )
-            if repaired_count != DIRECTOR_STORY_SCENES:
-                raise RuntimeError(
-                    failure_prefix
-                    + f"Could not normalize the story to exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
-                    f"without splitting a sentence or dialogue quote (got {repaired_count}). "
-                    "No retry was attempted."
-                )
 
         self._last_story_contract_warnings = []
         candidate = self._validate_story_output_contracts(
@@ -1759,16 +1771,11 @@ class QwenDirector(
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
         if paragraph_count != DIRECTOR_STORY_SCENES:
-            candidate = self._coerce_story_to_scene_paragraphs(candidate)
-            paragraph_count = len([
-                part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
-            ])
-            if paragraph_count != DIRECTOR_STORY_SCENES:
-                raise RuntimeError(
-                    failure_prefix
-                    + f"Final story topology must contain exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
-                    f"(got {paragraph_count}). No retry was attempted."
-                )
+            raise RuntimeError(
+                failure_prefix
+                + f"Final story topology must contain exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
+                f"(got {paragraph_count}). No retry or paragraph reshaping was attempted."
+            )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
         issues.extend(self._story_sentence_contract_issues(candidate))
@@ -1977,6 +1984,10 @@ class QwenDirector(
         fragment that belongs to the scene paragraph before it.
         """
         value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if re.search(r"(?im)^\s*\[\[SCENE_\d{2}\]\]", value):
+            # Numbered markers are scene boundaries, not prose fragments. Leave them
+            # untouched so the strict parser below can validate order and coverage.
+            return value
         paragraphs = [
             re.sub(r"[ \t\n]+", " ", part).strip()
             for part in re.split(r"\n\s*\n+", value)
@@ -2014,136 +2025,62 @@ class QwenDirector(
 
     @staticmethod
     def _coerce_story_to_scene_paragraphs(text: str) -> str:
-        """Normalize to the configured number of scene paragraphs without rewriting prose."""
+        """Remove explicit scene markers without inventing, merging, or splitting beats.
+
+        New story drafts use ``[[SCENE_01]]`` ... ``[[SCENE_12]]`` at the start of
+        each scene block. The marker is compiler scaffolding and is removed from the
+        delivered story. Legacy/checkpoint prose without markers is accepted only when
+        it already has exactly the configured number of paragraphs. A malformed marker
+        sequence raises instead of silently manufacturing scene boundaries.
+        """
         value = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not value:
             return ""
+
+        marker_pattern = re.compile(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\][ \t]*(?:\n|[ \t]+|$)")
+        markers = list(marker_pattern.finditer(value))
+        if markers:
+            expected = list(range(1, DIRECTOR_STORY_SCENES + 1))
+            actual = [int(match.group(1)) for match in markers]
+            if actual != expected:
+                raise ValueError(
+                    "Story scene markers must appear exactly once and in order as "
+                    f"[[SCENE_01]] through [[SCENE_{DIRECTOR_STORY_SCENES:02d}]]; "
+                    f"found {actual}. No retry or paragraph reshaping was attempted."
+                )
+            scenes: list[str] = []
+            for index, marker in enumerate(markers):
+                content_start = marker.end()
+                content_end = markers[index + 1].start() if index + 1 < len(markers) else len(value)
+                scene = re.sub(r"[ \t\n]+", " ", value[content_start:content_end]).strip()
+                if not scene:
+                    raise ValueError(
+                        f"Story scene marker [[SCENE_{index + 1:02d}]] has no prose. "
+                        "No retry or paragraph reshaping was attempted."
+                    )
+                scenes.append(scene)
+            if len(scenes) != DIRECTOR_STORY_SCENES:
+                raise ValueError(
+                    f"Story must contain exactly {DIRECTOR_STORY_SCENES} marked scenes; "
+                    f"found {len(scenes)}. No retry or paragraph reshaping was attempted."
+                )
+            return "\n\n".join(scenes)
 
         paragraphs = [
             re.sub(r"[ \t\n]+", " ", part).strip()
             for part in re.split(r"\n\s*\n+", value)
             if part.strip()
         ]
-        if not paragraphs or len(paragraphs) == DIRECTOR_STORY_SCENES:
-            return "\n\n".join(paragraphs)
-
-        original_count = len(paragraphs)
-
-        def word_count(part: str) -> int:
-            return len(re.findall(r"\b[\w'’-]+\b", part))
-
-        def sentence_spans(part: str) -> list[str]:
-            """Split only at sentence punctuation outside quoted dialogue.
-
-            Keeping an entire quoted utterance together is more important than
-            maximizing the number of split points: downstream scene boundaries
-            must not bisect a character's line or separate it from attribution.
-            """
-            value = part.strip()
-            if not value:
-                return []
-
-            opening_to_closing = {"“": "”", "‘": "’"}
-            quote_stack: list[str] = []
-            spans: list[str] = []
-            start = 0
-
-            for index, char in enumerate(value):
-                if char in opening_to_closing:
-                    quote_stack.append(opening_to_closing[char])
-                    continue
-
-                if char in {'"', "'", "”", "’"}:
-                    # Do not treat apostrophes in contractions/possessives as
-                    # quote delimiters. Curly closing quotes always close.
-                    if char == "'" and index > 0 and index + 1 < len(value):
-                        if value[index - 1].isalnum() and value[index + 1].isalnum():
-                            continue
-                    if quote_stack:
-                        expected = quote_stack[-1]
-                        if char == expected or (expected == '"' and char == '"'):
-                            quote_stack.pop()
-                        elif char in {'"', "'"} and expected == char:
-                            quote_stack.pop()
-                    elif char in {'"', "'"}:
-                        # Straight quotes toggle only when they look like an
-                        # opening quote, not when they follow a word.
-                        previous = value[index - 1] if index else " "
-                        following = value[index + 1] if index + 1 < len(value) else " "
-                        if previous.isspace() or previous in "([{—–:;":
-                            if not following.isspace():
-                                quote_stack.append(char)
-                    continue
-
-                if char not in ".!?" or quote_stack:
-                    continue
-                if index + 1 < len(value) and value[index + 1].isspace():
-                    span = value[start:index + 1].strip()
-                    if span:
-                        spans.append(span)
-                    cursor = index + 1
-                    while cursor < len(value) and value[cursor].isspace():
-                        cursor += 1
-                    start = cursor
-
-            tail = value[start:].strip()
-            if tail:
-                spans.append(tail)
-            return spans
-
-        # Too many paragraphs: merge the smallest adjacent interior pair.
-        # Keep opening and aftermath paragraphs distinct whenever possible.
-        while len(paragraphs) > DIRECTOR_STORY_SCENES:
-            n = len(paragraphs)
-            candidate_starts = list(range(1, n - 2)) or list(range(0, n - 1))
-            start = min(
-                candidate_starts,
-                key=lambda i: (
-                    word_count(paragraphs[i]) + word_count(paragraphs[i + 1]),
-                    abs(word_count(paragraphs[i]) - word_count(paragraphs[i + 1])),
-                    i,
-                ),
-            )
-            paragraphs[start] = paragraphs[start] + " " + paragraphs[start + 1]
-            del paragraphs[start + 1]
-
-        # Too few paragraphs: split only at an existing sentence boundary.
-        # Prefer the longest splittable paragraph and a split that keeps both halves
-        # reasonably close to the configured per-scene target without rewriting prose.
-        while len(paragraphs) < DIRECTOR_STORY_SCENES:
-            best = None
-            for index, paragraph in enumerate(paragraphs):
-                sentences = sentence_spans(paragraph)
-                if len(sentences) < 2:
-                    continue
-                total = word_count(paragraph)
-                for split_index in range(1, len(sentences)):
-                    left = " ".join(sentences[:split_index]).strip()
-                    right = " ".join(sentences[split_index:]).strip()
-                    left_words = word_count(left)
-                    right_words = word_count(right)
-                    if not left or not right:
-                        continue
-                    # Avoid creating a tiny final aftermath fragment.
-                    final_penalty = 60 if index == len(paragraphs) - 1 and right_words < 25 else 0
-                    target_penalty = abs(left_words - STORY_WORDS_PER_SCENE) + abs(right_words - STORY_WORDS_PER_SCENE)
-                    score = (final_penalty + target_penalty, -total, index, split_index)
-                    candidate = (score, index, split_index, left, right)
-                    if best is None or score < best[0]:
-                        best = candidate
-            if best is None:
-                break
-            _, index, split_index, left, right = best
-            paragraphs[index:index + 1] = [left, right]
-
-        result = "\n\n".join(paragraphs)
-        if len(paragraphs) != original_count:
+        # A legacy story can be normalized for whitespace only. Scene count is a hard
+        # topology invariant; never split a prose paragraph at arbitrary sentence boundaries
+        # and never merge independent beats just to reach the target count.
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
             print(
-                f"[DIRECTOR] story topology fallback: {original_count} -> {len(paragraphs)} paragraphs; prose preserved",
+                f"[DIRECTOR] story topology mismatch: got {len(paragraphs)} paragraphs, "
+                f"expected {DIRECTOR_STORY_SCENES}; boundaries preserved (no split/merge)",
                 flush=True,
             )
-        return result
-
+        return "\n\n".join(paragraphs)
 
     _STOCK_PHRASES = re.compile(
         r"\b(?:heart (?:pounded|pounding|thudded|thudding|hammered|hammering|raced|racing)|"
@@ -2845,8 +2782,8 @@ class QwenDirector(
         # off-screen: a radio or phone may simply be a prop in the room. Require
         # an audio-route phrase or an explicit audio action on the device.
         remote_device = (
-            r"radio|walkie-talkie|intercom|phone|telephone|voicemail|"
-            r"recording|transmission|communicator|speaker"
+            r"radio|walkie-talkie|intercom|phone|telephone|transmission|"
+            r"communicator|speaker|terminal|loudspeaker|console"
         )
         remote_context_re = re.compile(
             rf"\b(?:{remote_device})\b[^.!?]{{0,80}}"
@@ -2913,7 +2850,13 @@ class QwenDirector(
         # do not establish this state.
         remote_channel_end_by_paragraph: dict[int, int] = {}
 
-        def is_non_present_quote(position: int, end_position: int) -> bool:
+        def quote_delivery(position: int, end_position: int, semantic_delivery: str = "") -> str:
+            """Classify a quote as visible in-person audio, live remote audio, or excluded.
+
+            Remote speech stays available to the audio/compiler path while its source is
+            not automatically made a visible character. Remembered and written quotations
+            take precedence over a nearby device noun or remote-channel carry state.
+            """
             paragraph_break = text.rfind("\n\n", 0, position)
             paragraph_start = paragraph_break + 2 if paragraph_break >= 0 else 0
             paragraph_end = text.find("\n\n", end_position)
@@ -2922,78 +2865,59 @@ class QwenDirector(
             before = text[paragraph_start:position]
             after = text[end_position:paragraph_end]
 
+            prior_boundary = max(before.rfind("."), before.rfind("?"), before.rfind("!"))
+            local_before = before[prior_boundary + 1:][-260:]
+            next_boundaries = [index for index in (after.find("."), after.find("?"), after.find("!")) if index >= 0]
+            local_after = after[:min(next_boundaries) + 1] if next_boundaries else after[:180]
+
+            # These exclusions win over remote context; a device nearby does not turn
+            # a journal, memory, archive, or anonymous voice into present-time dialogue.
+            if remembered_context_re.search(local_before) or remembered_context_re.search(local_after):
+                return "excluded"
+            if (written_before_re.search(local_before) or written_reader_before_re.search(local_before)
+                    or written_after_re.search(local_after)):
+                return "excluded"
+            if anonymous_voice_re.search(local_before):
+                return "excluded"
+
             active_remote_end = remote_channel_end_by_paragraph.get(paragraph_start)
             if active_remote_end is not None and active_remote_end <= position:
                 intervening_text = text[active_remote_end:position]
                 if physical_presence_re.search(intervening_text):
                     remote_channel_end_by_paragraph.pop(paragraph_start, None)
                 else:
-                    # Multiple consecutive quoted lines can belong to the same
-                    # radio/phone voice even when the second line has no repeated
-                    # device wording. Paragraph boundaries and physical appearances
-                    # end this carry-over, preventing it from poisoning later scenes.
-                    return True
+                    return "remote"
 
-            # Classify the quote from its own surrounding sentence, not every cue
-            # in the paragraph. Otherwise an earlier memory/recording can wrongly
-            # suppress a later live line in the same paragraph.
-            prior_boundary = max(before.rfind("."), before.rfind("?"), before.rfind("!"))
-            local_before = before[prior_boundary + 1:][-260:]
-            next_boundaries = [index for index in (after.find("."), after.find("?"), after.find("!")) if index >= 0]
-            local_after = after[:min(next_boundaries) + 1] if next_boundaries else after[:180]
-
-            # Anonymous generic voice-over lines are not attributable to a visible,
-            # canonical character and must not be assigned to the protagonist by guess.
-            if anonymous_voice_re.search(local_before):
-                return True
-
-            # Remote evidence is quote-local. A preceding sentence is considered
-            # only when this quote has no local lead-in (e.g. "Her radio crackled.
-            # ‘Voss, you there?’"). Never carry arbitrary device mentions across
-            # multiple sentences in the paragraph.
             remote_positions = [match.start() for match in remote_context_re.finditer(local_before)]
             physical_positions = [match.start() for match in physical_presence_re.finditer(local_before)]
             local_speaker_positions = [match.start() for match in remote_speaker_phrase_re.finditer(local_before)]
             local_physical_positions = [match.start() for match in physical_presence_re.finditer(local_before)]
-            if local_speaker_positions and (
-                not local_physical_positions or max(local_speaker_positions) > max(local_physical_positions)
-            ):
-                remote_channel_end_by_paragraph[paragraph_start] = end_position
-                return True
-            if remote_positions and (
-                not physical_positions or max(remote_positions) > max(physical_positions)
-            ):
-                remote_channel_end_by_paragraph[paragraph_start] = end_position
-                return True
+            remote_evidence = bool(
+                (local_speaker_positions and (
+                    not local_physical_positions or max(local_speaker_positions) > max(local_physical_positions)
+                ))
+                or (remote_positions and (
+                    not physical_positions or max(remote_positions) > max(physical_positions)
+                ))
+            )
 
-            # Example kept valid: "Her radio crackled. \"Voss, you there?\"".
-            # When the quote's own lead-in is empty, check only the immediately
-            # preceding complete sentence—not older generic objects in the paragraph.
-            if not local_before.strip() and before.strip():
+            # With no local lead-in, check only the immediately preceding sentence.
+            if not remote_evidence and not local_before.strip() and before.strip():
                 prior_sentence_match = re.search(r"([^.!?]+[.!?])\s*$", before.strip())
                 if prior_sentence_match:
                     prior_sentence = prior_sentence_match.group(1)
                     prior_remote = list(remote_context_re.finditer(prior_sentence))
                     prior_speaker = list(remote_speaker_phrase_re.finditer(prior_sentence))
                     prior_physical = list(physical_presence_re.finditer(prior_sentence))
-                    if (prior_remote or prior_speaker) and (
+                    remote_evidence = bool((prior_remote or prior_speaker) and (
                         not prior_physical
                         or max((m.start() for m in prior_remote + prior_speaker), default=-1) > prior_physical[-1].start()
-                    ):
-                        remote_channel_end_by_paragraph[paragraph_start] = end_position
-                        return True
-            # A quote explicitly attributed to memory, an echo in someone's mind,
-            # or a written source is not present-time spoken dialogue. Check both
-            # sides of the quote because natural prose often adds "she read" after it.
-            if remembered_context_re.search(local_before) or remembered_context_re.search(local_after):
-                return True
-            if (
-                written_before_re.search(local_before)
-                or written_reader_before_re.search(local_before)
-                or written_after_re.search(local_after)
-            ):
-                return True
-            return False
+                    ))
+
+            if remote_evidence or str(semantic_delivery or "").strip().lower() == "remote":
+                remote_channel_end_by_paragraph[paragraph_start] = end_position
+                return "remote"
+            return "in_person"
 
         remote_excluded = 0
         semantic_items: list[dict] = []
@@ -3009,11 +2933,11 @@ class QwenDirector(
             quote_id = item.get("quote_id")
             canonical_speaker = canonicalize_speaker(speaker)
             if isinstance(quote_id, int) and quote_id > 0:
-                semantic_by_quote_id[quote_id] = {"key": key, "speaker": canonical_speaker}
+                semantic_by_quote_id[quote_id] = {"key": key, "speaker": canonical_speaker, "delivery": "remote" if str(item.get("delivery", "in_person")).strip().lower() == "remote" else "in_person"}
             # ID-addressed items are consumed only by their exact source occurrence.
             # Text-only legacy items use the fuzzy compatibility path below.
             if key and not (isinstance(quote_id, int) and quote_id > 0):
-                semantic_items.append({"key": key, "speaker": canonical_speaker, "quote_id": None})
+                semantic_items.append({"key": key, "speaker": canonical_speaker, "quote_id": None, "delivery": "remote" if str(item.get("delivery", "in_person")).strip().lower() == "remote" else "in_person"})
 
         allowed = set(allowed_surface_map) | {
             EntityResolver.normalize(EntityResolver.strip_honorific(value))
@@ -3057,29 +2981,60 @@ class QwenDirector(
 
         semantic_consumed: set[int] = set()
 
-        def consume_semantic_speaker(key: str) -> set[str]:
+        def consume_semantic_speaker(key: str) -> tuple[set[str], str]:
             for index, item in enumerate(semantic_items):
                 if index in semantic_consumed or item["key"] != key:
                     continue
                 semantic_consumed.add(index)
-                return {item["speaker"]}
-            return set()
+                return {item["speaker"]}, str(item.get("delivery", "in_person"))
+            return set(), "in_person"
 
         quote_pattern = re.compile(
             r'"([^"\n]+)"|“([^”\n]+)”|‘([^’\n]+)’|(?<!\w)\'([^\'\n]+)\'(?!\w)',
             flags=re.UNICODE,
         )
         quote_spans: list[tuple[int, int]] = []
+        quote_matches = list(quote_pattern.finditer(text))
+        previous_quote_match = None
+        previous_quote_speakers: set[str] = set()
+        previous_quote_delivery = "in_person"
+        pronoun_attribution_only_re = re.compile(
+            r"\s*[\"\u201d\u2019\u00bb]?\s*(?:and\s+)?(?:he|she|they)\s+"
+            r"(?:said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|screamed|screams|"
+            r"muttered|mutters|answered|answers|warned|warns|cried|cries|yelled|yells|"
+            r"barked|barks|called|calls|snapped|snaps|insisted|insists|demanded|demands)"
+            r"\s*[,;.!?…\u2014\u2013-]*\s*[\"\u201c\u2018\u00ab]?\s*\Z",
+            re.IGNORECASE,
+        )
 
-        for quote_id, match in enumerate(quote_pattern.finditer(text), start=1):
+        for quote_id, match in enumerate(quote_matches, start=1):
             value = next((part for part in match.groups() if part is not None), "")
             key = cls._dialogue_anchor_key(value)
             if not key:
                 continue
 
             semantic_quote = semantic_by_quote_id.get(quote_id)
-            speakers = ({semantic_quote["speaker"]} if semantic_quote and semantic_quote.get("speaker") else consume_semantic_speaker(key))
+            if semantic_quote and semantic_quote.get("speaker"):
+                speakers = {semantic_quote["speaker"]}
+                semantic_delivery = str(semantic_quote.get("delivery", "in_person"))
+            else:
+                speakers, semantic_delivery = consume_semantic_speaker(key)
+
+            # A short pronoun attribution belongs to the preceding quotation. If the next
+            # quotation starts immediately afterward and no new named attribution appears,
+            # preserve that speaker across the continuing turn instead of trusting a
+            # contradictory per-quote extraction label. This is intentionally narrow:
+            # it does not infer a speaker from a reaction or from a bare character mention.
+            if previous_quote_match is not None and previous_quote_speakers:
+                between_quotes = text[previous_quote_match.end():match.start()]
+                if pronoun_attribution_only_re.fullmatch(between_quotes):
+                    speakers = set(previous_quote_speakers)
+                    semantic_delivery = previous_quote_delivery
+
             if not speakers:
+                previous_quote_match = match
+                previous_quote_speakers = set()
+                previous_quote_delivery = "in_person"
                 explicit_hint = explicit_local_speaker(match.start(), match.end())
                 if explicit_hint:
                     speakers = {canonicalize_speaker(explicit_hint)}
@@ -3096,11 +3051,12 @@ class QwenDirector(
             quote_spans.append((match.start(), match.end()))
             if not display or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
-            if is_non_present_quote(match.start(), match.end()):
-                # A quote from a remote channel, memory/echo, or written source is
-                # not present-time dialogue. Only accepted source speech can later
-                # justify restoring a canonical speaker omitted from a Qwen shot.
+            delivery = quote_delivery(match.start(), match.end(), semantic_delivery)
+            if delivery == "excluded":
                 remote_excluded += 1
+                previous_quote_match = match
+                previous_quote_speakers = set()
+                previous_quote_delivery = "in_person"
                 continue
 
             segments.append({
@@ -3110,7 +3066,11 @@ class QwenDirector(
                 "start": match.start(),
                 "end": match.end(),
                 "semantic": True,
+                "delivery": delivery,
             })
+            previous_quote_match = match
+            previous_quote_speakers = set(speakers)
+            previous_quote_delivery = delivery
 
         # Explicit screenplay/script labels can be recovered deterministically even when a
         # semantic payload is unavailable. This path uses only the speaker surface, not a
@@ -3132,7 +3092,7 @@ class QwenDirector(
             key = cls._dialogue_anchor_key(display)
             if not key or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
-            semantic_speakers = consume_semantic_speaker(key)
+            semantic_speakers, semantic_delivery = consume_semantic_speaker(key)
             if semantic_speakers:
                 # The explicit screenplay label and Qwen's semantic speaker must agree.
                 # This prevents a malformed model response from reassigning a source line.
@@ -3144,6 +3104,11 @@ class QwenDirector(
                 continue
             else:
                 speaker_set = {speaker}
+                semantic_delivery = "in_person"
+            delivery = quote_delivery(match.start(), match.end(), semantic_delivery)
+            if delivery == "excluded":
+                remote_excluded += 1
+                continue
             segments.append({
                 "text": key,
                 "display": display,
@@ -3151,14 +3116,15 @@ class QwenDirector(
                 "start": match.start(),
                 "end": match.end(),
                 "semantic": bool(semantic_speakers),
+                "delivery": delivery,
             })
 
         segments.sort(key=lambda item: (item.get("start", 0), item.get("end", 0)))
         # Keep source offsets for exact source-to-scene recovery without another model call.
         if remote_excluded:
             print(
-                f"[DIRECTOR] dialogue source filter excluded {remote_excluded} remote/off-screen utterance(s); "
-                "scene-local dialogue keeps only visible speaking characters",
+                f"[DIRECTOR] dialogue source filter excluded {remote_excluded} remembered/written/anonymous utterance(s); "
+                "explicit live remote dialogue is retained as off-screen audio",
                 flush=True,
             )
         return segments
@@ -3448,10 +3414,14 @@ class QwenDirector(
                     canonical = canonical_by_norm.get(corrected, canonical)
                     normalized_speaker = canonical.lower()
 
-                if normalized_speaker not in bound:
-                    # Restore a missing binding only after the exact event matched a
-                    # source quote already accepted as present-time speech above. The
-                    # source filter excludes remote, remembered and written quotations.
+                source_delivery = (
+                    str(spoken_segments[last_source_index[0]].get("delivery", "in_person"))
+                    if last_source_index[0] is not None else str(event.get("delivery", "in_person"))
+                ).strip().lower()
+                is_remote = source_delivery == "remote"
+                if normalized_speaker not in bound and not is_remote:
+                    # Only in-person source speech may justify restoring a visible
+                    # shot/scene binding. Remote speakers remain canonical audio sources.
                     shot_characters = shot.get("characters")
                     if not isinstance(shot_characters, list):
                         shot_characters = list(shot_characters or [])
@@ -3482,6 +3452,10 @@ class QwenDirector(
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
+                if is_remote:
+                    repaired["delivery"] = "remote"
+                else:
+                    repaired.pop("delivery", None)
                 if last_source_index[0] is not None:
                     repaired["_source_segment_index"] = last_source_index[0]
                 # Dialogue text must be the exact source span (original casing and
@@ -3580,13 +3554,17 @@ class QwenDirector(
                 elif previous_index is not None:
                     previous_pos = scene_shot_index.get(segment_last_shot[previous_index], len(scene_shots) - 1)
                     target = scene_shots[min(len(scene_shots) - 1, previous_pos + 1)]
+            is_remote = str(segment.get("delivery", "in_person")).strip().lower() == "remote"
             if target is None:
-                # Prefer a shot already showing the canonical speaker and visibly
-                # staging speech, then balance dialogue load deterministically.
-                speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told)\b", re.IGNORECASE)
+                # Remote audio belongs to a shot grounded in the established receiver,
+                # channel, or listener reaction—not a fabricated visible speaker.
+                speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told|listen|listens|turned|startled|reacted|flinched|heard|crackled|intercom|radio|terminal|speaker)\b", re.IGNORECASE)
                 target = min(
                     scene_shots,
                     key=lambda item: (
+                        not bool(speech_action_re.search(str(item.get("action", "") or "") + " " + str(item.get("visual_prompt", "") or ""))),
+                        len(item.get("dialogue_events", []) or []),
+                    ) if is_remote else (
                         EntityResolver.normalize(canonical_speaker) not in {
                             EntityResolver.normalize(str(name)) for name in (item.get("characters", []) or [])
                         },
@@ -3599,6 +3577,8 @@ class QwenDirector(
             if not isinstance(target_events, list):
                 target_events = []
             event = {"speaker": canonical_speaker, "text": missing_text, "_source_segment_index": index}
+            if is_remote:
+                event["delivery"] = "remote"
             if progress > 0 and previous_shot_id:
                 event["continues_from_previous_shot"] = True
                 previous_events = shot_by_id[previous_shot_id].get("dialogue_events", [])
@@ -3607,42 +3587,51 @@ class QwenDirector(
             target_events.append(event)
             target["dialogue_events"] = target_events
 
-            speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told)\b", re.IGNORECASE)
+            speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told|listen|listens|heard|hears|crackled|transmitted)\b", re.IGNORECASE)
             action_text = str(target.get("action", "") or "").strip()
-            speaker_surface_present = any(
-                re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", action_text, re.IGNORECASE)
-                for surface in self._name_surfaces(canonical_speaker)
-            )
-            if not speech_action_re.search(action_text) or not speaker_surface_present:
-                speaking_clause = f"{canonical_speaker} visibly speaks the source line to the listener."
-                if action_text:
-                    action_base = " ".join(action_text.split()[:22]).rstrip(" .;,:—–-")
-                    target["action"] = f"{action_base}; {speaking_clause}" if action_base else speaking_clause
-                else:
-                    target["action"] = f"{canonical_speaker} speaks the source line, with their face and mouth clearly visible to the listener."
-            visual_text = str(target.get("visual_prompt", "") or "").strip()
-            visual_speaker_present = any(
-                re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", visual_text, re.IGNORECASE)
-                for surface in self._name_surfaces(canonical_speaker)
-            )
-            if not speech_action_re.search(visual_text) or not visual_speaker_present:
-                visual_base = " ".join(visual_text.split()[:30])
-                target["visual_prompt"] = (visual_base + " " if visual_base else "") + f"{canonical_speaker} visibly speaking, mouth and expression clear in frame."
-                target["visual_prompt"] = " ".join(target["visual_prompt"].split())
+            if is_remote:
+                remote_clause = f"The established in-world channel carries {canonical_speaker}'s voice; keep the source off-screen."
+                channel_re = r"\b(?:radio|intercom|terminal|speaker|receiver|transmission|communicator|phone|channel|voice|heard|listening)\b"
+                visual_text = str(target.get("visual_prompt", "") or "").strip()
+                if not re.search(channel_re, action_text + " " + visual_text, re.IGNORECASE):
+                    target["action"] = ((action_text.rstrip(" .;,:—–-") + "; ") if action_text else "") + remote_clause
+                if not re.search(channel_re, visual_text, re.IGNORECASE):
+                    target["visual_prompt"] = " ".join((visual_text + " A receiver or established channel carries the off-screen voice; the source is not visible.").split())
+            else:
+                speaker_surface_present = any(
+                    re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", action_text, re.IGNORECASE)
+                    for surface in self._name_surfaces(canonical_speaker)
+                )
+                if not speech_action_re.search(action_text) or not speaker_surface_present:
+                    speaking_clause = f"{canonical_speaker} visibly speaks the source line to the listener."
+                    if action_text:
+                        action_base = " ".join(action_text.split()[:22]).rstrip(" .;,:—–-")
+                        target["action"] = f"{action_base}; {speaking_clause}" if action_base else speaking_clause
+                    else:
+                        target["action"] = f"{canonical_speaker} speaks the source line, with their face and mouth clearly visible to the listener."
+                visual_text = str(target.get("visual_prompt", "") or "").strip()
+                visual_speaker_present = any(
+                    re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", visual_text, re.IGNORECASE)
+                    for surface in self._name_surfaces(canonical_speaker)
+                )
+                if not speech_action_re.search(visual_text) or not visual_speaker_present:
+                    visual_base = " ".join(visual_text.split()[:30])
+                    target["visual_prompt"] = (visual_base + " " if visual_base else "") + f"{canonical_speaker} visibly speaking, mouth and expression clear in frame."
+                    target["visual_prompt"] = " ".join(target["visual_prompt"].split())
 
-            target_chars = target.get("characters", [])
-            if not isinstance(target_chars, list):
-                target_chars = list(target_chars or [])
-                target["characters"] = target_chars
-            if not any(EntityResolver.normalize(str(name)) == EntityResolver.normalize(canonical_speaker) for name in target_chars):
-                target_chars.append(canonical_speaker)
+                target_chars = target.get("characters", [])
+                if not isinstance(target_chars, list):
+                    target_chars = list(target_chars or [])
+                    target["characters"] = target_chars
+                if not any(EntityResolver.normalize(str(name)) == EntityResolver.normalize(canonical_speaker) for name in target_chars):
+                    target_chars.append(canonical_speaker)
             target["speaking_characters"] = list(dict.fromkeys(
                 str(item.get("speaker", "") or "").strip()
                 for item in target_events if isinstance(item, dict) and str(item.get("speaker", "") or "").strip()
             ))
             target["speech_text"] = " ".join(str(item.get("text", "") or "").strip() for item in target_events if isinstance(item, dict) and str(item.get("text", "") or "").strip())
             scene = scene_by_id.get(scene_id or "")
-            if scene is not None:
+            if scene is not None and not is_remote:
                 scene_chars = scene.get("characters", [])
                 if not isinstance(scene_chars, list):
                     scene_chars = list(scene_chars or [])
@@ -3738,9 +3727,9 @@ class QwenDirector(
                     raise RuntimeError(
                         f"Shot {shot_id} contains unknown dialogue speaker '{event.get('speaker', '')}'."
                     )
-                if speaker not in bound:
+                if speaker not in bound and str(event.get("delivery", "in_person")).strip().lower() != "remote":
                     raise RuntimeError(
-                        f"Shot {shot_id} has dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
+                        f"Shot {shot_id} has in-person dialogue speaker '{event.get('speaker', '')}' not present in its character bindings."
                     )
                 expected_speakers.append(event["speaker"])
 
