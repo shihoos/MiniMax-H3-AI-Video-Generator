@@ -1676,6 +1676,14 @@ class QwenDirectorSanitizeMixin:
                 "Generated story has an underdeveloped final aftermath paragraph."
             )
 
+        # Scene prose is contractually one filmable beat of 6–8 sentences. Treat
+        # violations as a pre-production failure, not a warning after shot calls.
+        try:
+            sentence_issues = self._story_sentence_contract_issues(result)
+        except (AttributeError, TypeError):
+            sentence_issues = []
+        errors.extend(issue for issue in sentence_issues if "sentence count" in issue.lower())
+
         if errors:
             raise RuntimeError(" | ".join(errors))
 
@@ -1886,19 +1894,20 @@ class QwenDirectorSanitizeMixin:
                 )
                 if str(name).strip()
             ]
+            events = [event for event in (shot.get("dialogue_events", []) or []) if isinstance(event, dict)]
+            remote_speakers = {
+                str(event.get("speaker", "") or "").strip().lower()
+                for event in events
+                if str(event.get("delivery", "in_person")).strip().lower() == "remote"
+                and str(event.get("speaker", "") or "").strip()
+            }
 
-            for field in (
-                "characters",
-                "speaking_characters",
-            ):
-                for name in (
-                    shot.get(field, [])
-                    or []
-                ):
-                    if (
-                        str(name).strip().lower()
-                        not in allowed
-                    ):
+            # Dialogue-only remote sources may appear in speaking_characters, but
+            # never in the physical/visual `characters` roster.
+            for field in ("characters", "speaking_characters"):
+                field_allowed = allowed if field == "characters" else (allowed | remote_speakers)
+                for name in (shot.get(field, []) or []):
+                    if str(name).strip().lower() not in field_allowed:
                         raise RuntimeError(
                             f"Shot {shot.get('shot_id', '')} contains unknown character '{name}'."
                         )
@@ -1912,13 +1921,6 @@ class QwenDirectorSanitizeMixin:
                 if str(name).strip()
             }
             visible = {name.lower() for name in shot_characters}
-            events = [event for event in (shot.get("dialogue_events", []) or []) if isinstance(event, dict)]
-            remote_speakers = {
-                str(event.get("speaker", "") or "").strip().lower()
-                for event in events
-                if str(event.get("delivery", "in_person")).strip().lower() == "remote"
-                and str(event.get("speaker", "") or "").strip()
-            }
             in_person_speakers = {
                 str(event.get("speaker", "") or "").strip().lower()
                 for event in events
