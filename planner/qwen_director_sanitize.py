@@ -1916,9 +1916,10 @@ class QwenDirectorSanitizeMixin:
                 "Production plan has no usable character roster for this story mode."
             )
 
-        if not 4 <= len(scenes) <= self.MAX_SCENES:
+        minimum_scenes = 1 if mode == PRESERVE_USER_STORY_MODE else 4
+        if not minimum_scenes <= len(scenes) <= self.MAX_SCENES:
             raise RuntimeError(
-                f"Production plan must contain 4–{self.MAX_SCENES} scenes; got {len(scenes)}."
+                f"Production plan for {mode} must contain {minimum_scenes}–{self.MAX_SCENES} scenes; got {len(scenes)}."
             )
 
         scene_ids = [str(scene.get("scene_id", "")).strip() for scene in scenes]
