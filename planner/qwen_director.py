@@ -134,7 +134,6 @@ class QwenDirector(
             if isinstance(value, dict)
         }
 
-    @_with_faulthandler_watchdog
     def generate(
         self,
         *,
@@ -283,8 +282,7 @@ class QwenDirector(
         }
         if resuming:
             # For AI Story / Expand, the single semantic extraction call is required before resume.
-            # Preserve Story may legitimately have used zero calls when its text contained no
-            # quote-delimited prose dialogue; the checkpoint still records its exact call count.
+            # All modes use the same single semantic extraction stage; resume restores its exact state.
             try:
                 self._character_semantic_calls = max(
                     0,
@@ -299,6 +297,7 @@ class QwenDirector(
                     {
                         "text": str(item.get("text", "") or "").strip(),
                         "speaker": str(item.get("speaker", "") or "").strip(),
+                        **({"quote_id": int(item["quote_id"])} if str(item.get("quote_id", "")).isdigit() else {}),
                     }
                     for item in restored_semantic_dialogue
                     if isinstance(item, dict)
@@ -473,29 +472,18 @@ class QwenDirector(
                     qwen_character_extractor=self.extract_character_entities,
                 )
             else:
-                # Preserve mode keeps the deterministic user-story roster as source of truth.
-                # Use the single semantic Qwen pass only when quote-delimited prose dialogue exists;
-                # explicit screenplay-style speaker labels remain fully deterministic. This preserves
-                # the zero-inference fast path for stories that contain no quote-style dialogue.
+                # Preserve Story uses one semantic extraction pass for BOTH the complete
+                # cast and dialogue, even when the source has no quote marks. Deterministic
+                # name discovery is not authoritative and can miss aliases or late entrants.
                 canonical_characters = planner.create_characters(
                     canonical_source_story,
-                    qwen_character_extractor=None,
+                    qwen_character_extractor=self.extract_character_entities,
                 )
-                if self._preserve_story_requires_semantic_dialogue(story):
-                    preserve_hints = [
-                        str(character.name).strip()
-                        for character in canonical_characters
-                        if character is not None and str(getattr(character, "name", "")).strip()
-                    ]
-                    self.extract_character_entities(
-                        story,
-                        deterministic_candidates=preserve_hints,
+                if self._story_has_explicit_dialogue_surface(story) and not self._semantic_spoken_dialogue:
+                    self._record_recovery(
+                        "preserve_semantic_dialogue_empty",
+                        "Preserve Story contains an explicit dialogue surface, but the semantic extraction returned no anchored speech items.",
                     )
-                    if not self._semantic_spoken_dialogue:
-                        self._record_recovery(
-                            "preserve_semantic_dialogue_empty",
-                            "Preserve Story contains quote-delimited prose but the semantic extraction returned no spoken dialogue items.",
-                        )
 
         character_payloads = []
         for character in canonical_characters:
@@ -534,6 +522,7 @@ class QwenDirector(
         canonical_scenes = planner.create_scenes(
             canonical_source_story,
             canonical_characters,
+            minimum_scenes=(1 if mode == PRESERVE_USER_STORY_MODE else 4),
         )
 
         scenes = self._sanitize_scenes(
@@ -550,10 +539,11 @@ class QwenDirector(
                 "Deterministic base plan contains no canonical scenes."
             )
 
-        if len(scenes) < 4 or len(scenes) > self.MAX_SCENES:
+        minimum_scene_count = 1 if mode == PRESERVE_USER_STORY_MODE else 4
+        if len(scenes) < minimum_scene_count or len(scenes) > self.MAX_SCENES:
             raise RuntimeError(
                 "Deterministic base plan scene count is outside "
-                f"the required 4-{self.MAX_SCENES} range: {len(scenes)}"
+                f"the required {minimum_scene_count}-{self.MAX_SCENES} range for {mode}: {len(scenes)}"
             )
 
         # Preserve deterministic scene topology. Scene-specific dramatic purpose
@@ -1606,6 +1596,7 @@ class QwenDirector(
             if not raw:
                 raise RuntimeError(failure_prefix + str(exc)) from exc
 
+        raw = self._strip_story_markdown_emphasis(raw)
         raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
         if cleanup_reason:
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
@@ -1707,8 +1698,9 @@ class QwenDirector(
                     f"(got {paragraph_count}). No retry was attempted."
                 )
         issues = self._story_quality_issues(candidate)
-        issues.extend(self._story_craft_issues(candidate))
         issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
+        issues.extend(self._story_sentence_contract_issues(candidate))
+        issues.extend(self._story_craft_issues(candidate))
         issues.extend(
             "contract: " + str(item)
             for item in (getattr(self, "_last_story_contract_warnings", []) or [])
@@ -1733,54 +1725,80 @@ class QwenDirector(
 
     @staticmethod
     def _blueprint_cast_names(story_blueprint: str | None) -> list[str]:
-        """Names from the planner's CAST line (text before the first parenthesis of each entry)."""
+        """Read plausible person entries from the sanitized Architect CAST line."""
+        non_person_role = re.compile(
+            r"\b(?:non[- ]human|relentless force|environmental force|weather system|weather phenomenon|sealed chamber|chamber|location|place|building|object|device|machine|artifact|organization|organisation|company|corporation|abstract concept)\b",
+            re.IGNORECASE,
+        )
         for line in str(story_blueprint or "").splitlines():
             if line.upper().startswith("CAST:"):
                 names = []
                 for entry in line[5:].split("|"):
-                    name = re.split(r"[(\[:,\u2013\u2014-]", entry, maxsplit=1)[0].strip(" *_`")
-                    if 1 < len(name) <= 40 and name not in names:
+                    role = entry[entry.find("(") + 1:entry.rfind(")")] if "(" in entry and ")" in entry else ""
+                    if non_person_role.search(role.split(";", 1)[0]):
+                        continue
+                    name = re.split(r"[(\[:,\u2013\u2014]", entry, maxsplit=1)[0].strip(" *_`")
+                    name = re.sub(r"\s+", " ", name)
+                    key = EntityResolver.normalize(name)
+                    if 1 < len(name) <= 96 and key and key not in {EntityResolver.normalize(x) for x in names}:
                         names.append(name)
                 return names
         return []
 
     @staticmethod
-    def _story_recurring_names(paragraphs: list[str]) -> list[str]:
-        """Capitalised words used mid-sentence in 2+ scenes: a model-free proxy for the cast."""
-        counts: dict[str, set[int]] = {}
-        for i, paragraph in enumerate(paragraphs):
-            for match in re.finditer(r"(?<![.!?\"\u201c\u2018]\s)(?<!^)\b([A-Z][a-z]{2,})\b", paragraph):
-                counts.setdefault(match.group(1), set()).add(i)
-        stop = {"The", "She", "He", "They", "Her", "His", "Their", "When", "Then", "But", "And", "With", "Without",
-                "After", "Before", "Outside", "Inside", "As", "That", "This", "There", "What", "Where", "Why", "How"}
-        return [n for n, scenes in counts.items() if len(scenes) >= 2 and n not in stop][:8]
+    def _name_surfaces(name: str) -> list[str]:
+        """Safe full/titleless/given-name surfaces; surname-only matches are avoided."""
+        value = re.sub(r"\s+", " ", str(name or "").strip())
+        if not value:
+            return []
+        titleless = EntityResolver.strip_honorific(value)
+        surfaces = [value, titleless]
+        tokens = titleless.split()
+        if tokens and len(tokens[0]) >= 3:
+            surfaces.append(tokens[0])
+        return list(dict.fromkeys(x for x in surfaces if x))
 
     def _story_cast_contract_issues(self, story: str, story_blueprint: str | None) -> list[str]:
-        """Deterministic, model-free check of the multi-character contract; log-only.
-
-        Verifies the finished prose: each planned core character appears in at least two
-        scene paragraphs, and at least two scenes hold quoted dialogue with two or more
-        core characters present. Never rewrites or retries.
-        """
+        """Log-only cast diagnostics with title/first-name awareness; no numeric cast quota."""
         paragraphs = [p for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
-        names = self._blueprint_cast_names(story_blueprint) or self._story_recurring_names(paragraphs)
+        names = self._blueprint_cast_names(story_blueprint)
         if not names:
-            return ["cast: no recurring named characters found in the story"]
+            return []
         issues: list[str] = []
-        presence = {
-            name: [i for i, p in enumerate(paragraphs) if re.search(r"\b" + re.escape(name) + r"\b", p)]
-            for name in names
-        }
-        for name, scenes in presence.items():
-            if len(scenes) < 2:
-                issues.append(f"cast: '{name}' appears in {len(scenes)} scene(s), need 2+")
+        presence: dict[str, list[int]] = {}
+        for name in names:
+            surfaces = self._name_surfaces(name)
+            matched = [
+                i for i, paragraph in enumerate(paragraphs)
+                if any(re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", paragraph, re.IGNORECASE) for surface in surfaces)
+            ]
+            presence[name] = matched
+            if not matched:
+                issues.append(f"cast: planned core character '{name}' has no clear name-form match in the finished prose")
         dialogue_scenes = 0
         for i, paragraph in enumerate(paragraphs):
-            present = [n for n in names if i in presence[n]]
+            present = [name for name in names if i in presence[name]]
             if len(present) >= 2 and re.search(r"[\"\u201c][^\"\u201d]{3,}[\"\u201d]", paragraph):
                 dialogue_scenes += 1
-        if dialogue_scenes < 2:
-            issues.append(f"cast: only {dialogue_scenes} scene(s) pair 2+ core characters with spoken dialogue, need 2+")
+        if len(names) >= 2 and dialogue_scenes < 2:
+            issues.append(f"cast: only {dialogue_scenes} scene(s) pair 2+ planned core characters with quoted dialogue")
+        final_text = paragraphs[-1] if paragraphs else ""
+        if re.search(r"\bno survivors?\b", final_text, re.IGNORECASE) and re.search(
+            r"\b(?:alive|survived|survivor|hospital|woke up|recovered)\b", " ".join(paragraphs), re.IGNORECASE
+        ):
+            issues.append("continuity: ending says 'no survivors' while the story also depicts a survivor/alive character")
+        return issues
+
+    def _story_sentence_contract_issues(self, story: str) -> list[str]:
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
+        issues = []
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
+            issues.append(f"topology: expected {DIRECTOR_STORY_SCENES} paragraphs, found {len(paragraphs)}")
+        for index, paragraph in enumerate(paragraphs, start=1):
+            protected = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|Capt|Cmdr|Lt|Sgt|St|Rev|Hon|Sr|Jr)\.(?=\s)", r"\1<dot>", paragraph)
+            count = len([x for x in re.split(r"(?<=[.!?])(?:[\"\u201d\u2019']?\s+|$)", protected) if x.strip()])
+            if not 6 <= count <= 8:
+                issues.append(f"scene {index:02d}: sentence count {count}, expected 6–8")
         return issues
 
     def _story_craft_issues(self, story: str) -> list[str]:
@@ -1795,6 +1813,14 @@ class QwenDirector(
         if absent:
             issues.append("named people who are never on screen: " + ", ".join(absent[:3]))
         return issues
+
+    @staticmethod
+    def _strip_story_markdown_emphasis(raw: str) -> str:
+        """Remove leaked Markdown emphasis without rewriting narrative wording."""
+        value = str(raw or "").replace("\r\n", "\n").replace("\r", "\n")
+        value = re.sub(r"(?<!\w)(\*{1,2})([^*\n]+?)\1(?!\w)", r"\2", value)
+        value = re.sub(r"(?<!\w)(_{1,2})([^_\n]+?)\1(?!\w)", r"\2", value)
+        return value
 
     @staticmethod
     def _strip_story_nonprose_tail(raw: str) -> tuple[str, str]:
@@ -2649,24 +2675,18 @@ class QwenDirector(
 
     @staticmethod
     def _normalize_dialogue_text(value: str, keep_case: bool = False) -> str:
-        cleaned = (
-            re.sub(
-                r"\s+",
-                " ",
-                str(value or "").strip().strip('"“”‘’'),
-            )
-            .replace("’", "'")
-            .replace("‘", "'")
-            .replace("—", "-")
-            .replace("–", "-")
-        )
-        return cleaned if keep_case else cleaned.lower()
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip().strip('"“”‘’'))
+        if keep_case:
+            # Display/source text must preserve the user's exact apostrophe, dash and
+            # punctuation choices; only the comparison key is normalized elsewhere.
+            return cleaned
+        return cleaned.replace("’", "'").replace("‘", "'").replace("—", "-").replace("–", "-").lower()
 
     @staticmethod
     def _dialogue_anchor_key(value: str) -> str:
-        text = QwenDirector._normalize_dialogue_text(value)
-        text = re.sub(r"^[,;:!?\.\-\s]+|[,;:!?\.\-\s]+$", "", text)
-        return re.sub(r"\s+", " ", text).strip()
+        """Canonical comparison key; source text is preserved separately."""
+        text = str(value or "").replace("’", "'").replace("‘", "'").replace("…", "...").casefold()
+        return " ".join(re.findall(r"[\w]+(?:'[\w]+)*", text, flags=re.UNICODE))
 
     @staticmethod
     def _story_has_explicit_dialogue_surface(story: str) -> bool:
@@ -2905,24 +2925,63 @@ class QwenDirector(
 
         remote_excluded = 0
         semantic_items: list[dict] = []
+        semantic_by_quote_id: dict[int, dict] = {}
         for item in (semantic_spoken_dialogue or []):
             if not isinstance(item, dict):
                 continue
             spoken = str(item.get("text", "") or "").strip()
             speaker = str(item.get("speaker", "") or "").strip()
             key = cls._dialogue_anchor_key(spoken)
-            if not key or not speaker:
+            if not speaker:
                 continue
-            semantic_items.append({
-                "key": key,
-                "speaker": canonicalize_speaker(speaker),
-            })
+            quote_id = item.get("quote_id")
+            canonical_speaker = canonicalize_speaker(speaker)
+            if isinstance(quote_id, int) and quote_id > 0:
+                semantic_by_quote_id[quote_id] = {"key": key, "speaker": canonical_speaker}
+            # ID-addressed items are consumed only by their exact source occurrence.
+            # Text-only legacy items use the fuzzy compatibility path below.
+            if key and not (isinstance(quote_id, int) and quote_id > 0):
+                semantic_items.append({"key": key, "speaker": canonical_speaker, "quote_id": None})
 
         allowed = set(allowed_surface_map) | {
             EntityResolver.normalize(EntityResolver.strip_honorific(value))
             for value in allowed_surface_map.values()
             if str(value or "").strip()
         }
+
+        # Deterministic fallback only for an explicit local attribution that names an
+        # already-approved canonical person. It does not classify arbitrary quotations.
+        speech_cue_re = re.compile(
+            r"\b(?:said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+            r"muttered|mutters|answered|answers|warned|warns|told|tells|cried|cries|"
+            r"yelled|yells|barked|barks|called|calls|snapped|snaps|added|adds|"
+            r"insisted|insists|admitted|admits|demanded|demands|repeated|repeats)\b",
+            re.IGNORECASE,
+        )
+        speaker_surfaces: list[tuple[str, str]] = []
+        for canonical in dict.fromkeys(allowed_surface_map.values()):
+            for surface in cls._name_surfaces(canonical):
+                speaker_surfaces.append((surface, canonical))
+        for alias, canonical in alias_map.items():
+            resolved = str(canonical or "").strip()
+            if resolved:
+                speaker_surfaces.append((str(alias), resolved))
+
+        def explicit_local_speaker(position: int, end_position: int) -> str | None:
+            before = text[max(0, position - 130):position]
+            after = text[end_position:min(len(text), end_position + 130)]
+            before_clause = re.split(r"(?<=[.!?])[\"\u201d\u2019']?\s+", before)[-1]
+            after_clause = re.split(r"[.!?](?:[\"\u201d\u2019']?\s+|$)", after, maxsplit=1)[0]
+            matches = set()
+            for surface, canonical in speaker_surfaces:
+                if not surface or len(surface) < 2:
+                    continue
+                surface_re = r"(?<!\w)" + re.escape(surface) + r"(?!\w)"
+                if re.search(surface_re, before_clause, re.IGNORECASE) and speech_cue_re.search(before_clause):
+                    matches.add(canonical)
+                if re.search(surface_re, after_clause, re.IGNORECASE) and speech_cue_re.search(after_clause):
+                    matches.add(canonical)
+            return next(iter(matches)) if len(matches) == 1 else None
 
         semantic_consumed: set[int] = set()
 
@@ -2940,14 +2999,18 @@ class QwenDirector(
         )
         quote_spans: list[tuple[int, int]] = []
 
-        for match in quote_pattern.finditer(text):
-            value = next((part for part in match.groups() if part), "")
+        for quote_id, match in enumerate(quote_pattern.finditer(text), start=1):
+            value = next((part for part in match.groups() if part is not None), "")
             key = cls._dialogue_anchor_key(value)
             if not key:
                 continue
 
-            speakers = consume_semantic_speaker(key)
-            # Without Qwen semantic dialogue, do not guess from generic English prose.
+            semantic_quote = semantic_by_quote_id.get(quote_id)
+            speakers = ({semantic_quote["speaker"]} if semantic_quote and semantic_quote.get("speaker") else consume_semantic_speaker(key))
+            if not speakers:
+                explicit_hint = explicit_local_speaker(match.start(), match.end())
+                if explicit_hint:
+                    speakers = {canonicalize_speaker(explicit_hint)}
             if not speakers:
                 continue
 
@@ -2957,8 +3020,7 @@ class QwenDirector(
                     quote_spans.append((match.start(), match.end()))
                     continue
 
-            display = cls._normalize_dialogue_text(value, keep_case=True)
-            display = display.rstrip(",;: ").strip()
+            display = cls._normalize_dialogue_text(value, keep_case=True).strip()
             quote_spans.append((match.start(), match.end()))
             if not display or len(re.findall(r"[A-Za-z]", display)) < 2:
                 continue
@@ -3020,9 +3082,7 @@ class QwenDirector(
             })
 
         segments.sort(key=lambda item: (item.get("start", 0), item.get("end", 0)))
-        for segment in segments:
-            segment.pop("start", None)
-            segment.pop("end", None)
+        # Keep source offsets for exact source-to-scene recovery without another model call.
         if remote_excluded:
             print(
                 f"[DIRECTOR] dialogue source filter excluded {remote_excluded} remote/off-screen utterance(s); "
@@ -3081,8 +3141,55 @@ class QwenDirector(
             allowed_speakers=allowed_names,
             speaker_aliases=aliases,
         )
-        segment_progress = [0 for _ in spoken_segments]
+        # Progress is measured in normalized word tokens, not characters, so curly
+        # quotes, ellipses, and punctuation changes cannot corrupt the source cursor.
+        story_paragraphs = [part for part in re.split(r"\n\s*\n+", str(story or "")) if part.strip()]
+        # Scene units may join source paragraphs with spaces during deterministic rebalancing.
+        # Map original source offsets into a whitespace-collapsed coordinate space so long
+        # Preserve Story inputs still bind each quote to the exact source-derived scene.
+        collapsed_chars = []
+        original_to_collapsed = [0] * (len(str(story or "")) + 1)
+        in_whitespace = False
+        for original_index, character in enumerate(str(story or "")):
+            if character.isspace():
+                if collapsed_chars and not in_whitespace:
+                    collapsed_chars.append(" ")
+                original_to_collapsed[original_index] = max(0, len(collapsed_chars) - 1)
+                in_whitespace = True
+            else:
+                collapsed_chars.append(character)
+                original_to_collapsed[original_index] = len(collapsed_chars) - 1
+                in_whitespace = False
+        collapsed_story = "".join(collapsed_chars).strip()
+        scene_ranges = []
+        cursor = 0
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            description = str(scene.get("description", "") or scene.get("story_summary", "") or "").strip()
+            normalized_description = re.sub(r"\s+", " ", description).strip()
+            start_at = collapsed_story.find(normalized_description, cursor) if normalized_description else -1
+            if start_at < 0 and normalized_description:
+                start_at = collapsed_story.find(normalized_description)
+            if start_at >= 0:
+                scene_ranges.append((start_at, start_at + len(normalized_description), scene_id))
+                cursor = max(cursor, start_at + len(normalized_description))
+        segment_scene_ids = []
+        for segment in spoken_segments:
+            source_position = int(segment.get("start", -1))
+            collapsed_position = original_to_collapsed[source_position] if 0 <= source_position < len(original_to_collapsed) else -1
+            scene_id = next((sid for lo, hi, sid in scene_ranges if lo <= collapsed_position < hi), None)
+            if not scene_id and len(story_paragraphs) == len(scenes) and source_position >= 0:
+                paragraph_index = len(re.findall(r"\n\s*\n+", story[:source_position]))
+                if 0 <= paragraph_index < len(scenes):
+                    scene_id = str(scenes[paragraph_index].get("scene_id", "") or "").strip()
+            segment_scene_ids.append(scene_id)
 
+        segment_progress = [0 for _ in spoken_segments]
+        segment_first_shot: dict[int, str] = {}
+        segment_last_shot: dict[int, str] = {}
+        last_source_index: list[int | None] = [None]
         last_display: list[str] = [""]
         dialogue_counts = {
             "input": 0,
@@ -3092,50 +3199,40 @@ class QwenDirector(
             "unmatched_text": 0,
         }
 
-        def _consume_source_dialogue(normalized_text: str):
+        def _consume_source_dialogue(normalized_text: str, shot_scene_id: str):
             last_display[0] = ""
-            if not normalized_text:
+            last_source_index[0] = None
+            candidate_key = self._dialogue_anchor_key(normalized_text)
+            candidate_tokens = candidate_key.split()
+            if not candidate_tokens:
                 return None
 
-            def _match_key(value: str) -> str:
-                return re.sub(r"[.,!?;:]+$", "", str(value or "").strip())
-
-            candidate_key = _match_key(normalized_text)
-            if not candidate_key:
-                return None
-
-            # Prefer the earliest source utterance whose remaining text can carry
-            # this exact contiguous event. This gives each source occurrence a
-            # finite budget and supports safe splitting of long utterances while
-            # tolerating a terminal-punctuation difference from Qwen.
             for index, segment in enumerate(spoken_segments):
-                source_text = str(segment.get("text", "") or "")
+                if segment_scene_ids[index] and segment_scene_ids[index] != shot_scene_id:
+                    continue
+                if not segment_scene_ids[index]:
+                    # Do not permit an unassigned utterance to drift into an arbitrary scene.
+                    continue
+                source_tokens = str(segment.get("text", "") or "").split()
                 progress = segment_progress[index]
-                remaining = source_text[progress:]
-                if not remaining:
+                remaining_tokens = source_tokens[progress:]
+                if not remaining_tokens or len(candidate_tokens) > len(remaining_tokens):
+                    continue
+                if remaining_tokens[:len(candidate_tokens)] != candidate_tokens:
                     continue
 
-                remaining_key = _match_key(remaining)
-                if candidate_key == remaining_key:
-                    segment_progress[index] = min(
-                        len(source_text),
-                        progress + len(normalized_text),
-                    )
-                    display_text = str(segment.get("display", "") or "")
-                    if len(display_text) == len(source_text):
-                        last_display[0] = display_text[progress:segment_progress[index]].strip()
-                    return set(segment.get("source_speakers", set()) or set())
-
-                if remaining_key.startswith(candidate_key):
-                    segment_progress[index] = min(
-                        len(source_text),
-                        progress + len(normalized_text),
-                    )
-                    display_text = str(segment.get("display", "") or "")
-                    if len(display_text) == len(source_text):
-                        last_display[0] = display_text[progress:segment_progress[index]].strip()
-                    return set(segment.get("source_speakers", set()) or set())
-
+                new_progress = progress + len(candidate_tokens)
+                segment_progress[index] = new_progress
+                display_text = str(segment.get("display", "") or "")
+                display_spans = list(re.finditer(r"[\w]+(?:['’][\w]+)*", display_text, flags=re.UNICODE))
+                if display_spans and len(display_spans) >= new_progress:
+                    start_char = display_spans[progress].start() if progress < len(display_spans) else 0
+                    end_char = len(display_text) if new_progress == len(source_tokens) else display_spans[new_progress - 1].end()
+                    last_display[0] = display_text[start_char:end_char].strip()
+                elif new_progress == len(source_tokens):
+                    last_display[0] = display_text
+                last_source_index[0] = index
+                return set(segment.get("source_speakers", set()) or set())
             return None
 
         def _resolve(value: str) -> str | None:
@@ -3197,7 +3294,12 @@ class QwenDirector(
                     dialogue_counts["no_source_anchor"] += 1
                     continue
 
-                matched_source_speakers = _consume_source_dialogue(normalized_text)
+                matched_source_speakers = _consume_source_dialogue(
+                    normalized_text, str(shot.get("scene_id", "") or "").strip()
+                )
+                if matched_source_speakers is not None and last_source_index[0] is not None:
+                    segment_first_shot.setdefault(last_source_index[0], shot_id)
+                    segment_last_shot[last_source_index[0]] = shot_id
                 if matched_source_speakers is None:
                     # Qwen sometimes emits a narrative sentence or repeats a source
                     # line in multiple shots. Neither is valid audio. Drop it before
@@ -3206,6 +3308,11 @@ class QwenDirector(
                     dialogue_counts["unmatched_text"] += 1
                     continue
 
+                explicit_source_canonicals = {
+                    resolved.lower()
+                    for source_speaker in matched_source_speakers
+                    if (resolved := _resolve(source_speaker)) is not None
+                }
                 canonical = _resolve(speaker)
                 if canonical is None:
                     contextual = EntityResolver.contextual_generic_alias(
@@ -3216,26 +3323,25 @@ class QwenDirector(
                     )
                     if contextual and contextual.lower() in canonical_by_norm:
                         canonical = canonical_by_norm[contextual.lower()]
+                if canonical is None and len(explicit_source_canonicals) == 1:
+                    # The exact source utterance and its canonical speaker outrank an
+                    # unresolvable generic/alias label emitted by the shot model.
+                    source_canonical = next(iter(explicit_source_canonicals))
+                    canonical = canonical_by_norm.get(source_canonical, source_canonical)
+                    self._record_recovery(
+                        "dialogue_speaker_restored_from_source",
+                        f"shot={shot_id} speaker={speaker!r} -> {canonical!r}",
+                    )
                 if canonical is None:
-                    # Explicit source dialogue is a protected semantic contract.
-                    # Never silently delete a real spoken line because Qwen used
-                    # an unresolved speaker surface. A later stage cannot recover
-                    # an event that is discarded here, so fail closed with the
-                    # exact shot/speaker context instead.
                     self._record_recovery(
                         "dialogue_speaker_unresolved",
                         f"shot={shot_id} speaker={speaker!r}",
                     )
                     raise RuntimeError(
-                        "Explicit dialogue speaker could not be canonically resolved: "
+                        "Explicit dialogue speaker could not be canonically resolved from the source: "
                         f"shot={shot_id} speaker={speaker!r}"
                     )
 
-                explicit_source_canonicals = {
-                    resolved.lower()
-                    for source_speaker in matched_source_speakers
-                    if (resolved := _resolve(source_speaker)) is not None
-                }
                 if matched_source_speakers and not explicit_source_canonicals:
                     # Explicit source attribution is authoritative enough to reject
                     # an unsafe remap, but not to justify deleting the spoken line.
@@ -3304,6 +3410,8 @@ class QwenDirector(
 
                 repaired = dict(event)
                 repaired["speaker"] = canonical
+                if last_source_index[0] is not None:
+                    repaired["_source_segment_index"] = last_source_index[0]
                 # Dialogue text must be the exact source span (original casing and
                 # punctuation), never a lower-cased matching key.
                 if last_display[0]:
@@ -3321,6 +3429,183 @@ class QwenDirector(
                 str(event.get("text", "")).strip()
                 for event in repaired_events
                 if str(event.get("text", "")).strip()
+            )
+
+        # Conservation pass: any source utterance that Qwen's shot output omitted (or
+        # only partially emitted) is restored from the exact source span. This is a
+        # deterministic assignment, not a model retry, and never invents dialogue.
+        shot_by_id = {str(shot.get("shot_id", "") or "").strip(): shot for shot in shots if isinstance(shot, dict)}
+        shots_by_scene: dict[str, list[dict]] = {}
+        for shot in shots:
+            if isinstance(shot, dict):
+                shots_by_scene.setdefault(str(shot.get("scene_id", "") or "").strip(), []).append(shot)
+        restored_count = 0
+        restored_partial_count = 0
+        for index, segment in enumerate(spoken_segments):
+            source_tokens = str(segment.get("text", "") or "").split()
+            progress = segment_progress[index]
+            if not source_tokens or progress >= len(source_tokens):
+                continue
+            display = str(segment.get("display", "") or "").strip()
+            spans = list(re.finditer(r"[\w]+(?:['’][\w]+)*", display, flags=re.UNICODE))
+            if progress <= 0:
+                missing_text = display
+            elif spans and progress < len(spans):
+                missing_text = display[spans[progress].start():].strip()
+                restored_partial_count += 1
+            else:
+                # A punctuation-only tail is not a separate spoken event.
+                continue
+            source_speakers = list(segment.get("source_speakers", set()) or set())
+            resolved_speakers = [_resolve(value) for value in source_speakers]
+            canonical_speaker = next((value for value in resolved_speakers if value), None)
+            if not canonical_speaker:
+                raise RuntimeError(
+                    "Source dialogue conservation failed: cannot resolve source speaker "
+                    + repr(source_speakers)
+                )
+
+            source_position = int(segment.get("start", -1))
+            scene_id = segment_scene_ids[index]
+            if not scene_id:
+                # Exact source quote in a scene description is a safe fallback. If the
+                # same line occurs multiple times, source offsets/ranges above take precedence.
+                key = self._dialogue_anchor_key(display)
+                candidates = []
+                for scene in scenes:
+                    if not isinstance(scene, dict):
+                        continue
+                    text_value = str(scene.get("description", "") or scene.get("story_summary", "") or "")
+                    if key and key in self._dialogue_anchor_key(text_value):
+                        candidates.append(str(scene.get("scene_id", "") or "").strip())
+                if len(candidates) == 1:
+                    scene_id = candidates[0]
+                elif len(story_paragraphs) == len(scenes) and source_position >= 0:
+                    paragraph_index = len(re.findall(r"\n\s*\n+", story[:source_position]))
+                    if 0 <= paragraph_index < len(scenes):
+                        scene_id = str(scenes[paragraph_index].get("scene_id", "") or "").strip()
+            scene_shots = shots_by_scene.get(scene_id or "", [])
+            if not scene_shots:
+                raise RuntimeError(
+                    "Source dialogue conservation failed: no production shot could be mapped to "
+                    f"utterance {display!r} (scene={scene_id!r}). No retry was attempted."
+                )
+
+            previous_shot_id = segment_last_shot.get(index)
+            target = None
+            scene_shot_index = {str(item.get("shot_id", "") or "").strip(): pos for pos, item in enumerate(scene_shots)}
+            if progress > 0 and previous_shot_id:
+                previous_pos = scene_shot_index.get(previous_shot_id, -1)
+                target = scene_shots[previous_pos + 1] if 0 <= previous_pos + 1 < len(scene_shots) else scene_shots[max(0, previous_pos)]
+            else:
+                next_index = next((j for j in range(index + 1, len(spoken_segments))
+                                   if segment_scene_ids[j] == scene_id and j in segment_first_shot), None)
+                previous_index = next((j for j in range(index - 1, -1, -1)
+                                       if segment_scene_ids[j] == scene_id and j in segment_last_shot), None)
+                if next_index is not None:
+                    next_pos = scene_shot_index.get(segment_first_shot[next_index], 0)
+                    target = scene_shots[max(0, next_pos - 1)]
+                elif previous_index is not None:
+                    previous_pos = scene_shot_index.get(segment_last_shot[previous_index], len(scene_shots) - 1)
+                    target = scene_shots[min(len(scene_shots) - 1, previous_pos + 1)]
+            if target is None:
+                # Prefer a shot already showing the canonical speaker and visibly
+                # staging speech, then balance dialogue load deterministically.
+                speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told)\b", re.IGNORECASE)
+                target = min(
+                    scene_shots,
+                    key=lambda item: (
+                        EntityResolver.normalize(canonical_speaker) not in {
+                            EntityResolver.normalize(str(name)) for name in (item.get("characters", []) or [])
+                        },
+                        not bool(speech_action_re.search(str(item.get("action", "") or ""))),
+                        len(item.get("dialogue_events", []) or []),
+                    ),
+                )
+
+            target_events = target.get("dialogue_events", [])
+            if not isinstance(target_events, list):
+                target_events = []
+            event = {"speaker": canonical_speaker, "text": missing_text, "_source_segment_index": index}
+            if progress > 0 and previous_shot_id:
+                event["continues_from_previous_shot"] = True
+                previous_events = shot_by_id[previous_shot_id].get("dialogue_events", [])
+                if previous_events and isinstance(previous_events[-1], dict):
+                    previous_events[-1]["continues_to_next_shot"] = True
+            target_events.append(event)
+            target["dialogue_events"] = target_events
+
+            speech_action_re = re.compile(r"\b(?:say|says|said|speak|speaks|speaking|ask|asks|asked|reply|replies|replied|shout|shouts|shouted|whisper|whispers|whispered|call|calls|called|tell|tells|told)\b", re.IGNORECASE)
+            action_text = str(target.get("action", "") or "").strip()
+            speaker_surface_present = any(
+                re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", action_text, re.IGNORECASE)
+                for surface in self._name_surfaces(canonical_speaker)
+            )
+            if not speech_action_re.search(action_text) or not speaker_surface_present:
+                speaking_clause = f"{canonical_speaker} visibly speaks the source line to the listener."
+                if action_text:
+                    action_base = " ".join(action_text.split()[:22]).rstrip(" .;,:—–-")
+                    target["action"] = f"{action_base}; {speaking_clause}" if action_base else speaking_clause
+                else:
+                    target["action"] = f"{canonical_speaker} speaks the source line, with their face and mouth clearly visible to the listener."
+            visual_text = str(target.get("visual_prompt", "") or "").strip()
+            visual_speaker_present = any(
+                re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", visual_text, re.IGNORECASE)
+                for surface in self._name_surfaces(canonical_speaker)
+            )
+            if not speech_action_re.search(visual_text) or not visual_speaker_present:
+                visual_base = " ".join(visual_text.split()[:30])
+                target["visual_prompt"] = (visual_base + " " if visual_base else "") + f"{canonical_speaker} visibly speaking, mouth and expression clear in frame."
+                target["visual_prompt"] = " ".join(target["visual_prompt"].split())
+
+            target_chars = target.get("characters", [])
+            if not isinstance(target_chars, list):
+                target_chars = list(target_chars or [])
+                target["characters"] = target_chars
+            if not any(EntityResolver.normalize(str(name)) == EntityResolver.normalize(canonical_speaker) for name in target_chars):
+                target_chars.append(canonical_speaker)
+            target["speaking_characters"] = list(dict.fromkeys(
+                str(item.get("speaker", "") or "").strip()
+                for item in target_events if isinstance(item, dict) and str(item.get("speaker", "") or "").strip()
+            ))
+            target["speech_text"] = " ".join(str(item.get("text", "") or "").strip() for item in target_events if isinstance(item, dict) and str(item.get("text", "") or "").strip())
+            scene = scene_by_id.get(scene_id or "")
+            if scene is not None:
+                scene_chars = scene.get("characters", [])
+                if not isinstance(scene_chars, list):
+                    scene_chars = list(scene_chars or [])
+                    scene["characters"] = scene_chars
+                if not any(EntityResolver.normalize(str(name)) == EntityResolver.normalize(canonical_speaker) for name in scene_chars):
+                    scene_chars.append(canonical_speaker)
+            segment_progress[index] = len(source_tokens)
+            restored_count += 1
+
+        for shot in shots:
+            if not isinstance(shot, dict):
+                continue
+            events = shot.get("dialogue_events", [])
+            if not isinstance(events, list):
+                continue
+            if any(isinstance(event, dict) and "_source_segment_index" in event for event in events):
+                events.sort(key=lambda event: int(event.get("_source_segment_index", 10**9)) if isinstance(event, dict) else 10**9)
+            for event in events:
+                if isinstance(event, dict):
+                    event.pop("_source_segment_index", None)
+            shot["dialogue_events"] = events
+            shot["speaking_characters"] = list(dict.fromkeys(
+                str(event.get("speaker", "") or "").strip()
+                for event in events if isinstance(event, dict) and str(event.get("speaker", "") or "").strip()
+            ))
+            shot["speech_text"] = " ".join(
+                str(event.get("text", "") or "").strip()
+                for event in events if isinstance(event, dict) and str(event.get("text", "") or "").strip()
+            )
+
+        if restored_count:
+            print(
+                f"[DIRECTOR] dialogue source conservation restored={restored_count} "
+                f"(partial_tails={restored_partial_count}); no extra Qwen call",
+                flush=True,
             )
 
         dropped = dialogue_counts["input"] - dialogue_counts["kept"]
@@ -4060,12 +4345,9 @@ def _h3_apply_kaggle_runtime_fix_20261010():
         ]
         item["additionalProperties"] = False
 
-        dialogue = schema["properties"]["spoken_dialogue"]
-        dialogue["maxItems"] = 128  # preserve existing capacity contract
-        dialogue["items"]["properties"]["speaker"] = {
-            "type": "string",
-            "maxLength": 96,
-        }
+        dialogue = schema["properties"]["quote_classifications"]
+        dialogue["maxItems"] = 256  # every source quote receives a bounded classification
+        dialogue["items"]["properties"]["speaker"] = {"type": "string", "maxLength": 96}
         return schema
 
     QwenDirector._character_extraction_json_schema = staticmethod(
