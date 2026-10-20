@@ -310,16 +310,19 @@ def test_character_schema_does_not_silently_cap_qwen_cast_at_32():
     schema = QwenDirector._character_extraction_json_schema()
     candidates = schema["properties"]["candidates"]
     _assert("maxItems" not in candidates, "character extraction schema must not impose a cast-size cap")
-    _assert(schema["properties"]["spoken_dialogue"].get("maxItems") == 128,
-            "spoken-dialogue extraction should retain its independent bounded payload")
+    _assert(schema["properties"]["quote_classifications"].get("maxItems") == 256,
+            "quote classification must support long dialogue-heavy sources without a 128-line cap")
+    dialogue_item = schema["properties"]["quote_classifications"]["items"]
+    _assert(set(dialogue_item["required"]) == {"quote_id", "classification", "speaker"},
+            "every quote must have an explicit ID, category, and speaker field")
 
 
 def test_character_semantic_schema_includes_spoken_dialogue():
     from planner.qwen_director_prompts import QwenDirectorPromptMixin
     schema = QwenDirectorPromptMixin._character_extraction_json_schema()
-    _assert("spoken_dialogue" in schema["properties"], "semantic character extraction schema lacks spoken_dialogue")
-    _assert("spoken_dialogue" in schema["required"], "spoken_dialogue must be part of the single semantic extraction contract")
-    _assert(schema["properties"]["spoken_dialogue"]["maxItems"] >= 64, "spoken dialogue schema is artificially capped")
+    _assert("quote_classifications" in schema["properties"], "semantic character extraction schema lacks quote_classifications")
+    _assert("quote_classifications" in schema["required"], "every source quote must be classified in the single semantic extraction contract")
+    _assert(schema["properties"]["quote_classifications"]["maxItems"] >= 128, "quote classification schema is artificially capped")
 
 
 def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue():
@@ -330,7 +333,7 @@ def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue()
     mixin._semantic_spoken_dialogue = []
     mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
     observed = {}
-    story = 'Elara opened the vault. Kael Mercer woke and said, "I can walk." Elara helped him reach the exit.'
+    story = "Elara opened the vault. The radio carried Kael Mercer's voice: \"I can walk.\" Elara helped her teammate reach the exit."
     def fake_chat_json(system_prompt, user_prompt, *args, **kwargs):
         observed["schema"] = kwargs["response_schema"]
         observed["system"] = system_prompt
@@ -338,22 +341,205 @@ def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue()
         return {
             "candidates": [{"name": "Elara", "entity_type": "PERSON", "is_character": True,
                             "identity_type": "named_character"}],
-            "spoken_dialogue": [{"text": "I can walk.", "speaker": "Kael Mercer"}],
+            "quote_classifications": [{"quote_id": 1, "classification": "remote_or_offscreen_spoken", "speaker": "Kael Mercer"}],
         }
     mixin._chat_json = fake_chat_json
     result = mixin.extract_character_entities(
         story, deterministic_candidates=["Elara", "Kael Mercer", "Station Echo-7"]
     )
-    _assert(set(observed["payload"]) == {"story"},
-            "deterministic hint names and planned cast must not be sent as roster directives")
-    _assert(set(observed["schema"]["properties"]) == {"candidates", "spoken_dialogue"},
-            "Qwen should decide the cast directly, not fill a per-name classification array")
-    _assert("physically participate" in observed["system"] and "no cast-count quota" in observed["system"].lower(),
-            "extractor must request all current-action participants without a cast quota")
+    _assert(set(observed["payload"]) == {"story_evidence", "quotes", "name_surface_index", "name_surface_evidence"},
+            "the extractor must receive bounded story evidence, a complete numbered quote inventory, and source-grounded recall indexes")
+    _assert(observed["payload"]["quotes"] == [{"quote_id": 1, "text": "I can walk.", "context": observed["payload"]["quotes"][0]["context"]}],
+            "every quote must retain its exact text and stable quote ID")
+    _assert(set(observed["schema"]["properties"]) == {"candidates", "quote_classifications"},
+            "Qwen should decide the cast directly and classify each numbered source quote")
+    _assert("physically participate" in observed["system"] and "no cast-count quota" in observed["system"].lower() and "every supplied `quote_id`" in observed["system"].lower(),
+            "extractor must request all current-action participants and classify every quote ID")
     _assert([item["name"] for item in result["candidates"]] == ["Elara"],
             "the extractor must not programmatically add a missing character to Qwen's roster")
-    _assert(mixin._semantic_spoken_dialogue == [{"text": "I can walk.", "speaker": "Kael Mercer"}],
-            "dialogue extraction should remain available without silently rewriting the roster")
+    _assert(mixin._semantic_spoken_dialogue == [],
+            "remote speech must not become an in-person dialogue event or add its speaker to the cast")
+
+
+def test_in_person_dialogue_speaker_must_exist_in_qwen_cast():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    mixin = object.__new__(QwenDirectorPromptMixin)
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    mixin._chat_json = lambda *args, **kwargs: {
+        "candidates": [{"name": "Elara", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"}],
+        "quote_classifications": [{"quote_id": 1, "classification": "in_person_spoken", "speaker": "Kael Mercer"}],
+    }
+    try:
+        mixin.extract_character_entities('Kael said, “I can walk.”')
+    except RuntimeError as exc:
+        _assert("absent from Qwen's accepted character roster" in str(exc), f"unexpected fail-closed reason: {exc}")
+    else:
+        raise AssertionError("in-person dialogue from a character absent from Qwen's roster was silently accepted")
+
+
+def test_quote_inventory_preserves_repeated_quotes_and_punctuation():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = "Lena said, “It’s the only way…” Later, Tomas repeated, \"It's the only way...\""
+    quotes = QwenDirectorPromptMixin._source_quote_inventory(story)
+    _assert(len(quotes) == 2, f"quote inventory lost a source occurrence: {quotes!r}")
+    _assert([item["quote_id"] for item in quotes] == [1, 2], "quote IDs must be stable and ordered")
+    _assert(quotes[0]["text"] == "It’s the only way…" and quotes[1]["text"] == "It's the only way...",
+            "quote inventory must preserve exact source punctuation")
+    from planner.qwen_director import QwenDirector
+    _assert(QwenDirector._dialogue_anchor_key(quotes[0]["text"]) == QwenDirector._dialogue_anchor_key(quotes[1]["text"]),
+            "curly apostrophes and ellipses must compare equal without rewriting source text")
+
+
+def test_blueprint_cast_filter_excludes_weather_and_objects_but_keeps_dynamic_people():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    blueprint = "CAST: Mara Venn (engineer; wants the truth; direct) | The Storm (non-human, relentless force; howls) | The Vault (sealed chamber; holds the core) | Ivo Chen (medic; wants to save Mara; calm)\nSCENE 01: Mara enters."
+    normalized = QwenDirectorPromptMixin._normalize_story_blueprint(blueprint + "\n" + "\n".join(f"SCENE {i:02d}: Beat {i} follows the previous action." for i in range(2, 13)), 12)
+    cast_line = normalized.splitlines()[0]
+    _assert("Mara Venn" in cast_line and "Ivo Chen" in cast_line, f"real character anchors were lost: {cast_line}")
+    _assert("The Storm" not in cast_line and "The Vault" not in cast_line, f"non-person CAST entries survived: {cast_line}")
+
+
+def test_cast_static_check_is_alias_aware_and_does_not_require_fixed_recurrence():
+    from planner.qwen_director import QwenDirector
+    director = object.__new__(QwenDirector)
+    story = "Dr. Elena Voss entered.\n\nElena found the key.\n\nAnika Patel arrived and spoke."
+    blueprint = "CAST: Dr. Elena Voss (engineer; precise) | Anika Patel (researcher; sharp)\nSCENE 01: Elena arrives."
+    issues = director._story_cast_contract_issues(story, blueprint)
+    _assert(not any("Dr. Elena Voss" in issue for issue in issues), f"titleless first-name use caused a false cast warning: {issues}")
+
+
+def test_preserve_quality_contract_accepts_source_driven_single_scene_only_for_preserve_mode():
+    from planner.config import AI_STORY_MODE, PRESERVE_USER_STORY_MODE
+    from planner.qwen_director import QwenDirector
+    director = object.__new__(QwenDirector)
+    scenes = [{"scene_id": "scene_001"}]
+    shots = [{
+        "shot_id": f"scene_001_shot_{i:03d}", "scene_id": "scene_001", "characters": [],
+        "speaking_characters": [], "visual_prompt": "A grounded cinematic view of the supplied source event and its physical setting.",
+        "camera_shot": "medium", "camera_movement": "static", "lens_and_depth_of_field": "normal, deep focus",
+        "composition_notes": "Subject centered with environmental context.",
+    } for i in range(1, 4)]
+    director._validate_production_quality(mode=PRESERVE_USER_STORY_MODE, story="Eli finds a sealed vault.", scenes=scenes, shots=shots, characters=[])
+    try:
+        director._validate_production_quality(mode=AI_STORY_MODE, story="Eli finds a sealed vault.", scenes=scenes, shots=shots, characters=[{"name": "Eli"}])
+    except RuntimeError as exc:
+        _assert("must contain 4" in str(exc), f"unexpected generated-story topology failure: {exc}")
+    else:
+        raise AssertionError("AI Story incorrectly accepted a one-scene plan")
+
+
+def test_preserve_short_source_is_not_duplicated_into_fake_scenes():
+    from planner.production_planner import ProductionPlanner
+    planner = ProductionPlanner(Path("."))
+    units = planner._split_story("Eli enters the station and finds a sealed vault.")
+    result = planner._rebalance_story_units(units, minimum_units=1)
+    scenes = planner.create_scenes("Eli enters the station and finds a sealed vault.", [], minimum_scenes=1)
+    _assert(len(result) == 1 and len(scenes) == 1, f"short Preserve Story was padded with repeated scenes: {[x.text for x in result]} / {len(scenes)} scenes")
+    _assert(result[0].text == "Eli enters the station and finds a sealed vault.", "Preserve Story source text changed")
+
+
+def test_watchdog_is_armed_per_qwen_http_request_not_whole_generation():
+    import inspect
+    from planner.qwen_director import QwenDirector
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+    generate_source = inspect.getsource(QwenDirector.generate)
+    post_source = inspect.getsource(QwenDirectorRuntimeMixin._post_chat)
+    _assert("@_with_faulthandler_watchdog" not in generate_source, "the 15-minute watchdog must not wrap the entire multi-call production")
+    _assert("@_with_faulthandler_watchdog" in post_source, "watchdog must reset for each Qwen HTTP request")
+
+
+def test_source_dialogue_omitted_by_shot_model_is_restored_exactly_once():
+    from planner.qwen_director import QwenDirector
+    director = object.__new__(QwenDirector)
+    director._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    director._semantic_spoken_dialogue = [{"quote_id": 1, "text": "I found the key…", "speaker": "Mara"}]
+    story = 'Mara entered and said, “I found the key…”'
+    scenes = [{"scene_id": "scene_001", "description": story, "story_summary": story, "characters": ["Mara"]}]
+    shots = [{"shot_id": f"scene_001_shot_{i:03d}", "scene_id": "scene_001", "characters": ["Mara"], "dialogue_events": [], "speaking_characters": [], "speech_text": ""} for i in range(1, 4)]
+    director._normalize_dialogue_speakers(story, scenes, shots, [{"name": "Mara"}])
+    events = [event for shot in shots for event in shot["dialogue_events"]]
+    _assert(len(events) == 1, f"omitted source dialogue was not restored exactly once: {events!r}")
+    _assert(events[0]["text"] == "I found the key…", f"source punctuation was not preserved: {events!r}")
+    _assert(events[0]["speaker"] == "Mara", f"source speaker was not preserved: {events!r}")
+
+
+def test_long_preserve_dialogue_maps_through_rebalanced_source_scenes():
+    from planner.qwen_director import QwenDirector
+    director = object.__new__(QwenDirector)
+    director._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    paragraphs = [f'Mara said, “Line {i} remains source-anchored.”' for i in range(14)]
+    story = "\n\n".join(paragraphs)
+    director._semantic_spoken_dialogue = [
+        {"quote_id": i + 1, "text": f"Line {i} remains source-anchored.", "speaker": "Mara"}
+        for i in range(14)
+    ]
+    scene_texts = [" ".join(paragraphs[:3])] + paragraphs[3:]
+    scenes = [{"scene_id": f"scene_{i + 1:03d}", "description": text, "story_summary": text, "characters": ["Mara"]} for i, text in enumerate(scene_texts)]
+    shots = [{"shot_id": f"{scene['scene_id']}_shot_{j:03d}", "scene_id": scene["scene_id"], "characters": ["Mara"], "dialogue_events": [], "speaking_characters": [], "speech_text": "", "action": "Mara studies the evidence in the room.", "visual_prompt": "Mara studies the evidence in a grounded cinematic composition with the source setting visible."} for scene in scenes for j in range(1, 4)]
+    director._normalize_dialogue_speakers(story, scenes, shots, [{"name": "Mara"}])
+    emitted = [event["text"] for shot in shots for event in shot["dialogue_events"]]
+    _assert(len(emitted) == 14, f"long source lost utterances while scenes were rebalanced: {emitted!r}")
+    _assert(set(emitted) == {f"Line {i} remains source-anchored." for i in range(14)}, f"long source utterances changed: {emitted!r}")
+    for i, paragraph in enumerate(paragraphs):
+        target_scene = next(scene for scene in scenes if f"Line {i} remains source-anchored." in scene["description"])
+        target_events = [event["text"] for shot in shots if shot["scene_id"] == target_scene["scene_id"] for event in shot["dialogue_events"]]
+        _assert(f"Line {i} remains source-anchored." in target_events, f"source quote {i} drifted to a different scene")
+
+
+def test_dialogue_cannot_drift_to_another_scene_and_is_restored_in_source_scene():
+    from planner.qwen_director import QwenDirector
+    director = object.__new__(QwenDirector)
+    director._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    story = 'Mara said, “The gate is open.”\n\nIvo said, “The bridge is gone.”'
+    director._semantic_spoken_dialogue = [
+        {"quote_id": 1, "text": "The gate is open.", "speaker": "Mara"},
+        {"quote_id": 2, "text": "The bridge is gone.", "speaker": "Ivo"},
+    ]
+    scenes = [
+        {"scene_id": "scene_001", "description": "Mara said, “The gate is open.”", "story_summary": "Mara said, “The gate is open.”", "characters": ["Mara"]},
+        {"scene_id": "scene_002", "description": "Ivo said, “The bridge is gone.”", "story_summary": "Ivo said, “The bridge is gone.”", "characters": ["Ivo"]},
+    ]
+    shots = []
+    for scene_id in ("scene_001", "scene_002"):
+        for i in range(1, 4):
+            shots.append({"shot_id": f"{scene_id}_shot_{i:03d}", "scene_id": scene_id, "characters": [], "dialogue_events": [], "speaking_characters": [], "speech_text": ""})
+    # The shot model wrongly puts Ivo's second-scene line in scene 1. It must be dropped there.
+    shots[0]["dialogue_events"] = [{"speaker": "Ivo", "text": "The bridge is gone."}]
+    director._normalize_dialogue_speakers(story, scenes, shots, [{"name": "Mara"}, {"name": "Ivo"}])
+    by_scene = {scene_id: [event["text"] for shot in shots if shot["scene_id"] == scene_id for event in shot["dialogue_events"]] for scene_id in ("scene_001", "scene_002")}
+    _assert(by_scene["scene_001"] == ["The gate is open."], f"scene 1 dialogue drifted or source line was lost: {by_scene}")
+    _assert(by_scene["scene_002"] == ["The bridge is gone."], f"scene 2 dialogue was not restored: {by_scene}")
+
+
+def test_unclassified_quote_with_explicit_named_attribution_is_recovered_without_retry():
+    from planner.qwen_director import QwenDirector
+    story = 'Mara said, “The gate is open.” Later, Ivo replied, “The bridge is gone…”'
+    semantic = [{"quote_id": 1, "text": "The gate is open.", "speaker": "Mara"}]
+    segments = QwenDirector._extract_story_spoken_segments(story, semantic, allowed_speakers={"Mara", "Ivo"})
+    _assert([item["display"] for item in segments] == ["The gate is open.", "The bridge is gone…"],
+            f"explicitly attributed source dialogue was lost when Qwen omitted a quote ID: {segments!r}")
+    _assert(segments[1]["source_speakers"] == {"ivo"}, f"source attribution did not recover Ivo's line: {segments!r}")
+
+
+def test_long_source_quote_inventory_keeps_all_quotes_and_bounds_context():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = "\n\n".join(f'Mara entered room {i}. Mara said, “Source line number {i} remains exact.” Ivo watched.' for i in range(180))
+    quotes = QwenDirectorPromptMixin._source_quote_inventory(story)
+    evidence = QwenDirectorPromptMixin._semantic_extraction_evidence(story, quotes)
+    _assert(len(quotes) == 180 and len(evidence["quotes"]) == 180, "long source compaction silently dropped quote candidates")
+    _assert([item["quote_id"] for item in evidence["quotes"]] == list(range(1, 181)), "long-source quote IDs are not complete and ordered")
+    _assert(len(evidence["story_evidence"]) < len(story), "long-source story evidence should be bounded while quote inventory remains complete")
+    _assert("Ivo" in evidence["name_surface_index"] and "Mara" in evidence["name_surface_index"], "long-source name-like surfaces were lost from the recall index")
+    _assert(any("Ivo" in item["source_context"] for item in evidence["name_surface_evidence"]), "long-source source contexts lost an active character mention")
+
+
+def test_story_markdown_emphasis_is_removed_without_cross_paragraph_consumption():
+    from planner.qwen_director import QwenDirector
+    story = "Mara *opened the vault* carefully.\n\nIvo **held the door** while Elena _watched_."
+    cleaned = QwenDirector._strip_story_markdown_emphasis(story)
+    _assert(cleaned == "Mara opened the vault carefully.\n\nIvo held the door while Elena watched.", f"Markdown sanitizer damaged story prose: {cleaned!r}")
 
 
 # ── Dialogue contract behavior ─────────────────────────────────────────────
@@ -463,8 +649,8 @@ def test_honorific_speaker_normalization_keeps_in_person_dialogue_and_filters_re
     semantic = [
         {"text": "Voss, you still there?", "speaker": "Dr. Renn"},
         {"text": "Don’t open that vault", "speaker": "Dr. Renn"},
-        {"text": "You’ve got ten minutes before the storm breaches the outer shell", "speaker": "Dr. Renn"},
-        {"text": "No one leaves with that data", "speaker": "Dr. Renn"},
+        {"text": "You’ve got ten minutes before the storm breaches the outer shell,", "speaker": "Dr. Renn"},
+        {"text": "No one leaves with that data,", "speaker": "Dr. Renn"},
     ]
     aliases = EntityResolver.build_character_alias_map([{"name": "Renn", "identity_type": "named_character"}])
     segments = QwenDirector._extract_story_spoken_segments(
@@ -473,9 +659,9 @@ def test_honorific_speaker_normalization_keeps_in_person_dialogue_and_filters_re
     texts = [segment["display"] for segment in segments]
     speakers = [segment["source_speakers"] for segment in segments]
     _assert(len(segments) == 2, f"expected two visible Renn utterances and no radio dialogue: {segments}")
-    _assert(any("you've got ten minutes before the storm breaches the outer shell" == text.casefold() for text in texts),
+    _assert(any("You’ve got ten minutes before the storm breaches the outer shell," == text for text in texts),
             f"in-person entrance dialogue was dropped: {texts}")
-    _assert("No one leaves with that data" in texts, f"in-person final-scene dialogue was dropped: {texts}")
+    _assert("No one leaves with that data," in texts, f"in-person final-scene dialogue was dropped: {texts}")
     _assert(all(value == {"renn"} for value in speakers), f"title-bearing speaker was not canonicalized: {speakers}")
 
 
@@ -1157,15 +1343,203 @@ def test_topology_is_driven_by_scene_and_shot_settings():
             f"fallback compile must yield scenes x shots, got {len(shots)}")
 
 
+def test_compact_shot_prompt_example_is_valid_json():
+    import json
+    import re
+    from planner.qwen_director_prompts import SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
+    match = re.search(
+        r"COMPACT OUTPUT CONTRACT:.*?\n\n(\{.*?\})\n\nThere must be exactly",
+        SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT,
+        flags=re.DOTALL,
+    )
+    _assert(match is not None, "compact shot prompt example block is missing")
+    sample = json.loads(match.group(1))
+    _assert(isinstance(sample.get("scene_shots"), list) and sample["scene_shots"],
+            "compact shot example must show the scene_shots envelope")
+    scene = sample["scene_shots"][0]
+    _assert("scene_id" in scene and all(key in scene.get("scene_metadata", {}) for key in (
+        "location", "lighting", "color_temperature", "time_of_day", "weather", "dramatic_purpose")),
+        "compact example must show all required parent-scene metadata")
+    _assert(len(scene.get("shots", [])) == 3,
+            "compact prompt example should match the configured three-shot scene topology")
+    shot = scene["shots"][0]
+    for field in ("shot_id", "scene_id", "location", "lighting", "color_temperature",
+                  "speaking_characters", "speech_text", "is_scene_boundary",
+                  "character_spatial_bboxes", "character_spatial_regions"):
+        _assert(field not in shot, f"compact prompt example must not teach output of derived field {field}")
+    _assert("dialogue_events" in shot and "continuity_start_state" in shot and "continuity_end_state" in shot,
+            "compact example must retain authoritative dialogue and continuity fields")
+
+
+def test_compact_shot_batch_schema_omits_derived_and_empty_fields():
+    from planner.qwen_director import QwenDirector
+    probe = QwenDirector.__new__(QwenDirector)
+    batch = probe._shot_batch_json_schema(scene_count=2)
+    shot = batch["properties"]["scene_shots"]["items"]["properties"]["shots"]["items"]
+    properties = shot["properties"]
+    for field in (
+        "shot_id", "scene_id", "location", "lighting", "color_temperature",
+        "speaking_characters", "speech_text", "is_scene_boundary",
+        "character_spatial_bboxes", "character_spatial_regions",
+        "character_spatial_bboxes_start", "character_spatial_bboxes_end",
+        "character_spatial_regions_start", "character_spatial_regions_end",
+    ):
+        _assert(field not in properties and field not in shot["required"],
+                f"compact batch schema should derive {field} after generation")
+    for field in ("action", "visual_prompt", "dialogue_events", "continuity_start_state", "continuity_end_state"):
+        _assert(field in properties and field in shot["required"],
+                f"compact batch schema must retain creative/continuity field {field}")
+    dialogue_schema = properties["dialogue_events"]
+    dialogue_item = dialogue_schema["items"]
+    _assert(set(dialogue_item["properties"]) == {"source_dialogue_id"},
+            "batch dialogue should carry a source ID, not duplicate speaker/text payloads")
+    constrained = probe._shot_batch_json_schema(
+        scene_count=2,
+        dialogue_ids=["scene_001_d001", "scene_002_d001"],
+    )
+    ref_property = constrained["properties"]["scene_shots"]["items"]["properties"]["shots"]["items"]["properties"]["dialogue_events"]["items"]["properties"]["source_dialogue_id"]
+    _assert(ref_property.get("enum") == ["scene_001_d001", "scene_002_d001"],
+            "batch schema must constrain source-dialogue references to the supplied whitelist")
+    full = probe._shot_json_schema()["properties"]["shots"]["items"]["properties"]
+    _assert("location" in full and "character_spatial_bboxes" in full,
+            "compact optimization must not remove fields from the canonical standalone shot schema")
+
+
+def test_source_dialogue_ids_are_stable_and_scene_scoped():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    payload = [
+        {"scene_id": "scene_001", "source_dialogue": [
+            {"speaker": "Mara", "text": "Open the door."},
+            {"speaker": "Eli", "text": "Not yet."},
+        ]},
+        {"scene_id": "scene_002", "source_dialogue": [
+            {"speaker": "Mara", "text": "Now!"},
+        ]},
+    ]
+    QwenDirectorPromptMixin._assign_source_dialogue_ids(payload)
+    ids = [[item["dialogue_id"] for item in scene["source_dialogue"]] for scene in payload]
+    _assert(ids == [["scene_001_d001", "scene_001_d002"], ["scene_002_d001"]],
+            f"dialogue references must be stable and globally unique by scene: {ids}")
+    _assert(payload[0]["source_dialogue"][0]["text"] == "Open the door.",
+            "dialogue ID assignment must preserve original source text")
+
+
+def test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicate():
+    import json
+    from planner.qwen_director import QwenDirector
+    payload = json.dumps({"scenes": [
+        {"scene_id": "scene_001", "source_dialogue": [
+            {"dialogue_id": "scene_001_d001", "speaker": "Mara Venn", "text": "Open the door… now!"},
+        ]},
+        {"scene_id": "scene_002", "source_dialogue": [
+            {"dialogue_id": "scene_002_d001", "speaker": "Eli Rhee", "text": "Wait."},
+        ]},
+    ]}, ensure_ascii=False)
+    index, ids = QwenDirector._shot_batch_dialogue_index(payload)
+    _assert(ids == ["scene_001_d001", "scene_002_d001"], f"wrong indexed dialogue IDs: {ids}")
+    director = QwenDirector.__new__(QwenDirector)
+    recovered_events = []
+    director._record_recovery = lambda *args: recovered_events.append(args)
+    shots = [
+        {"shot_id": "scene_001_shot_001", "dialogue_events": [
+            {"source_dialogue_id": "scene_001_d001"},
+        ]},
+        {"shot_id": "scene_001_shot_002", "dialogue_events": [
+            {"source_dialogue_id": "scene_001_d001"},
+            {"source_dialogue_id": "scene_002_d001"},
+        ]},
+    ]
+    expanded = director._expand_shot_batch_dialogue_references(
+        shots, index["scene_001"]
+    )
+    _assert(expanded[0]["dialogue_events"] == [{
+        "speaker": "Mara Venn", "text": "Open the door… now!",
+        "continues_from_previous_shot": False, "continues_to_next_shot": False,
+    }], "reference expansion must restore exact source speaker/text/punctuation")
+    _assert(expanded[1]["dialogue_events"] == [],
+            "duplicate and cross-scene IDs must be rejected before source reconciliation")
+    _assert(len(recovered_events) == 2,
+            f"duplicate/foreign dialogue references should be observable: {recovered_events}")
+
+
+def test_batch_normalizer_reconstructs_deterministic_shot_ids():
+    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+    normalized = QwenDirectorSanitizeMixin._normalize_batch_shot_response({
+        "scene_shots": [{"scene_id": "scene_004", "shots": [{"action": "A"}, {"action": "B"}, {"action": "C"}]}]
+    })
+    shots = normalized["scene_004"]
+    _assert([s["scene_id"] for s in shots] == ["scene_004"] * 3,
+            "parent scene IDs must be reconstructed for compact shot JSON")
+    _assert([s["shot_id"] for s in shots] == ["scene_004_shot_001", "scene_004_shot_002", "scene_004_shot_003"],
+            f"shot IDs must be reconstructed in output order: {shots}")
+
+
+def test_shot_batch_context_caps_are_largest_first_and_bounded():
+    from planner.qwen_director import QwenDirector
+    _assert(QwenDirector._shot_batch_story_context_capacities(3000) == [3000, 2400, 1800, 1200],
+            "global recap context should compact in deterministic largest-first stages")
+    _assert(QwenDirector._shot_batch_story_context_capacities(1000) == [1000],
+            "context caps must not inflate a smaller runtime-configured maximum")
+
+
+def test_sanitizer_restores_compact_batch_fields_from_scene_metadata():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    scene = {"scene_id": "scene_001", "location": "harbor office", "lighting": "cold window light",
+             "color_temperature": "cool", "mood": "tense", "description": "Mara speaks in the harbor office."}
+    raw = [{
+        "scene_id": "scene_001", "shot_id": "scene_001_shot_001", "action": "Mara speaks at the desk.",
+        "visual_prompt": "Mara speaks at a desk inside the harbor office under cold window light, framed tightly.",
+        "characters": ["Mara"], "dialogue_events": [
+            {"speaker": "Mara", "text": "Open the door.", "continues_from_previous_shot": False, "continues_to_next_shot": False},
+            {"speaker": "Mara", "text": "We have no time.", "continues_from_previous_shot": False, "continues_to_next_shot": False},
+        ],
+        "camera_shot": "medium", "camera_movement": "static", "lens_and_depth_of_field": "normal lens",
+        "composition_notes": "Mara centered against the desk.", "continuity_start_state": {"state_description": "At the desk."},
+        "continuity_end_state": {"state_description": "Mara turns toward the door."},
+    }]
+    shots = director._sanitize_shots(raw, scene, {"mara"})
+    _assert(len(shots) == 1, f"sanitizer unexpectedly rejected compact shot: {shots}")
+    _assert(shots[0]["speech_text"] == "Open the door. We have no time.",
+            f"speech_text must contain each authoritative utterance once: {shots[0].get('speech_text')!r}")
+    _assert(shots[0]["location"] == "harbor office" and shots[0]["lighting"] == "cold window light"
+            and shots[0]["color_temperature"] == "cool",
+            "per-shot place/light fields must be restored from canonical scene metadata")
+    _assert(all(key in shots[0] for key in (
+        "character_spatial_bboxes", "character_spatial_regions", "character_spatial_bboxes_start",
+        "character_spatial_bboxes_end", "character_spatial_regions_start", "character_spatial_regions_end")),
+        "canonical spatial fields must remain present after compact model output")
+
+
 def test_shot_batch_completion_budget_uses_runtime_topology():
     from planner.config import DIRECTOR_MAX_TOKENS, DIRECTOR_SHOTS_PER_SCENE
     from planner.qwen_director import QwenDirector
     def expected(scene_count):
         count = max(1, int(scene_count))
-        return min(int(DIRECTOR_MAX_TOKENS), max(320, 700 * int(DIRECTOR_SHOTS_PER_SCENE) * count))
+        return min(int(DIRECTOR_MAX_TOKENS), max(320, 600 * int(DIRECTOR_SHOTS_PER_SCENE) * count))
     _assert(QwenDirector._shot_batch_completion_budget(1) == expected(1), "one-scene shot batch budget ignored YAML topology")
     _assert(QwenDirector._shot_batch_completion_budget(2) == expected(2), "two-scene shot batch budget ignored YAML topology")
     _assert(QwenDirector._shot_batch_completion_budget(0) == expected(1), "non-positive scene count must clamp to one")
+
+
+def test_shot_batch_budget_and_prompt_compaction_create_more_two_scene_headroom():
+    from planner.config import DIRECTOR_MAX_TOKENS, DIRECTOR_N_CTX, DIRECTOR_SHOTS_PER_SCENE
+    from planner.qwen_director import QwenDirector
+    from planner.qwen_director_prompts import SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
+    system_chars = len(SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT)
+    _assert(system_chars < 11000,
+            f"shot batch system prompt regressed toward the historical 14,353-character prompt: {system_chars}")
+    completion = QwenDirector._shot_batch_completion_budget(2)
+    expected_completion = min(
+        int(DIRECTOR_MAX_TOKENS),
+        max(320, 600 * int(DIRECTOR_SHOTS_PER_SCENE) * 2),
+    )
+    prompt_limit = int(DIRECTOR_N_CTX) - 128 - completion
+    historical_prompt_limit = int(DIRECTOR_N_CTX) - 128 - 4200
+    _assert(completion == expected_completion,
+            f"compact two-scene completion cap mismatch: {completion} != {expected_completion}")
+    _assert(prompt_limit > historical_prompt_limit,
+            f"two-scene completion reserve must leave more prompt context than the old 4,200-token reserve: {prompt_limit}")
 
 
 def test_story_scene_coercion_keeps_quoted_dialogue_intact():
@@ -1423,6 +1797,19 @@ def main():
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
         test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
         test_character_semantic_schema_includes_spoken_dialogue,
+        test_in_person_dialogue_speaker_must_exist_in_qwen_cast,
+        test_quote_inventory_preserves_repeated_quotes_and_punctuation,
+        test_blueprint_cast_filter_excludes_weather_and_objects_but_keeps_dynamic_people,
+        test_cast_static_check_is_alias_aware_and_does_not_require_fixed_recurrence,
+        test_preserve_short_source_is_not_duplicated_into_fake_scenes,
+        test_preserve_quality_contract_accepts_source_driven_single_scene_only_for_preserve_mode,
+        test_watchdog_is_armed_per_qwen_http_request_not_whole_generation,
+        test_source_dialogue_omitted_by_shot_model_is_restored_exactly_once,
+        test_long_preserve_dialogue_maps_through_rebalanced_source_scenes,
+        test_dialogue_cannot_drift_to_another_scene_and_is_restored_in_source_scene,
+        test_unclassified_quote_with_explicit_named_attribution_is_recovered_without_retry,
+        test_long_source_quote_inventory_keeps_all_quotes_and_bounds_context,
+        test_story_markdown_emphasis_is_removed_without_cross_paragraph_consumption,
         # Dialogue contract
         test_story_dialogue_contract_uses_qwen_semantic_spans,
         test_bare_radio_prop_does_not_make_following_live_quote_remote,
@@ -1458,7 +1845,15 @@ def main():
         test_author_is_one_nonthinking_call_and_receives_planned_cast,
         test_story_plan_uses_richer_beats_and_required_cast_line,
         test_topology_is_driven_by_scene_and_shot_settings,
+        test_compact_shot_prompt_example_is_valid_json,
+        test_compact_shot_batch_schema_omits_derived_and_empty_fields,
+        test_source_dialogue_ids_are_stable_and_scene_scoped,
+        test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicate,
+        test_batch_normalizer_reconstructs_deterministic_shot_ids,
+        test_shot_batch_context_caps_are_largest_first_and_bounded,
+        test_sanitizer_restores_compact_batch_fields_from_scene_metadata,
         test_shot_batch_completion_budget_uses_runtime_topology,
+        test_shot_batch_budget_and_prompt_compaction_create_more_two_scene_headroom,
         test_story_scene_coercion_keeps_quoted_dialogue_intact,
         # Runtime
         test_checkpoint_fingerprint_tracks_runtime_topology_and_frame_policy,
