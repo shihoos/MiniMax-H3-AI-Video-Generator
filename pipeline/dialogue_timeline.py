@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from typing import Any
@@ -477,7 +478,37 @@ class DialogueTimeline:
                         f"Dialogue contract violation: {shot_id!r} event {index} has no canonical speaker binding."
                     )
 
+    def _register_remote_only_speakers(self, plan: dict) -> None:
+        """Create transient speaker bindings for explicitly remote audio sources.
+
+        These entries live only in this timeline instance and are not appended to
+        ``plan['characters']``. This permits audio scheduling while keeping remote
+        voices out of the physical/canonical character roster.
+        """
+        for shot in (plan.get("shots", []) or []):
+            if not isinstance(shot, dict):
+                continue
+            for event in (shot.get("dialogue_events", []) or []):
+                if not isinstance(event, dict) or str(event.get("delivery", "in_person")).strip().lower() != "remote":
+                    continue
+                name = str(event.get("speaker", "") or event.get("speaker_name", "") or "").strip()
+                key = self._norm(name)
+                if not key or key in self._by_name:
+                    continue
+                digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
+                slug = re.sub(r"[^a-z0-9]+", "_", key).strip("_")[:32] or "voice"
+                speaker_id = f"remote_voice_{slug}_{digest}"
+                candidate = {
+                    "character_id": speaker_id,
+                    "name": name,
+                    "role": "remote_dialogue_source",
+                    "description": "Audio-only source for explicitly remote dialogue; not a visible character.",
+                }
+                self._by_name[key] = candidate
+                self._by_id[speaker_id] = candidate
+
     def apply_to_plan(self, plan: dict) -> None:
+        self._register_remote_only_speakers(plan)
         previous_by_scene: dict[str, DialogueEvent | None] = {}
         continuation_by_scene: dict[str, bool] = {}
         previous_shot_by_scene: dict[str, dict | None] = {}
