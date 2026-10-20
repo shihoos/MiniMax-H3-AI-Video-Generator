@@ -24,6 +24,7 @@ class DialogueEvent:
     continues_to_next_shot: bool = False
     expected_duration_ms: int | None = None
     duration_source: str = "wpm_estimate"
+    delivery: str = "in_person"
 
     def __post_init__(self) -> None:
         self.dialogue_id = str(self.dialogue_id or "").strip()
@@ -55,6 +56,9 @@ class DialogueEvent:
             if self.expected_duration_ms <= 0:
                 raise ValueError("expected_duration_ms must be greater than zero.")
         self.duration_source = str(self.duration_source or "wpm_estimate").strip()
+        self.delivery = str(self.delivery or "in_person").strip().lower()
+        if self.delivery not in {"in_person", "remote"}:
+            raise ValueError("delivery must be either 'in_person' or 'remote'.")
 
     @property
     def duration_seconds(self) -> float:
@@ -74,6 +78,7 @@ class DialogueEvent:
             "continues_to_next_shot": self.continues_to_next_shot,
             "expected_duration_ms": self.expected_duration_ms,
             "duration_source": self.duration_source,
+            "delivery": self.delivery,
         }
 
     @staticmethod
@@ -85,6 +90,7 @@ class DialogueEvent:
                 "text": {"type": "string"},
                 "continues_from_previous_shot": {"type": "boolean"},
                 "continues_to_next_shot": {"type": "boolean"},
+                "delivery": {"type": "string", "enum": ["in_person", "remote"]},
             },
             "required": [
                 "speaker",
