@@ -217,9 +217,9 @@ centered, rule of thirds, leading lines, foreground frame, negative space, silho
 
 Choose natural, concrete lighting language supported by the actual environment and visible light sources. Do not select a lighting style from a fixed menu. Write framing, movement, lens, and composition terms in lowercase exactly as specified above.
 
-Return JSON only in this structure. COMPACT OUTPUT CONTRACT: individual shot objects omit `shot_id` and `scene_id` (derived from parent scene and shot-array order); omit per-shot `location`, `lighting`, and `color_temperature` (derived from scene metadata); omit `speaking_characters` and `speech_text` (derived from dialogue references); omit `is_scene_boundary` (derived from scene order); and omit the six `character_spatial_*` maps (the supplied traces consistently leave them empty). These fields are restored before persistence, validation, and compilation. Do not output them.
+Return JSON only in this structure. COMPACT OUTPUT CONTRACT: individual shot objects omit `shot_id` and `scene_id` (derived from parent scene and shot-array order); omit per-shot `location`, `lighting`, and `color_temperature` (derived from scene metadata); omit `speaking_characters` and `speech_text` (derived from dialogue references); omit `is_scene_boundary` (derived from scene order); omit `continuity_start_state` and `continuity_end_state` (the production continuity ledger derives these after generation); and omit the six `character_spatial_*` maps (the supplied traces consistently leave them empty). These fields are restored or derived before persistence, validation, and compilation. Do not output them.
 
-{"scene_shots":[{"scene_id":"scene_001","scene_metadata":{"location":"the supplied scene location","time_of_day":"unspecified","weather":"unspecified","atmosphere":"grounded atmosphere","mood":"scene mood","lighting":"visible motivated light source","color_temperature":"neutral","environment_details":[],"key_props":[],"dramatic_purpose":"what this scene changes in the story"},"dialogue_assignments":{},"shots":[{"duration_seconds":5.2,"characters":[],"action":"A visible physical story action changes the situation in a way supported by the source.","camera_shot":"wide","camera_movement":"static","lens_and_depth_of_field":"normal lens","composition_notes":"Clear subject separation.","mood":"tense","visual_prompt":"Grounded cinematic wide view of the supplied location, lit by the specific motivated source established in the scene.","continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A character reacts to the event and reveals a distinct detail grounded in the same scene.","camera_shot":"medium","camera_movement":"push-in","lens_and_depth_of_field":"shallow focus","composition_notes":"Readable foreground and depth.","mood":"tense","visual_prompt":"Closer cinematic framing shows a distinct observable reaction in the same location and motivated light.","continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A supported state change or consequence completes this scene's visible beat without new events.","camera_shot":"close-up","camera_movement":"static","lens_and_depth_of_field":"selective focus","composition_notes":"Isolate the meaningful detail.","mood":"uneasy","visual_prompt":"Cinematic close detail shows the established consequence while keeping character, location, and motivated lighting consistent.","continuity_start_state":{},"continuity_end_state":{}}]}]}
+{"scene_shots":[{"scene_id":"scene_001","scene_metadata":{"location":"the supplied scene location","time_of_day":"unspecified","weather":"unspecified","atmosphere":"grounded atmosphere","mood":"scene mood","lighting":"visible motivated light source","color_temperature":"neutral","environment_details":[],"key_props":[],"dramatic_purpose":"what this scene changes in the story"},"dialogue_assignments":{},"shots":[{"duration_seconds":5.2,"characters":[],"action":"A visible physical story action changes the situation in a way supported by the source.","camera_shot":"wide","camera_movement":"static","lens_and_depth_of_field":"normal lens","composition_notes":"Clear subject separation.","mood":"tense","visual_prompt":"Grounded cinematic wide view of the supplied location, lit by the specific motivated source established in the scene."},{"duration_seconds":5.2,"characters":[],"action":"A character reacts to the event and reveals a distinct detail grounded in the same scene.","camera_shot":"medium","camera_movement":"push-in","lens_and_depth_of_field":"shallow focus","composition_notes":"Readable foreground and depth.","mood":"tense","visual_prompt":"Closer cinematic framing shows a distinct observable reaction in the same location and motivated light."},{"duration_seconds":5.2,"characters":[],"action":"A supported state change or consequence completes this scene's visible beat without new events.","camera_shot":"close-up","camera_movement":"static","lens_and_depth_of_field":"selective focus","composition_notes":"Isolate the meaningful detail.","mood":"uneasy","visual_prompt":"Cinematic close detail shows the established consequence while keeping character, location, and motivated lighting consistent."}]}]}
 
 There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and exactly one entry for every supplied scene. Do not add prose outside JSON.
 Do NOT output compiler-owned fields.
@@ -262,9 +262,11 @@ class QwenDirectorPromptMixin:
     prose. Use every tag exactly once and in numeric order. The tags are removed by the application;
     they are not story text. Each scene must remain a single paragraph/beat. Do not combine two beats,
     split one beat across tags, or use a sentence-count split to create a missing scene. Every scene
-    should contain 6–8 complete sentences and at least 75 story words; target __PER__ words rather
-    than compressing or padding the causal beat. Expand through a meaningful choice, physical action,
-    reaction, consequence, or motivated dialogue—not repeated wording.
+    must contain 6–8 complete sentences; target __PER__ words per scene and never write a short
+    3–5-sentence summary in place of a developed beat. Do not move to the next scene marker until
+    the current beat contains its action, choice, reaction, consequence, and state transition where
+    relevant. Reach the final scene's completed consequence rather than stopping at an unresolved
+    future hook. Expand through physical action and causal consequence—not repeated wording.
     The story becomes a film of about __MINUTES__ minutes, so each marked scene is ONE filmable beat
     in one primary physical location: a specific place, visible action, and a change in the situation.
     If the characters physically move to a different location, narrate a clear transition in a different
@@ -497,7 +499,9 @@ class QwenDirectorPromptMixin:
             + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
             + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
-            + " End with the actual causal resolution in scene 12 and a complete sentence. Output only these marked story blocks."
+            + " Every scene must contain 6–8 complete sentences with concrete action, decision, reaction, and consequence; expand short beats with blueprint-grounded causality, not padding or repeated prose."
+            + " Scene 12 must show the central objective and conflict resolving on-page, with the completed observable consequence and the protagonist's immediate outcome. Do not end with a future hook, teaser, new threat, unexplained signal, promise, unanswered question, or sequel setup."
+            + " End with a complete sentence describing a consequence that has already happened, not a future possibility. Output only these marked story blocks."
             + " CONTINUITY LOCK: silently replay every scene in order before writing. Preserve the prior scene's character fates, object ownership/location, access states, and causal consequences. An irreversible action such as a detonation or collapse cannot already have completed and then be triggered again; after destruction or lockout, later action needs an explicitly established path or safe interval. If the blueprint contains a physical contradiction, make the smallest repair that preserves the intended conflict and resolution rather than narrating impossible events. Never introduce an unseeded mechanism to fix that repair."
             + " Do not output any headings or labels other than the required [[SCENE_01]] through [[SCENE_12]] structural tags. Do not reproduce the Architect's `SCENE 01:` beat labels. No planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or postscript. Count words silently; never print a word-count report."
         )
@@ -613,6 +617,157 @@ class QwenDirectorPromptMixin:
                 "end": match.end(),
             })
         return result
+
+    @staticmethod
+    def _source_named_quote_attribution(story: str, quote: dict) -> dict | None:
+        """Return only an unambiguous, immediately attached named-speaker attribution.
+
+        This is a correction/validation signal for the semantic extractor, not a cast
+        discovery mechanism. A name is accepted as authoritative only when the source
+        directly couples it to a speech verb next to this exact quote span. It never
+        promotes a mere mention or reaction into a speaker assignment.
+        """
+        text = str(story or "")
+        try:
+            start = int(quote.get("start", -1))
+            end = int(quote.get("end", -1))
+        except (TypeError, ValueError):
+            return None
+        if start < 0 or end <= start or end > len(text):
+            return None
+
+        # Names may be canonical names, AI names, or a source-grounded relational
+        # identity such as "Eli's sister (hologram)". The attribution verb and local
+        # position, rather than capitalization alone, establish the speaker.
+        atom = r"[A-Z][A-Za-z0-9]*(?:['’][A-Za-z]+)?(?:[.\-][A-Za-z0-9]+)*"
+        role = (
+            r"sister|brother|mother|father|daughter|son|wife|husband|partner|"
+            r"security|system|assistant|scientist|doctor|captain|commander|"
+            r"hologram|projection|operator"
+        )
+        speaker_pattern = (
+            r"(?:(?:Dr|Mr|Mrs|Ms|Prof|Capt|Cmdr|Lt|Sgt)\.\s+)?"
+            + atom
+            + rf"(?:\s+(?:{atom}|(?i:{role})))*"
+            + r"(?:\s*\((?i:hologram|projection|projected image|AI|remote)\))?"
+        )
+        speech_verb = (
+            r"said|say|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+            r"screamed|screams|muttered|mutters|answered|answers|warned|warns|"
+            r"told|tells|cried|cries|yelled|yells|barked|barks|called|calls|"
+            r"snapped|snaps|added|adds|insisted|insists|admitted|admits|"
+            r"demanded|demands|repeated|repeats|continued|continues|declared|declares|"
+            r"announced|announces|hissed|hisses|stated|states|voiced|voices|"
+            r"echoed|echoes|crackled|crackles|boomed|booms|played|plays"
+        )
+
+        paragraph_separator = text.rfind("\n\n", 0, start)
+        paragraph_start = paragraph_separator + 2 if paragraph_separator >= 0 else 0
+        before = text[max(paragraph_start, start - 220):start]
+        # Prefix attribution: Elara shouted, “...”; allow a short physical/emotional
+        # descriptor between the name and verb but never cross a sentence boundary.
+        before_clause = re.split(r"(?<=[.!?])\s+", before)[-1]
+        # AI/system voice descriptions often use a source-first construction rather
+        # than `AURORA said`: `AURORA's voice echoed through the speakers:`.
+        remote_voice_prefix = re.search(
+            rf"(?<!\w)(?P<speaker>{speaker_pattern})\s+voice\s+"
+            r"(?i:(?:echoed|echoes|crackled|crackles|boomed|booms|played|plays|"
+            r"came through|rang out|sounded))\b"
+            r"[^.!?\n]{0,48}[,;:—–-]?\s*$",
+            before_clause,
+        )
+        prefix = re.search(
+            rf"(?<!\w)(?P<speaker>{speaker_pattern})(?:\s+[^.!?\n]{{0,48}})?\s+"
+            rf"(?P<verb>(?i:{speech_verb}))\s*[,;:—–-]?\s*$",
+            before_clause,
+        )
+        attribution = None
+        if remote_voice_prefix:
+            attribution = (remote_voice_prefix.group("speaker").strip(), "before")
+        elif prefix:
+            attribution = (prefix.group("speaker").strip(), "before")
+        else:
+            # Suffix attribution: “...,” Elara said. Crucially, do not apply
+            # "Elara shouted, “next quote" to the preceding quoted sign/message.
+            # The punctuation before a following quote must terminate the attribution.
+            after = text[end:min(len(text), end + 180)]
+            suffix = re.match(
+                rf"^\s*[,;:]?\s*(?P<speaker>{speaker_pattern})\s+"
+                rf"(?P<verb>(?i:{speech_verb}))\b[^.!?\n]{{0,32}}[.!?…](?=\s|$)",
+                after,
+            )
+            if suffix:
+                attribution = (suffix.group("speaker").strip(), "after")
+        if not attribution:
+            return None
+
+        speaker, placement = attribution
+        # `AURORA's voice` and similar possessive source labels identify AURORA,
+        # not a separate character named `AURORA's`.
+        speaker = re.sub(r"(?i)['’]s$", "", speaker).strip()
+        # A projected/holographic identity or explicit in-world transmission is an
+        # audio/remote source for cast-binding purposes. Do not turn it into a physical
+        # canonical character just because Qwen marked the quote in-person.
+        # Keep delivery inference inside the attribution's own sentence. Looking at
+        # the wider paragraph would misclassify an in-person line merely because a
+        # hologram/radio/sign appeared one sentence earlier.
+        local = before_clause if placement == "before" else after[:120]
+        remote_source = bool(
+            re.search(r"\(\s*(?:hologram|projection|projected image|AI|remote)\s*\)", speaker, re.IGNORECASE)
+            or re.search(
+                r"\b(?:hologram|holographic projection|projected image|remote voice|"
+                r"over the radio|through the radio|over the intercom|through the intercom|"
+                r"from the terminal|through the terminal|over the phone|through the phone|"
+                r"through the speakers|over the speakers|through loudspeakers|over loudspeakers|"
+                r"through the station speakers)\b",
+                local,
+                re.IGNORECASE,
+            )
+        )
+        return {
+            "speaker": speaker,
+            "placement": placement,
+            "delivery": "remote" if remote_source else "in_person",
+        }
+
+    @staticmethod
+    def _source_supports_remote_speaker(quote: dict, speaker: str) -> bool:
+        """Require local source evidence before retaining an unrostered remote voice.
+
+        Qwen's `remote` label alone is not evidence that a source exists in the story.
+        The quoted span's bounded context must contain both a remote-channel cue and
+        at least one identity-bearing token from the proposed speaker surface.
+        """
+        context = str(quote.get("context", "") or "")
+        surface = re.sub(r"\([^)]*\)", " ", str(speaker or ""))
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9'’-]*", surface)
+        generic = {
+            "the", "a", "an", "and", "of", "voice", "hologram", "holographic",
+            "projection", "projected", "image", "remote", "offscreen", "off-screen",
+            "sister", "brother", "mother", "father", "daughter", "son", "wife",
+            "husband", "partner", "assistant", "operator", "system", "security",
+            "dr", "mr", "mrs", "ms", "prof", "capt", "cmdr", "lt", "sgt",
+        }
+        identity_tokens = []
+        for token in tokens:
+            cleaned = re.sub(r"(?i)['’]s$", "", token).casefold()
+            if cleaned and cleaned not in generic and len(cleaned) >= 3:
+                identity_tokens.append(cleaned)
+        if not identity_tokens:
+            return False
+        remote_cue = re.search(
+            r"\b(?:hologram|holographic|projection|projected image|remote voice|"
+            r"AI|artificial intelligence|radio|intercom|terminal|loudspeaker|loudspeakers|station speakers|"
+            r"through the speakers|over the speakers|phone|transmission|voice came through)\b",
+            context,
+            re.IGNORECASE,
+        )
+        if not remote_cue:
+            return False
+        return any(
+            re.search(r"(?<!\w)" + re.escape(token) + r"(?!\w)", context, re.IGNORECASE)
+            for token in identity_tokens
+        )
 
     @staticmethod
     def _source_name_surface_index(story: str, max_surfaces: int = 256) -> list[str]:
@@ -753,7 +908,7 @@ class QwenDirectorPromptMixin:
 
     The payload includes a numbered `quotes` inventory. Return exactly one `quote_classifications` item for EVERY supplied `quote_id`, with the same ID, one classification, and a speaker. Use `in_person_spoken` for direct speech from a speaker physically present in the current scene; use `remote_or_offscreen_spoken` for an explicitly attributed, live, diegetic voice over radio/intercom/phone/terminal/loudspeaker or another in-world channel when the source remains off-screen; use `written_or_displayed` for notes, journals, signs, screens, labels, messages or documents; use `remembered_or_recalled` for remembered or archival speech; use `inner_monologue` for thoughts; and `other` when no listed category applies. Do not promote narration, generic voice-over, written text, or a recording merely being read to spoken dialogue. For both spoken classifications, provide the canonical speaker when the source explicitly identifies one and the speaker belongs in the current story cast; otherwise leave speaker empty. Resolve consecutive dialogue turns from grammar: when a quote is followed by an attribution such as “she shouted” and the next quote follows without a new named-speaker attribution, carry the same speaker forward unless source text clearly signals a speaker change. Do not reassign a continuing multi-quote turn merely because another character is mentioned or reacts between lines. A remote speaker is audible but is NOT thereby a visible shot character. For `in_person_spoken`, the speaker must physically participate in that scene. Do not return quote text: the application restores it exactly from the source.
 
-    The quote inventory is an exhaustive coverage checklist. Do not omit, duplicate, or invent quote IDs. If unsure whether a quote is speech, classify it explicitly rather than omitting it. This lets the application detect missing classifications and apply only source-grounded deterministic fallback. Return exactly `candidates` and `quote_classifications`, with no prose outside JSON.
+    The quote inventory is an exhaustive coverage checklist. Do not omit, duplicate, or invent quote IDs. If unsure whether a quote is speech, classify it explicitly rather than omitting it. This lets the application detect missing classifications and apply only source-grounded deterministic fallback. Return compact JSON on one line: no indentation, pretty-printing, or optional whitespace between JSON fields. Return exactly `candidates` and `quote_classifications`, with no prose outside JSON.
     """).strip()
 
         quote_inventory = self._source_quote_inventory(story)
@@ -776,11 +931,39 @@ class QwenDirectorPromptMixin:
         if not isinstance(result, dict):
             result = {"candidates": [], "spoken_dialogue": []}
         # Never supplement candidates from hints, the planning outline, or dialogue
-        # speaker names. Qwen's `candidates` response is the roster authority.
+        # speaker names. Qwen's `candidates` response remains the cast authority.
+        raw_candidates = [
+            item for item in (result.get("candidates") or []) if isinstance(item, dict)
+        ]
+        accepted_candidates = [
+            item for item in raw_candidates
+            if item.get("is_character", False) is True
+            and str(item.get("entity_type", "")).strip().upper() in {"PERSON", "CHARACTER", "SENTIENT"}
+            and str(item.get("name", "") or "").strip()
+        ]
+        canonical_names = {
+            EntityResolver.normalize(str(item.get("name", ""))): str(item.get("name", "")).strip()
+            for item in accepted_candidates
+            if EntityResolver.normalize(str(item.get("name", "")))
+        }
+        accepted_names = set(canonical_names)
+        accepted_aliases = EntityResolver.build_character_alias_map(accepted_candidates)
+
+        def resolve_roster_speaker(surface: str) -> str | None:
+            raw_key = EntityResolver.normalize(surface)
+            titleless_key = EntityResolver.normalize(EntityResolver.strip_honorific(surface))
+            for key in (raw_key, titleless_key):
+                if not key:
+                    continue
+                canonical_key = accepted_aliases.get(key, key)
+                if canonical_key in canonical_names:
+                    return canonical_names[canonical_key]
+            return None
+
         quote_by_id = {int(item["quote_id"]): item for item in quote_inventory}
+        raw_classifications = result.get("quote_classifications")
         normalized_dialogue = []
         seen_quote_ids = set()
-        raw_classifications = result.get("quote_classifications")
         if isinstance(raw_classifications, list):
             for item in raw_classifications:
                 if not isinstance(item, dict):
@@ -795,15 +978,36 @@ class QwenDirectorPromptMixin:
                 classification = str(item.get("classification", "other") or "other").strip().lower()
                 if classification not in {"in_person_spoken", "remote_or_offscreen_spoken"}:
                     continue
+
+                source_quote = quote_by_id[quote_id]
                 speaker = str(item.get("speaker", "") or "").strip()
+                delivery = "remote" if classification == "remote_or_offscreen_spoken" else "in_person"
+
+                # A local, explicit named attribution beats a conflicting model label.
+                # This is especially important for text/UI quotes followed by a human
+                # attribution, e.g. `“AEGIS: Access Denied.” Elara shouted, “...”`.
+                source_attribution = self._source_named_quote_attribution(story, source_quote)
+                if source_attribution:
+                    source_speaker = str(source_attribution.get("speaker", "") or "").strip()
+                    canonical_source = resolve_roster_speaker(source_speaker)
+                    if canonical_source:
+                        speaker = canonical_source
+                        delivery = str(source_attribution.get("delivery", "in_person"))
+                    elif source_speaker:
+                        # Keep an explicitly holographic/transmitted source as audio-only.
+                        # An unresolved in-person attribution is dropped below, never
+                        # guessed into the cast and never allowed to crash extraction.
+                        speaker = source_speaker
+                        delivery = str(source_attribution.get("delivery", delivery))
+
                 if not speaker:
-                    # Never invent a speaker for anonymous off-screen sound.
+                    # Anonymous sound is not turned into a guessed speaker.
                     continue
                 normalized_dialogue.append({
-                    "text": str(quote_by_id[quote_id]["text"]),
+                    "text": str(source_quote["text"]),
                     "speaker": speaker,
                     "quote_id": quote_id,
-                    "delivery": "remote" if classification == "remote_or_offscreen_spoken" else "in_person",
+                    "delivery": "remote" if delivery == "remote" else "in_person",
                 })
             missing_quote_ids = sorted(set(quote_by_id) - seen_quote_ids)
             if missing_quote_ids:
@@ -821,8 +1025,8 @@ class QwenDirectorPromptMixin:
                     quote_id = int(item.get("quote_id"))
                 except (TypeError, ValueError):
                     quote_id = None
-                speaker = str(item.get("speaker", "") or "").strip()
                 source_quote = quote_by_id.get(quote_id) if quote_id is not None else None
+                speaker = str(item.get("speaker", "") or "").strip()
                 text_value = str(source_quote.get("text", "") if source_quote else item.get("text", "") or "").strip()
                 if not speaker or not text_value:
                     continue
@@ -830,40 +1034,75 @@ class QwenDirectorPromptMixin:
                     if quote_id in seen_quote_ids or source_quote is None:
                         continue
                     seen_quote_ids.add(quote_id)
+                delivery = "remote" if str(item.get("delivery", "in_person")).strip().lower() == "remote" else "in_person"
+                if source_quote:
+                    source_attribution = self._source_named_quote_attribution(story, source_quote)
+                    if source_attribution:
+                        source_speaker = str(source_attribution.get("speaker", "") or "").strip()
+                        canonical_source = resolve_roster_speaker(source_speaker)
+                        if canonical_source:
+                            speaker = canonical_source
+                            delivery = str(source_attribution.get("delivery", "in_person"))
+                        elif source_speaker:
+                            speaker = source_speaker
+                            delivery = str(source_attribution.get("delivery", delivery))
                 entry = {"text": text_value, "speaker": speaker}
-                if str(item.get("delivery", "in_person")).strip().lower() == "remote":
+                if delivery == "remote":
                     entry["delivery"] = "remote"
                 if quote_id is not None:
                     entry["quote_id"] = quote_id
                 normalized_dialogue.append(entry)
+
         result = {
-            "candidates": [item for item in (result.get("candidates") or []) if isinstance(item, dict)],
+            "candidates": raw_candidates,
             "spoken_dialogue": normalized_dialogue,
             "quote_classifications": [item for item in (raw_classifications or []) if isinstance(item, dict)] if isinstance(raw_classifications, list) else [],
         }
-        accepted_candidates = [
-            item for item in result["candidates"]
-            if item.get("is_character", False) is True
-            and str(item.get("entity_type", "")).strip().upper() in {"PERSON", "CHARACTER", "SENTIENT"}
-            and str(item.get("name", "") or "").strip()
-        ]
-        accepted_names = {
-            EntityResolver.normalize(str(item.get("name", "")))
-            for item in accepted_candidates
-            if EntityResolver.normalize(str(item.get("name", "")))
-        }
-        accepted_aliases = EntityResolver.build_character_alias_map(accepted_candidates)
+        remote_only_speakers = set()
+        dropped_unrostered = []
+        retained_dialogue = []
         for item in normalized_dialogue:
             speaker = str(item.get("speaker", "") or "").strip()
-            speaker_key = EntityResolver.normalize(speaker)
-            titleless_key = EntityResolver.normalize(EntityResolver.strip_honorific(speaker))
-            if speaker_key not in accepted_names and titleless_key not in accepted_names and speaker_key not in accepted_aliases and titleless_key not in accepted_aliases:
-                raise RuntimeError(
-                    "Semantic extraction inconsistency: quote "
-                    f"{item.get('quote_id', '?')} is classified as spoken dialogue by {speaker!r}, "
-                    "but that speaker is absent from Qwen's accepted character roster. "
-                    "No deterministic cast add-back or retry was attempted."
-                )
+            canonical_speaker = resolve_roster_speaker(speaker)
+            if canonical_speaker:
+                item["speaker"] = canonical_speaker
+                retained_dialogue.append(item)
+                continue
+            if str(item.get("delivery", "in_person")).strip().lower() == "remote":
+                # Qwen's remote label is not enough: require source-local evidence of
+                # both this identity and an in-world transmission/projection channel.
+                try:
+                    source_quote_id = int(item.get("quote_id", -1))
+                except (TypeError, ValueError):
+                    source_quote_id = -1
+                source_quote = quote_by_id.get(source_quote_id)
+                if source_quote and self._source_supports_remote_speaker(source_quote, speaker):
+                    remote_only_speakers.add(speaker)
+                    retained_dialogue.append(item)
+                    continue
+            dropped_unrostered.append(item)
+
+        # Fail closed for ambiguous/unrostered in-person attribution without aborting
+        # the whole production. Do not add the speaker to the cast or guess another one.
+        normalized_dialogue = retained_dialogue
+        result["spoken_dialogue"] = normalized_dialogue
+        if dropped_unrostered:
+            dropped_ids = [str(item.get("quote_id", "?")) for item in dropped_unrostered]
+            print(
+                f"[DIRECTOR] dropped {len(dropped_unrostered)} unrostered or source-ungrounded dialogue "
+                f"event(s) at quote_id={','.join(dropped_ids[:12])}; no cast add-back or retry",
+                flush=True,
+            )
+            telemetry = getattr(self, "_qwen_telemetry", None)
+            if isinstance(telemetry, dict):
+                telemetry["deterministic_recoveries"] = int(telemetry.get("deterministic_recoveries", 0)) + len(dropped_unrostered)
+        if remote_only_speakers:
+            print(
+                "[DIRECTOR] retained source-grounded remote dialogue-only speaker(s) outside the "
+                "canonical visual cast; no cast add-back: "
+                + repr(sorted(remote_only_speakers)),
+                flush=True,
+            )
         print(
             f"[DIRECTOR] Qwen cast candidates={len(result['candidates'])} "
             f"dialogue_events={len(result['spoken_dialogue'])}",
@@ -1111,6 +1350,10 @@ class QwenDirectorPromptMixin:
         derived_shot_fields = {
             "shot_id", "scene_id", "location", "lighting", "color_temperature",
             "speaking_characters", "speech_text", "is_scene_boundary",
+            # Continuity maps are deterministic ledger outputs, not creative fields.
+            # Returning two empty objects for every shot wastes output tokens and
+            # risks letting Qwen's invented state override the chain-of-shots ledger.
+            "continuity_start_state", "continuity_end_state",
             "character_spatial_bboxes", "character_spatial_regions",
             "character_spatial_bboxes_start", "character_spatial_bboxes_end",
             "character_spatial_regions_start", "character_spatial_regions_end",
@@ -1291,23 +1534,27 @@ class QwenDirectorPromptMixin:
         budget_each = max(24, (max_chars - separator_cost - prefix_cost) // len(paragraphs))
 
         def quote_safe_truncate(text: str, limit: int) -> str:
-            """Never leave a quoted dialogue span with an orphaned opening quote."""
+            """Never leave a quoted dialogue span with an orphaned opening delimiter."""
             if len(text) <= limit:
                 return text
             head = text[:max(0, limit - 1)]
             open_quote = None
             open_at = -1
+            quote_closers = {'“': '”', '‘': '’', '«': '»', '„': '“', '"': '"', "'": "'"}
             for pos, char in enumerate(head):
-                if char == '"':
-                    if open_quote == '"':
-                        open_quote, open_at = None, -1
-                    elif open_quote is None:
-                        open_quote, open_at = '"', pos
-                elif char == '“' and open_quote is None:
-                    open_quote = '”'
-                    open_at = pos
-                elif char == '”' and char == open_quote:
+                # Apostrophes inside words are not quote delimiters.
+                if char in {"'", "’"} and pos > 0 and pos + 1 < len(head):
+                    if head[pos - 1].isalnum() and head[pos + 1].isalnum():
+                        continue
+                if open_quote is not None and char == open_quote:
                     open_quote, open_at = None, -1
+                elif open_quote is None and char in quote_closers:
+                    # A typographic right quote is only a closer, except that the
+                    # straight quote is symmetric and can open or close.
+                    if char in {'”', '’', '»'}:
+                        continue
+                    open_quote = quote_closers[char]
+                    open_at = pos
             if open_quote is not None:
                 head = head[:open_at].rstrip()
             return head.rstrip() + "…"
@@ -1322,9 +1569,27 @@ class QwenDirectorPromptMixin:
                 lambda match: match.group(1) + "\u2024",
                 paragraph,
             )
+            # Split on whitespace after sentence punctuation, allowing a closing
+            # quote to remain attached to the preceding span. The old regex consumed
+            # the quote as part of the separator, corrupting dialogue in the shot
+            # context. Also avoid splitting between a quoted line and its explicit
+            # speech attribution when a second quote immediately follows.
+            attribution_before_next_quote = (
+                r"(?![A-Z][A-Za-z0-9.'’\-]*(?:\s+[A-Z][A-Za-z0-9.'’\-]*)?\s+"
+                r"(?:said|say|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+                r"screamed|screams|muttered|mutters|answered|answers|warned|warns|"
+                r"told|tells|cried|cries|yelled|yells|barked|barks|called|calls|"
+                r"snapped|snaps|continued|continues|declared|declares)\b"
+                r"[^.!?\n]{0,28}[,;:—–-]?\s*[\"\u201c\u2018])"
+            )
+            sentence_boundary = (
+                r'(?:(?<=[.!?])|(?<=[.!?]["\u201d\u2019\']))\s+'
+                + attribution_before_next_quote
+                + r'(?=[A-Z"\u201c\u2018])'
+            )
             sentences = [
                 part.strip().replace("\u2024", ".")
-                for part in re.split(r"(?<=[.!?])[\"\u201d\u2019']?\s+(?=[A-Z\"\u201c])", protected)
+                for part in re.split(sentence_boundary, protected)
                 if part.strip()
             ]
             if not sentences:
@@ -1601,6 +1866,23 @@ class QwenDirectorPromptMixin:
                 if isinstance(item, dict) and str(item.get("name", "")).strip()
             }
             _alias_map = EntityResolver.build_character_alias_map(characters)
+            _remote_only_speaker_by_norm = {}
+            _known_speaker_surfaces = set(_canonical_by_norm) | set(_alias_map)
+            _known_speaker_surfaces |= {
+                EntityResolver.normalize(EntityResolver.strip_honorific(name))
+                for name in _canonical_by_norm.values()
+                if str(name).strip()
+            }
+            for _semantic_item in (getattr(self, "_semantic_spoken_dialogue", []) or []):
+                if not isinstance(_semantic_item, dict) or str(_semantic_item.get("delivery", "in_person")).strip().lower() != "remote":
+                    continue
+                _surface = str(_semantic_item.get("speaker", "") or "").strip()
+                _surface_key = EntityResolver.normalize(_surface)
+                _titleless_key = EntityResolver.normalize(EntityResolver.strip_honorific(_surface))
+                if _surface and _surface_key not in _known_speaker_surfaces and _titleless_key not in _known_speaker_surfaces:
+                    _remote_only_speaker_by_norm.setdefault(_surface_key, _surface)
+                    if _titleless_key:
+                        _remote_only_speaker_by_norm.setdefault(_titleless_key, _surface)
 
             # Do not leave stale source_dialogue entries on reused scene dictionaries.
             for _scene_payload in scene_payloads:
@@ -1639,6 +1921,12 @@ class QwenDirectorPromptMixin:
                     _alias_target = _alias_map.get(_speaker_key)
                     if _alias_target:
                         _canonical_speaker = _canonical_by_norm.get(EntityResolver.normalize(_alias_target))
+                if _canonical_speaker is None and str(_segment.get("delivery", "in_person")).strip().lower() == "remote":
+                    _canonical_speaker = _remote_only_speaker_by_norm.get(_speaker_key)
+                    if _canonical_speaker is None:
+                        _canonical_speaker = _remote_only_speaker_by_norm.get(
+                            EntityResolver.normalize(EntityResolver.strip_honorific(_speakers[0]))
+                        )
                 if _canonical_speaker is None:
                     _unmapped_speakers.add(_speakers[0])
                     continue
