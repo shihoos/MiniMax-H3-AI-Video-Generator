@@ -846,17 +846,30 @@ class QwenDirectorSanitizeMixin:
             scene_id = str(entry.get("scene_id", "") or "").strip()
             shots = entry.get("shots")
             if scene_id and isinstance(shots, list):
-                result[scene_id] = [
-                    item for item in shots if isinstance(item, dict)
-                ]
-                continue
-            if isinstance(shots, list):
-                for item in shots:
+                normalized_shots = []
+                for shot_index, item in enumerate(shots, start=1):
                     if not isinstance(item, dict):
                         continue
-                    sid = str(item.get("scene_id", "") or "").strip()
+                    candidate = dict(item)
+                    # These identifiers are fully determined by the parent scene
+                    # and array order. Do not spend generated tokens on them.
+                    if not str(candidate.get("scene_id", "") or "").strip():
+                        candidate["scene_id"] = scene_id
+                    if not str(candidate.get("shot_id", "") or "").strip():
+                        candidate["shot_id"] = f"{scene_id}_shot_{shot_index:03d}"
+                    normalized_shots.append(candidate)
+                result[scene_id] = normalized_shots
+                continue
+            if isinstance(shots, list):
+                for shot_index, item in enumerate(shots, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    candidate = dict(item)
+                    sid = str(candidate.get("scene_id", "") or "").strip()
+                    if sid and not str(candidate.get("shot_id", "") or "").strip():
+                        candidate["shot_id"] = f"{sid}_shot_{shot_index:03d}"
                     if sid:
-                        result.setdefault(sid, []).append(item)
+                        result.setdefault(sid, []).append(candidate)
         return result
 
     @staticmethod
@@ -930,12 +943,28 @@ class QwenDirectorSanitizeMixin:
                 "scene_id"
             ] = scene_id
 
-            # Repair non-critical omissions deterministically instead of
-            # discarding a useful shot. Use scene-owned values where available.
+            # Restore compact-response fields from their authoritative source.
+            # Scene location/light are deliberately not generated redundantly for
+            # every shot in a batch. Spatial maps remain in the canonical contract
+            # but safely default empty when no upstream evidence supplies them.
             scene_description = str(scene.get("description", "") or "").strip()
-            scene_lighting = str(scene.get("lighting", "") or "").strip() or "soft natural light"
-            scene_color = str(scene.get("color_temperature", "") or "").strip() or "neutral"
+            scene_lighting_raw = str(scene.get("lighting", "") or "").strip()
+            scene_color_raw = str(scene.get("color_temperature", "") or "").strip()
+            scene_lighting = scene_lighting_raw or "soft natural light"
+            scene_color = scene_color_raw or "neutral"
             scene_mood = str(scene.get("mood", "") or "").strip() or "cinematic"
+            raw_location = str(candidate.get("location", "") or "").strip()
+            scene_location = str(scene.get("location", "") or "").strip()
+            if scene_location:
+                candidate["location"] = scene_location
+            elif raw_location:
+                candidate["location"] = raw_location
+            else:
+                candidate["location"] = "unspecified location"
+            if scene_lighting_raw:
+                candidate["lighting"] = scene_lighting_raw
+            if scene_color_raw:
+                candidate["color_temperature"] = scene_color_raw
 
             defaults = {
                 "camera_shot": DEFAULT_CAMERA_SHOT,
