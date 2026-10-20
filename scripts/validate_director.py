@@ -339,8 +339,12 @@ def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue()
         observed["system"] = system_prompt
         observed["payload"] = json.loads(user_prompt)
         return {
-            "candidates": [{"name": "Elara", "entity_type": "PERSON", "is_character": True,
-                            "identity_type": "named_character"}],
+            "candidates": [
+                {"name": "Elara", "entity_type": "PERSON", "is_character": True,
+                 "identity_type": "named_character"},
+                {"name": "Kael Mercer", "entity_type": "PERSON", "is_character": True,
+                 "identity_type": "named_character"},
+            ],
             "quote_classifications": [{"quote_id": 1, "classification": "remote_or_offscreen_spoken", "speaker": "Kael Mercer"}],
         }
     mixin._chat_json = fake_chat_json
@@ -355,10 +359,12 @@ def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue()
             "Qwen should decide the cast directly and classify each numbered source quote")
     _assert("physically participate" in observed["system"] and "no cast-count quota" in observed["system"].lower() and "every supplied `quote_id`" in observed["system"].lower(),
             "extractor must request all current-action participants and classify every quote ID")
-    _assert([item["name"] for item in result["candidates"]] == ["Elara"],
-            "the extractor must not programmatically add a missing character to Qwen's roster")
-    _assert(mixin._semantic_spoken_dialogue == [],
-            "remote speech must not become an in-person dialogue event or add its speaker to the cast")
+    _assert([item["name"] for item in result["candidates"]] == ["Elara", "Kael Mercer"],
+            "the extractor must use Qwen's returned roster and must not programmatically add a missing character")
+    _assert(len(mixin._semantic_spoken_dialogue) == 1
+            and mixin._semantic_spoken_dialogue[0].get("delivery") == "remote"
+            and mixin._semantic_spoken_dialogue[0].get("speaker") == "Kael Mercer",
+            "explicit attributed remote dialogue must be retained as remote audio, not reclassified as in-person")
 
 
 def test_in_person_dialogue_speaker_must_exist_in_qwen_cast():
@@ -603,9 +609,106 @@ def test_story_dialogue_contract_uses_qwen_semantic_spans():
         allowed_speakers={"Lena", "Dr. Elias"},
     )
     _assert(
-        [item["text"] for item in speaker_contamination] == ["the storm is the first warning"],
-        f"remote 'speaker' context incorrectly removed later in-person dialogue: {speaker_contamination!r}",
+        [item["text"] for item in speaker_contamination] == ["you shouldn't be here", "the storm is the first warning"],
+        f"remote source dialogue should be preserved without contaminating the later in-person line: {speaker_contamination!r}",
     )
+    _assert(speaker_contamination[0].get("delivery") == "remote" and speaker_contamination[1].get("delivery") == "in_person",
+            f"remote-channel carry-over did not stop at the physical entrance: {speaker_contamination!r}")
+
+
+def test_consecutive_quote_speaker_carries_forward_after_pronoun_attribution():
+    from planner.qwen_director import QwenDirector
+    story = (
+        'Vex confronted Elara in the vault. “You’ll bury the cure!” she screamed. '
+        '“The world needs it!” Elara met her gaze, unwavering.'
+    )
+    segments = QwenDirector._extract_story_spoken_segments(
+        story,
+        [
+            {"quote_id": 1, "text": "You’ll bury the cure!", "speaker": "Mara Vex"},
+            # Deliberately wrong extractor label: source grammar has no new speaker
+            # attribution before the second line, so the continuing turn remains Vex's.
+            {"quote_id": 2, "text": "The world needs it!", "speaker": "Elara"},
+        ],
+        allowed_speakers={"Mara Vex", "Elara"},
+    )
+    _assert(len(segments) == 2, f"both consecutive dialogue turns must survive: {segments!r}")
+    _assert(segments[0]["source_speakers"] == {"mara vex"}, f"first shout lost Vex attribution: {segments!r}")
+    _assert(segments[1]["source_speakers"] == {"mara vex"},
+            f"continued quote was incorrectly reassigned without a new attribution: {segments!r}")
+
+
+def test_explicit_empty_shot_characters_are_not_filled_from_scene_cast():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    scene = {
+        "scene_id": "scene_001",
+        "description": "The empty vault corridor hums under emergency lighting.",
+        "location": "vault corridor",
+        "characters": ["Elara Voss", "Mara Vex"],
+    }
+    shot_data = {
+        "shot_id": "scene_001_shot_001", "scene_id": "scene_001",
+        "action": "The emergency light pulses over the sealed vault door.",
+        "visual_prompt": "The empty vault corridor under emergency lights, the sealed vault door and no people in view.",
+        "characters": [], "dialogue_events": [], "speaking_characters": [], "speech_text": "",
+        "camera_shot": "wide", "camera_movement": "static",
+        "lens_and_depth_of_field": "normal lens", "composition_notes": "Center the sealed door.",
+    }
+    sanitized = director._sanitize_shots([shot_data], scene, {"elara voss", "mara vex"})
+    _assert(len(sanitized) == 1, f"valid environment-only shot was dropped: {sanitized!r}")
+    _assert(sanitized[0].get("characters") == [],
+            f"explicitly empty visible cast was silently repopulated from the scene roster: {sanitized[0]!r}")
+    director._validate_shot_character_contract(sanitized, [
+        {"name": "Elara Voss"}, {"name": "Mara Vex"},
+    ])
+
+
+def test_remote_only_shot_can_have_no_visible_source_body():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._validate_shot_character_contract([{
+        "shot_id": "scene_001_shot_002", "characters": [],
+        "speaking_characters": ["AURORA"],
+        "dialogue_events": [{"speaker": "AURORA", "text": "Vault integrity compromised.", "delivery": "remote"}],
+    }], [{"name": "AURORA"}])
+    try:
+        director._validate_shot_character_contract([{
+            "shot_id": "scene_001_shot_003", "characters": [],
+            "speaking_characters": ["AURORA"],
+            "dialogue_events": [{"speaker": "AURORA", "text": "Vault integrity compromised.", "delivery": "in_person"}],
+        }], [{"name": "AURORA"}])
+    except RuntimeError as exc:
+        _assert("in-person speaker" in str(exc), f"wrong rejection for unbound in-person speaker: {exc}")
+    else:
+        raise AssertionError("an unbound in-person speaker must still fail closed")
+
+
+def test_remote_delivery_survives_timeline_and_context_ir_without_visible_source():
+    from pipeline.dialogue_timeline import DialogueTimeline
+    from pipeline.context_ir import H3ContextIRCompiler
+    timeline = DialogueTimeline(characters=[
+        {"character_id": "character-aurora", "name": "AURORA"},
+        {"character_id": "character-elara", "name": "Elara Voss"},
+    ])
+    shot = {
+        "shot_id": "scene_001_shot_001", "scene_id": "scene_001",
+        "duration_seconds": 5.2, "characters": ["Elara Voss"],
+        "dialogue_events": [{"speaker": "AURORA", "text": "Opening the vault will trigger the storm.", "delivery": "remote"}],
+    }
+    events = timeline.schedule_shot(shot)
+    _assert(len(events) == 1 and events[0]["delivery"] == "remote",
+            f"timeline did not retain remote delivery or incorrectly require visible binding: {events!r}")
+    _assert(events[0]["speaker_id"] == "character-aurora",
+            f"remote speaker must resolve through canonical roster: {events!r}")
+    context_lines = H3ContextIRCompiler._dialogue_lines(
+        {"language": "English"},
+        {"characters": ["Elara Voss"], "dialogue_events": events},
+    )
+    _assert(len(context_lines) == 1 and "remote channel" in context_lines[0].lower(),
+            f"Context IR lost remote channel semantics: {context_lines!r}")
+    _assert("do not show a physical source body" in context_lines[0].lower(),
+            f"Context IR must distinguish audio-only source from a story-established projection: {context_lines!r}")
 
 
 def test_bare_radio_prop_does_not_make_following_live_quote_remote():
@@ -658,14 +761,18 @@ def test_honorific_speaker_normalization_keeps_in_person_dialogue_and_filters_re
     )
     texts = [segment["display"] for segment in segments]
     speakers = [segment["source_speakers"] for segment in segments]
-    _assert(len(segments) == 2, f"expected two visible Renn utterances and no radio dialogue: {segments}")
+    _assert(len(segments) == 4, f"expected two remote-channel and two in-person Renn utterances: {segments}")
+    _assert(segments[0].get("delivery") == "remote" and segments[1].get("delivery") == "remote",
+            f"live radio turns must be kept as remote audio: {segments!r}")
+    _assert(all(segment.get("delivery") == "in_person" for segment in segments[2:]),
+            f"remote-channel context leaked past the character's physical entrance: {segments!r}")
     _assert(any("You’ve got ten minutes before the storm breaches the outer shell," == text for text in texts),
             f"in-person entrance dialogue was dropped: {texts}")
     _assert("No one leaves with that data," in texts, f"in-person final-scene dialogue was dropped: {texts}")
     _assert(all(value == {"renn"} for value in speakers), f"title-bearing speaker was not canonicalized: {speakers}")
 
 
-def test_dialogue_reconciliation_keeps_only_visible_canonical_speaker_events():
+def test_dialogue_reconciliation_preserves_remote_audio_without_visible_binding():
     from planner.qwen_director import QwenDirector
     story = (
         'Lena’s radio crackled. “Voss, you still there?” It was Dr. Renn, his voice taut. '
@@ -675,6 +782,7 @@ def test_dialogue_reconciliation_keeps_only_visible_canonical_speaker_events():
         'Renn yanked the ignition key from the dashboard. “No one leaves with that data,” he said, tossing the key into the wind.'
     )
     director = QwenDirector.__new__(QwenDirector)
+    director._reference_visual_context = {}
     director._semantic_spoken_dialogue = [
         {"text": "Voss, you still there?", "speaker": "Dr. Renn"},
         {"text": "Don’t open that vault", "speaker": "Dr. Renn"},
@@ -701,7 +809,12 @@ def test_dialogue_reconciliation_keeps_only_visible_canonical_speaker_events():
         {"name": "Renn", "identity_type": "named_character"},
     ]
     director._normalize_dialogue_speakers(story, scenes, shots, characters)
-    _assert(shots[0]["dialogue_events"] == [], f"remote radio speech must not become visible shot dialogue: {shots[0]}")
+    _assert(len(shots[0]["dialogue_events"]) == 2
+            and all(event.get("delivery") == "remote" and event.get("speaker") == "Renn"
+                    for event in shots[0]["dialogue_events"]),
+            f"both remote radio turns must remain in the audio track with remote delivery: {shots[0]}")
+    _assert("Renn" not in shots[0]["characters"] and "Renn" not in scenes[0]["characters"],
+            "remote speaker must not be added to visual shot/scene bindings")
     _assert(len(shots[1]["dialogue_events"]) == 1 and shots[1]["dialogue_events"][0]["speaker"] == "Renn",
             f"honorific-bearing in-person speaker was lost or not canonicalized: {shots[1]}")
     _assert(len(shots[2]["dialogue_events"]) == 1 and shots[2]["dialogue_events"][0]["speaker"] == "Renn",
@@ -883,7 +996,9 @@ def test_story_prompt_is_open_cast_and_fully_filled():
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = q._story_text_system(mode)
         _assert("__" not in text, f"{mode}: unfilled length placeholder in prompt")
-        _assert(f"exactly {DIRECTOR_STORY_SCENES} paragraphs" in text, f"{mode}: scene count missing from prompt")
+        _assert(f"exactly {DIRECTOR_STORY_SCENES} explicitly marked scene blocks" in text
+                and "[[SCENE_01]]" in text and "[[SCENE_12]]" in text,
+                f"{mode}: explicit scene-boundary contract missing from prompt")
         low = text.lower()
         _assert("names" in low and "relationships" in low, f"{mode}: Qwen must own cast, names and relationships")
         from planner.config import DIRECTOR_STORY_CAST_SIZE_POLICY, RUNTIME
@@ -896,12 +1011,16 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must require active character participation and interactions")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
+        _assert("75 story words" in low and "continuity lock" in q._story_text_user(mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower(),
+                f"{mode}: writer must guard minimum scene development and reconcile continuity")
         blueprint = q._story_blueprint_system(mode).lower()
         _assert("no fixed minimum" in blueprint and "maximum" in blueprint,
                 f"{mode}: Architect must use a plot-driven, unbounded cast size")
         _assert(("physically present" in blueprint or "physically active" in blueprint)
                 and "at least two beats" in blueprint,
                 f"{mode}: architecture prompt must seed active characters and interactions")
+        _assert("continuity ledger" in blueprint and "irreversible action" in blueprint,
+                f"{mode}: architect must reconcile irreversible actions and character/object states")
 
 
 def test_shot_sampler_uses_runtime_manifest_values():
@@ -1201,7 +1320,8 @@ def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes
             temperature=temperature, top_p=top_p, source_character_names=[],
         )
     except RuntimeError as exc:
-        _assert("Could not normalize the story to exactly" in str(exc),
+        _assert("scene boundaries were preserved" in str(exc).lower()
+                and "no split, merge" in str(exc).lower(),
                 f"unexpected topology failure: {exc}")
     else:
         raise AssertionError("story without sufficient sentence boundaries must not be accepted")
@@ -1293,9 +1413,11 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
         DIRECTOR_STORY_WRITER_TOP_P, STORY_MIN_WORDS,
     )
     paragraphs = [
-        " ".join([f"Scene{i}", "Ines", "carried", "the", "lantern", "down", "the", "cellar", "stairs", "and", "counted", "each", "step."]
-                 + ["She", "listened", "for", "the", "door", "above", "her", "head."] * 8)
-        for i in range(DIRECTOR_STORY_SCENES + 3)
+        f"[[SCENE_{i:02d}]] " + " ".join(
+            [f"Scene{i}", "Ines", "carried", "the", "lantern", "down", "the", "cellar", "stairs", "and", "counted", "each", "step."]
+            + ["She", "listened", "for", "the", "door", "above", "her", "head."] * 8
+        )
+        for i in range(1, DIRECTOR_STORY_SCENES + 1)
     ]
     story = "\n\n".join(paragraphs)
     director = QwenDirector.__new__(QwenDirector)
@@ -1367,8 +1489,10 @@ def test_compact_shot_prompt_example_is_valid_json():
                   "speaking_characters", "speech_text", "is_scene_boundary",
                   "character_spatial_bboxes", "character_spatial_regions"):
         _assert(field not in shot, f"compact prompt example must not teach output of derived field {field}")
-    _assert("dialogue_events" in shot and "continuity_start_state" in shot and "continuity_end_state" in shot,
-            "compact example must retain authoritative dialogue and continuity fields")
+    _assert("dialogue_events" not in shot and "continuity_start_state" in shot and "continuity_end_state" in shot,
+            "dialogue is assigned once at the scene level; shot objects must not duplicate dialogue references")
+    _assert("dialogue_assignments" in scene and scene["dialogue_assignments"] == {},
+            "compact example must show the parent-level dialogue assignment object")
 
 
 def test_compact_shot_batch_schema_omits_derived_and_empty_fields():
@@ -1403,6 +1527,91 @@ def test_compact_shot_batch_schema_omits_derived_and_empty_fields():
     full = probe._shot_json_schema()["properties"]["shots"]["items"]["properties"]
     _assert("location" in full and "character_spatial_bboxes" in full,
             "compact optimization must not remove fields from the canonical standalone shot schema")
+
+
+def test_scene_local_dialogue_assignments_are_unique_and_constrained():
+    from planner.qwen_director import QwenDirector
+    probe = QwenDirector.__new__(QwenDirector)
+    schema = probe._shot_batch_json_schema(
+        scene_count=2,
+        dialogue_ids_by_scene={
+            "scene_001": ["scene_001_d001", "scene_001_d002"],
+            "scene_002": [],
+        },
+    )
+    variants = schema["properties"]["scene_shots"]["items"]["oneOf"]
+    by_scene = {
+        variant["properties"]["scene_id"]["enum"][0]: variant
+        for variant in variants
+    }
+    first = by_scene["scene_001"]["properties"]["dialogue_assignments"]
+    _assert(first["required"] == ["scene_001_d001", "scene_001_d002"],
+            "each allowed source ID must be represented exactly once as a parent object key")
+    for dialogue_id, property_schema in first["properties"].items():
+        _assert(property_schema["enum"] == [1, 2, 3],
+                f"dialogue assignment {dialogue_id} must select exactly one legal 1-based shot")
+        _assert(property_schema["type"] == "integer",
+                f"dialogue assignment {dialogue_id} must use a legal integer shot index")
+    second = by_scene["scene_002"]["properties"]["dialogue_assignments"]
+    _assert(second["properties"] == {} and second["required"] == [] and second["additionalProperties"] is False,
+            "a scene with no source dialogue must allow only an empty assignment object")
+    _assert("dialogue_assignments" in by_scene["scene_001"]["required"],
+            "the keyed assignment map must be required on every scene response")
+    shot_properties = by_scene["scene_001"]["properties"]["shots"]["items"]["properties"]
+    _assert("dialogue_events" not in shot_properties,
+            "live shot schema must not permit per-shot duplicated source IDs")
+
+
+def test_batch_normalizer_expands_scene_level_dialogue_assignments():
+    from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
+    normalized = QwenDirectorSanitizeMixin._normalize_batch_shot_response({
+        "scene_shots": [{
+            "scene_id": "scene_004",
+            "dialogue_assignments": {"scene_004_d001": 2, "scene_004_d002": 3},
+            "shots": [{"action": "A"}, {"action": "B"}, {"action": "C"}],
+        }]
+    })
+    shots = normalized["scene_004"]
+    _assert(shots[0].get("dialogue_events", []) == [],
+            "unassigned shot must not receive an invented dialogue reference")
+    _assert(shots[1].get("dialogue_events", []) == [{"source_dialogue_id": "scene_004_d001"}],
+            "parent assignment must expand to the selected 1-based shot only")
+    _assert(shots[2].get("dialogue_events", []) == [{"source_dialogue_id": "scene_004_d002"}],
+            "each source ID must expand only to its own assigned shot")
+    _assert("source_dialogue_id" not in {event.get("source_dialogue_id") for event in shots[1].get("dialogue_events", [])},
+            "a source ID assigned to another shot must not leak into this shot")
+
+
+def test_repeated_dialogue_text_maps_to_the_exact_source_paragraph():
+    import json
+    from planner.qwen_director import QwenDirector
+
+    story = (
+        'Mira stood by the entrance and said, “Stay here.” She watched the door close.'
+        '\n\n'
+        'Tarek crossed the room and said, “Stay here.” He then guarded the corridor.'
+    )
+    director = QwenDirector.__new__(QwenDirector)
+    director._reference_visual_context = {}
+    director._semantic_spoken_dialogue = [
+        {"quote_id": 1, "speaker": "Mira", "text": "Stay here."},
+        {"quote_id": 2, "speaker": "Tarek", "text": "Stay here."},
+    ]
+    scenes = [
+        {"scene_id": "scene_001", "description": "Mira watches the entrance."},
+        {"scene_id": "scene_002", "description": "Tarek guards a corridor."},
+    ]
+    payload = json.loads(director._shot_director_batch_user(
+        story, [{"name": "Mira"}, {"name": "Tarek"}], scenes, visual_language={}
+    ))
+    sources = {
+        scene["scene_id"]: [(entry["speaker"], entry["text"]) for entry in scene["source_dialogue"]]
+        for scene in payload["scenes"]
+    }
+    _assert(sources["scene_001"] == [("Mira", "Stay here.")],
+            f"first repeated quote must bind to its first source scene: {sources}")
+    _assert(sources["scene_002"] == [("Tarek", "Stay here.")],
+            f"second repeated quote must bind to its own source scene: {sources}")
 
 
 def test_source_dialogue_ids_are_stable_and_scene_scoped():
@@ -1558,6 +1767,36 @@ def test_story_scene_coercion_keeps_quoted_dialogue_intact():
                 f"quoted dialogue/speaker attribution was split across scene paragraphs: {paragraphs!r}")
 
 
+def test_scene_markers_preserve_one_to_one_scene_boundaries():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    marked = "\n\n".join(
+        f"[[SCENE_{index:02d}]] Scene {index} starts and ends in its own location."
+        for index in range(1, DIRECTOR_STORY_SCENES + 1)
+    )
+    normalized = QwenDirector._coerce_story_to_scene_paragraphs(marked)
+    paragraphs = [part for part in re.split(r"\n\s*\n+", normalized) if part.strip()]
+    _assert(len(paragraphs) == DIRECTOR_STORY_SCENES,
+            f"marked scenes should parse one-to-one: got {len(paragraphs)}")
+    _assert("[[SCENE_" not in normalized, "structural markers must not leak into finished story prose")
+    _assert(paragraphs[0].startswith("Scene 1") and paragraphs[-1].startswith(f"Scene {DIRECTOR_STORY_SCENES}"),
+            "scene marker parsing changed story order")
+
+    eleven = "\n\n".join(f"Existing beat {index}." for index in range(1, DIRECTOR_STORY_SCENES))
+    untouched = QwenDirector._coerce_story_to_scene_paragraphs(eleven)
+    _assert(len([p for p in untouched.split("\n\n") if p.strip()]) == DIRECTOR_STORY_SCENES - 1,
+            "an 11-scene story must not be split into 12 artificial scenes")
+
+    malformed = marked.replace("[[SCENE_06]]", "[[SCENE_05]]", 1)
+    try:
+        QwenDirector._coerce_story_to_scene_paragraphs(malformed)
+    except ValueError as exc:
+        _assert("must appear exactly once and in order" in str(exc),
+                f"malformed marker failure should explain its invariant: {exc}")
+    else:
+        raise AssertionError("duplicate/out-of-order scene markers must fail closed")
+
+
 # ── Runtime fingerprint / camera ──────────────────────────────────────────
 
 def test_checkpoint_fingerprint_tracks_runtime_topology_and_frame_policy():
@@ -1695,8 +1934,12 @@ def test_unique_story_paragraph_recovers_unmatched_source_dialogue():
     ]
     _assert(("Dr. Elias", "the storm is the first warning") in normalized,
             f"unmatched in-person dialogue was not recovered from its unique story paragraph: {source_dialogue!r}")
-    _assert(all("you shouldn t be here" not in text for _, text in normalized),
-            f"remote loudspeaker dialogue leaked into scene-local visible speech: {source_dialogue!r}")
+    remote_lines = [item for item in source_dialogue if "you shouldn t be here" in re.sub(r"[^a-z0-9]+", " ", str(item.get("text", "")).casefold()).strip()]
+    _assert(len(remote_lines) == 1 and remote_lines[0].get("delivery") == "remote",
+            f"live remote loudspeaker dialogue must be preserved as remote audio, not discarded or made in-person: {source_dialogue!r}")
+    in_person_lines = [item for item in source_dialogue if "the storm is the first warning" in re.sub(r"[^a-z0-9]+", " ", str(item.get("text", "")).casefold()).strip()]
+    _assert(len(in_person_lines) == 1 and in_person_lines[0].get("delivery", "in_person") == "in_person",
+            f"the later in-person dialogue was not distinguished from remote speech: {source_dialogue!r}")
 
 
 def test_exact_duplicate_terminal_sentence_is_removed_without_retry():
@@ -1812,10 +2055,14 @@ def main():
         test_story_markdown_emphasis_is_removed_without_cross_paragraph_consumption,
         # Dialogue contract
         test_story_dialogue_contract_uses_qwen_semantic_spans,
+        test_consecutive_quote_speaker_carries_forward_after_pronoun_attribution,
+        test_explicit_empty_shot_characters_are_not_filled_from_scene_cast,
+        test_remote_only_shot_can_have_no_visible_source_body,
+        test_remote_delivery_survives_timeline_and_context_ir_without_visible_source,
         test_bare_radio_prop_does_not_make_following_live_quote_remote,
         test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally,
         test_honorific_speaker_normalization_keeps_in_person_dialogue_and_filters_remote_voice,
-        test_dialogue_reconciliation_keeps_only_visible_canonical_speaker_events,
+        test_dialogue_reconciliation_preserves_remote_audio_without_visible_binding,
         # Prompt assembly
         test_shot_planning_allows_empty_scene_binding_with_closed_roster,
         test_shot_context_preserves_paragraph_boundaries,
@@ -1848,6 +2095,9 @@ def main():
         test_compact_shot_prompt_example_is_valid_json,
         test_compact_shot_batch_schema_omits_derived_and_empty_fields,
         test_source_dialogue_ids_are_stable_and_scene_scoped,
+        test_repeated_dialogue_text_maps_to_the_exact_source_paragraph,
+        test_scene_local_dialogue_assignments_are_unique_and_constrained,
+        test_batch_normalizer_expands_scene_level_dialogue_assignments,
         test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicate,
         test_batch_normalizer_reconstructs_deterministic_shot_ids,
         test_shot_batch_context_caps_are_largest_first_and_bounded,
@@ -1855,6 +2105,7 @@ def main():
         test_shot_batch_completion_budget_uses_runtime_topology,
         test_shot_batch_budget_and_prompt_compaction_create_more_two_scene_headroom,
         test_story_scene_coercion_keeps_quoted_dialogue_intact,
+        test_scene_markers_preserve_one_to_one_scene_boundaries,
         # Runtime
         test_checkpoint_fingerprint_tracks_runtime_topology_and_frame_policy,
         test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
