@@ -541,9 +541,11 @@ class H3ContextIRCompiler:
             timing = f" at {start:.2f} seconds" if end <= start else f" from {start:.2f} to {end:.2f} seconds"
             speaker_phrase = f"{speaker_name} ({speaker_id})" if speaker_name else f"({speaker_id})"
             continuation = " Continue this dialogue into the next shot." if bool(event.get("continues_to_next_shot", False)) else ""
-            lines.append(
-                f"At{timing}, {speaker_phrase} says <d>[{language}] {text}</d>.{continuation}"
-            )
+            if str(event.get("delivery", "in_person")).strip().lower() == "remote":
+                line = f"At{timing}, {speaker_phrase} is heard over an established in-world remote channel; do not show a physical source body. Show a projection or hologram only if the story explicitly establishes one. The audible line is <d>[{language}] {text}</d>.{continuation}"
+            else:
+                line = f"At{timing}, {speaker_phrase} says <d>[{language}] {text}</d>.{continuation}"
+            lines.append(line)
         if not lines:
             speech = cls._clean(shot.get("speech_text"))
             if speech:
@@ -845,7 +847,7 @@ class H3ContextIRCompiler:
             if not isinstance(event,dict): continue
             raw=self._clean(event.get("speaker_id") or event.get("speaker_name") or event.get("speaker"))
             if not raw: continue
-            dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0)})
+            dialogue_rows.append({"speaker_id":speaker_map.get(raw,raw if re.fullmatch(r"S\d+",raw) else ""),"speaker_name":self._speaker_name(event),"language":self._language(plan,shot,event),"text":str(event.get("text","") or ""),"start_seconds":float(event.get("start_seconds",0.0) or 0.0),"end_seconds":float(event.get("end_seconds",0.0) or 0.0),"delivery":"remote" if str(event.get("delivery","in_person")).strip().lower()=="remote" else "in_person"})
         production_id = self._clean(plan.get("production_id"))
         capture_root = str(plan.get("context_ir_capture_root", "") or "").strip()
         if not capture_root and production_id:
