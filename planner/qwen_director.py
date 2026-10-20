@@ -24,6 +24,7 @@ from planner.config import (
     STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
     DIRECTOR_N_CTX,
+    DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_STORY_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_MAX_TOKENS,
     DIRECTOR_STORY_PLAN_THINKING_BUDGET,
@@ -717,38 +718,95 @@ class QwenDirector(
                     )[: self.SHOTS_PER_SCENE]
 
                 else:
-                    # Start with the largest candidate and shrink only if the
-                    # prompt would leave less than a useful completion reserve
-                    # inside the fixed 8192-token context.
+                    # Fit the largest candidate batch first. When two scenes do
+                    # not fit, compact only the global story recap in stages; the
+                    # per-scene descriptions, dialogue whitelist, canonical cast,
+                    # and continuity evidence remain intact. Shrink to one scene
+                    # only if the smaller recap still cannot fit.
+                    batch_context_fits = False
+                    batch_user = ""
+                    prompt_tokens = 0
+                    desired_completion = 0
+                    chosen_context_chars = None
                     while True:
-                        batch_user = self._shot_director_batch_user(
+                        base_user = self._shot_director_batch_user(
                             story,
                             characters,
                             batch_scenes,
                             visual_language,
                         )
-
                         desired_completion = self._shot_batch_completion_budget(
                             len(batch_scenes)
                         )
+                        prompt_limit = int(DIRECTOR_N_CTX) - 128 - desired_completion
+                        try:
+                            base_payload = json.loads(base_user)
+                        except (TypeError, json.JSONDecodeError):
+                            base_payload = None
 
-                        prompt_tokens = self._count_tokens(
-                            self._shot_director_batch_system()
-                            + "\n\n"
-                            + batch_user
+                        context_caps = (
+                            self._shot_batch_story_context_capacities(
+                                DIRECTOR_SHOT_STORY_CONTEXT_CHARS
+                            )
+                            if base_payload is not None
+                            else [DIRECTOR_SHOT_STORY_CONTEXT_CHARS]
                         )
+                        candidate_users = []
+                        seen_candidate_users = set()
+                        for context_chars in context_caps:
+                            if base_payload is not None:
+                                candidate_payload = dict(base_payload)
+                                if context_chars != DIRECTOR_SHOT_STORY_CONTEXT_CHARS:
+                                    candidate_payload["story_context"] = self._compact_story_context(
+                                        story, context_chars
+                                    )
+                                candidate_user = json.dumps(
+                                    candidate_payload,
+                                    ensure_ascii=False,
+                                    separators=(",", ":"),
+                                )
+                            else:
+                                candidate_user = base_user
+                            if candidate_user not in seen_candidate_users:
+                                candidate_users.append((candidate_user, context_chars))
+                                seen_candidate_users.add(candidate_user)
 
-                        if (
-                            prompt_tokens
-                            <= int(DIRECTOR_N_CTX)
-                            - 128
-                            - desired_completion
-                        ):
+                        fitted_user = None
+                        fitted_tokens = None
+                        fitted_chars = None
+                        for candidate_user, candidate_chars in candidate_users:
+                            candidate_tokens = self._count_tokens(
+                                self._shot_director_batch_system()
+                                + "\n\n"
+                                + candidate_user
+                            )
+                            if candidate_tokens <= prompt_limit:
+                                fitted_user = candidate_user
+                                fitted_tokens = candidate_tokens
+                                fitted_chars = candidate_chars
+                                break
+
+                        if fitted_user is not None:
+                            batch_user = fitted_user
+                            prompt_tokens = int(fitted_tokens)
+                            chosen_context_chars = fitted_chars
+                            batch_context_fits = True
+                            if (
+                                len(batch_scenes) > 1
+                                and chosen_context_chars is not None
+                                and chosen_context_chars < DIRECTOR_SHOT_STORY_CONTEXT_CHARS
+                            ):
+                                print(
+                                    "[DIRECTOR] compacted global story recap for shot batch "
+                                    f"scenes={len(batch_scenes)} chars={chosen_context_chars}/"
+                                    f"{DIRECTOR_SHOT_STORY_CONTEXT_CHARS} prompt_tokens={prompt_tokens} "
+                                    f"limit={prompt_limit}; scene evidence/dialogue preserved",
+                                    flush=True,
+                                )
                             break
 
                         if len(batch_scenes) == 1:
                             break
-
                         batch_scenes = batch_scenes[:-1]
 
                     batch_ids = [
@@ -759,31 +817,44 @@ class QwenDirector(
                     ]
 
                     batch_response = None
-                    try:
-                        batch_response = self._chat_json(
-                            self._shot_director_batch_system(),
-                            batch_user,
-                            minimum_completion=320,
-                            temperature=shot_temperature,
-                            top_p=shot_top_p,
-                            call_name=(
-                                "shot_batch:"
-                                + "_".join(batch_ids)
-                            ),
-                            max_completion=self._shot_batch_completion_budget(
-                                len(batch_scenes)
-                            ),
-                            json_mode=True,
-                            disable_thinking=True,
-                            response_schema=self._shot_batch_json_schema(
-                                scene_count=len(batch_scenes),
-                            ),
-                        )
-                    except RuntimeError as batch_error:
+                    batch_dialogue_index: dict[str, dict[str, dict]] = {}
+                    batch_dialogue_ids: list[str] = []
+                    if not batch_context_fits:
                         self._record_recovery(
-                            "shot_batch_deterministic_fallback",
-                            str(batch_error),
+                            "shot_batch_context_budget_fallback",
+                            "Even a single-scene prompt exceeded the context budget after "
+                            "global-story recap compaction; used deterministic shot fallback.",
                         )
+                    else:
+                        batch_dialogue_index, batch_dialogue_ids = self._shot_batch_dialogue_index(
+                            batch_user
+                        )
+                        try:
+                            batch_response = self._chat_json(
+                                self._shot_director_batch_system(),
+                                batch_user,
+                                minimum_completion=320,
+                                temperature=shot_temperature,
+                                top_p=shot_top_p,
+                                call_name=(
+                                    "shot_batch:"
+                                    + "_".join(batch_ids)
+                                ),
+                                max_completion=self._shot_batch_completion_budget(
+                                    len(batch_scenes)
+                                ),
+                                json_mode=True,
+                                disable_thinking=True,
+                                response_schema=self._shot_batch_json_schema(
+                                    scene_count=len(batch_scenes),
+                                    dialogue_ids=batch_dialogue_ids,
+                                ),
+                            )
+                        except RuntimeError as batch_error:
+                            self._record_recovery(
+                                "shot_batch_deterministic_fallback",
+                                str(batch_error),
+                            )
 
                     # Model/runtime failure is the only recovery boundary here. Parsing,
                     # sanitization and invariant errors are intentionally outside the catch so
@@ -807,11 +878,12 @@ class QwenDirector(
                                 target_scene.get("scene_id", "") or ""
                             ).strip()
 
+                            referenced_shots = self._expand_shot_batch_dialogue_references(
+                                batch_map.get(target_id, []),
+                                batch_dialogue_index.get(target_id, {}),
+                            )
                             candidate = self._sanitize_shots(
-                                batch_map.get(
-                                    target_id,
-                                    [],
-                                ),
+                                referenced_shots,
                                 target_scene,
                                 character_names,
                             )
@@ -3693,18 +3765,136 @@ class QwenDirector(
                 )
 
     @staticmethod
+    def _shot_batch_dialogue_index(
+        user_payload: str,
+    ) -> tuple[dict[str, dict[str, dict]], list[str]]:
+        """Index the exact, scene-local dialogue whitelist used by a shot batch."""
+        try:
+            payload = json.loads(str(user_payload or ""))
+        except (TypeError, json.JSONDecodeError):
+            return {}, []
+        scenes = payload.get("scenes", []) if isinstance(payload, dict) else []
+        if not isinstance(scenes, list):
+            return {}, []
+        result: dict[str, dict[str, dict]] = {}
+        all_ids: list[str] = []
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            scene_id = str(scene.get("scene_id", "") or "").strip()
+            if not scene_id:
+                continue
+            local: dict[str, dict] = {}
+            entries = scene.get("source_dialogue", [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    dialogue_id = str(entry.get("dialogue_id", "") or "").strip()
+                    speaker = str(entry.get("speaker", "") or "").strip()
+                    text = str(entry.get("text", "") or "").strip()
+                    if not dialogue_id or not speaker or not text:
+                        continue
+                    if dialogue_id in local:
+                        # IDs are compiler-owned and must be unique within their scene.
+                        raise ValueError(
+                            f"Duplicate source dialogue ID {dialogue_id!r} in scene {scene_id!r}."
+                        )
+                    local[dialogue_id] = {"speaker": speaker, "text": text}
+                    all_ids.append(dialogue_id)
+            result[scene_id] = local
+        if len(all_ids) != len(set(all_ids)):
+            raise ValueError("Source dialogue IDs must be unique across a shot batch.")
+        return result, sorted(all_ids)
+
+    def _expand_shot_batch_dialogue_references(
+        self,
+        shots: list[dict],
+        source_dialogue_index: dict[str, dict],
+    ) -> list[dict]:
+        """Restore compact dialogue-ID references to exact source text and speakers.
+
+        One source ID may be assigned to at most one shot in its scene. Legacy
+        speaker/text events are retained only for backwards compatibility and are
+        still subjected to the normal source-anchor reconciliation pipeline.
+        """
+        expanded_shots: list[dict] = []
+        used_ids: set[str] = set()
+        for raw_shot in shots or []:
+            if not isinstance(raw_shot, dict):
+                continue
+            shot = dict(raw_shot)
+            raw_events = shot.get("dialogue_events", [])
+            if not isinstance(raw_events, list):
+                raw_events = []
+            expanded_events = []
+            for raw_event in raw_events:
+                if not isinstance(raw_event, dict):
+                    continue
+                dialogue_id = str(raw_event.get("source_dialogue_id", "") or "").strip()
+                if not dialogue_id:
+                    # Backwards compatibility with older cached/nonconforming responses;
+                    # the later source-anchor reconciler remains authoritative.
+                    if str(raw_event.get("speaker", "") or "").strip() and str(raw_event.get("text", "") or "").strip():
+                        expanded_events.append(dict(raw_event))
+                    continue
+                source = source_dialogue_index.get(dialogue_id)
+                if source is None:
+                    self._record_recovery(
+                        "unknown_shot_dialogue_reference",
+                        f"shot={shot.get('shot_id', '')!r} id={dialogue_id!r}; source-scene whitelist enforced",
+                    )
+                    continue
+                if dialogue_id in used_ids:
+                    self._record_recovery(
+                        "duplicate_shot_dialogue_reference",
+                        f"shot={shot.get('shot_id', '')!r} id={dialogue_id!r}; repeated reference dropped",
+                    )
+                    continue
+                used_ids.add(dialogue_id)
+                expanded_events.append({
+                    "speaker": str(source["speaker"]),
+                    "text": str(source["text"]),
+                    "continues_from_previous_shot": False,
+                    "continues_to_next_shot": False,
+                })
+            shot["dialogue_events"] = expanded_events
+            expanded_shots.append(shot)
+        return expanded_shots
+
+    @staticmethod
+    def _shot_batch_story_context_capacities(max_chars: int) -> list[int]:
+        """Largest-first global-story context caps for fitting two-scene batches.
+
+        Per-scene descriptions, canonical cast, source-dialogue spans and local
+        continuity notes are never changed by this strategy. Only the redundant
+        global narrative recap is compacted, and only when the context budget
+        requires it. The original configured cap is always tried first.
+        """
+        maximum = max(1, int(max_chars))
+        candidates = [maximum, min(maximum, 2400), min(maximum, 1800), min(maximum, 1200)]
+        result = []
+        for value in candidates:
+            if value not in result:
+                result.append(value)
+        return result
+
+    @staticmethod
     def _shot_batch_completion_budget(scene_count: int) -> int:
         """Return the token cap for a batched shot request.
 
-        The 700-token per-shot estimate is multiplied by the configured
+        The 600-token per-shot reserve is multiplied by the configured
         shots-per-scene and the number of scenes in this batch, then capped
-        by the global Director token ceiling. The shot count alone is not a
-        completion-token budget.
+        by the global Director token ceiling. This estimate is calibrated
+        against the October 20 traces after compacting derived response fields;
+        it preserves headroom above observed compact-output estimates and frees
+        context capacity for effective two-scene batching. Live vLLM traces must
+        confirm the budget remains sufficient on the deployed model/runtime.
         """
         count = max(1, int(scene_count))
         return min(
             int(DIRECTOR_MAX_TOKENS),
-            max(320, 700 * int(DIRECTOR_SHOTS_PER_SCENE) * count),
+            max(320, 600 * int(DIRECTOR_SHOTS_PER_SCENE) * count),
         )
 
     @_with_faulthandler_watchdog
