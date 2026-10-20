@@ -551,6 +551,8 @@ class ProductionPlanner:
     def _rebalance_story_units(
         self,
         units: list[StoryUnit],
+        *,
+        minimum_units: int = 4,
     ) -> list[StoryUnit]:
         """
         Deterministically normalize story units into the production
@@ -628,14 +630,10 @@ class ProductionPlanner:
                 if sentence:
                     pieces.append(sentence)
 
-        if len(pieces) < 4:
-            # The director contract requires at least four structural scene
-            # inputs. For short source text, create four overlapping context
-            # windows from the original material rather than inventing events
-            # or cutting the source into meaningless word fragments.
-            short_source = [
-                piece for piece in pieces if piece
-            ]
+        if len(pieces) < minimum_units:
+            # Preserve Story follows the source material; it must not duplicate a
+            # one-sentence source into several fake scenes merely to meet topology.
+            short_source = [piece for piece in pieces if piece]
             if not short_source:
                 short_source = [
                     str(unit.text or "").strip()
@@ -645,6 +643,12 @@ class ProductionPlanner:
 
             if not short_source:
                 return []
+
+            if minimum_units <= 1:
+                return [
+                    StoryUnit(order=index, text=piece)
+                    for index, piece in enumerate(short_source, start=1)
+                ]
 
             if len(short_source) == 1:
                 groups = [
@@ -3498,15 +3502,12 @@ class ProductionPlanner:
         self,
         story: str,
         characters: list[Character],
+        *,
+        minimum_scenes: int = 4,
     ) -> list[Scene]:
 
-        units = self._split_story(
-            story
-        )
-
-        units = self._rebalance_story_units(
-            units
-        )
+        units = self._split_story(story)
+        units = self._rebalance_story_units(units, minimum_units=max(1, int(minimum_scenes)))
 
         scenes = []
 
