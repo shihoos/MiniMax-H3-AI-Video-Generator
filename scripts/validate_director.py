@@ -373,16 +373,111 @@ def test_in_person_dialogue_speaker_must_exist_in_qwen_cast():
     mixin._character_semantic_calls = 0
     mixin._semantic_spoken_dialogue = []
     mixin._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
     mixin._chat_json = lambda *args, **kwargs: {
         "candidates": [{"name": "Elara", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"}],
         "quote_classifications": [{"quote_id": 1, "classification": "in_person_spoken", "speaker": "Kael Mercer"}],
     }
-    try:
-        mixin.extract_character_entities('Kael said, “I can walk.”')
-    except RuntimeError as exc:
-        _assert("absent from Qwen's accepted character roster" in str(exc), f"unexpected fail-closed reason: {exc}")
-    else:
-        raise AssertionError("in-person dialogue from a character absent from Qwen's roster was silently accepted")
+    result = mixin.extract_character_entities('Kael said, “I can walk.”')
+    _assert(result["spoken_dialogue"] == [], "unrostered in-person dialogue must be dropped, not assigned to a guessed character")
+    _assert(mixin._semantic_spoken_dialogue == [], "dropped dialogue must not leak into the later shot whitelist")
+    _assert(mixin._qwen_telemetry["deterministic_recoveries"] == 1, "the deterministic drop must be observable in telemetry")
+
+
+def test_source_attribution_overrides_mislabelled_ui_quote_speaker():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = "The display flashed “AEGIS: Access Denied.” Elara shouted, “I'm not here to play games!”"
+    mixin = object.__new__(QwenDirectorPromptMixin)
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
+    mixin._chat_json = lambda *args, **kwargs: {
+        "candidates": [
+            {"name": "Elara", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"},
+            {"name": "AEGIS", "entity_type": "SENTIENT", "is_character": True, "identity_type": "named_character"},
+        ],
+        "quote_classifications": [
+            {"quote_id": 1, "classification": "written_or_displayed", "speaker": "AEGIS"},
+            {"quote_id": 2, "classification": "remote_or_offscreen_spoken", "speaker": "AEGIS"},
+        ],
+    }
+    result = mixin.extract_character_entities(story)
+    spoken = result["spoken_dialogue"]
+    _assert(len(spoken) == 1, f"only the directly spoken Elara line should survive: {spoken!r}")
+    _assert(spoken[0]["text"] == "I'm not here to play games!" and spoken[0]["speaker"] == "Elara",
+            f"source-named speaker attribution must override Qwen's mistaken AEGIS label: {spoken!r}")
+    _assert(spoken[0].get("delivery") == "in_person", f"a nearby UI message must not make Elara's line remote: {spoken!r}")
+
+
+def test_named_ai_voice_from_speakers_is_source_grounded_remote():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = 'AURORA\'s voice echoed through the speakers: “The vault is failing.”'
+    quote = QwenDirectorPromptMixin._source_quote_inventory(story)[0]
+    attribution = QwenDirectorPromptMixin._source_named_quote_attribution(story, quote)
+    _assert(attribution is not None and attribution["speaker"] == "AURORA"
+            and attribution["delivery"] == "remote",
+            f"a speaker named at the start of a paragraph must not lose its first letter: {attribution!r}")
+    _assert(QwenDirectorPromptMixin._source_supports_remote_speaker(quote, attribution["speaker"]),
+            "an explicit speaker identity and remote channel in source context must pass remote grounding")
+
+
+def test_unrostered_remote_speaker_without_source_grounding_is_dropped():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    mixin = object.__new__(QwenDirectorPromptMixin)
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
+    mixin._chat_json = lambda *args, **kwargs: {
+        "candidates": [{"name": "Eli", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"}],
+        "quote_classifications": [{"quote_id": 1, "classification": "remote_or_offscreen_spoken", "speaker": "Ghost"}],
+    }
+    result = mixin.extract_character_entities('Eli entered the empty control room. “Open the door.” The corridor remained silent.')
+    _assert(result["spoken_dialogue"] == [],
+            f"Qwen's remote label alone must not invent an ungrounded source: {result['spoken_dialogue']!r}")
+    _assert(mixin._qwen_telemetry["deterministic_recoveries"] == 1,
+            "dropping a source-ungrounded remote speaker must be visible in telemetry")
+
+
+def test_unrostered_hologram_speaker_is_audio_only_not_a_crash():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = "Eli opened the vault. Eli's sister (hologram) said, “Do not touch the core.”"
+    mixin = object.__new__(QwenDirectorPromptMixin)
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._qwen_telemetry = {"deterministic_recoveries": 0, "calls": [], "total_elapsed_seconds": 0, "prompt_tokens": 0, "completion_tokens": 0, "retries": 0, "cache_hits": 0}
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
+    mixin._chat_json = lambda *args, **kwargs: {
+        "candidates": [{"name": "Eli", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"}],
+        "quote_classifications": [{"quote_id": 1, "classification": "in_person_spoken", "speaker": "Eli's sister (hologram)"}],
+    }
+    result = mixin.extract_character_entities(story)
+    _assert(len(result["spoken_dialogue"]) == 1, f"an explicit hologram voice should survive as dialogue-only audio: {result!r}")
+    _assert(result["spoken_dialogue"][0].get("delivery") == "remote", f"explicit hologram delivery must be remote: {result['spoken_dialogue']!r}")
+    _assert([item["name"] for item in result["candidates"]] == ["Eli"], "hologram recovery must never add a cast member")
+
+
+def test_context_compaction_never_loses_closing_quote_or_splits_attribution():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    story = (
+        "The station corridor remained cold and blue, while machinery rattled behind thick walls "
+        "and distant ventilation fans filled the air with a steady metallic roar. "
+        "The display flashed “AEGIS: Access Denied.” Elara shouted, “I'm not here to play games!” "
+        "The old control panel glowed under a layer of frost and dust, its narrow buttons almost "
+        "hidden below the cracked glass. The warning light remained red above the sealed door, "
+        "while a weak amber lamp flickered in the far corner of the room. The wall panels vibrated "
+        "whenever the generators changed pitch, making the thin shadows jump across the damp metal "
+        "floor. The ventilation fans struggled against the cold, and a thin trail of vapor drifted "
+        "through the broken service grille. Behind her, distant alarms filled the station as the "
+        "storm pressed against reinforced outer walls, rattling every loose fixture in the corridor."
+    )
+    _assert(len(story) > 400, "quote-preservation test must exercise the compaction path")
+    compact = QwenDirectorPromptMixin._compact_story_context(story, 400)
+    _assert(len(compact) <= 400, f"compacted context must respect its budget: {len(compact)}")
+    _assert('“AEGIS: Access Denied.”' in compact, f"closing punctuation for displayed text was lost: {compact!r}")
+    _assert("Elara shouted, “I'm not here to play games!”" in compact,
+            f"the named attribution and its quoted line must stay together: {compact!r}")
 
 
 def test_quote_inventory_preserves_repeated_quotes_and_punctuation():
@@ -711,6 +806,89 @@ def test_remote_delivery_survives_timeline_and_context_ir_without_visible_source
             f"Context IR must distinguish audio-only source from a story-established projection: {context_lines!r}")
 
 
+def test_unrostered_remote_speaker_survives_without_cast_addback():
+    from planner.qwen_director_prompts import QwenDirectorPromptMixin
+    from planner.qwen_director import QwenDirector
+    from pipeline.dialogue_timeline import DialogueTimeline
+
+    story = 'Eli watched as a hologram flickered to life. “I left you a key.” His sister’s face shimmered on the terminal.'
+    mixin = QwenDirectorPromptMixin()
+    mixin._character_semantic_calls = 0
+    mixin._semantic_spoken_dialogue = []
+    mixin._anchor_semantic_dialogue_to_story = lambda _story, items: list(items)
+    mixin._chat_json = lambda *args, **kwargs: {
+        "candidates": [{"name": "Eli", "entity_type": "PERSON", "is_character": True, "identity_type": "named_character"}],
+        "quote_classifications": [{
+            "quote_id": 1,
+            "classification": "remote_or_offscreen_spoken",
+            "speaker": "Eli's sister (hologram)",
+        }],
+    }
+    result = mixin.extract_character_entities(story, [])
+    _assert([item["name"] for item in result["candidates"]] == ["Eli"],
+            "an audio-only remote speaker must not be added to Qwen's canonical roster")
+    _assert(len(mixin._semantic_spoken_dialogue) == 1
+            and mixin._semantic_spoken_dialogue[0].get("delivery") == "remote",
+            "explicit remote dialogue must survive even when the source is not a canonical character")
+
+    director = QwenDirector.__new__(QwenDirector)
+    director._semantic_spoken_dialogue = list(mixin._semantic_spoken_dialogue)
+    director._qwen_telemetry = {}
+    director._recovery_events = []
+    segments = director._extract_story_spoken_segments(
+        story,
+        director._semantic_spoken_dialogue,
+        allowed_speakers=["Eli"],
+    )
+    _assert(len(segments) == 1 and segments[0].get("delivery") == "remote"
+            and "Eli's sister" in next(iter(segments[0].get("source_speakers", set()))),
+            f"the source remote-only voice was lost or reclassified: {segments!r}")
+
+    import json
+    director._reference_visual_context = {}
+    payload = json.loads(director._shot_director_batch_user(
+        story,
+        [{"name": "Eli"}],
+        [{"scene_id": "scene_001", "characters": ["Eli"], "description": story}],
+    ))
+    source_dialogue = payload["scenes"][0].get("source_dialogue", [])
+    _assert(len(source_dialogue) == 1
+            and source_dialogue[0].get("speaker") == "Eli's sister (hologram)"
+            and source_dialogue[0].get("delivery") == "remote",
+            f"shot prompt dialogue whitelist did not carry the audio-only speaker: {source_dialogue!r}")
+
+    shots = [{
+        "shot_id": "scene_001_shot_001", "scene_id": "scene_001", "characters": [],
+        "duration_seconds": 5.2, "action": "Eli watches the hologram on the terminal.",
+        "visual_prompt": "Eli watches the dim hologram shimmer above the terminal in the abandoned station.",
+        "dialogue_events": [{"speaker": "Eli's sister (hologram)", "text": "I left you a key.", "delivery": "remote"}],
+    }]
+    scenes = [{"scene_id": "scene_001", "characters": ["Eli"], "description": story}]
+    characters = [{"name": "Eli", "character_id": "character-eli"}]
+    director._normalize_dialogue_speakers(story, scenes, shots, characters)
+    director._validate_dialogue_speaker_contract(shots, characters)
+    director._validate_shot_character_contract(shots, characters)
+    _assert(shots[0]["characters"] == [] and "Eli's sister (hologram)" not in scenes[0]["characters"],
+            "a remote-only speaker was incorrectly promoted into visible shot/scene character bindings")
+    _assert(len(shots[0]["dialogue_events"]) == 1
+            and shots[0]["dialogue_events"][0].get("delivery") == "remote",
+            f"remote-only speech did not survive deterministic dialogue reconciliation: {shots[0]!r}")
+
+    plan = {"characters": characters, "shots": shots, "scenes": scenes}
+    timeline = DialogueTimeline(characters)
+    timeline.apply_to_plan(plan)
+    event = plan["shots"][0]["dialogue_events"][0]
+    _assert(event.get("delivery") == "remote" and event.get("speaker_id", "").startswith("remote_voice_"),
+            f"timeline did not create a transient audio-only speaker binding: {event!r}")
+    _assert(len(plan["characters"]) == 1 and plan["characters"][0]["name"] == "Eli",
+            "timeline's transient remote speaker binding leaked into plan.characters")
+    from pipeline.context_ir import H3ContextIRCompiler
+    lines = H3ContextIRCompiler._dialogue_lines({"language": "English"}, plan["shots"][0])
+    _assert(len(lines) == 1 and "remote channel" in lines[0].lower()
+            and "eli's sister" in lines[0].lower(),
+            f"Context IR lost the audio-only speaker identity or remote delivery: {lines!r}")
+
+
 def test_bare_radio_prop_does_not_make_following_live_quote_remote():
     from planner.qwen_director import QwenDirector
     segments = QwenDirector._extract_story_spoken_segments(
@@ -1011,7 +1189,15 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must require active character participation and interactions")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
-        _assert("75 story words" in low and "continuity lock" in q._story_text_user(mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower(),
+        from planner.config import STORY_MIN_WORDS, STORY_WRITER_WORDS_PER_SCENE
+        _assert(f"never under {STORY_MIN_WORDS}" in low,
+                f"{mode}: system prompt must match the configured minimum, not a stale word floor")
+        _assert(f"words total and never under {STORY_MIN_WORDS} usable story words" in q._story_text_user(
+                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower()
+                and str(STORY_WRITER_WORDS_PER_SCENE) in q._story_text_user(
+                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat")
+                and "continuity lock" in q._story_text_user(
+                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower(),
                 f"{mode}: writer must guard minimum scene development and reconcile continuity")
         blueprint = q._story_blueprint_system(mode).lower()
         _assert("no fixed minimum" in blueprint and "maximum" in blueprint,
@@ -1265,7 +1451,7 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
             "normalized blueprint should include all configured scenes")
 
 
-def test_story_length_soft_floor_uses_one_author_call_without_retry():
+def test_story_minimum_word_contract_fails_closed_without_retry():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
     from contextlib import redirect_stdout
@@ -1281,6 +1467,9 @@ def test_story_length_soft_floor_uses_one_author_call_without_retry():
             calls.append(k)
             return "\n\n".join(paras)
         director._chat_text = fake_chat
+        # Isolate the hard word-count contract from semantic premise-coverage
+        # checks; those have their own generation-contract tests.
+        director._validate_story_output_contracts = lambda _mode, _input, candidate, **_kwargs: candidate
         with redirect_stdout(StringIO()):
             out = director._generate_story_once(
                 AI_STORY_MODE, "premise", "system", "user",
@@ -1288,18 +1477,40 @@ def test_story_length_soft_floor_uses_one_author_call_without_retry():
             )
         return out, calls
 
-    # 65 words/scene = 780 words: under the 816 prompt target but above the hard floor -> accepted, 1 call.
-    (story, generated), calls = run(65)
-    _assert(generated and len(calls) == 1, f"slightly short story must be accepted with one call: {len(calls)}")
-    # 30 words/scene = 360 words: truncated/off-task -> fails closed, still exactly 1 call.
-    calls_seen = []
+    # 68 words/scene = 816 words: exactly the minimum production contract.
+    (story, generated), calls = run(68)
+    _assert(generated and len(calls) == 1, f"minimum-length story must pass with one call: {len(calls)}")
+    _assert(len(re.findall(r"\b[\w'’-]+\b", story)) >= STORY_MIN_WORDS, "accepted story fell below minimum")
+    # 65 words/scene = 780 words: reject before downstream work, never retry.
     try:
-        run(30)
+        run(65)
     except RuntimeError as exc:
-        _assert(str(STORY_ACCEPT_MIN_WORDS) in str(exc) or "hard floor" in str(exc), f"unexpected rejection: {exc}")
+        _assert(str(STORY_ACCEPT_MIN_WORDS) in str(exc) or "minimum production contract" in str(exc),
+                f"unexpected rejection: {exc}")
     else:
-        raise AssertionError("truncated story must fail closed")
-    _assert(STORY_ACCEPT_MIN_WORDS < STORY_MIN_WORDS, "accept floor must sit below the prompt minimum")
+        raise AssertionError("under-length story must fail closed before shot generation")
+    _assert(STORY_ACCEPT_MIN_WORDS == STORY_MIN_WORDS, "acceptance floor must equal the production minimum")
+
+
+
+def test_story_completion_contract_rejects_unresolved_final_hook():
+    from planner.qwen_director import QwenDirector
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS
+    director = QwenDirector.__new__(QwenDirector)
+    director._story_min_words = STORY_MIN_WORDS
+    paragraphs = []
+    for scene_index in range(DIRECTOR_STORY_SCENES):
+        words = [f"scene{scene_index+1}"] + [f"grounded{scene_index}_{i}" for i in range(69)]
+        paragraphs.append(" ".join(words) + ".")
+    paragraphs[-1] = paragraphs[-1][:-1] + " The team would discover a new threat beyond the sealed door."
+    story = "\n\n".join(paragraphs)
+    try:
+        director._validate_story_completion_contract(AI_STORY_MODE, story)
+    except RuntimeError as exc:
+        _assert("unresolved future hook" in str(exc).lower() and "sentence count" in str(exc).lower(),
+                f"completion gate must catch both unresolved ending and scene-depth violations: {exc}")
+    else:
+        raise AssertionError("a future-hook ending must fail the single-pass completion contract")
 
 
 def test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes():
@@ -1368,6 +1579,9 @@ def test_author_is_one_nonthinking_call_and_receives_planned_cast():
     )
     _assert("CAST: Ines Vale" in writer_user and "SCENE 12:" in writer_user,
             "the normalized CAST and all 12 beats must reach the prose writer")
+    _assert("6–8 complete sentences" in writer_user and "protagonist's immediate outcome" in writer_user
+            and "Do not end with a future hook" in writer_user,
+            "writer contract must require scene depth and an on-page completed ending")
 
     paragraphs = [" ".join([f"Scene{i}", "Ines", "and", "Tomas", "acted."] + [f"word{i}_{j}" for j in range(75)]) + "."
                   for i in range(12)]
@@ -1378,6 +1592,7 @@ def test_author_is_one_nonthinking_call_and_receives_planned_cast():
         calls.append(kwargs.copy())
         return "\n\n".join(paragraphs)
     director._chat_text = fake_chat
+    director._validate_story_output_contracts = lambda _mode, _input, candidate, **_kwargs: candidate
     with redirect_stdout(StringIO()):
         story, generated = director._generate_story_once(
             AI_STORY_MODE, "premise", mixin._story_text_system(AI_STORY_MODE), writer_user,
@@ -1427,6 +1642,7 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
         calls.append(kwargs.copy())
         return story
     director._chat_text = fake_chat
+    director._validate_story_output_contracts = lambda _mode, _input, candidate, **_kwargs: candidate
     from contextlib import redirect_stdout
     from io import StringIO
     temperature, top_p = director._sampling_for_mode(AI_STORY_MODE)
@@ -1489,8 +1705,8 @@ def test_compact_shot_prompt_example_is_valid_json():
                   "speaking_characters", "speech_text", "is_scene_boundary",
                   "character_spatial_bboxes", "character_spatial_regions"):
         _assert(field not in shot, f"compact prompt example must not teach output of derived field {field}")
-    _assert("dialogue_events" not in shot and "continuity_start_state" in shot and "continuity_end_state" in shot,
-            "dialogue is assigned once at the scene level; shot objects must not duplicate dialogue references")
+    _assert("dialogue_events" not in shot and "continuity_start_state" not in shot and "continuity_end_state" not in shot,
+            "shot continuity is derived downstream; the prompt example must not spend tokens on empty state maps")
     _assert("dialogue_assignments" in scene and scene["dialogue_assignments"] == {},
             "compact example must show the parent-level dialogue assignment object")
 
@@ -1507,12 +1723,13 @@ def test_compact_shot_batch_schema_omits_derived_and_empty_fields():
         "character_spatial_bboxes", "character_spatial_regions",
         "character_spatial_bboxes_start", "character_spatial_bboxes_end",
         "character_spatial_regions_start", "character_spatial_regions_end",
+        "continuity_start_state", "continuity_end_state",
     ):
         _assert(field not in properties and field not in shot["required"],
                 f"compact batch schema should derive {field} after generation")
-    for field in ("action", "visual_prompt", "dialogue_events", "continuity_start_state", "continuity_end_state"):
+    for field in ("action", "visual_prompt", "dialogue_events"):
         _assert(field in properties and field in shot["required"],
-                f"compact batch schema must retain creative/continuity field {field}")
+                f"compact batch schema must retain creative field {field}")
     dialogue_schema = properties["dialogue_events"]
     dialogue_item = dialogue_schema["items"]
     _assert(set(dialogue_item["properties"]) == {"source_dialogue_id"},
@@ -2041,6 +2258,10 @@ def main():
         test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_in_person_dialogue_speaker_must_exist_in_qwen_cast,
+        test_source_attribution_overrides_mislabelled_ui_quote_speaker,
+        test_named_ai_voice_from_speakers_is_source_grounded_remote,
+        test_unrostered_remote_speaker_without_source_grounding_is_dropped,
+        test_unrostered_hologram_speaker_is_audio_only_not_a_crash,
         test_quote_inventory_preserves_repeated_quotes_and_punctuation,
         test_blueprint_cast_filter_excludes_weather_and_objects_but_keeps_dynamic_people,
         test_cast_static_check_is_alias_aware_and_does_not_require_fixed_recurrence,
@@ -2059,6 +2280,7 @@ def main():
         test_explicit_empty_shot_characters_are_not_filled_from_scene_cast,
         test_remote_only_shot_can_have_no_visible_source_body,
         test_remote_delivery_survives_timeline_and_context_ir_without_visible_source,
+        test_unrostered_remote_speaker_survives_without_cast_addback,
         test_bare_radio_prop_does_not_make_following_live_quote_remote,
         test_dialogue_speaker_aliases_and_duplicate_lines_are_reconciled_structurally,
         test_honorific_speaker_normalization_keeps_in_person_dialogue_and_filters_remote_voice,
@@ -2068,6 +2290,7 @@ def main():
         test_shot_context_preserves_paragraph_boundaries,
         test_shot_context_does_not_split_honorific_from_name,
         test_story_context_compactor_keeps_causal_middle_action,
+        test_context_compaction_never_loses_closing_quote_or_splits_attribution,
         test_honorific_and_active_short_name_do_not_drop_character,
         test_sound_and_ui_words_are_not_deterministic_characters,
         test_descriptive_sanitizer_preserves_qualified_identity,
@@ -2085,7 +2308,8 @@ def main():
         test_story_blueprint_normalization_accepts_dynamic_cast_sizes_and_hyphenated_names,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
-        test_story_length_soft_floor_uses_one_author_call_without_retry,
+        test_story_minimum_word_contract_fails_closed_without_retry,
+        test_story_completion_contract_rejects_unresolved_final_hook,
         test_story_topology_fails_closed_when_sentence_boundaries_cannot_make_scenes,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
