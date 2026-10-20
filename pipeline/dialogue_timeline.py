@@ -177,7 +177,7 @@ class DialogueTimeline:
             return normalized
         return DialogueTimeline._legacy_events(shot)
 
-    def _resolve_speaker(self, name_or_id: str, shot_characters: list[str]) -> dict:
+    def _resolve_speaker(self, name_or_id: str, shot_characters: list[str], *, allow_unbound: bool = False) -> dict:
         key = self._norm(name_or_id)
         if key in self._by_name:
             candidate = self._by_name[key]
@@ -191,7 +191,7 @@ class DialogueTimeline:
                     break
         if candidate is None:
             raise ValueError(f"Unknown dialogue speaker: {name_or_id!r}")
-        if shot_characters:
+        if shot_characters and not allow_unbound:
             allowed = {self._norm(v) for v in shot_characters}
             if self._norm(candidate.get("name", "")) not in allowed:
                 raise ValueError(
@@ -234,9 +234,11 @@ class DialogueTimeline:
         count = len(raw_events)
 
         for index, raw in enumerate(raw_events, start=1):
+            remote_delivery = str(raw.get("delivery", "in_person")).strip().lower() == "remote"
             speaker = self._resolve_speaker(
                 str(raw.get("speaker", "")).strip(),
                 shot_characters,
+                allow_unbound=remote_delivery,
             )
             text = str(raw.get("text", ""))
             if not text.strip():
@@ -382,6 +384,7 @@ class DialogueTimeline:
                     else None
                 ),
                 duration_source=estimate.source,
+                delivery="remote" if remote_delivery else "in_person",
             )
             events.append(event)
             cursor = end + post
