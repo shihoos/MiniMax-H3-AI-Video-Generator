@@ -167,11 +167,11 @@ Create exactly __SHOTS_PER_SCENE__ production-ready shots for EACH supplied scen
 
 For each `scene_shots` item, return one `scene_metadata` object that is the canonical semantic interpretation of that scene. Qwen is the source of truth for its physical setting, time_of_day, weather, atmosphere, mood, lighting, color_temperature, environment_details, key_props, and dramatic_purpose. Interpret dramatic_purpose from what this specific scene does in the actual story and how it changes the protagonist's situation; write a concise natural-language phrase, not a fixed beat label. Do not infer purpose from scene index or force a conventional setup/catalyst/midpoint/climax sequence. A quiet aftermath, investigation, failed attempt, relationship shift, reveal, transition, or other story-specific function is valid when grounded by the text. Use the story and supplied scene prose, not keyword matching or a fixed vocabulary menu. Make the scene visually specific while preserving story facts. Do not invent a weather change, a new time-of-day event, or a prop that changes the plot. If the story does not establish time or weather and a choice is not strongly implied by the physical scene, use `unspecified`. For indoor scenes, weather can be `unspecified` unless it is visibly affecting the interior. All shots in the same scene must agree with this canonical setting. The compiler derives each shot's location, lighting and color temperature from `scene_metadata`; use that same place and light source explicitly in each `visual_prompt`. Keep each shot's mood consistent with the scene.
 
-The parent `scene_metadata.location` is the canonical physical setting for every shot in that scene. Do not emit a duplicate per-shot location field. Keep all shot actions and visual prompts physically inside that location unless the source explicitly establishes a scene change.
+The parent `scene_metadata.location` is the one physical setting for every shot. Never combine outside and interior locations. Do not emit a per-shot location field. Keep shots there unless the source establishes a scene change; prose that moves between places does not imply simultaneous presence in both.
 
 The scenes are part of one coherent film. Use ONLY the supplied characters. Do not create new characters or invent character names.
 In `characters` and in every dialogue speaker use the EXACT canonical spelling and capitalization from the supplied `characters` list (never a lower-cased or shortened copy).
-Only list a character in a shot if that character is visible in that shot's framing.
+List only physically visible characters; story mentions and audio alone do not prove visibility. A terminal/intercom/radio voice does not put its speaker in the room; depict the source only when the story establishes a visible hologram/projection or physical entrance. Distinguish sentient devices from humans.
 Keep action 10–30 words, visual_prompt 15–40 words, composition_notes <=18 words, lens_and_depth_of_field <=10 words, mood <=5 words, camera_shot <=5 words, and camera_movement <=5 words. Use the canonical scene-metadata location; never output a separate per-shot location field.
 `action` describes only physical/narrative events; never describe camera behavior there.
 `camera_shot` and `camera_movement` contain only framing/camera decisions; do not duplicate them in `action`.
@@ -183,14 +183,15 @@ Preserve:
 - emotional progression;
 - visual-language consistency.
 DIALOGUE CONTRACT:
-- Only direct, in-person spoken dialogue is eligible. Never turn narration, action, thoughts, exposition, screen/UI/sign text, or remote/off-screen speech into a visible dialogue event.
-- Each scene's `source_dialogue` is the authoritative whitelist of `{dialogue_id, speaker, text}` entries. Emit each eligible line only as `{"source_dialogue_id":"<exact ID>"}` in that scene's `dialogue_events`; never emit `speaker` or `text`, and never paraphrase or invent an ID. The compiler restores exact source wording, punctuation, and canonical speaker.
-- Assign each source ID at most once and only to the shot where the speaker is physically present, visible, and shown speaking. Never borrow IDs across scenes, repeat an ID, or assign dialogue to an unrelated action. If no eligible source ID applies, emit an empty array.
+- Use only explicit source speech; exclude narration, actions, thoughts, writing, and remembered/archival quotes. `in_person` means the speaker is physically present; `remote` is an attributed live in-world voice whose source stays off-screen.
+- `source_dialogue` is the whitelist `{dialogue_id, speaker, text, delivery}`. Assign each ID in `dialogue_assignments` to exactly one shot number (1..__SHOTS_PER_SCENE__); never omit, repeat, or null an ID. The caller restores exact text, canonical speaker, and delivery.
+- `dialogue_assignments` is a keyed object: each source ID is a key, so a key must never be copied to another shot or another scene. Use only the exact keys supplied for that specific scene. The schema rejects foreign IDs.
+- Do not emit `dialogue_events`, `speaker`, `text`, `speaking_characters`, or `speech_text` inside shot objects. Those are reconstructed by the caller from `dialogue_assignments` and the source whitelist.
 - Never invent generic speakers or use noncanonical name spellings. Source identities are authoritative; never use a role label unless it is a supplied canonical identity.
-- Prefer one dialogue reference per shot, two only when the shot genuinely stages both utterances. Long dialogue is split later by deterministic timing after the exact source text is restored; do not duplicate an ID to imitate continuation.
+- Assign in-person lines to a shot where the speaker is visible and speaking. For remote lines, show the receiver/channel or listener reaction; keep the source out of visible `characters` unless a projection/hologram or physical entrance is established. Long-line timing is handled downstream; never duplicate an ID.
 - Treat shot duration as a hard production constraint: when dialogue is present, leave timing headroom; the compiler finalizes legal duration. Do not put timestamps in the response.
 
-Within each scene, use meaningfully different framing and composition. Keep the same underlying story beat, but make the __SHOTS_PER_SCENE__ shot actions complementary (for example: establish the place, the main action, then a reaction or telling detail): show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
+Within each scene, vary framing/composition and use motivated camera movement instead of defaulting every shot to static: tracking for established motion, push-in/dolly for a source-supported reveal, pan/tilt for an established detail, handheld only for grounded instability. Static is valid for observation; never move just to meet a quota. Keep the same underlying story beat, but make the __SHOTS_PER_SCENE__ shot actions complementary (for example: establish the place, the main action, then a reaction or telling detail): show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
 LIGHT AND PLACE CONTINUITY: `scene_metadata.lighting` and `scene_metadata.color_temperature` are canonical for all shots of this scene. Do not emit duplicated per-shot lighting or color-temperature fields. Every `visual_prompt` must still name the setting and the physically motivated visible light source; never invent neon/tungsten lamps or use soft-overcast outdoor light indoors. The lighting vocabulary below is a spelling guide, NOT a menu to rotate.
 
 STORY FIDELITY: depict only events, objects, and states that the scene description or story context actually states.
@@ -218,7 +219,7 @@ Choose natural, concrete lighting language supported by the actual environment a
 
 Return JSON only in this structure. COMPACT OUTPUT CONTRACT: individual shot objects omit `shot_id` and `scene_id` (derived from parent scene and shot-array order); omit per-shot `location`, `lighting`, and `color_temperature` (derived from scene metadata); omit `speaking_characters` and `speech_text` (derived from dialogue references); omit `is_scene_boundary` (derived from scene order); and omit the six `character_spatial_*` maps (the supplied traces consistently leave them empty). These fields are restored before persistence, validation, and compilation. Do not output them.
 
-{"scene_shots":[{"scene_id":"scene_001","scene_metadata":{"location":"the supplied scene location","time_of_day":"unspecified","weather":"unspecified","atmosphere":"grounded atmosphere","mood":"scene mood","lighting":"visible motivated light source","color_temperature":"neutral","environment_details":[],"key_props":[],"dramatic_purpose":"what this scene changes in the story"},"shots":[{"duration_seconds":5.2,"characters":[],"action":"A visible physical story action changes the situation in a way supported by the source.","camera_shot":"wide","camera_movement":"static","lens_and_depth_of_field":"normal lens","composition_notes":"Clear subject separation.","mood":"tense","visual_prompt":"Grounded cinematic wide view of the supplied location, lit by the specific motivated source established in the scene.","dialogue_events":[],"continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A character reacts to the event and reveals a distinct detail grounded in the same scene.","camera_shot":"medium","camera_movement":"push-in","lens_and_depth_of_field":"shallow focus","composition_notes":"Readable foreground and depth.","mood":"tense","visual_prompt":"Closer cinematic framing shows a distinct observable reaction in the same location and motivated light.","dialogue_events":[],"continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A supported state change or consequence completes this scene's visible beat without new events.","camera_shot":"close-up","camera_movement":"static","lens_and_depth_of_field":"selective focus","composition_notes":"Isolate the meaningful detail.","mood":"uneasy","visual_prompt":"Cinematic close detail shows the established consequence while keeping character, location, and motivated lighting consistent.","dialogue_events":[],"continuity_start_state":{},"continuity_end_state":{}}]}]}
+{"scene_shots":[{"scene_id":"scene_001","scene_metadata":{"location":"the supplied scene location","time_of_day":"unspecified","weather":"unspecified","atmosphere":"grounded atmosphere","mood":"scene mood","lighting":"visible motivated light source","color_temperature":"neutral","environment_details":[],"key_props":[],"dramatic_purpose":"what this scene changes in the story"},"dialogue_assignments":{},"shots":[{"duration_seconds":5.2,"characters":[],"action":"A visible physical story action changes the situation in a way supported by the source.","camera_shot":"wide","camera_movement":"static","lens_and_depth_of_field":"normal lens","composition_notes":"Clear subject separation.","mood":"tense","visual_prompt":"Grounded cinematic wide view of the supplied location, lit by the specific motivated source established in the scene.","continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A character reacts to the event and reveals a distinct detail grounded in the same scene.","camera_shot":"medium","camera_movement":"push-in","lens_and_depth_of_field":"shallow focus","composition_notes":"Readable foreground and depth.","mood":"tense","visual_prompt":"Closer cinematic framing shows a distinct observable reaction in the same location and motivated light.","continuity_start_state":{},"continuity_end_state":{}},{"duration_seconds":5.2,"characters":[],"action":"A supported state change or consequence completes this scene's visible beat without new events.","camera_shot":"close-up","camera_movement":"static","lens_and_depth_of_field":"selective focus","composition_notes":"Isolate the meaningful detail.","mood":"uneasy","visual_prompt":"Cinematic close detail shows the established consequence while keeping character, location, and motivated lighting consistent.","continuity_start_state":{},"continuity_end_state":{}}]}]}
 
 There must be exactly __SHOTS_PER_SCENE__ shots inside every scene_shots entry and exactly one entry for every supplied scene. Do not add prose outside JSON.
 Do NOT output compiler-owned fields.
@@ -255,15 +256,22 @@ class QwenDirectorPromptMixin:
         mode: str,
     ) -> str:
         fmt = """
-    Format: plain prose in third person past tense, exactly __N__ paragraphs separated
-    by blank lines, about __TOTAL__ words in all (never under __MINW__). Every scene paragraph
-    should contain 6–8 complete sentences; develop the causal beat instead of compressing it.
-    The story becomes a film of about __MINUTES__ minutes, so each paragraph is ONE filmable scene
-    of roughly __PER__ words: a specific place, visible action, and a change in the
-    situation. Put any spoken line, in quotation marks, inside its scene paragraph,
-    never in a paragraph of its own. No headings, labels, camera directions, or
-    commentary. Do not append word counts, checklists, markdown separators, summaries,
-    meta-commentary, or a postscript after the final sentence. Output only the story."""
+    Format: plain prose in third person past tense, exactly __N__ explicitly marked scene blocks,
+    about __TOTAL__ story words in all (never under __MINW__). Start each scene on a new line with
+    its exact structural tag `[[SCENE_01]]` through `[[SCENE_12]]`, then one space and that scene's
+    prose. Use every tag exactly once and in numeric order. The tags are removed by the application;
+    they are not story text. Each scene must remain a single paragraph/beat. Do not combine two beats,
+    split one beat across tags, or use a sentence-count split to create a missing scene. Every scene
+    should contain 6–8 complete sentences and at least 75 story words; target __PER__ words rather
+    than compressing or padding the causal beat. Expand through a meaningful choice, physical action,
+    reaction, consequence, or motivated dialogue—not repeated wording.
+    The story becomes a film of about __MINUTES__ minutes, so each marked scene is ONE filmable beat
+    in one primary physical location: a specific place, visible action, and a change in the situation.
+    If the characters physically move to a different location, narrate a clear transition in a different
+    scene instead of blending incompatible indoor/outdoor settings. Put any spoken line, in quotation
+    marks, inside its own scene prose, never in a separate dialogue paragraph. No other headings,
+    camera directions, or commentary. Do not append word counts, checklists, markdown separators,
+    summaries, meta-commentary, or a postscript after the final scene. Output only the story blocks."""
         ensemble = f"""
     CAST CONTRACT (mandatory; policy={DIRECTOR_STORY_CAST_SIZE_POLICY}): Qwen determines the cast size from the story's actual needs. There is NO fixed minimum, target, or maximum number of characters. Include the protagonist and every additional character needed to make the conflict, causal turns, relationships, and resolution work; add as many as the story genuinely needs. Do not add characters merely to hit a quota or restrict a strong story to a small ensemble. Qwen chooses every name, identity, relationship, motive, and role; never use preset names or a hard-coded cast. Recurring core characters should physically participate in present-time scenes, take consequential actions, and recur where the plot needs them. A one-scene supporting character is valid when that character materially changes an event. Give important characters distinct wants and points of view. At least two separate scenes should contain direct in-person dialogue between named characters when it fits the premise; those exchanges must change a decision, reveal a conflict, or shift trust. Let the plot turn through character actions and consequences, not only discoveries or records. A person mentioned only in backstory or visible only in a photo, label, document, recording, screen, or anonymous remote voice does NOT count as physically active.
     """
@@ -278,7 +286,7 @@ class QwenDirectorPromptMixin:
             return textwrap.dedent("""
     You are the screenwriter expanding the supplied story into a complete short film told as prose. Preserve established source characters, the setting, chronology, key events, any twist, and the source's outcome. Do not erase a source character or contradict an established fact.
 
-    Preserve the source's established character identities, relationships, and story-relevant canon, but do not impose a fixed cast size. Add as many new named characters as the causal development genuinely needs, including allies, opponents, witnesses, or other participants whose choices materially change the path to the existing outcome. Do not add characters merely to meet a quota, and do not replace source anchors with new identities. A useful supporting character may appear in one scene; recurring characters should recur when their role in the plot calls for it. Do not count a person who appears only in a message, document, memory, photo, recording, monitor, or anonymous remote voice as physically present. Build cause-and-effect between existing plot points instead of padding the prose or repeating paragraphs. Do not contradict source outcomes, established survival/fate, chronology, or cause-and-effect. Any new character, clue, device, or mechanism must be introduced before it is needed and must change events rather than merely appear.
+    Preserve the source's established character identities, relationships, and story-relevant canon, but do not impose a fixed cast size. Add as many new named characters as the causal development genuinely needs, including allies, opponents, witnesses, or other participants whose choices materially change the path to the existing outcome. Do not add characters merely to meet a quota, and do not replace source anchors with new identities. A useful supporting character may appear in one scene; recurring characters should recur when their role in the plot calls for it. Do not treat a person heard remotely as physically present unless the story explicitly places them there. Build cause-and-effect between existing plot points instead of padding the prose or repeating paragraphs. Do not contradict source outcomes, established survival/fate, chronology, or cause-and-effect. Any new character, clue, device, or mechanism must be introduced before it is needed and must change events rather than merely appear. Keep each scene in one primary location and explicitly show transitions; keep the state and owner/location of plot-bearing objects consistent across every handoff, lock, escape, collapse, or destruction.
 
     The protagonist's goal must be clear early. Determine cast size from the premise and causal plan, with no numeric quota; recurring and supporting characters are allowed whenever they materially affect events. Use visible actions and decisions; plant a detail that pays off; make at least two in-person dialogue exchanges change the conflict or trust between characters when compatible with the premise; and resolve the main question in the final scene consistently with the source outcome.
     """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
@@ -308,6 +316,22 @@ class QwenDirectorPromptMixin:
             solely to solve the conflict. Track every major planted clue and obligation through payoff,
             and do not contradict the final fate or state of any surviving character. Avoid unrelated
             subplots and unexplained turns.
+
+            CONTINUITY LEDGER (mandatory, internal planning pass): every beat has exactly one primary
+            physical location and explicitly states who is physically present versus only heard remotely.
+            For every beat, reconcile the prior beat's exit state with the next beat's entry state. Track
+            each important character's alive/dead and present/absent state, each critical object's owner
+            and location, each access/lock state, and each threat or irreversible action's status. Record
+            the before-state, the concrete action/choice, and the resulting after-state for each plot-bearing
+            object or mechanism. A scene cannot quietly switch from outdoors to an interior or relocate a
+            character between a remote terminal and the room. A destructive trigger, collapse, detonation,
+            escape, or other irreversible action happens only once unless the blueprint explicitly explains
+            a staged warning versus the real trigger. After a location is destroyed or made inaccessible,
+            no later beat may continue there without an explicitly established safe interval or route. Do
+            not make a character act after death, disappear without cause, or return without a stated cause.
+            Before output, silently replay all scenes in order and remove any beat that requires an object,
+            person, location, or mechanism to be in two incompatible states. Preserve the intended conflict
+            and ending while making every physical transition possible.
 
             The CAST line contains PEOPLE who act as characters only, never weather, forces, places,
             buildings, rooms, objects, devices, organizations, or abstract concepts. A sentient non-human
@@ -463,15 +487,19 @@ class QwenDirectorPromptMixin:
             )
         result += (
             "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(DIRECTOR_STORY_SCENES)
-            + " scene paragraphs, one for each beat in order, each about " + str(STORY_WRITER_WORDS_PER_SCENE)
+            + " scene blocks in numeric order. Prefix each block with its exact structural tag "
+            + "[[SCENE_01]] through [[SCENE_12]], followed by one space and that scene's prose. "
+            + "Use every tag exactly once; the application removes these tags. Each marked scene is one paragraph/beat, about " + str(STORY_WRITER_WORDS_PER_SCENE)
             + " words (roughly " + str(STORY_WRITER_WORDS_PER_SCENE - 15) + "–" + str(STORY_WRITER_WORDS_PER_SCENE + 20)
-            + " words; a paragraph under " + str(STORY_WORDS_PER_SCENE - 15) + " words is too short), about "
+            + " words; a scene under " + str(STORY_WORDS_PER_SCENE - 15) + " words is too short), about "
             + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
             + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
             + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
-            + " End with the actual causal resolution in scene 12 and a complete sentence. Output only those 12 story paragraphs."
-            + " Do not output headings, scene labels, planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or any postscript after the final scene. Count words silently; never print a word-count report."
+            + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
+            + " End with the actual causal resolution in scene 12 and a complete sentence. Output only these marked story blocks."
+            + " CONTINUITY LOCK: silently replay every scene in order before writing. Preserve the prior scene's character fates, object ownership/location, access states, and causal consequences. An irreversible action such as a detonation or collapse cannot already have completed and then be triggered again; after destruction or lockout, later action needs an explicitly established path or safe interval. If the blueprint contains a physical contradiction, make the smallest repair that preserves the intended conflict and resolution rather than narrating impossible events. Never introduce an unseeded mechanism to fix that repair."
+            + " Do not output any headings or labels other than the required [[SCENE_01]] through [[SCENE_12]] structural tags. Do not reproduce the Architect's `SCENE 01:` beat labels. No planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or postscript. Count words silently; never print a word-count report."
         )
         return result
 
@@ -717,13 +745,13 @@ class QwenDirectorPromptMixin:
         system_prompt = textwrap.dedent("""
     You are Qwen's character and dialogue extractor for a film-production planner. Return JSON only.
 
-    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of people who physically participate in present-time story events: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in an event shown happening now. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
+    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
 
-    Review the beginning, middle, and ending evidence for distinct people performing or receiving a present-time physical action, then merge aliases for the same person. Do not bias toward a protagonist-only roster or stop after the first candidate: include every distinct person who actually acts or speaks in person. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, or generic role words as people.
+    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON.
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. `name_surface_index` and `name_surface_evidence` are recall aids generated from source text; they can contain places, objects, sentence-initial words, or other false positives. They are NOT a cast list. The evidence entries contain short source contexts around name-like surfaces that may be absent from compacted story evidence. Use them to check the source, and include a surface only when the source supports a person physically participating in present-time events. Qwen alone decides which names are people, how aliases resolve, and who belongs in `candidates`. The `candidates` array is the final cast decision; no downstream step will add names from these indexes, a planned cast, or dialogue speakers. A dialogue speaker must also be represented in `candidates` when that person physically participates in the story.
 
-    The payload includes a numbered `quotes` inventory. Return exactly one `quote_classifications` item for EVERY supplied `quote_id`, with the same ID, one classification, and a speaker. Use `in_person_spoken` only for direct speech spoken by a physically present character in the current scene; use `remote_or_offscreen_spoken` for radio/intercom/phone/recording/screen or other remote voices; use `written_or_displayed` for notes, journals, signs, screens, labels, messages or documents; use `remembered_or_recalled` for remembered speech; use `inner_monologue` for thoughts; and `other` when no listed category applies. For non-in-person categories, set speaker to an empty string unless the source explicitly attributes it and the attribution is useful; the application will not turn those categories into scene dialogue. For `in_person_spoken`, the speaker must be a canonical character from `candidates` who physically participates in the story. Do not return quote text: the application restores it exactly from the source.
+    The payload includes a numbered `quotes` inventory. Return exactly one `quote_classifications` item for EVERY supplied `quote_id`, with the same ID, one classification, and a speaker. Use `in_person_spoken` for direct speech from a speaker physically present in the current scene; use `remote_or_offscreen_spoken` for an explicitly attributed, live, diegetic voice over radio/intercom/phone/terminal/loudspeaker or another in-world channel when the source remains off-screen; use `written_or_displayed` for notes, journals, signs, screens, labels, messages or documents; use `remembered_or_recalled` for remembered or archival speech; use `inner_monologue` for thoughts; and `other` when no listed category applies. Do not promote narration, generic voice-over, written text, or a recording merely being read to spoken dialogue. For both spoken classifications, provide the canonical speaker when the source explicitly identifies one and the speaker belongs in the current story cast; otherwise leave speaker empty. Resolve consecutive dialogue turns from grammar: when a quote is followed by an attribution such as “she shouted” and the next quote follows without a new named-speaker attribution, carry the same speaker forward unless source text clearly signals a speaker change. Do not reassign a continuing multi-quote turn merely because another character is mentioned or reacts between lines. A remote speaker is audible but is NOT thereby a visible shot character. For `in_person_spoken`, the speaker must physically participate in that scene. Do not return quote text: the application restores it exactly from the source.
 
     The quote inventory is an exhaustive coverage checklist. Do not omit, duplicate, or invent quote IDs. If unsure whether a quote is speech, classify it explicitly rather than omitting it. This lets the application detect missing classifications and apply only source-grounded deterministic fallback. Return exactly `candidates` and `quote_classifications`, with no prose outside JSON.
     """).strip()
@@ -765,15 +793,17 @@ class QwenDirectorPromptMixin:
                     continue
                 seen_quote_ids.add(quote_id)
                 classification = str(item.get("classification", "other") or "other").strip().lower()
-                if classification != "in_person_spoken":
+                if classification not in {"in_person_spoken", "remote_or_offscreen_spoken"}:
                     continue
                 speaker = str(item.get("speaker", "") or "").strip()
                 if not speaker:
+                    # Never invent a speaker for anonymous off-screen sound.
                     continue
                 normalized_dialogue.append({
                     "text": str(quote_by_id[quote_id]["text"]),
                     "speaker": speaker,
                     "quote_id": quote_id,
+                    "delivery": "remote" if classification == "remote_or_offscreen_spoken" else "in_person",
                 })
             missing_quote_ids = sorted(set(quote_by_id) - seen_quote_ids)
             if missing_quote_ids:
@@ -801,6 +831,8 @@ class QwenDirectorPromptMixin:
                         continue
                     seen_quote_ids.add(quote_id)
                 entry = {"text": text_value, "speaker": speaker}
+                if str(item.get("delivery", "in_person")).strip().lower() == "remote":
+                    entry["delivery"] = "remote"
                 if quote_id is not None:
                     entry["quote_id"] = quote_id
                 normalized_dialogue.append(entry)
@@ -828,7 +860,7 @@ class QwenDirectorPromptMixin:
             if speaker_key not in accepted_names and titleless_key not in accepted_names and speaker_key not in accepted_aliases and titleless_key not in accepted_aliases:
                 raise RuntimeError(
                     "Semantic extraction inconsistency: quote "
-                    f"{item.get('quote_id', '?')} is classified as in-person dialogue by {speaker!r}, "
+                    f"{item.get('quote_id', '?')} is classified as spoken dialogue by {speaker!r}, "
                     "but that speaker is absent from Qwen's accepted character roster. "
                     "No deterministic cast add-back or retry was attempted."
                 )
@@ -848,6 +880,7 @@ class QwenDirectorPromptMixin:
             {
                 "text": str(item.get("text", "") or "").strip(),
                 "speaker": str(item.get("speaker", "") or "").strip(),
+                **({"delivery": "remote"} if str(item.get("delivery", "in_person")).strip().lower() == "remote" else {}),
                 **({"quote_id": int(item["quote_id"])} if str(item.get("quote_id", "")).isdigit() else {}),
             }
             for item in (result.get("spoken_dialogue", []) or [])
@@ -1066,6 +1099,7 @@ class QwenDirectorPromptMixin:
         self,
         scene_count: int = 2,
         dialogue_ids: list[str] | None = None,
+        dialogue_ids_by_scene: dict[str, list[str]] | None = None,
     ) -> dict:
         shot_schema = deepcopy(self._shot_json_schema(
             self.SHOTS_PER_SCENE,
@@ -1104,6 +1138,16 @@ class QwenDirectorPromptMixin:
                 "additionalProperties": False,
             },
         }
+        if dialogue_ids_by_scene is not None:
+            # The live batch path represents dialogue as one keyed scene-level assignment map.
+            # A source ID can then occur only once in JSON; unlike shot-level arrays this schema
+            # structurally prevents one line from being copied to several shots.
+            shot_schema["properties"].pop("dialogue_events", None)
+            shot_schema["required"] = [
+                field for field in shot_schema.get("required", [])
+                if field != "dialogue_events"
+            ]
+
         scene_metadata_schema = {
             "type": "object",
             "properties": {
@@ -1131,6 +1175,63 @@ class QwenDirectorPromptMixin:
             ],
             "additionalProperties": False,
         }
+        scene_item_properties = {
+            "scene_id": {"type": "string"},
+            "scene_metadata": scene_metadata_schema,
+            "shots": {
+                "type": "array",
+                "minItems": self.SHOTS_PER_SCENE,
+                "maxItems": self.SHOTS_PER_SCENE,
+                "items": shot_schema,
+            },
+        }
+        scene_item_required = ["scene_id", "scene_metadata", "shots"]
+
+        if dialogue_ids_by_scene is not None:
+            variants = []
+            normalized_scene_ids = {}
+            for raw_scene_id, raw_ids in dialogue_ids_by_scene.items():
+                scene_id = str(raw_scene_id or "").strip()
+                if not scene_id or scene_id in normalized_scene_ids:
+                    raise ValueError("Scene-local dialogue schema requires unique, non-empty scene IDs.")
+                ids = sorted({str(value).strip() for value in (raw_ids or []) if str(value).strip()})
+                normalized_scene_ids[scene_id] = ids
+            if len(normalized_scene_ids) != int(scene_count):
+                raise ValueError(
+                    f"Scene-local dialogue schema received {len(normalized_scene_ids)} scenes; expected {scene_count}."
+                )
+            for scene_id, ids in normalized_scene_ids.items():
+                assignment_properties = {
+                    dialogue_id: {
+                        "type": "integer",
+                        "enum": list(range(1, self.SHOTS_PER_SCENE + 1)),
+                    }
+                    for dialogue_id in ids
+                }
+                assignment_schema = {
+                    "type": "object",
+                    "properties": assignment_properties,
+                    "required": list(ids),
+                    "additionalProperties": False,
+                }
+                variant_properties = deepcopy(scene_item_properties)
+                variant_properties["scene_id"] = {"type": "string", "enum": [scene_id]}
+                variant_properties["dialogue_assignments"] = assignment_schema
+                variants.append({
+                    "type": "object",
+                    "properties": variant_properties,
+                    "required": [*scene_item_required, "dialogue_assignments"],
+                    "additionalProperties": False,
+                })
+            scene_items_schema = {"oneOf": variants}
+        else:
+            scene_items_schema = {
+                "type": "object",
+                "properties": scene_item_properties,
+                "required": scene_item_required,
+                "additionalProperties": False,
+            }
+
         return {
             "type": "object",
             "properties": {
@@ -1138,25 +1239,7 @@ class QwenDirectorPromptMixin:
                     "type": "array",
                     "minItems": scene_count,
                     "maxItems": scene_count,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "scene_id": {"type": "string"},
-                            "scene_metadata": scene_metadata_schema,
-                            "shots": {
-                                "type": "array",
-                                "minItems": self.SHOTS_PER_SCENE,
-                                "maxItems": self.SHOTS_PER_SCENE,
-                                "items": shot_schema,
-                            },
-                        },
-                        "required": [
-                            "scene_id",
-                            "scene_metadata",
-                            "shots",
-                        ],
-                        "additionalProperties": False,
-                    },
+                    "items": scene_items_schema,
                 },
             },
             "required": ["scene_shots"],
@@ -1560,6 +1643,30 @@ class QwenDirectorPromptMixin:
                     _unmapped_speakers.add(_speakers[0])
                     continue
 
+                # Prefer the quote's exact source offset when the source paragraphs and
+                # production scenes are one-to-one. Text-only matching is ambiguous when the
+                # same line is intentionally repeated in two scenes (for example, a repeated
+                # argument or callback); the offset disambiguates the actual occurrence.
+                _source_position = int(_segment.get("start", -1))
+                if len(_story_paragraphs) == len(scene_payloads) and 0 <= _source_position < len(str(story or "")):
+                    _source_paragraph_index = len(re.findall(r"\n\s*\n+", str(story or "")[:_source_position]))
+                    if 0 <= _source_paragraph_index < len(scene_payloads):
+                        _target_scene = scene_payloads[_source_paragraph_index]
+                        _target_scene_id = str(_target_scene.get("scene_id", "") or "").strip()
+                        _target_paragraph_key = _dialogue_phrase_key(_story_paragraphs[_source_paragraph_index])
+                        _use_key = (_target_scene_id, _phrase)
+                        _already_used = _used_phrases.get(_use_key, 0)
+                        _available = (" " + _target_paragraph_key + " ").count(" " + _phrase + " ")
+                        if _available > _already_used:
+                            _target_scene["source_dialogue"].append({
+                                "speaker": _canonical_speaker,
+                                "text": _display,
+                                **({"delivery": "remote"} if str(_segment.get("delivery", "in_person")).lower() == "remote" else {}),
+                            })
+                            _used_phrases[_use_key] = _already_used + 1
+                            _scene_cursor = max(_scene_cursor, _source_paragraph_index)
+                            continue
+
                 _attached = False
                 for _scene_index in range(_scene_cursor, len(scene_payloads)):
                     _scene_payload = scene_payloads[_scene_index]
@@ -1579,6 +1686,7 @@ class QwenDirectorPromptMixin:
                     _scene_payload["source_dialogue"].append({
                         "speaker": _canonical_speaker,
                         "text": _display,
+                        **({"delivery": "remote"} if str(_segment.get("delivery", "in_person")).lower() == "remote" else {}),
                     })
                     _used_phrases[_use_key] = _already_used + 1
                     _scene_cursor = _scene_index
@@ -1618,6 +1726,7 @@ class QwenDirectorPromptMixin:
                             _target_scene["source_dialogue"].append({
                                 "speaker": _canonical_speaker,
                                 "text": _display,
+                                **({"delivery": "remote"} if str(_segment.get("delivery", "in_person")).lower() == "remote" else {}),
                             })
                             _used_phrases[_use_key] = _already_used + 1
                             _scene_cursor = max(_scene_cursor, scene_payloads.index(_target_scene))
