@@ -174,11 +174,9 @@ STORY_WRITER_WORDS_PER_SCENE = int(
     _story_contract.get("writer_words_per_scene", STORY_WORDS_PER_SCENE)
 )
 
-# Hard acceptance floor: only truncated/off-task output below this fails. Between this and
-# STORY_MIN_WORDS the single draft is accepted with a warning (no retry, no repair).
-STORY_ACCEPT_MIN_WORDS = int(
-    _story_contract.get("accept_min_words", int(STORY_TARGET_WORDS * 0.6))
-)
+# Fail-closed acceptance floor. The value must equal the production minimum so a short
+# draft cannot trigger character extraction and shot generation as if it were complete.
+STORY_ACCEPT_MIN_WORDS = int(_story_contract.get("accept_min_words", STORY_MIN_WORDS))
 # Cast count is a narrative decision, not a numeric runtime contract.
 DIRECTOR_STORY_CAST_SIZE_POLICY = str(_story_contract.get("cast_size_policy", "")).strip().lower()
 
@@ -203,8 +201,11 @@ if not 0.0 <= DIRECTOR_SHOT_TEMPERATURE <= 2.0:
     raise RuntimeError("Shot temperature must be in [0, 2].")
 if not 0.0 < DIRECTOR_SHOT_TOP_P <= 1.0:
     raise RuntimeError("Shot top_p must be in (0, 1].")
-if STORY_WRITER_WORDS_PER_SCENE < STORY_WORDS_PER_SCENE or not 1 <= STORY_ACCEPT_MIN_WORDS <= STORY_MIN_WORDS:
-    raise RuntimeError("runtime_versions.yaml story_contract writer/accept-floor values are invalid.")
+if STORY_WRITER_WORDS_PER_SCENE < STORY_WORDS_PER_SCENE or STORY_ACCEPT_MIN_WORDS != STORY_MIN_WORDS:
+    raise RuntimeError(
+        "runtime_versions.yaml story_contract must set the writer target at or above "
+        "the per-scene minimum and accept_min_words exactly to minimum_words."
+    )
 if DIRECTOR_STORY_SCENES < 4 or DIRECTOR_SHOTS_PER_SCENE < 1 or STORY_WORDS_PER_SCENE < 1:
     raise RuntimeError("runtime_versions.yaml story_contract topology values are invalid.")
 if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
