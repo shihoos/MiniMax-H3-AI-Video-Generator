@@ -712,16 +712,15 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must require active character participation and interactions")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
-        from planner.config import STORY_MIN_WORDS, STORY_WRITER_WORDS_PER_SCENE
-        _assert(f"never under {STORY_MIN_WORDS}" in low,
-                f"{mode}: system prompt must match the configured minimum, not a stale word floor")
-        _assert(f"words total and never under {STORY_MIN_WORDS} usable story words" in q._story_text_user(
-                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower()
-                and str(STORY_WRITER_WORDS_PER_SCENE) in q._story_text_user(
-                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat")
-                and "continuity lock" in q._story_text_user(
-                    mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat").lower(),
-                f"{mode}: writer must guard minimum scene development and reconcile continuity")
+        from planner.config import STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
+        writer_prompt = q._story_text_user(
+            mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat"
+        ).lower()
+        _assert("guidance, not a quota" in writer_prompt
+                and str(STORY_TARGET_WORDS) in writer_prompt
+                and str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in writer_prompt
+                and "continuity lock" in writer_prompt,
+                f"{mode}: writer must use flexible target/stretch guidance and preserve continuity")
         blueprint = q._story_blueprint_system(mode).lower()
         _assert("no fixed minimum" in blueprint and "maximum" in blueprint,
                 f"{mode}: Architect must use a plot-driven, unbounded cast size")
@@ -822,42 +821,66 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
             "normalized blueprint should include all configured scenes")
 
 
-def test_story_minimum_word_contract_fails_closed_without_retry():
+def test_story_minimum_is_a_hard_floor_without_retry():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
     from contextlib import redirect_stdout
     from io import StringIO
+
     temperature, top_p = QwenDirector.__new__(QwenDirector)._sampling_for_mode(AI_STORY_MODE)
 
     def run(words_per_scene):
-        paras = [" ".join([f"Ines{k}"] + [f"w{k}x{i}" for i in range(words_per_scene - 1)]) + "." for k in range(DIRECTOR_STORY_SCENES)]
+        paragraphs = [
+            " ".join([f"Ines{k}"] + [f"w{k}x{i}" for i in range(words_per_scene - 1)]) + "."
+            for k in range(1, DIRECTOR_STORY_SCENES + 1)
+        ]
         director = QwenDirector.__new__(QwenDirector)
         director._story_min_words = STORY_ACCEPT_MIN_WORDS
         calls = []
-        def fake_chat(*a, **k):
-            calls.append(k)
-            return "\n\n".join(paras)
+
+        def fake_chat(*args, **kwargs):
+            calls.append(kwargs)
+            return "\n\n".join(paragraphs)
+
         director._chat_text = fake_chat
         director._validate_story_output_contracts = lambda _mode, _input, candidate, **_kwargs: candidate
-        with redirect_stdout(StringIO()):
-            out = director._generate_story_once(
-                AI_STORY_MODE, "premise", "system", "user",
-                temperature=temperature, top_p=top_p, source_character_names=[],
-            )
-        return out, calls
+        try:
+            with redirect_stdout(StringIO()):
+                result, generated = director._generate_story_once(
+                    AI_STORY_MODE, "premise", "system", "user",
+                    temperature=temperature, top_p=top_p, source_character_names=[],
+                )
+            return result, generated, calls, None
+        except RuntimeError as exc:
+            return None, False, calls, str(exc)
 
-    (story, generated), calls = run(68)
-    _assert(generated and len(calls) == 1, f"minimum-length story must pass with one call: {len(calls)}")
-    _assert(len(re.findall(r"\b[\w'’-]+\b", story)) >= STORY_MIN_WORDS, "accepted story fell below minimum")
+    floor_words = (STORY_MIN_WORDS + DIRECTOR_STORY_SCENES - 1) // DIRECTOR_STORY_SCENES
+    accepted_result, accepted_generated, accepted_calls, accepted_error = run(floor_words)
+    _assert(STORY_MIN_WORDS == STORY_ACCEPT_MIN_WORDS == 816,
+            f"minimum and acceptance floor must be 816: {STORY_MIN_WORDS}, {STORY_ACCEPT_MIN_WORDS}")
+    _assert(accepted_generated and accepted_error is None and len(accepted_calls) == 1,
+            f"story meeting the lower boundary must pass with one writer call: {accepted_error}")
+    _assert(len(re.findall(r"\b[\w'’-]+\b", accepted_result)) >= STORY_MIN_WORDS,
+            "accepted story must meet the minimum word boundary")
+
+    short_result, short_generated, short_calls, short_error = run(65)
+    _assert(not short_generated and short_result is None and len(short_calls) == 1,
+            "sub-816-word story must fail after exactly one writer call, without retry")
+    _assert("below the configured minimum" in (short_error or "").lower(),
+            f"sub-floor story must report the minimum-length failure: {short_error}")
+
+    completion_probe = QwenDirector.__new__(QwenDirector)
+    completion_probe._story_min_words = STORY_MIN_WORDS
     try:
-        run(65)
+        completion_probe._validate_story_completion_contract(AI_STORY_MODE, short_result or "")
     except RuntimeError as exc:
-        _assert(str(STORY_ACCEPT_MIN_WORDS) in str(exc) or "minimum production contract" in str(exc),
-                f"unexpected rejection: {exc}")
+        _assert("below the minimum accepted length" in str(exc).lower(),
+                f"completion contract must enforce the lower boundary: {exc}")
     else:
-        raise AssertionError("under-length story must fail closed before shot generation")
-    _assert(STORY_ACCEPT_MIN_WORDS == STORY_MIN_WORDS, "acceptance floor must equal the production minimum")
+        raise AssertionError("completion contract must reject a sub-816-word story")
 
+    _assert(len([x for x in re.split(r"\n\s*\n+", accepted_result) if x.strip()]) == DIRECTOR_STORY_SCENES,
+            "accepted story must preserve the configured scene count")
 
 def test_story_completion_contract_rejects_unresolved_final_hook():
     from planner.qwen_director import QwenDirector
@@ -946,8 +969,8 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
             f"prose writer must use its runtime-configured ceiling ({expected_ceiling}): {calls[0]}")
     _assert(calls[0].get("minimum_output_tokens") == DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
             f"prose writer must use the runtime-configured minimum output floor: {calls[0]}")
-    _assert(STORY_MIN_WORDS == int(DIRECTOR_STORY_SCENES * 85 * 0.8) == 816,
-            f"story minimum must match prompt's 80% target: {STORY_MIN_WORDS}")
+    _assert(STORY_MIN_WORDS == 816,
+            f"minimum accepted story length must remain 816 words: {STORY_MIN_WORDS}")
     _assert(count == DIRECTOR_STORY_SCENES, f"paragraphs must be normalized to {DIRECTOR_STORY_SCENES}, got {count}")
 
 
@@ -1088,7 +1111,7 @@ def main():
         test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
-        test_story_minimum_word_contract_fails_closed_without_retry,
+        test_story_minimum_is_a_hard_floor_without_retry,
         test_story_completion_contract_rejects_unresolved_final_hook,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
