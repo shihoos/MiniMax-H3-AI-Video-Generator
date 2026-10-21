@@ -240,13 +240,15 @@ class QwenDirectorPromptMixin:
     @staticmethod
     def _fill_story_length(text: str) -> str:
         n = int(DIRECTOR_STORY_SCENES)
-        # Ask for the writer overshoot; validation still uses STORY_MIN_WORDS.
-        per = int(STORY_WRITER_WORDS_PER_SCENE)
+        # Primary target is 1,020; minimum accepted length is 816; 1,320 is stretch guidance.
+        per = int(STORY_WORDS_PER_SCENE)
+        stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
         seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
         return (
             text.replace("__N__", str(n))
             .replace("__PER__", str(per))
-            .replace("__TOTAL__", str(n * per))
+            .replace("__TOTAL__", str(STORY_TARGET_WORDS))
+            .replace("__STRETCH__", str(stretch))
             .replace("__MINW__", str(STORY_MIN_WORDS))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
         )
@@ -257,14 +259,16 @@ class QwenDirectorPromptMixin:
     ) -> str:
         fmt = """
     Format: plain prose in third person past tense, exactly __N__ explicitly marked scene blocks,
-    about __TOTAL__ story words in all (never under __MINW__). Start each scene on a new line with
+    Write at least __MINW__ story words overall. Aim for about __TOTAL__ words, with a flexible stretch
+    toward __STRETCH__ when the story needs more development. __MINW__ is the lower acceptance boundary,
+    not an exact target: do not pad or repeat prose, and do not cut a natural ending to hit a number. Start each scene on a new line with
     its exact structural tag `[[SCENE_01]]` through `[[SCENE_12]]`, then one space and that scene's
     prose. Use every tag exactly once and in numeric order. The tags are removed by the application;
     they are not story text. Each scene must remain a single paragraph/beat. Do not combine two beats,
     split one beat across tags, or use a sentence-count split to create a missing scene. Every scene
-    must contain 7–10 complete sentences; target __PER__ words per scene. Each scene must contain at least 100 words of actual narrative before moving to the next scene marker. Fully dramatize the action, meaningful choice, reaction, causal consequence, and changed situation. Never write a short
-    3–5-sentence summary in place of a developed beat. Do not move to the next scene marker until
-    the current beat contains its action, choice, reaction, consequence, and state transition where
+    should use as many complete sentences as the dramatic beat needs; about __PER__ words per scene
+    is flexible guidance, not a quota. Do not use a short summary in place of a developed beat. Do not
+    move to the next scene marker until the current beat contains its action, choice, reaction, consequence, and state transition where
     relevant. Reach the final scene's completed consequence rather than stopping at an unresolved
     future hook. Expand through physical action and causal consequence—not repeated wording.
     The story becomes a film of about __MINUTES__ minutes, so each marked scene is ONE filmable beat
@@ -491,16 +495,16 @@ class QwenDirectorPromptMixin:
             "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(DIRECTOR_STORY_SCENES)
             + " scene blocks in numeric order. Prefix each block with its exact structural tag "
             + "[[SCENE_01]] through [[SCENE_12]], followed by one space and that scene's prose. "
-            + "Use every tag exactly once; the application removes these tags. Each marked scene is one paragraph/beat, about " + str(STORY_WRITER_WORDS_PER_SCENE)
-            + " words (roughly " + str(STORY_WRITER_WORDS_PER_SCENE - 15) + "–" + str(STORY_WRITER_WORDS_PER_SCENE + 20)
-            + " words; a scene under " + str(max(STORY_WORDS_PER_SCENE - 15, STORY_WRITER_WORDS_PER_SCENE - 25)) + " words is too short), about "
-            + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
-            + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
+            + "Use every tag exactly once; the application removes these tags. Each marked scene is one developed paragraph. About " + str(STORY_WORDS_PER_SCENE)
+            + " words per scene is flexible guidance, not a quota. The complete story must contain at least " + str(STORY_MIN_WORDS)
+            + " words to pass acceptance. Aim for about " + str(STORY_TARGET_WORDS)
+            + " words overall, stretching toward " + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
+            + " when the story needs more development. Do not pad to hit the target or cut off a natural ending."
             + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Preserve each planned character's canonical identity: use the canonical full name on first mention, and do not rename or collapse distinct people. After identification, use natural shorter forms whenever they remain unambiguous."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
             + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
-            + " Every scene must contain 7–10 complete sentences and at least 100 words, with concrete action, a meaningful choice, a specific reaction, a causal consequence, and a changed situation; expand short beats with blueprint-grounded causality, not padding or repeated prose."
+            + " Vary sentence count and length according to dramatic purpose. Show grounded actions, decisions, reactions, causes and consequences; never pad or repeat prose to meet a quota."
             + " Scene 12 must show the central objective and conflict resolving on-page, with the completed observable consequence and the protagonist's immediate outcome. Do not end with a future hook, teaser, new threat, unexplained signal, promise, unanswered question, or sequel setup."
             + " End with a complete sentence describing a consequence that has already happened, not a future possibility. Output only these marked story blocks."
             + " CONTINUITY LOCK: silently replay every scene in order before writing. Preserve the prior scene's character fates, object ownership/location, access states, and causal consequences. An irreversible action such as a detonation or collapse cannot already have completed and then be triggered again; after destruction or lockout, later action needs an explicitly established path or safe interval. If the blueprint contains a physical contradiction, make the smallest repair that preserves the intended conflict and resolution rather than narrating impossible events. Never introduce an unseeded mechanism to fix that repair."
