@@ -85,7 +85,7 @@ director:
     target_words: 1020
     minimum_words: 816
     # Prompt-only overshoot; the 816-word minimum is enforced as a hard single-pass floor.
-    writer_words_per_scene: 100
+    writer_words_per_scene: 125
     # A story below the configured 816-word minimum is rejected before character
     # extraction or shot generation. There is no automatic retry or repair call.
     accept_min_words: 816
