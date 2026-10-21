@@ -188,7 +188,7 @@ DIALOGUE CONTRACT:
 - `dialogue_assignments` is a keyed object: each source ID is a key, so a key must never be copied to another shot or another scene. Use only the exact keys supplied for that specific scene. The schema rejects foreign IDs.
 - Do not emit `dialogue_events`, `speaker`, `text`, `speaking_characters`, or `speech_text` inside shot objects. Those are reconstructed by the caller from `dialogue_assignments` and the source whitelist.
 - Never invent generic speakers or use noncanonical name spellings. Source identities are authoritative; never use a role label unless it is a supplied canonical identity.
-- Assign in-person lines to a shot where the speaker is visible and speaking. For remote lines, show the receiver/channel or listener reaction; keep the source out of visible `characters` unless a projection/hologram or physical entrance is established. Long-line timing is handled downstream; never duplicate an ID.
+- Assign in-person lines to a shot where the speaker is visible and speaking. For remote lines, show the receiver/channel or listener reaction; keep the source out of visible `characters` unless a projection/hologram or physical entrance is established. Long-line timing is handled downstream; never duplicate an ID. Spread a scene's source lines across DIFFERENT shots (at most one line per shot) so each line can fit its shot; preserve each line and its speaker together, preserve source order, and never move an in-person line to a shot where its speaker is not visible. Leave remote/off-screen lines on a shot that establishes the live channel or listener reaction; the remote speaker must not be added to visible characters.
 - Treat shot duration as a hard production constraint: when dialogue is present, leave timing headroom; the compiler finalizes legal duration. Do not put timestamps in the response.
 
 Within each scene, vary framing/composition and use motivated camera movement instead of defaulting every shot to static: tracking for established motion, push-in/dolly for a source-supported reveal, pan/tilt for an established detail, handheld only for grounded instability. Static is valid for observation; never move just to meet a quota. Keep the same underlying story beat, but make the __SHOTS_PER_SCENE__ shot actions complementary (for example: establish the place, the main action, then a reaction or telling detail): show distinct observable facets, reactions, evidence, or state changes supported by the scene text; do not paraphrase the same action twice. If the source supports only one instant, use complementary coverage without inventing a new event.
@@ -243,7 +243,9 @@ class QwenDirectorPromptMixin:
         # Primary target is 1,020; minimum accepted length is 816; 1,320 is stretch guidance.
         per = int(STORY_WORDS_PER_SCENE)
         stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
-        seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
+        shot_seconds = float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
+        seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * shot_seconds
+        line_words = max(6, int((shot_seconds - 1.0) * 2.2))
         return (
             text.replace("__N__", str(n))
             .replace("__PER__", str(per))
@@ -251,6 +253,8 @@ class QwenDirectorPromptMixin:
             .replace("__STRETCH__", str(stretch))
             .replace("__MINW__", str(STORY_MIN_WORDS))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
+            .replace("__SHOT_SECONDS__", f"{shot_seconds:.1f}")
+            .replace("__LINEW__", str(line_words))
         )
 
     def _story_text_system_raw(
@@ -275,7 +279,13 @@ class QwenDirectorPromptMixin:
     in one primary physical location: a specific place, visible action, and a change in the situation.
     If the characters physically move to a different location, narrate a clear transition in a different
     scene instead of blending incompatible indoor/outdoor settings. Put any spoken line, in quotation
-    marks, inside its own scene prose, never in a separate dialogue paragraph. No other headings,
+    marks, inside its own scene prose, never in a separate dialogue paragraph. Each shot lasts about
+    __SHOT_SECONDS__ seconds: keep a spoken line brief enough for one shot, normally no more than
+    __LINEW__ words. Prefer no more than two quoted dialogue lines per scene, with each line assigned
+    to its own shot; do not add dialogue just to satisfy a quota. Speech should change a decision, expose
+    a conflict, or shift trust. Do not split a line, repeat a line, or write extra spoken lines as padding.
+    No scene has a fixed sentence-count requirement; use as many complete sentences as its beat needs.
+    No other headings,
     camera directions, or commentary. Do not append word counts, checklists, markdown separators,
     summaries, meta-commentary, or a postscript after the final scene. Output only the story blocks."""
         ensemble = f"""
@@ -347,9 +357,12 @@ class QwenDirectorPromptMixin:
             identities and voices consistent. Then output exactly {n} non-empty lines, one per scene,
             numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly {STORY_PLAN_BEAT_MIN_WORDS}–{STORY_PLAN_BEAT_MAX_WORDS} words) that states who is
             physically present, their goal or conflicting intent, a specific visible action, one concrete
-            sensory/visual detail, the causal turn, and knowledge/object state carried forward. At least six
-            beats must contain a short, clearly quoted line spoken in person by one of the named characters.
-            Keep recurring characters active in at least two scenes each. The CAST line is the only non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
+            sensory/visual detail, the causal turn, and knowledge/object state carried forward. Where the
+            premise supports in-person interpersonal conflict, prefer 2-4 beats with one short, consequential
+            quoted line spoken by a physically present named character (normally no more than {max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))} words).
+            Do not force speech into isolation-driven or primarily visual beats; never place more than one
+            quoted line in a beat. Keep dialogue on-topic and causally meaningful. The CAST line is the only
+            non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
         """).strip()
 
     def _story_blueprint_user(
@@ -502,7 +515,7 @@ class QwenDirectorPromptMixin:
             + " when the story needs more development. Do not pad to hit the target or cut off a natural ending."
             + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Preserve each planned character's canonical identity: use the canonical full name on first mention, and do not rename or collapse distinct people. After identification, use natural shorter forms whenever they remain unambiguous."
-            + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
+            + " Where the premise supports interpersonal conflict, aim for two meaningful in-person dialogue exchanges between named active characters across different scenes; each spoken line should change a choice, expose a conflict, or shift trust. Do not force dialogue into isolation-driven or primarily visual beats. Keep each quoted line short enough for one shot (normally no more than " + str(max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))) + " words), and use no more than two quoted lines per scene."
             + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
             + " Vary sentence count and length according to dramatic purpose. Show grounded actions, decisions, reactions, causes and consequences; never pad or repeat prose to meet a quota."
             + " Scene 12 must show the central objective and conflict resolving on-page, with the completed observable consequence and the protagonist's immediate outcome. Do not end with a future hook, teaser, new threat, unexplained signal, promise, unanswered question, or sequel setup."
