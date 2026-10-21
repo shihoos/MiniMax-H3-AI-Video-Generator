@@ -83,11 +83,11 @@ director:
     shots_per_scene: 3
     words_per_scene: 85
     target_words: 1020
+    # Hard lower boundary for acceptance; not an exact target or a reason to cut an ending.
     minimum_words: 816
-    # Prompt-only overshoot; the 816-word minimum is enforced as a hard single-pass floor.
-    writer_words_per_scene: 125
-    # A story below the configured 816-word minimum is rejected before character
-    # extraction or shot generation. There is no automatic retry or repair call.
+    # Stretch guidance: 110 words x 12 scenes = about 1,320 words when the story needs it.
+    writer_words_per_scene: 110
+    # Must match minimum_words; below-floor output fails without retry or repair.
     accept_min_words: 816
     # The narrative determines the cast size; no numeric minimum, target, or maximum.
     cast_size_policy: plot_driven
