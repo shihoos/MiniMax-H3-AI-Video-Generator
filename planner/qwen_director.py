@@ -2778,8 +2778,9 @@ class QwenDirector(
         # off-screen: a radio or phone may simply be a prop in the room. Require
         # an audio-route phrase or an explicit audio action on the device.
         remote_device = (
-            r"radio|walkie-talkie|intercom|phone|telephone|transmission|"
-            r"communicator|speaker|terminal|loudspeaker|console"
+            r"radio|walkie-talkie|intercom|comms|communications? relay|"
+            r"phone|telephone|transmission|communicator|speaker|"
+            r"terminal|loudspeaker|console"
         )
         remote_context_re = re.compile(
             rf"\b(?:{remote_device})\b[^.!?]{{0,80}}"
