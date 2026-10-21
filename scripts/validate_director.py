@@ -362,6 +362,68 @@ def test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicat
             f"duplicate/foreign dialogue references should be observable: {recovered_events}")
 
 
+
+def test_scene_local_dialogue_balancer_spreads_lines_and_preserves_source_constraints():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    source = {
+        "scene_007_d001": {"speaker": "Ana", "text": "I found the hidden signal."},
+        "scene_007_d002": {"speaker": "Ben", "text": "We need to leave right now."},
+    }
+    shots = [
+        {"scene_id": "scene_007", "shot_id": f"scene_007_shot_{i:03d}",
+         "characters": ["Ana", "Ben"],
+         "dialogue_events": ([{"source_dialogue_id": "scene_007_d001"},
+                              {"source_dialogue_id": "scene_007_d002"}] if i == 1 else [])}
+        for i in range(1, 4)
+    ]
+    director._record_recovery = lambda *args: None
+    expanded = director._expand_shot_batch_dialogue_references(shots, source)
+    per_shot = [shot["dialogue_events"] for shot in expanded]
+    _assert(all(len(events) <= 1 for events in per_shot),
+            f"eligible source lines must be spread to separate shots: {per_shot!r}")
+    spoken = [event for events in per_shot for event in events]
+    _assert(len(spoken) == 2 and [event["text"] for event in spoken] == [source["scene_007_d001"]["text"], source["scene_007_d002"]["text"]],
+            f"balancing must preserve both exact source lines and their order: {spoken!r}")
+    _assert([event["speaker"] for event in spoken] == ["Ana", "Ben"],
+            f"balancing must preserve canonical speakers: {spoken!r}")
+
+    # A line must not be reassigned to a shot where its speaker is not visible.
+    hidden = [dict(shot, characters=["Ana"]) for shot in shots]
+    before = [[e["source_dialogue_id"] for e in shot["dialogue_events"]] for shot in hidden]
+    after = director._h3_balance_scene_dialogue(hidden, source)
+    after_ids = [[e["source_dialogue_id"] for e in shot["dialogue_events"]] for shot in after]
+    _assert(before == after_ids,
+            f"when no speaker-valid distribution exists, assignments must remain unchanged: {after_ids!r}")
+
+    # Do not let a foreign scene ID migrate across scene boundaries.
+    mixed_index = {**source, "scene_008_d001": {"speaker": "Mara", "text": "Wait."}}
+    mixed = [dict(shot) for shot in shots]
+    mixed[1]["dialogue_events"] = [{"source_dialogue_id": "scene_008_d001"}]
+    before_mixed = [[e["source_dialogue_id"] for e in shot["dialogue_events"]] for shot in mixed]
+    after_mixed = director._h3_balance_scene_dialogue(mixed, mixed_index)
+    after_mixed_ids = [[e["source_dialogue_id"] for e in shot["dialogue_events"]] for shot in after_mixed]
+    _assert(before_mixed == after_mixed_ids,
+            f"balancer must leave mixed-scene assignments untouched: {after_mixed_ids!r}")
+
+
+def test_scene_sentence_counts_are_flexible_but_dialogue_timing_is_advisory():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    director = QwenDirector.__new__(QwenDirector)
+    # One sentence per scene is intentionally allowed by the advisory diagnostic.
+    story = "\n\n".join(f"Scene {i} ends." for i in range(1, DIRECTOR_STORY_SCENES + 1))
+    issues = director._story_sentence_contract_issues(story)
+    _assert(not any("sentence count" in issue.lower() for issue in issues),
+            f"sentence-count quotas must not be diagnosed as violations: {issues!r}")
+    _assert(not any("topology" in issue.lower() for issue in issues),
+            f"correct twelve-scene topology should pass: {issues!r}")
+    dialogue_story = [f"Scene {i} is complete." for i in range(1, DIRECTOR_STORY_SCENES + 1)]
+    dialogue_story[0] = 'Ana said, "One two three four five six seven eight nine ten." Then Ben left.'
+    dialogue_issues = director._story_sentence_contract_issues("\n\n".join(dialogue_story))
+    _assert(any("exceeds 9 words" in issue for issue in dialogue_issues),
+            f"overlong quoted dialogue should be flagged as advisory: {dialogue_issues!r}")
+
 def test_scene_local_dialogue_assignments_are_unique_and_constrained():
     from planner.qwen_director import QwenDirector
     probe = QwenDirector.__new__(QwenDirector)
@@ -710,6 +772,8 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must explicitly reject a fixed numeric cast quota")
         _assert("physically" in low and "dialogue" in low,
                 f"{mode}: prompt must require active character participation and interactions")
+        _assert("no scene has a fixed sentence-count requirement" in low and "one shot" in low,
+                f"{mode}: scene sentences must be flexible and dialogue must fit a shot")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
         from planner.config import STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
@@ -727,6 +791,9 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert(("physically present" in blueprint or "physically active" in blueprint)
                 and "at least two beats" in blueprint,
                 f"{mode}: architecture prompt must seed active characters and interactions")
+        _assert("at least six beats must contain" not in blueprint
+                and "prefer 2-4 beats" in blueprint,
+                f"{mode}: blueprint must not force six dialogue beats")
         _assert("continuity ledger" in blueprint and "irreversible action" in blueprint,
                 f"{mode}: architect must reconcile irreversible actions and character/object states")
 
@@ -1092,6 +1159,8 @@ def main():
         # Dialogue ID/text integrity
         test_source_dialogue_ids_are_stable_and_scene_scoped,
         test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicate,
+        test_scene_local_dialogue_balancer_spreads_lines_and_preserves_source_constraints,
+        test_scene_sentence_counts_are_flexible_but_dialogue_timing_is_advisory,
         test_scene_local_dialogue_assignments_are_unique_and_constrained,
         test_batch_normalizer_expands_scene_level_dialogue_assignments,
         test_repeated_dialogue_text_maps_to_the_exact_source_paragraph,
