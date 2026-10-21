@@ -1682,7 +1682,9 @@ class QwenDirectorSanitizeMixin:
             sentence_issues = self._story_sentence_contract_issues(result)
         except (AttributeError, TypeError):
             sentence_issues = []
-        errors.extend(issue for issue in sentence_issues if "sentence count" in issue.lower())
+        # Sentence count remains a writing-quality target, not a hard production gate.
+        # _generate_story_once reports these issues through story_static_checks.
+        # Keep all other completion-contract checks blocking.
 
         if errors:
             raise RuntimeError(" | ".join(errors))
@@ -1806,12 +1808,10 @@ class QwenDirectorSanitizeMixin:
                     )
                 )
 
-                if overlap < 0.35:
-
-                    raise RuntimeError(
-                        "Expand Story mode changed too much of the supplied story "
-                        f"(meaningful-token overlap={overlap:.3f}; minimum=0.350)."
-                    )
+                # Lexical overlap is not a reliable semantic-preservation gate:
+                # valid paraphrases can use different words while retaining source events.
+                # Required anchors and the stricter source-event coverage check below
+                # remain blocking, so do not reject an expansion on token overlap alone.
 
             anchors = self._preservation_anchors(source)
             result_lower = result.lower()
