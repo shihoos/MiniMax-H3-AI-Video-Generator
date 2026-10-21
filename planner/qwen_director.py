@@ -1422,14 +1422,13 @@ class QwenDirector(
         return "\n\n".join(kept) if len(kept) >= max(4, int(DIRECTOR_STORY_SCENES * 0.8)) else ""
 
     def _trim_to_last_sentence(self, text: str) -> str:
-        """Cut a draft back to its last complete sentence; '' if too little remains."""
+        """Cut a draft back to its last complete sentence; return empty if none exists."""
         value = str(text or "").replace("\r\n", "\n").strip()
         matches = list(re.finditer(r"[.!?][\"'\u2019\u201d\u00bb)\]]*(?=\s|$)", value))
         if not matches:
             return ""
         value = value[: matches[-1].end()].strip()
-        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
-        return value if len(re.findall(r"\b[\w'’-]+\b", value)) >= minimum_words else ""
+        return value
 
     @staticmethod
     def _trim_repeated_terminal_sentence(story: str) -> tuple[str, bool]:
@@ -1710,17 +1709,13 @@ class QwenDirector(
             )
         self._last_story_draft = raw
 
-        # Length is measured only over cleaned narrative, so checklists, fake word counts,
-        # and duplicated blocks cannot satisfy the contract. The acceptance floor equals
-        # STORY_MIN_WORDS: an under-length single-pass draft is rejected before any
-        # character-extraction or shot-batch calls are spent. No retry or repair call.
+        # Log output length before cleanup. The acceptance floor is checked after cleanup,
+        # so harmless deterministic cleanup cannot leave a too-short story marked successful.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
-        if usable_words < self._story_min_words:
-            raise RuntimeError(
-                failure_prefix + f"Qwen returned only {usable_words} usable story words "
-                f"after removing non-story output (minimum production contract {self._story_min_words}+). "
-                "The single writer call is not retried and no downstream Qwen calls are launched."
-            )
+        print(
+            f"[QWEN] story_length words={usable_words} target_guidance=1020 stretch_guidance=1320",
+            flush=True,
+        )
         # One paragraph per configured scene is enforced before quality checks. The
         # scene marker parser above never manufactures missing beats from prose.
         candidate = str(raw or "").strip()
@@ -1734,32 +1729,28 @@ class QwenDirector(
             strict=True,
         )
 
-        # Never accept a dangling generation tail. Word-count is rechecked after any safe trim.
+        # Never accept a dangling generation tail; retain only complete sentence boundaries.
         candidate, removed_duplicate_ending = self._trim_repeated_terminal_sentence(candidate)
         if removed_duplicate_ending:
             print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
 
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
-        if word_count < self._story_min_words:
-            raise RuntimeError(
-                failure_prefix + f"Qwen returned only {word_count} usable words "
-                f"(need {self._story_min_words}+ to satisfy the configured story-length contract) "
-                "check the Qwen server/trace. No retry was attempted."
-            )
+        print(f"[QWEN] story_length_after_cleanup words={word_count}", flush=True)
         if candidate and not self._ends_cleanly(candidate):
             trimmed = self._trim_to_last_sentence(candidate)
             if not trimmed:
                 raise RuntimeError(
                     failure_prefix + "The cleaned story ends mid-sentence and cannot be safely trimmed "
-                    "while preserving the minimum word count. No retry was attempted."
+                    "without a safe complete-sentence boundary. No retry was attempted."
                 )
             candidate = trimmed
             word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
-            if word_count < self._story_min_words:
-                raise RuntimeError(
-                    failure_prefix + f"Safe sentence-boundary cleanup leaves only {word_count} words "
-                    f"(need {self._story_min_words}+). No retry was attempted."
-                )
+        if word_count < self._story_min_words:
+            raise RuntimeError(
+                failure_prefix
+                + f"Final story has {word_count} words, below the configured minimum of "
+                  f"{self._story_min_words}. The single Author call was not retried or repaired."
+            )
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
@@ -1962,10 +1953,6 @@ class QwenDirector(
         if len(paragraphs) <= DIRECTOR_STORY_SCENES or len(paragraphs) > DIRECTOR_STORY_SCENES + 3:
             return raw
         head = paragraphs[:DIRECTOR_STORY_SCENES]
-        words = len(re.findall(r"\b[\w'’-]+\b", " ".join(head)))
-        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
-        if words < minimum_words:
-            return raw
         return "\n\n".join(head)
 
     def _reflow_story_paragraphs(self, text: str) -> str:
