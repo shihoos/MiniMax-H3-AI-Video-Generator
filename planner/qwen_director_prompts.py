@@ -262,7 +262,7 @@ class QwenDirectorPromptMixin:
     prose. Use every tag exactly once and in numeric order. The tags are removed by the application;
     they are not story text. Each scene must remain a single paragraph/beat. Do not combine two beats,
     split one beat across tags, or use a sentence-count split to create a missing scene. Every scene
-    must contain 6–8 complete sentences; target __PER__ words per scene and never write a short
+    must contain 7–10 complete sentences; target __PER__ words per scene. Each scene must contain at least 100 words of actual narrative before moving to the next scene marker. Fully dramatize the action, meaningful choice, reaction, causal consequence, and changed situation. Never write a short
     3–5-sentence summary in place of a developed beat. Do not move to the next scene marker until
     the current beat contains its action, choice, reaction, consequence, and state transition where
     relevant. Reach the final scene's completed consequence rather than stopping at an unresolved
@@ -493,14 +493,14 @@ class QwenDirectorPromptMixin:
             + "[[SCENE_01]] through [[SCENE_12]], followed by one space and that scene's prose. "
             + "Use every tag exactly once; the application removes these tags. Each marked scene is one paragraph/beat, about " + str(STORY_WRITER_WORDS_PER_SCENE)
             + " words (roughly " + str(STORY_WRITER_WORDS_PER_SCENE - 15) + "–" + str(STORY_WRITER_WORDS_PER_SCENE + 20)
-            + " words; a scene under " + str(STORY_WORDS_PER_SCENE - 15) + " words is too short), about "
+            + " words; a scene under " + str(max(STORY_WORDS_PER_SCENE - 15, STORY_WRITER_WORDS_PER_SCENE - 25)) + " words is too short), about "
             + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
             + " words total and never under " + str(STORY_MIN_WORDS) + " usable story words."
             + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
             + " Preserve each planned character's canonical identity: use the canonical full name on first mention, and do not rename or collapse distinct people. After identification, use natural shorter forms whenever they remain unambiguous."
             + " Include at least two direct, in-person dialogue exchanges between named active characters across different scenes."
             + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
-            + " Every scene must contain 6–8 complete sentences with concrete action, decision, reaction, and consequence; expand short beats with blueprint-grounded causality, not padding or repeated prose."
+            + " Every scene must contain 7–10 complete sentences and at least 100 words, with concrete action, a meaningful choice, a specific reaction, a causal consequence, and a changed situation; expand short beats with blueprint-grounded causality, not padding or repeated prose."
             + " Scene 12 must show the central objective and conflict resolving on-page, with the completed observable consequence and the protagonist's immediate outcome. Do not end with a future hook, teaser, new threat, unexplained signal, promise, unanswered question, or sequel setup."
             + " End with a complete sentence describing a consequence that has already happened, not a future possibility. Output only these marked story blocks."
             + " CONTINUITY LOCK: silently replay every scene in order before writing. Preserve the prior scene's character fates, object ownership/location, access states, and causal consequences. An irreversible action such as a detonation or collapse cannot already have completed and then be triggered again; after destruction or lockout, later action needs an explicitly established path or safe interval. If the blueprint contains a physical contradiction, make the smallest repair that preserves the intended conflict and resolution rather than narrating impossible events. Never introduce an unseeded mechanism to fix that repair."
