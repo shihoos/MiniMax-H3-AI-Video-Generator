@@ -162,20 +162,19 @@ DIRECTOR_STORY_WRITER_TOP_K = int(_story_writing_sampling["top_k"])
 DIRECTOR_STORY_WRITER_MIN_P = float(_story_writing_sampling["min_p"])
 DIRECTOR_STORY_PRESENCE_PENALTY = float(_story_writing_sampling["presence_penalty"])
 
-# Story length and scene topology are also runtime-manifest values, not prompts
-# or environment defaults. The target must agree with the per-scene contract.
+# Runtime values describe the story target, the minimum accepted length, and fixed scene topology.
+# STORY_MIN_WORDS is a lower acceptance boundary; STORY_TARGET_WORDS remains guidance.
 DIRECTOR_STORY_SCENES = int(_story_contract["scene_count"])
 DIRECTOR_SHOTS_PER_SCENE = int(_story_contract["shots_per_scene"])
 STORY_WORDS_PER_SCENE = int(_story_contract["words_per_scene"])
 STORY_TARGET_WORDS = int(_story_contract["target_words"])
 STORY_MIN_WORDS = int(_story_contract["minimum_words"])
-# Prompt-only overshoot (see runtime_versions.yaml); never used as a validation threshold.
+# Flexible stretch guidance for scenes that need more development; not a quota.
 STORY_WRITER_WORDS_PER_SCENE = int(
     _story_contract.get("writer_words_per_scene", STORY_WORDS_PER_SCENE)
 )
 
-# Fail-closed acceptance floor. The value must equal the production minimum so a short
-# draft cannot trigger character extraction and shot generation as if it were complete.
+# The acceptance floor is explicit and must match minimum_words.
 STORY_ACCEPT_MIN_WORDS = int(_story_contract.get("accept_min_words", STORY_MIN_WORDS))
 # Cast count is a narrative decision, not a numeric runtime contract.
 DIRECTOR_STORY_CAST_SIZE_POLICY = str(_story_contract.get("cast_size_policy", "")).strip().lower()
