@@ -1853,15 +1853,18 @@ class QwenDirector(
         return issues
 
     def _story_sentence_contract_issues(self, story: str) -> list[str]:
+        """Advisory scene/dialogue diagnostics without rigid sentence-count quotas."""
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
         issues = []
         if len(paragraphs) != DIRECTOR_STORY_SCENES:
             issues.append(f"topology: expected {DIRECTOR_STORY_SCENES} paragraphs, found {len(paragraphs)}")
         for index, paragraph in enumerate(paragraphs, start=1):
-            protected = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|Capt|Cmdr|Lt|Sgt|St|Rev|Hon|Sr|Jr)\.(?=\s)", r"\1<dot>", paragraph)
-            count = len([x for x in re.split(r"(?<=[.!?])(?:[\"\u201d\u2019']?\s+|$)", protected) if x.strip()])
-            if not 6 <= count <= 8:
-                issues.append(f"scene {index:02d}: sentence count {count}, expected 6–8")
+            quoted = re.findall(r'[\"“]([^\"”]{2,})[\"”]', paragraph)
+            if len(quoted) > 2:
+                issues.append(f"scene {index:02d}: {len(quoted)} quoted lines; aim for no more than 2 so speech can fit separate shots")
+            long_lines = [line for line in quoted if len(re.findall(r"[\w'’-]+", line)) > 9]
+            if long_lines:
+                issues.append(f"scene {index:02d}: a quoted line exceeds 9 words and may exceed a 5.17-second shot")
         return issues
 
     def _story_craft_issues(self, story: str) -> list[str]:
@@ -3846,6 +3849,86 @@ class QwenDirector(
             raise ValueError("Source dialogue IDs must be unique across a shot batch.")
         return result, sorted(all_ids)
 
+    def _h3_balance_scene_dialogue(self, shots, source_dialogue_index):
+        """Balance dialogue independently within each scene in a batched shot list."""
+        try:
+            import itertools
+            out = [dict(s) if isinstance(s, dict) else s for s in (shots or [])]
+            if not isinstance(source_dialogue_index, dict):
+                return out
+            groups = {}
+            for idx, shot in enumerate(out):
+                if not isinstance(shot, dict):
+                    continue
+                scene = str(shot.get("scene_id", "") or "").strip()
+                if not scene:
+                    shot_id = str(shot.get("shot_id", "") or "").strip()
+                    match = re.match(r"(scene_\d+)_shot_", shot_id)
+                    scene = match.group(1) if match else ""
+                if scene:
+                    groups.setdefault(scene, []).append(idx)
+            for scene, indexes in groups.items():
+                scene_shots = [out[i] for i in indexes]
+                if len(scene_shots) < 2:
+                    continue
+                ids, valid = [], True
+                for shot in scene_shots:
+                    events = shot.get("dialogue_events") or []
+                    if not isinstance(events, list):
+                        valid = False; break
+                    for event in events:
+                        if not isinstance(event, dict):
+                            valid = False; break
+                        did = str(event.get("source_dialogue_id", "") or "").strip()
+                        if not did or did not in source_dialogue_index or not did.startswith(scene + "_d"):
+                            valid = False; break
+                        ids.append(did)
+                    if not valid: break
+                if not valid or len(ids) < 2 or len(ids) != len(set(ids)):
+                    continue
+                def _order(did):
+                    m = re.search(r"_d(\d+)$", did)
+                    return (int(m.group(1)), did) if m else (10**9, did)
+                ids.sort(key=_order)
+                n, k = len(ids), len(scene_shots)
+                if n > k:  # one source line per shot; do not worsen over-budget scenes
+                    continue
+                durations = []
+                for did in ids:
+                    item = source_dialogue_index.get(did)
+                    if not isinstance(item, dict) or not str(item.get("speaker", "") or "").strip():
+                        valid = False; break
+                    durations.append(max(1, len(str(item.get("text", "") or "").split())) / 145.0 * 60.0 + 0.15)
+                if not valid: continue
+                current = [[str(e["source_dialogue_id"]).strip() for e in (sh.get("dialogue_events") or [])] for sh in scene_shots]
+                current_loads = [sum(durations[ids.index(d)] for d in g if d in ids) for g in current]
+                current_max = max(current_loads, default=0.0)
+                best = None
+                for cuts in itertools.combinations_with_replacement(range(n + 1), k - 1):
+                    bounds = (0, *cuts, n)
+                    assigned = [ids[bounds[j]:bounds[j+1]] for j in range(k)]
+                    if any(len(g) > 1 for g in assigned): continue
+                    allowed = True
+                    for sh, group in zip(scene_shots, assigned):
+                        visible = {str(c).strip().casefold() for c in (sh.get("characters") or [])}
+                        for did in group:
+                            speaker = str(source_dialogue_index[did].get("speaker", "")).strip().casefold()
+                            if speaker not in visible:
+                                allowed = False; break
+                        if not allowed: break
+                    if not allowed: continue
+                    loads = [sum(durations[ids.index(d)] for d in g) for g in assigned]
+                    key = (max(loads, default=0.0), sum(x*x for x in loads))
+                    if best is None or key < best[0]: best = (key, assigned)
+                if best is None or best[0][0] >= current_max - 0.25: continue
+                for sh, group in zip(scene_shots, best[1]):
+                    sh["dialogue_events"] = [{"source_dialogue_id": did} for did in group]
+                print(f"[DIRECTOR] dialogue_load_balanced scene={scene} lines={n} worst_shot={current_max:.1f}s->{best[0][0]:.1f}s", flush=True)
+            return out
+        except Exception as exc:
+            print(f"[DIRECTOR] dialogue balancing skipped: {type(exc).__name__}: {exc}", flush=True)
+            return list(shots or [])
+
     def _expand_shot_batch_dialogue_references(
         self,
         shots: list[dict],
@@ -3857,6 +3940,9 @@ class QwenDirector(
         speaker/text events are retained only for backwards compatibility and are
         still subjected to the normal source-anchor reconciliation pipeline.
         """
+        # Rebalance eligible in-person lines before expanding IDs to source text.
+        # This is deterministic, scene-local, preserves source order and never calls a model.
+        shots = self._h3_balance_scene_dialogue(shots, source_dialogue_index)
         expanded_shots: list[dict] = []
         used_ids: set[str] = set()
         for raw_shot in shots or []:
