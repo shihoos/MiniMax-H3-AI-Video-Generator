@@ -20,7 +20,7 @@ from planner.config import (
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     DIRECTOR_STORY_SCENES,
-    STORY_MIN_WORDS,
+    STORY_ACCEPT_MIN_WORDS,
 )
 
 
@@ -1657,13 +1657,13 @@ class QwenDirectorSanitizeMixin:
                 f"Generated story must contain exactly {DIRECTOR_STORY_SCENES} paragraphs (found {len(paragraphs)})."
             )
 
+        # A minimum length is a hard lower acceptance boundary, not an exact target.
+        # It must not cause trimming or padding; a short draft fails the single-pass run.
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
-        minimum_words = int(getattr(self, "_story_min_words", STORY_MIN_WORDS) or STORY_MIN_WORDS)
-        # Keep the hard completion check aligned with the prompt's 80%-of-target minimum.
-        if not minimum_words <= word_count <= DIRECTOR_STORY_SCENES * 140:
+        minimum_words = int(getattr(self, "_story_min_words", STORY_ACCEPT_MIN_WORDS))
+        if word_count < minimum_words:
             errors.append(
-                f"Generated story must contain {minimum_words} to {DIRECTOR_STORY_SCENES * 140} words "
-                f"(found {word_count})."
+                f"Generated story has {word_count} words, below the minimum accepted length of {minimum_words}."
             )
 
         if self._story_has_open_ended_finale(result):
@@ -1671,13 +1671,9 @@ class QwenDirectorSanitizeMixin:
                 "Generated story ends on an unresolved future hook rather than a completed consequence."
             )
 
-        if self._final_paragraph_word_count(result) < 25:
-            errors.append(
-                "Generated story has an underdeveloped final aftermath paragraph."
-            )
+        # The final scene must resolve the story; do not impose a numeric paragraph quota.
 
-        # Scene prose is contractually one filmable beat of 6–8 sentences. Treat
-        # violations as a pre-production failure, not a warning after shot calls.
+        # Sentence count is a writing-quality target, not a hard production gate.
         try:
             sentence_issues = self._story_sentence_contract_issues(result)
         except (AttributeError, TypeError):
