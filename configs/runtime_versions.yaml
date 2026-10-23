@@ -16,7 +16,7 @@ generation:
   width: 1344
   height: 768
   fps: 24
-  frames_per_shot: 124
+  frames_per_shot: 141
   normal_steps: 20
   turbo_steps: 8
   ref2va_scheduler: beta
@@ -55,10 +55,10 @@ director:
   # Native thinking_token_budget is supported by this vLLM 0.31.0 runtime.
   story_architecture:
     # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
-    max_tokens: 2600
+    max_tokens: 3600
     thinking_token_budget: 1280
-    beat_words_min: 45
-    beat_words_max: 60
+    beat_words_min: 85
+    beat_words_max: 105
   # Two-stage story flow: Architect thinks/plans once; Author writes once without thinking.
   story_sampling:
     thinking:
@@ -74,19 +74,19 @@ director:
       top_p: 0.8
       top_k: 20
       min_p: 0.0
-      presence_penalty: 1.5
+      presence_penalty: 0.8
       max_tokens: 3000
       # Keep zero: vLLM min_tokens suppresses EOS, not semantic under-length output.
       minimum_output_tokens: 0
   story_contract:
     scene_count: 12
     shots_per_scene: 3
-    words_per_scene: 85
-    target_words: 1020
+    words_per_scene: 110
+    target_words: 1320
     # Hard lower boundary for acceptance; not an exact target or a reason to cut an ending.
     minimum_words: 816
     # Stretch guidance: 110 words x 12 scenes = about 1,320 words when the story needs it.
-    writer_words_per_scene: 110
+    writer_words_per_scene: 130
     # Must match minimum_words; below-floor output fails without retry or repair.
     accept_min_words: 816
     # The narrative determines the cast size; no numeric minimum, target, or maximum.
