@@ -21,6 +21,8 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
     STORY_WORDS_PER_SCENE,
+    STORY_TARGET_WORDS,
+    STORY_WRITER_WORDS_PER_SCENE,
     STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
     DIRECTOR_N_CTX,
@@ -1105,10 +1107,86 @@ class QwenDirector(
             )[: self.SHOTS_PER_SCENE]
 
             if len(current) < self.SHOTS_PER_SCENE:
-                self._record_recovery(
-                    "shot_field_sanitization_incomplete",
-                    f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
-                )
+                # H3_STORY1300_GROUNDED_SHOT_FALLBACK: finish missing shot slots locally;
+                # never issue another Qwen request. Keep actions grounded in this scene.
+                scene_text_parts = [
+                    scene.get("description", ""),
+                    scene.get("scene_objective", ""),
+                    scene.get("obligatory_moment", ""),
+                    scene.get("story_summary", ""),
+                ]
+                scene_text = re.sub(r"\s+", " ", " ".join(
+                    str(value or "").strip() for value in scene_text_parts if str(value or "").strip()
+                )).strip()
+                action_parts = [
+                    part.strip() for part in re.split(r"(?<=[.!?])\s+", scene_text) if part.strip()
+                ]
+                if not action_parts and scene_text:
+                    action_parts = [scene_text]
+                if not action_parts:
+                    action_parts = ["The established scene state remains visible without introducing a new event."]
+
+                source_dialogue = scene.get("source_dialogue", [])
+                if not isinstance(source_dialogue, list):
+                    source_dialogue = []
+                clean_dialogue = [
+                    item for item in source_dialogue
+                    if isinstance(item, dict)
+                    and str(item.get("speaker", "") or "").strip()
+                    and str(item.get("text", "") or "").strip()
+                ]
+                while len(current) < self.SHOTS_PER_SCENE:
+                    fallback_index = len(current)
+                    action = action_parts[min(fallback_index, len(action_parts) - 1)]
+                    action = re.sub(r"\s+", " ", action).strip()[:500]
+                    assigned_dialogue = [
+                        item for item_index, item in enumerate(clean_dialogue)
+                        if item_index % self.SHOTS_PER_SCENE == fallback_index
+                    ]
+                    visible_characters = list(dict.fromkeys(
+                        str(item.get("speaker", "") or "").strip()
+                        for item in assigned_dialogue
+                        if str(item.get("delivery", "in_person") or "in_person").strip().lower() != "remote"
+                        and str(item.get("speaker", "") or "").strip().lower() in character_names
+                    ))
+                    candidate = {
+                        "scene_id": sid,
+                        "shot_id": f"{sid}_shot_fallback_{fallback_index + 1}",
+                        "duration_seconds": float(H3_FRAMES_PER_SHOT) / float(H3_FPS),
+                        "characters": visible_characters,
+                        "action": action,
+                        "camera_shot": ("wide", "medium", "close-up")[fallback_index % 3],
+                        "camera_movement": "static",
+                        "lens_and_depth_of_field": "normal lens, moderate depth of field",
+                        "composition_notes": "Clear subject separation and readable spatial depth.",
+                        "mood": str(scene.get("mood", "") or "grounded").strip(),
+                        "visual_prompt": (scene_text or action) + " The visible action stays consistent with the established scene and its motivated lighting.",
+                        "dialogue_events": [
+                            {
+                                "speaker": str(item.get("speaker", "")).strip(),
+                                "text": str(item.get("text", "")).strip(),
+                                "delivery": str(item.get("delivery", "in_person") or "in_person").strip().lower(),
+                                "continues_from_previous_shot": False,
+                                "continues_to_next_shot": False,
+                            }
+                            for item in assigned_dialogue
+                        ],
+                    }
+                    sanitized = self._sanitize_shots([candidate], scene, character_names)
+                    if not sanitized:
+                        break
+                    current.append(sanitized[0])
+                    fallback_index += 1
+                if len(current) >= self.SHOTS_PER_SCENE:
+                    self._record_recovery(
+                        "scene_shots_restored_from_grounded_fallback",
+                        f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
+                    )
+                else:
+                    self._record_recovery(
+                        "shot_field_sanitization_incomplete",
+                        f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
+                    )
 
             repaired_shots.extend(current)
 
@@ -1713,7 +1791,9 @@ class QwenDirector(
         # so harmless deterministic cleanup cannot leave a too-short story marked successful.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
         print(
-            f"[QWEN] story_length words={usable_words} target_guidance=1020 stretch_guidance=1320",
+            f"[QWEN] story_length words={usable_words} "
+            f"target_guidance={STORY_TARGET_WORDS} "
+            f"stretch_guidance={DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE}",
             flush=True,
         )
         # One paragraph per configured scene is enforced before quality checks. The
