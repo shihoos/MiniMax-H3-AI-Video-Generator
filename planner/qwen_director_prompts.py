@@ -229,6 +229,13 @@ Return JSON only.
 """
 
 
+
+
+CALIBRATION_SCENE_EXAMPLE = (
+    'Marta reached the ferry landing at dusk with her cracked lantern still swinging from her wrist, and found the ticket booth shuttered behind a rusted grille. Out on the black water, the last boat\'s engine coughed twice and began to pull away from the pier. She sprinted along the slick planks, her boots skidding on frost, and shouted for the pilot to wait. Old Teodor, coiling rope at the stern, only shrugged and pointed at a sign reading no passengers after six. Marta tugged the folded permit from her coat and held it above the widening gap, her thumb pressed over the torn corner. "Read the stamp, not the date," she called. Teodor squinted, swore under his breath, and hurled the stern line back to the pier. She caught it, hauled the hull against the bollards, and leapt aboard as the engine settled into a grudging, uneven grumble.'
+)
+
+
 class QwenDirectorPromptMixin:
     def _story_text_system(
         self,
@@ -240,7 +247,7 @@ class QwenDirectorPromptMixin:
     @staticmethod
     def _fill_story_length(text: str) -> str:
         n = int(DIRECTOR_STORY_SCENES)
-        # Primary target is 1,020; minimum accepted length is 816; 1,320 is stretch guidance.
+        # Render the active runtime contract; keep guidance and diagnostics configuration-driven.
         per = int(STORY_WORDS_PER_SCENE)
         stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
         shot_seconds = float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
@@ -252,117 +259,186 @@ class QwenDirectorPromptMixin:
             .replace("__TOTAL__", str(STORY_TARGET_WORDS))
             .replace("__STRETCH__", str(stretch))
             .replace("__MINW__", str(STORY_MIN_WORDS))
+            .replace("__SCMIN__", str(int(STORY_MIN_WORDS * 1.25 / n) + 1))
+            .replace("__SCMIN__", str(int(STORY_MIN_WORDS * 1.25 / n) + 1))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
             .replace("__SHOT_SECONDS__", f"{shot_seconds:.1f}")
             .replace("__LINEW__", str(line_words))
         )
 
-    def _story_text_system_raw(
-        self,
-        mode: str,
-    ) -> str:
-        fmt = """
-    Format: plain prose in third person past tense, exactly __N__ explicitly marked scene blocks,
-    Write at least __MINW__ story words overall. Aim for about __TOTAL__ words, with a flexible stretch
-    toward __STRETCH__ when the story needs more development. __MINW__ is the lower acceptance boundary,
-    not an exact target: do not pad or repeat prose, and do not cut a natural ending to hit a number. Start each scene on a new line with
-    its exact structural tag `[[SCENE_01]]` through `[[SCENE_12]]`, then one space and that scene's
-    prose. Use every tag exactly once and in numeric order. The tags are removed by the application;
-    they are not story text. Each scene must remain a single paragraph/beat. Do not combine two beats,
-    split one beat across tags, or use a sentence-count split to create a missing scene. Every scene
-    should use as many complete sentences as the dramatic beat needs; about __PER__ words per scene
-    is flexible guidance, not a quota. Do not use a short summary in place of a developed beat. Do not
-    move to the next scene marker until the current beat contains its action, choice, reaction, consequence, and state transition where
-    relevant. Reach the final scene's completed consequence rather than stopping at an unresolved
-    future hook. Expand through physical action and causal consequence—not repeated wording.
-    The story becomes a film of about __MINUTES__ minutes, so each marked scene is ONE filmable beat
-    in one primary physical location: a specific place, visible action, and a change in the situation.
-    If the characters physically move to a different location, narrate a clear transition in a different
-    scene instead of blending incompatible indoor/outdoor settings. Put any spoken line, in quotation
-    marks, inside its own scene prose, never in a separate dialogue paragraph. Each shot lasts about
-    __SHOT_SECONDS__ seconds: keep a spoken line brief enough for one shot, normally no more than
-    __LINEW__ words. Prefer no more than two quoted dialogue lines per scene, with each line assigned
-    to its own shot; do not add dialogue just to satisfy a quota. Speech should change a decision, expose
-    a conflict, or shift trust. Do not split a line, repeat a line, or write extra spoken lines as padding.
-    No scene has a fixed sentence-count requirement; use as many complete sentences as its beat needs.
-    No other headings,
-    camera directions, or commentary. Do not append word counts, checklists, markdown separators,
-    summaries, meta-commentary, or a postscript after the final scene. Output only the story blocks."""
-        ensemble = f"""
-    CAST CONTRACT (mandatory; policy={DIRECTOR_STORY_CAST_SIZE_POLICY}): Qwen determines the cast size from the story's actual needs. There is no fixed minimum, target, or maximum cast quota that applies to every premise. For ordinary AI Story premises, build a genuine ensemble: the protagonist plus at least two additional named, physically present human characters whose choices materially affect the conflict, reversals, relationships, or resolution. Use fewer physically present humans only when the premise genuinely depends on isolation or additional humans would contradict its core logic; make that reason explicit in the causal blueprint. A recording, hologram, AI, remote voice, photograph, document, or person mentioned only in backstory does not count toward this active-human ensemble. For Expand Story, preserve the source's established cast and add people only when they materially serve the existing causal story. Qwen chooses every name, identity, relationship, motive, and role; never use preset names or a hard-coded cast. Recurring core characters should physically participate in present-time scenes, take consequential actions, and recur where the plot needs them. A one-scene supporting character is valid when that character materially changes an event. Give important characters distinct wants and points of view. At least two separate scenes should contain direct in-person dialogue between named characters when it fits the premise; those exchanges must change a decision, reveal a conflict, or shift trust. Let the plot turn through character actions and consequences, not only discoveries or records. A person mentioned only in backstory or visible only in a photo, label, document, recording, screen, or anonymous remote voice does NOT count as physically active.
-    """
+    def _story_text_system_raw(self, mode: str) -> str:
+        """Return one consistent story-writing contract for the single Author call."""
+        n = int(DIRECTOR_STORY_SCENES)
+        target = int(STORY_TARGET_WORDS)
+        writing_floor = max(1300, target - 20)
+        per = int(STORY_WORDS_PER_SCENE)
+        stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
+        shot_seconds = float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
+        line_words = max(6, int((shot_seconds - 1.0) * 2.2))
+
         if mode == AI_STORY_MODE:
-            return textwrap.dedent("""
-    You are the screenwriter expanding the supplied causal blueprint into a complete short film told as prose. The blueprint is the binding story plan: preserve its named identities, relationships, scene order, causes, object states, and intended resolution. Do not invent a different story or silently omit a planned active character. If any cast detail is underspecified, complete it consistently rather than changing the plot.
+            source_rule = (
+                "The Architect blueprint is the binding causal plan. Preserve its character identities, "
+                "relationships, scene order, causes, object states, planted clues, intended costs, and "
+                "resolution. Make only the smallest repair needed if a physical contradiction would make "
+                "events impossible; do not silently replace the plot."
+            )
+        elif mode == EXPAND_USER_STORY_MODE:
+            source_rule = (
+                "Preserve the source story's established identities, relationships, setting, chronology, "
+                "key events, twists, and outcome. Add causal development, not unrelated subplots; never "
+                "erase or contradict a source character or established outcome."
+            )
+        else:
+            source_rule = "Preserve all supplied story facts and do not invent a different outcome."
 
-    Write a compelling, character-driven ensemble thriller/drama, not a solitary discovery tour. For an ordinary AI Story premise, physically stage the protagonist and at least two additional named human characters in the present-time story, unless the blueprint explicitly establishes why isolation is essential. Give each important character a distinct want, a consequential choice, and a reason to cooperate or conflict; do not count recordings, remote voices, holograms, or AI systems as additional physically present humans. Preserve the blueprint's cast and make each planned active character matter on-page. Establish the protagonist's concrete goal in scene 1; give the opposing force and allies understandable motives; make choices create consequences; plant an ordinary detail that pays off in a fair reversal; give characters distinct voices; and resolve the central conflict visibly in scene 12. Every scene must change who has leverage, what someone knows, or what action becomes necessary. The blueprint's mechanism rules and object states are binding: never introduce an unseeded cure, power, object, or new rule to solve the climax. Any apparent cure or solution must be causally prepared and demonstrated; any explicit countdown or threat must have a traceable resolution. Resolve the protagonist's stated goal and every major clue or cost, and make the final paragraph's factual claims consistent with what the story showed about who survived and what happened. No unexplained disappearances, convenient keys without setup, contradictory broadcasts, or ending that merely says the truth is out while leaving the main question unanswered.
-    """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
+        return textwrap.dedent(f"""\
+            You are an expert screenwriter writing a compelling, filmable short film in third-person past
+            tense. Write vivid, natural, fully dramatized prose: every scene is lived moment by moment,
+            never summarized, outlined, or reported. {source_rule}
 
-        if mode == EXPAND_USER_STORY_MODE:
-            return textwrap.dedent("""
-    You are the screenwriter expanding the supplied story into a complete short film told as prose. Preserve established source characters, the setting, chronology, key events, any twist, and the source's outcome. Do not erase a source character or contradict an established fact.
+            LENGTH CONTRACT (mandatory): write exactly {n} explicitly marked scene blocks. The expected
+            target is {target} usable story words and the finished story must reach at least {writing_floor};
+            it may stretch toward {stretch} when the story needs it. Write about {per} words per scene at the
+            very least, the natural size of the SCENE SHAPE below (9 sentences of 12-20 words each,
+            usually 115-140 words). Scenes 9-{n:02d} are written with the same fullness as
+            scenes 1-3; the ending is never rushed. Per-scene length is flexible, but a scene of five or six
+            sentences is unfinished, so keep writing until its shape is complete. Do not pad with adjectives
+            or repeated ideas: every added sentence carries a new action, obstacle, reaction, or consequence.
 
-    Preserve the source's established character identities, relationships, and story-relevant canon, but do not impose a fixed cast size. Add as many new named characters as the causal development genuinely needs, including allies, opponents, witnesses, or other participants whose choices materially change the path to the existing outcome. Do not add characters merely to meet a quota, and do not replace source anchors with new identities. A useful supporting character may appear in one scene; recurring characters should recur when their role in the plot calls for it. Do not treat a person heard remotely as physically present unless the story explicitly places them there. Build cause-and-effect between existing plot points instead of padding the prose or repeating paragraphs. Do not contradict source outcomes, established survival/fate, chronology, or cause-and-effect. Any new character, clue, device, or mechanism must be introduced before it is needed and must change events rather than merely appear. Keep each scene in one primary location and explicitly show transitions; keep the state and owner/location of plot-bearing objects consistent across every handoff, lock, escape, collapse, or destruction.
+            SCENE SHAPE: write each scene as one developed paragraph of 9 sentences in one primary physical
+            location, following the blueprint's six fields in order:
+            ENTRY, 1 sentence: place, time, who is physically present, one concrete sensory detail.
+            ACTION, 2 sentences: what the lead character does toward the goal, step by step.
+            OBSTACLE, 2 sentences: the opposition, failure, or changed fact, with a specific physical detail.
+            CHOICE, 2 sentences: the decision, or a short spoken exchange, and the act that carries it out.
+            COST, 1 sentence: what it risks or costs, and how the character reacts.
+            RESULT, 1 sentence: the consequence that is now true, which hands the next scene its start state.
+            Never copy a blueprint sentence: render each field in fresh prose, and let the second sentence of
+            a two-sentence field add a physical detail, perception, or reaction the blueprint did not state.
 
-    The protagonist's goal must be clear early. Determine cast size from the premise and causal plan, with no numeric quota; recurring and supporting characters are allowed whenever they materially affect events. Use visible actions and decisions; plant a detail that pays off; make at least two in-person dialogue exchanges change the conflict or trust between characters when compatible with the premise; and resolve the main question in the final scene consistently with the source outcome.
-    """).strip() + "\n\n" + textwrap.dedent(ensemble).strip() + "\n\n" + textwrap.dedent(fmt).strip()
+            DRAMATIC QUALITY: make the protagonist's concrete goal and pressure clear in scene 1. Give the
+            opposing force and important allies understandable motives and conflicting wants. Let choices
+            cause reversals and costs; every scene must change the situation, knowledge, leverage, danger,
+            or a relationship. Plant a specific detail before its payoff; let the midpoint change the meaning
+            of earlier evidence; let the low point force a painful choice; make the climax follow from rules,
+            tools, and evidence established earlier. The final scene shows the central conflict resolved
+            through an observable action and its consequence, with no convenient cure, power, helper, key,
+            object, or rule appearing at the climax. Use concrete sensory details that interact with action,
+            distinct character voices, varied sentence openings and rhythm, and purposeful dialogue. Avoid
+            unexplained reversals, melodramatic coincidence, stock metaphors, moralizing, and exposition that
+            restates what the audience already knows.
 
-        raise ValueError("Preserve Story does not use a story-text pass.")
+            CAST: let the premise and causal plan determine the cast. There is no fixed minimum, target, or
+            maximum cast quota. Never add a person just to meet a count. Preserve every established core
+            identity; names and relationships are story facts, and each person is named clearly on first
+            mention. Each important character wants something specific and makes at least one decision that
+            affects the outcome when the plot gives them a role. Where the story supports interpersonal
+            conflict, aim for two meaningful in-person dialogue exchanges across different scenes. Remote
+            voices, recordings, holograms, documents, and AI are not physically present people.
 
+            CONTINUITY: track who is physically present versus heard remotely, each person's knowledge and
+            fate, and the owner, location, and state of every important object. Show movement between
+            locations explicitly, in a separate scene. An irreversible event happens once; a character cannot
+            act after death; a destroyed or inaccessible place cannot be revisited without an established
+            route or safe interval.
+
+            DIALOGUE: use no more than two quoted lines per scene, each at or below {line_words} words so it
+            can fit one shot of about {shot_seconds:.1f} seconds. Dialogue is optional in any scene. Each line
+            must change a decision, reveal a conflict, shift trust, or establish useful information; never
+            repeat a line.
+
+            FORMAT: plain prose, exactly {n} explicitly marked scene blocks, each beginning on a new line with
+            its exact tag [[SCENE_01]] through [[SCENE_{n:02d}]], followed by one space and the scene prose.
+            Use every tag exactly once and in numeric order; the application removes the tags and they are not
+            story words. Output only these scene blocks: no headings, camera directions, word counts,
+            checklists, markdown separators, summaries, meta-commentary, or postscript. The final sentence
+            describes a consequence that has already happened, not a future hook, teaser, new threat,
+            promise, or unresolved question.
+        """).strip()
 
     def _story_blueprint_system(self, mode: str) -> str:
-        """Build a compact causal beat sheet, not a Story Bible or alternate story."""
+        """Build a detailed causal blueprint with explicit scene-development and continuity contracts."""
         n = int(DIRECTOR_STORY_SCENES)
-        task_rule = (
-            "Determine the cast from the premise and causal plot; there is no fixed minimum, target, or maximum cast quota that applies to every premise. For an ordinary AI Story premise, plan a protagonist plus at least two additional named humans who physically participate in present-time events and whose choices materially change the conflict, reversals, relationships, or resolution. Use fewer only when the premise genuinely requires isolation or additional humans would contradict its core logic; make that exception explicit. Qwen chooses every name, identity, relationship, motive, and role; never use preset names or a hard-coded cast. Recurring core characters should act across multiple beats; functional one-scene supporting characters are allowed when they change events. Do not add characters merely to satisfy a quota. At least two beats should contain consequential face-to-face dialogue or conflict between named characters when compatible with the premise. Do not count labels, records, memories, screens, recordings, remote voices, or AI systems as physically present human characters."
-            if mode == AI_STORY_MODE
-            else "Preserve source character identities and story-relevant canon, setting, chronology, key events, twists, and outcome. There is no fixed minimum, target, or maximum character count. Add any number of named allies, opponents, witnesses, or other participants whose choices materially change the causal path to the same outcome. Do not add people only to meet a quota; preserve source anchors. Recurring characters should act across multiple beats when their role calls for it, while useful one-scene supporting characters are valid. At least two beats should include direct interpersonal conflict or dialogue where the premise supports it."
-        )
-        return textwrap.dedent(f"""            You are the story architect for a short film, not the prose writer.
-            Produce a concise, causally complete blueprint of exactly {n} scenes for the source premise.
-            {task_rule}
+        beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
+        beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
+        line_words = max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))
 
-            Plan for a finished, emotionally credible story: make the protagonist's goal concrete early;
-            ensure each scene is caused by a previous choice or event; track who knows what; keep the
-            location and important object states consistent; plant one ordinary detail early and pay it
-            off in a fair reversal; make a consequential choice cost something; give the ending a clear,
-            observable resolution in the final scene. Define the rules of any threat/technology/medical
-            mechanism before it drives the climax; every solution must follow from evidence or tools
-            introduced earlier. Never introduce a new cure, power, rule, helper, or object in the climax
-            solely to solve the conflict. Track every major planted clue and obligation through payoff,
-            and do not contradict the final fate or state of any surviving character. Avoid unrelated
-            subplots and unexplained turns.
+        if mode == AI_STORY_MODE:
+            premise_rule = (
+                "Create an original story from the supplied premise. Qwen owns every character name, "
+                "identity, relationship, motive, and role. Choose cast size from the causal plot: no fixed "
+                "minimum, target, or maximum cast quota. Never add characters just to meet a count. "
+                "When interpersonal conflict improves the premise, use distinct people whose choices alter "
+                "events; an audio recording, remote voice, hologram, AI, document, or corpse is not a "
+                "physically present human counterpart."
+            )
+        else:
+            premise_rule = (
+                "Expand the supplied story while preserving its established character names and identities, "
+                "setting, chronology, key events, twists, and outcome. There is no fixed minimum, target, "
+                "or maximum cast quota. Never add characters just to meet a count. Add a named person only "
+                "when that person's choice materially changes the causal path; do not merge, rename, or drop "
+                "an established source character."
+            )
 
-            CONTINUITY LEDGER (mandatory, internal planning pass): every beat has exactly one primary
-            physical location and explicitly states who is physically present versus only heard remotely.
-            For every beat, reconcile the prior beat's exit state with the next beat's entry state. Track
-            each important character's alive/dead and present/absent state, each critical object's owner
-            and location, each access/lock state, and each threat or irreversible action's status. Record
-            the before-state, the concrete action/choice, and the resulting after-state for each plot-bearing
-            object or mechanism. A scene cannot quietly switch from outdoors to an interior or relocate a
-            character between a remote terminal and the room. A destructive trigger, collapse, detonation,
-            escape, or other irreversible action happens only once unless the blueprint explicitly explains
-            a staged warning versus the real trigger. After a location is destroyed or made inaccessible,
-            no later beat may continue there without an explicitly established safe interval or route. Do
-            not make a character act after death, disappear without cause, or return without a stated cause.
-            Before output, silently replay all scenes in order and remove any beat that requires an object,
-            person, location, or mechanism to be in two incompatible states. Preserve the intended conflict
-            and ending while making every physical transition possible.
+        return textwrap.dedent(f"""\
+            You are the story architect, not the prose writer. Build a detailed, emotionally credible,
+            causally complete blueprint of exactly {n} scenes. This is not a synopsis: the Author turns
+            each beat into a finished scene and can only be as rich as your beats, so a complete story of
+            at least 1,300 words depends on every beat being fully written out.
 
-            The CAST line contains PEOPLE who act as characters only, never weather, forces, places,
-            buildings, rooms, objects, devices, organizations, or abstract concepts. A sentient non-human
-            may be listed only when it is intentionally a character with agency, not a metaphor for weather.
-            First output ONE line beginning `CAST:` that lists every core character as
-            `Name (role; what they want; how they speak) | Name (...) | ...` so the writer keeps
-            identities and voices consistent. Then output exactly {n} non-empty lines, one per scene,
-            numbered `SCENE 01:` through `SCENE {n:02d}:` in order. Each line should be one compact beat (roughly {STORY_PLAN_BEAT_MIN_WORDS}–{STORY_PLAN_BEAT_MAX_WORDS} words) that states who is
-            physically present, their goal or conflicting intent, a specific visible action, one concrete
-            sensory/visual detail, the causal turn, and knowledge/object state carried forward. Where the
-            premise supports in-person interpersonal conflict, prefer 2-4 beats with one short, consequential
-            quoted line spoken by a physically present named character (normally no more than {max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))} words).
-            Do not force speech into isolation-driven or primarily visual beats; never place more than one
-            quoted line in a beat. Keep dialogue on-topic and causally meaningful. The CAST line is the only
-            non-scene line allowed. No other preamble, JSON, prose paragraphs, or commentary.
+            WORKING STYLE: keep private reasoning brief. Decide the cast, the protagonist's goal, the
+            midpoint reversal, the lowest point and its cost, and the climactic choice, then spend your
+            effort writing all {n} full beats. The beats are the product; a beat under {beat_min} words is
+            a failure.
+
+            CAST CONTRACT: {premise_rule} Give core characters distinct goals, fears, leverage, and voices.
+            Their decisions, not coincidence or exposition alone, must cause important turns. At least two beats should contain consequential face-to-face conflict or dialogue when compatible with the premise; prefer 2-4 beats with a short exchange of up to two quoted lines. Do not force dialogue into an isolation-driven story. Keep the cast line to people who act as characters; places,
+            buildings, organizations, objects, devices, and abstract forces are not people.
+
+            STORY DESIGN: establish a concrete protagonist goal and immediate pressure early; make each
+            scene change the situation, knowledge, leverage, danger, or relationship. Escalate obstacles
+            through character choices. Give the middle a meaningful reversal that changes what the
+            protagonist believes or can do; make the lowest point impose a real cost; make the climax
+            require a costly choice; and show a complete, observable resolution in the final scene. Plant
+            a fair clue or ordinary detail before its payoff. Any threat, technology, medicine, countdown,
+            or special mechanism must have clear rules before it determines the outcome. Never introduce
+            an unprepared cure, power, helper, object, or rule just to solve the climax.
+
+            CONTINUITY LEDGER (mandatory internal check): for every scene, track one primary physical
+            location, who is physically present versus heard remotely, what each person knows, and the
+            alive/dead and present/absent state of core characters. Track each important object's owner,
+            location, and state; each door/access/lock state; and each threat or irreversible action. Every
+            scene must state the relevant entry state, a concrete action or choice, and the resulting exit
+            state that causes the next beat. An irreversible action happens only once unless a staged
+            warning and the real event are explicitly distinguished. No character may act after death,
+            disappear without cause, or return without a stated route and reason. After destruction or
+            lockout, no later scene may use that place without an established safe interval or route.
+            Replay all {n} beats before output and repair physical, timeline, knowledge, and object-state
+            contradictions without inventing an unseeded mechanism.
+
+            BEAT SHAPE (mandatory): every beat is ONE line made of six labelled fields in this exact order,
+            each field one sentence of 12-20 words with concrete nouns and verbs, about {beat_min}-{beat_max}
+            words per beat in total:
+            ENTRY: the single primary location, who is physically present, and what the lead wants right now.
+            ACTION: the lead's concrete physical action toward that want.
+            OBSTACLE: the opposition, failure, or changed fact, with one specific physical detail.
+            CHOICE: the decision or short exchange it forces (a quoted line is allowed; keep dialogue sparse).
+            COST: what the choice risks or costs, and how the character reacts.
+            RESULT: what is now true, which directly causes the next scene.
+            Write the labels exactly as shown, after the "SCENE nn:" prefix, on the same line. Every beat,
+            including the last two, has all six fields; closing beats are not shorter. Each field adds a
+            different story fact or change; do not inflate with adjectives or repeat the same beat. Scene
+            {n:02d} resolves the central objective and its RESULT shows what the protagonist's choice cost.
+
+            CAST FORMAT: first output exactly one line beginning CAST:; list every core character as
+            Name (role; what they want; how they speak) separated by |. Then output exactly {n} lines,
+            each beginning SCENE 01: through SCENE {n:02d}:, one line per scene with no line breaks inside a
+            beat. Beats describe physical events, not camera directions. Spoken lines belong to a character
+            physically present in that location, normally no longer than {line_words} words, and must change
+            a choice, trust, leverage, or understanding. Use at most two quoted lines in a beat and never
+            repeat dialogue for padding. No preamble, JSON, extra lines, or commentary.
         """).strip()
 
     def _story_blueprint_user(
@@ -481,10 +557,7 @@ class QwenDirectorPromptMixin:
         source_character_names: list[str] | None = None,
         story_blueprint: str | None = None,
     ) -> str:
-        source_text = self._compact_story_context(
-            story,
-            DIRECTOR_STORY_CONTEXT_CHARS,
-        )
+        source_text = self._compact_story_context(story, DIRECTOR_STORY_CONTEXT_CHARS)
         result = "MODE: " + str(mode) + "\n\nSOURCE STORY / PREMISE:\n" + source_text
         if mode == EXPAND_USER_STORY_MODE:
             anchors = list(dict.fromkeys(
@@ -493,38 +566,60 @@ class QwenDirectorPromptMixin:
                 if str(value).strip()
             ))
             if anchors:
-                result += (
-                    "\n\nSOURCE CHARACTER ANCHORS (preserve; not a cast limit):\n"
-                    + ", ".join(anchors)
-                )
+                result += "\n\nSOURCE CHARACTER ANCHORS (preserve exact identity; not a cast limit):\n" + ", ".join(anchors)
+
         if str(story_blueprint or "").strip():
             result += (
-                "\n\nCAUSAL SCENE BLUEPRINT (structural reference; do not reproduce these labels; the CAST line lists the recurring characters whose names and voices must stay consistent):\n"
+                "\n\nCAUSAL BLUEPRINT (binding for events, names, objects and continuity; it is an outline, not the length model):\n"
                 + str(story_blueprint).strip()
-                + "\n\nExpand every beat into vivid, natural filmable prose. Preserve its cause-and-effect, "
-                  "character knowledge, and object/location continuity. Do not explain the blueprint or add headings."
+                + "\n\nHOW TO EXPAND THE BLUEPRINT: each scene's labelled fields (ENTRY, ACTION, OBSTACLE, CHOICE, COST, RESULT) become exactly "
+                "1, 2, 2, 2, 1, 1 prose sentences, a 9-sentence scene of roughly 115-140 words. "
+                "Never copy a blueprint sentence; the second sentence of each two-sentence field adds a physical detail, perception, or reaction "
+                "that the blueprint does not state. Do not let a short beat produce a short scene."
             )
+
+        target = int(STORY_TARGET_WORDS)
+        writing_floor = max(1300, target - 20)
+        per = int(STORY_WORDS_PER_SCENE)
+        stretch = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
+        n = int(DIRECTOR_STORY_SCENES)
+        line_words = max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))
+
         result += (
-            "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(DIRECTOR_STORY_SCENES)
-            + " scene blocks in numeric order. Prefix each block with its exact structural tag "
-            + "[[SCENE_01]] through [[SCENE_12]], followed by one space and that scene's prose. "
-            + "Use every tag exactly once; the application removes these tags. Each marked scene is one developed paragraph. About " + str(STORY_WORDS_PER_SCENE)
-            + " words per scene is flexible guidance, not a quota. The complete story must contain at least " + str(STORY_MIN_WORDS)
-            + " words to pass acceptance. Aim for about " + str(STORY_TARGET_WORDS)
-            + " words overall, stretching toward " + str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
-            + " when the story needs more development. Do not pad to hit the target or cut off a natural ending."
-            + " Preserve the blueprint's plot-driven cast without a numeric quota: do not omit planned characters, and add supporting people only when they materially serve the story. Recurring core characters should remain active across the scenes needed by their roles."
-            + " Preserve each planned character's canonical identity: use the canonical full name on first mention, and do not rename or collapse distinct people. After identification, use natural shorter forms whenever they remain unambiguous."
-            + " Where the premise supports interpersonal conflict, aim for two meaningful in-person dialogue exchanges between named active characters across different scenes; each spoken line should change a choice, expose a conflict, or shift trust. Do not force dialogue into isolation-driven or primarily visual beats. Keep each quoted line short enough for one shot (normally no more than " + str(max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))) + " words), and use no more than two quoted lines per scene."
-            + " Give each scene one primary physical location; make changes of location explicit in a separate scene."
-            + " Vary sentence count and length according to dramatic purpose. Show grounded actions, decisions, reactions, causes and consequences; never pad or repeat prose to meet a quota."
-            + " Scene 12 must show the central objective and conflict resolving on-page, with the completed observable consequence and the protagonist's immediate outcome. Do not end with a future hook, teaser, new threat, unexplained signal, promise, unanswered question, or sequel setup."
-            + " End with a complete sentence describing a consequence that has already happened, not a future possibility. Output only these marked story blocks."
-            + " CONTINUITY LOCK: silently replay every scene in order before writing. Preserve the prior scene's character fates, object ownership/location, access states, and causal consequences. An irreversible action such as a detonation or collapse cannot already have completed and then be triggered again; after destruction or lockout, later action needs an explicitly established path or safe interval. If the blueprint contains a physical contradiction, make the smallest repair that preserves the intended conflict and resolution rather than narrating impossible events. Never introduce an unseeded mechanism to fix that repair."
-            + " Do not output any headings or labels other than the required [[SCENE_01]] through [[SCENE_12]] structural tags. Do not reproduce the Architect's `SCENE 01:` beat labels. No planning notes, word counts, checklists, markdown separators, summaries, statements that the requirements were met, emojis, or postscript. Count words silently; never print a word-count report."
+            "\n\nCALIBRATION EXAMPLE (shows the required density and length of ONE scene; it belongs to an unrelated story, "
+            "so never reuse its names, setting, objects, or events):\n"
+            "[[SCENE_03]] " + CALIBRATION_SCENE_EXAMPLE
+        )
+
+        result += (
+            "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(n) + " scene blocks in numeric order. "
+            "Prefix each block with its exact structural tag [[SCENE_01]] through [[SCENE_" + f"{n:02d}" + "]], "
+            "followed by one space and that scene's prose. Use every tag exactly once; the application removes these tags. "
+            "Each marked scene is one developed paragraph of 9 full sentences, as in the calibration example, never a summary. "
+            "The story is " + str(target) + " words in total and must reach at least " + str(writing_floor)
+            + " usable words; it may extend toward " + str(stretch) + " words when the causal story needs it. "
+            "Aim for about " + str(per) + " words per scene at the very least, and most scenes should land around 115-140. "
+            "Per-scene distribution is flexible guidance, not a quota, but every scene completes its shape "
+            "(entry, action, obstacle, choice, cost, result) before the next tag begins, "
+            "and scenes 9-" + f"{n:02d}" + " are as fully developed as scenes 1-3. Never pad or repeat ideas; each added sentence carries "
+            "a new action, obstacle, reaction, or consequence. This is one writing pass: do not print a word count, and do not stop early because the plot "
+            "has been summarized. "
+            "Preserve the plot-driven cast: do not omit planned core characters or force a numeric cast quota. "
+            "Qwen owns character names and relationships; keep exact canonical identities, name each person clearly on first mention, "
+            "and never rename or merge distinct people. Recurring core characters must act when the plot gives them a role. "
+            "CONTINUITY LOCK: every scene has one primary physical location; make transitions explicit and preserve knowledge, object, access, and fate continuity. "
+            "No unseeded cure, power, helper, object, or rule may solve the climax. Where the premise supports it, aim for two meaningful in-person dialogue exchanges across different scenes; each exchange must change a choice, expose conflict, or shift trust. At least two beats should contain consequential interpersonal conflict or dialogue when the premise supports it. "
+            "Use no more than two quoted lines per scene, with each line at most " + str(line_words)
+            + " words so it fits one shot. Do not force speech into isolation-driven beats. "
+            "Use specific sensory details that serve an action, distinct voices, varied sentence openings and rhythm, "
+            "and avoid repetitive gestures, stock metaphors, exposition dumps, or moralizing summaries. "
+            "Scene " + f"{n:02d}" + " must resolve the central objective and conflict on-page, show the completed observable consequence and the protagonist's immediate outcome, "
+            "and end on a consequence that has already happened, not a future hook or unanswered question. "
+            "Never use camera, cut to, pans, zoom, or shot as narrative prose. "
+            "Output only the " + str(n) + " tagged story blocks; no headings, planning notes, word counts, checklists, markdown separators, summaries, or postscript.\n\n"
+            "Begin now with [[SCENE_01]] and write every scene in full through [[SCENE_" + f"{n:02d}" + "]]."
         )
         return result
-
 
     def _sampling_for_mode(
         self,
@@ -551,6 +646,18 @@ class QwenDirectorPromptMixin:
 
     @staticmethod
     def _character_extraction_json_schema() -> dict:
+        """Speakers are named first, then the cast is listed; the cast can never be empty."""
+        schema = QwenDirectorPromptMixin._character_extraction_json_schema_base()
+        props = schema["properties"]
+        schema["properties"] = {
+            "quote_classifications": props["quote_classifications"],
+            "candidates": {**props["candidates"], "minItems": 1},
+        }
+        schema["required"] = ["quote_classifications", "candidates"]
+        return schema
+
+    @staticmethod
+    def _character_extraction_json_schema_base() -> dict:
         """Let Qwen return the complete cast without per-name or cast-count rules.
 
         The candidates array has no minItems/maxItems cast quota. Output tokens and
@@ -923,7 +1030,7 @@ class QwenDirectorPromptMixin:
         system_prompt = textwrap.dedent("""
     You are Qwen's character and dialogue extractor for a film-production planner. Return JSON only.
 
-    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist.
+    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist. The JSON lists `quote_classifications` first and `candidates` second: every speaker you attribute in an in_person_spoken quote who physically takes part in the story MUST also appear in `candidates`, together with every other named person who acts. `candidates` is never empty.
 
     Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON.
 
@@ -1358,6 +1465,44 @@ class QwenDirectorPromptMixin:
         }
 
     def _shot_batch_json_schema(
+        self,
+        scene_count: int = 2,
+        dialogue_ids: list[str] | None = None,
+        dialogue_ids_by_scene: dict[str, list[str]] | None = None,
+    ) -> dict:
+        """Base schema plus hard length bounds, so a repetition loop inside a free-text field
+        cannot run to the token cap (observed: 3600 tokens, finish_reason=length, run aborted).
+        Limits are >= 1.7x the longest value seen in real traces; the sanitizer trims prompts to 40 words anyway."""
+        schema = self._shot_batch_json_schema_base(
+            scene_count=scene_count,
+            dialogue_ids=dialogue_ids,
+            dialogue_ids_by_scene=dialogue_ids_by_scene,
+        )
+        meta_limits = {"location": 120, "time_of_day": 40, "weather": 40, "atmosphere": 80,
+                       "mood": 40, "lighting": 160, "color_temperature": 40}
+        shot_limits = {"action": 260, "lens_and_depth_of_field": 60, "composition_notes": 200,
+                       "mood": 40, "visual_prompt": 320}
+        item = schema["properties"]["scene_shots"]["items"]
+        for branch in (item.get("oneOf") or [item]):
+            props = branch["properties"]
+            meta = props["scene_metadata"]["properties"]
+            for key, limit in meta_limits.items():
+                if key in meta and meta[key].get("type") == "string":
+                    meta[key].setdefault("maxLength", limit)
+            for key, limit in (("environment_details", 80), ("key_props", 60)):
+                if key in meta and isinstance(meta[key].get("items"), dict):
+                    meta[key]["items"].setdefault("maxLength", limit)
+            shot = props["shots"]["items"]["properties"]
+            for key, limit in shot_limits.items():
+                if key in shot and shot[key].get("type") == "string":
+                    shot[key].setdefault("maxLength", limit)
+            if "characters" in shot:
+                shot["characters"].setdefault("maxItems", 6)
+                if isinstance(shot["characters"].get("items"), dict):
+                    shot["characters"]["items"].setdefault("maxLength", 96)
+        return schema
+
+    def _shot_batch_json_schema_base(
         self,
         scene_count: int = 2,
         dialogue_ids: list[str] | None = None,
@@ -2094,3 +2239,4 @@ class QwenDirectorPromptMixin:
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
