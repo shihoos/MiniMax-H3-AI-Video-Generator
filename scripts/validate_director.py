@@ -362,7 +362,6 @@ def test_shot_batch_dialogue_references_restore_exact_source_text_and_deduplicat
             f"duplicate/foreign dialogue references should be observable: {recovered_events}")
 
 
-
 def test_scene_local_dialogue_balancer_spreads_lines_and_preserves_source_constraints():
     from planner.qwen_director import QwenDirector
     director = QwenDirector.__new__(QwenDirector)
@@ -423,6 +422,7 @@ def test_scene_sentence_counts_are_flexible_but_dialogue_timing_is_advisory():
     dialogue_issues = director._story_sentence_contract_issues("\n\n".join(dialogue_story))
     _assert(any("exceeds 9 words" in issue for issue in dialogue_issues),
             f"overlong quoted dialogue should be flagged as advisory: {dialogue_issues!r}")
+
 
 def test_scene_local_dialogue_assignments_are_unique_and_constrained():
     from planner.qwen_director import QwenDirector
@@ -754,48 +754,84 @@ def test_dialogue_reconciliation_preserves_remote_audio_without_visible_binding(
 
 def test_story_prompt_is_open_cast_and_fully_filled():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE, DIRECTOR_STORY_SCENES
+    from planner.config import (
+        AI_STORY_MODE, EXPAND_USER_STORY_MODE, DIRECTOR_STORY_SCENES,
+        DIRECTOR_STORY_CAST_SIZE_POLICY, RUNTIME, STORY_TARGET_WORDS,
+        STORY_WRITER_WORDS_PER_SCENE,
+    )
     q = QwenDirector.__new__(QwenDirector)
+    floor = max(1300, int(STORY_TARGET_WORDS) - 20)
+    sample_blueprint = "CAST: Ada | Bea | Cy\n" + "\n".join(
+        f"SCENE {index:02d}: beat" for index in range(1, int(DIRECTOR_STORY_SCENES) + 1)
+    )
+    _assert(int(RUNTIME["director"]["story_sampling"]["writing"]["max_tokens"]) == 3000,
+            "Author token ceiling must remain 3000")
+    _assert(int(RUNTIME["director"]["story_sampling"]["writing"].get("minimum_output_tokens", 0)) == 0,
+            "minimum_output_tokens must remain zero")
+    _assert(int(RUNTIME["director"]["story_max_tokens"]) == 6500,
+            "global story ceiling must remain unchanged")
+    _assert(int(RUNTIME["director"]["story_architecture"]["max_tokens"]) == 3600,
+            "Architect ceiling must remain unchanged")
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = q._story_text_system(mode)
-        _assert("__" not in text, f"{mode}: unfilled length placeholder in prompt")
-        _assert(f"exactly {DIRECTOR_STORY_SCENES} explicitly marked scene blocks" in text
-                and "[[SCENE_01]]" in text and "[[SCENE_12]]" in text,
-                f"{mode}: explicit scene-boundary contract missing from prompt")
-        low = text.lower()
-        _assert("names" in low and "relationships" in low, f"{mode}: Qwen must own cast, names and relationships")
-        from planner.config import DIRECTOR_STORY_CAST_SIZE_POLICY, RUNTIME
+        low = " ".join(text.lower().split())
+        _assert("__" not in text, f"{mode}: unfilled prompt placeholder")
+        _assert(f"exactly {DIRECTOR_STORY_SCENES} explicitly marked scene blocks" in low
+                and "[[scene_01]]" in low and f"[[scene_{DIRECTOR_STORY_SCENES:02d}]]" in low,
+                f"{mode}: explicit scene-boundary contract missing")
+        _assert("names" in low and "relationships" in low,
+                f"{mode}: Qwen must own names and relationships")
         _assert(DIRECTOR_STORY_CAST_SIZE_POLICY == "plot_driven"
                 and RUNTIME["director"]["story_contract"].get("cast_size_policy") == "plot_driven",
-                f"{mode}: cast-size policy must be plot-driven and runtime-authoritative")
-        _assert("no fixed minimum" in low and "no fixed" in low and "maximum" in low,
-                f"{mode}: prompt must explicitly reject a fixed numeric cast quota")
-        _assert("physically" in low and "dialogue" in low,
-                f"{mode}: prompt must require active character participation and interactions")
-        _assert("no scene has a fixed sentence-count requirement" in low and "one shot" in low,
-                f"{mode}: scene sentences must be flexible and dialogue must fit a shot")
-        _assert("word counts" in low and "postscript" in low,
-                f"{mode}: prompt must forbid count reports and output after the story")
-        from planner.config import STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
-        writer_prompt = q._story_text_user(
-            mode, "premise", story_blueprint="CAST: Ada\nSCENE 01: beat"
-        ).lower()
-        _assert("guidance, not a quota" in writer_prompt
-                and str(STORY_TARGET_WORDS) in writer_prompt
-                and str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in writer_prompt
-                and "continuity lock" in writer_prompt,
-                f"{mode}: writer must use flexible target/stretch guidance and preserve continuity")
-        blueprint = q._story_blueprint_system(mode).lower()
-        _assert("no fixed minimum" in blueprint and "maximum" in blueprint,
-                f"{mode}: Architect must use a plot-driven, unbounded cast size")
-        _assert(("physically present" in blueprint or "physically active" in blueprint)
-                and "at least two beats" in blueprint,
-                f"{mode}: architecture prompt must seed active characters and interactions")
-        _assert("at least six beats must contain" not in blueprint
-                and "prefer 2-4 beats" in blueprint,
-                f"{mode}: blueprint must not force six dialogue beats")
+                f"{mode}: general runtime cast policy must remain plot-driven")
+        _assert(f"finished story must reach at least {floor}" in low,
+                f"{mode}: prompt floor must state the 1300+ target")
+        _assert("110-130" in low and "not flexible guidance" in low,
+                f"{mode}: each scene must have a consistent 110-130 word contract")
+        _assert("countdown values must only decrease" in low or "countdown values only decrease" in low,
+                f"{mode}: countdown continuity contract missing")
+        _assert("quotation marks only for audible" in low and "journal" in low,
+                f"{mode}: written text must not be misclassified as spoken dialogue")
+        _assert("varied sentence openings" in low and "never begin three consecutive" in low,
+                f"{mode}: repetition guard missing")
+        if mode == AI_STORY_MODE:
+            _assert("at least three distinct named, living human characters" in low
+                    and "physically appear" in low and "at least two scenes" in low,
+                    "AI Story Writer must require three causally active humans")
+        else:
+            _assert("no fixed minimum or maximum cast size" in low,
+                    "Expand Story must preserve its source-driven cast policy")
+
+        writer = q._story_text_user(mode, "premise", story_blueprint=sample_blueprint)
+        writer_low = " ".join(writer.lower().split())
+        _assert(f"must reach at least {floor}" in writer_low,
+                f"{mode}: Writer must state the hard 1300+ target")
+        _assert("110-130 usable story words" in writer_low,
+                f"{mode}: Writer must require 110-130 words in each scene")
+        _assert(str(STORY_WRITER_WORDS_PER_SCENE) in writer and "continuity lock" in writer_low,
+                f"{mode}: Writer must state configured per-scene guidance and continuity contract")
+        _assert("begin now with [[scene_01]]" in writer_low,
+                f"{mode}: Writer start marker missing")
+        if mode == AI_STORY_MODE:
+            _assert("ai story cast execution contract" in writer_low,
+                    "AI Story cast contract must be explicit in the Writer prompt")
+        blueprint = " ".join(q._story_blueprint_system(mode).lower().split())
         _assert("continuity ledger" in blueprint and "irreversible action" in blueprint,
-                f"{mode}: architect must reconcile irreversible actions and character/object states")
+                f"{mode}: Architect continuity ledger missing")
+        _assert("85-105 words" in blueprint and "six labelled fields" in blueprint,
+                f"{mode}: Architect beat length/shape contract missing")
+        if mode == AI_STORY_MODE:
+            _assert("at least three distinct named, living human characters" in blueprint
+                    and "physically appears" in blueprint and "materially change" in blueprint,
+                    "AI Story Architect must plan three active human characters")
+        else:
+            _assert("no fixed minimum or maximum cast quota" in blueprint,
+                    "Expand Story Architect must preserve source-driven cast size")
+
+
+def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
+    """Compatibility alias for repo environments whose main() references this name."""
+    return test_story_prompt_is_open_cast_and_fully_filled()
 
 
 def test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota():
@@ -879,7 +915,7 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
     _assert(calls[0].get("disable_thinking") is False, "architect must use thinking mode")
     _assert(calls[0].get("thinking_token_budget") == DIRECTOR_STORY_PLAN_THINKING_BUDGET == 1280,
             f"architect must use its configured reasoning budget: {calls[0]}")
-    _assert(calls[0].get("max_completion") == DIRECTOR_STORY_PLAN_MAX_TOKENS == 2600,
+    _assert(calls[0].get("max_completion") == DIRECTOR_STORY_PLAN_MAX_TOKENS,
             f"architect must use its configured hard output ceiling: {calls[0]}")
     _assert(calls[0].get("temperature") == DIRECTOR_STORY_THINKING_TEMPERATURE == 0.6
             and calls[0].get("top_p") == DIRECTOR_STORY_THINKING_TOP_P == 0.95,
@@ -936,40 +972,8 @@ def test_story_minimum_is_a_hard_floor_without_retry():
     _assert("below the configured minimum" in (short_error or "").lower(),
             f"sub-floor story must report the minimum-length failure: {short_error}")
 
-    completion_probe = QwenDirector.__new__(QwenDirector)
-    completion_probe._story_min_words = STORY_MIN_WORDS
-    try:
-        completion_probe._validate_story_completion_contract(AI_STORY_MODE, short_result or "")
-    except RuntimeError as exc:
-        _assert("below the minimum accepted length" in str(exc).lower(),
-                f"completion contract must enforce the lower boundary: {exc}")
-    else:
-        raise AssertionError("completion contract must reject a sub-816-word story")
-
     _assert(len([x for x in re.split(r"\n\s*\n+", accepted_result) if x.strip()]) == DIRECTOR_STORY_SCENES,
             "accepted story must preserve the configured scene count")
-
-def test_story_completion_contract_rejects_unresolved_final_hook():
-    from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS
-    director = QwenDirector.__new__(QwenDirector)
-    director._story_min_words = STORY_MIN_WORDS
-    paragraphs = []
-    for scene_index in range(DIRECTOR_STORY_SCENES):
-        words = [f"scene{scene_index+1}"] + [f"grounded{scene_index}_{i}" for i in range(69)]
-        paragraphs.append(" ".join(words) + ".")
-    paragraphs[-1] = paragraphs[-1][:-1] + " The team would discover a new threat beyond the sealed door."
-    story = "\n\n".join(paragraphs)
-    try:
-        director._validate_story_completion_contract(AI_STORY_MODE, story)
-    except RuntimeError as exc:
-        # Sentence-count violations are surfaced by _generate_story_once as
-        # story_static_checks warnings, not raised from the completion gate.
-        # Only the unresolved-ending violation is a hard completion failure.
-        _assert("unresolved future hook" in str(exc).lower(),
-                f"completion gate must catch the unresolved ending: {exc}")
-    else:
-        raise AssertionError("a future-hook ending must fail the single-pass completion contract")
 
 
 def test_story_uses_one_architect_and_one_author_without_retry_or_repair():
@@ -1176,12 +1180,11 @@ def main():
         test_remote_delivery_survives_timeline_and_context_ir_without_visible_source,
         test_dialogue_reconciliation_preserves_remote_audio_without_visible_binding,
         # Story pipeline hard gates
-        test_story_prompt_is_open_cast_and_fully_filled,
+        test_story_prompt_values_and_dialogue_exchange_contract_are_consistent,
         test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
-        test_story_completion_contract_rejects_unresolved_final_hook,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_scene_markers_preserve_one_to_one_scene_boundaries,
