@@ -586,10 +586,28 @@ def _linked_input_source(
 
 
 def _h3_legal_frames(seconds: float, fps: float = 24.0) -> int:
+    """Mirror H3WorkflowBuilder._legal_frames / DialogueTimeline.h3_legal_frames.
+
+    The legal H3 frame grid is 17*n+5. H3_FRAMES_PER_SHOT (from
+    configs/runtime_versions.yaml via planner/config.py) is the configuration-
+    owned minimum legal frame count -- not the historical hardcoded 124. This
+    helper must read the same floor the builder reads; otherwise it drifts
+    whenever frames_per_shot changes and produces a false failure such as
+    'did not preserve the H3 legal frame fallback value'.
+    """
+    import math
+    from planner.config import H3_FRAMES_PER_SHOT
+
     value = max(4.0, min(15.0, float(seconds)))
-    requested = round(value * fps)
-    n = max(0, (requested - 5 + 16) // 17)
-    return max(124, min(362, 17 * n + 5))
+    requested = value * fps
+    first_n = max(0, int(math.ceil((int(H3_FRAMES_PER_SHOT) - 5) / 17.0)))
+    last_n = (362 - 5) // 17
+    legal_frames = [17 * n + 5 for n in range(first_n, last_n + 1)]
+    if not legal_frames:
+        raise RuntimeError(
+            "Configured H3 frame bounds contain no legal 17*n+5 frame count."
+        )
+    return min(legal_frames, key=lambda frames: (abs(frames - requested), -frames))
 
 
 def validate_h3_duration_chain() -> None:
