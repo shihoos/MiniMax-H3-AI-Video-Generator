@@ -233,6 +233,17 @@ class EntityResolver:
                     iter(matches)
                 )
 
+        # Surname-only references ("Kael" for "Mira Kael") resolve when exactly one
+        # canonical person owns that final name token and it is not already an alias.
+        last_map: dict[str, set[str]] = {}
+        for canonical in names:
+            tokens = cls.strip_honorific(canonical).split()
+            if len(tokens) >= 2 and len(tokens[-1]) >= 3:
+                last_map.setdefault(tokens[-1], set()).add(canonical)
+        for alias, matches in last_map.items():
+            if len(matches) == 1 and alias not in aliases:
+                aliases[alias] = next(iter(matches))
+
         return aliases
 
     @classmethod
