@@ -931,7 +931,16 @@ class CinematicCompiler:
 
             "speaking_characters":
                 (
-                    []
+                    list(dict.fromkeys(
+                        str(event.get("speaker", "") or "").strip()
+                        for event in (shot.get("dialogue_events", []) or [])
+                        if isinstance(event, dict) and str(event.get("speaker", "") or "").strip()
+                    ))
+                    if any(
+                        isinstance(event, dict) and str(event.get("speaker", "") or "").strip()
+                        for event in (shot.get("dialogue_events", []) or [])
+                    )
+                    else []
                     if not shot.get("speaking_characters")
                     else self._canonical_characters(
                         shot.get(
