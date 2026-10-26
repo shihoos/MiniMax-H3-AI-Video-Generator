@@ -2032,8 +2032,19 @@ class QwenDirectorSanitizeMixin:
             # Empty visible-character bindings are valid for environment/detail shots
             # and for shots that carry only remote audio. In-person visibility is enforced
             # against dialogue_events by _validate_shot_character_contract.
-            for name in [*shot_characters, *speakers]:
+            # Audio-only remote sources may speak without being visible roster members.
+            remote_speakers = {
+                str(event.get("speaker", "") or "").strip().lower()
+                for event in (shot.get("dialogue_events", []) or [])
+                if isinstance(event, dict)
+                and str(event.get("delivery", "in_person")).strip().lower() == "remote"
+                and str(event.get("speaker", "") or "").strip()
+            }
+            for name in shot_characters:
                 if allowed and str(name).strip().lower() not in allowed:
+                    raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
+            for name in speakers:
+                if allowed and str(name).strip().lower() not in (allowed | remote_speakers):
                     raise RuntimeError(f"Shot {shot_id} contains unknown character '{name}'.")
 
         if any(count != self.SHOTS_PER_SCENE for count in scene_counts.values()):
