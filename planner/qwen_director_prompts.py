@@ -231,6 +231,19 @@ Return JSON only.
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 CALIBRATION_SCENE_EXAMPLE = (
     'Marta reached the ferry landing at dusk with her cracked lantern still swinging from her wrist, and found the ticket booth shuttered behind a rusted grille. Out on the black water, the last boat\'s engine coughed twice and began to pull away from the pier. She sprinted along the slick planks, her boots skidding on frost, and shouted for the pilot to wait. Old Teodor, coiling rope at the stern, only shrugged and pointed at a sign reading no passengers after six. Marta tugged the folded permit from her coat and held it above the widening gap, her thumb pressed over the torn corner. "Read the stamp, not the date," she called. Teodor squinted, swore under his breath, and hurled the stern line back to the pier. She caught it, hauled the hull against the bollards, and leapt aboard as the engine settled into a grudging, uneven grumble.'
 )
@@ -274,7 +287,7 @@ class QwenDirectorPromptMixin:
         per = int(STORY_WORDS_PER_SCENE)
         stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
         shot_seconds = float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
-        line_words = max(6, int((shot_seconds - 1.0) * 2.2))
+        line_words = min(9, max(6, int((shot_seconds - 1.0) * 2.2)))
 
         if mode == AI_STORY_MODE:
             source_rule = (
@@ -287,7 +300,10 @@ class QwenDirectorPromptMixin:
             source_rule = (
                 "Preserve the source story's established identities, relationships, setting, chronology, "
                 "key events, twists, and outcome. Add causal development, not unrelated subplots; never "
-                "erase or contradict a source character or established outcome."
+                "erase or contradict a source character or established outcome. Every source sentence "
+                "must stay recognisable in order: restate each one in one plain sentence that keeps its own "
+                "key nouns, verbs, names, and place words (an 'abandoned station' stays an 'abandoned station', "
+                "never a renamed place), then develop it with new action, people, and consequences."
             )
         else:
             source_rule = "Preserve all supplied story facts and do not invent a different outcome."
@@ -300,21 +316,26 @@ class QwenDirectorPromptMixin:
             LENGTH CONTRACT (mandatory): write exactly {n} explicitly marked scene blocks. The expected
             target is {target} usable story words and the finished story must reach at least {writing_floor};
             it may stretch toward {stretch} when the story needs it. Write about {per} words per scene at the
-            very least, the natural size of the SCENE SHAPE below (9 sentences of 12-20 words each,
-            usually 115-140 words). Scenes 9-{n:02d} are written with the same fullness as
+            very least, the natural size of the SCENE SHAPE below (9 sentences averaging 15-18 words,
+            usually 125-150 words). Scenes 9-{n:02d} are written with the same fullness as
             scenes 1-3; the ending is never rushed. Per-scene length is flexible, but a scene of five or six
-            sentences is unfinished, so keep writing until its shape is complete. Do not pad with adjectives
+            sentences, or under 120 words, is unfinished, so keep writing until its shape is complete. Scene
+            {n:02d} is a full scene of 9 sentences, never a summary. Do not pad with adjectives
             or repeated ideas: every added sentence carries a new action, obstacle, reaction, or consequence.
 
             SCENE SHAPE: write each scene as one developed paragraph of 9 sentences in one primary physical
-            location, following the blueprint's six fields in order:
+            location, each sentence a full 15-18 word sentence with a concrete detail and a subordinate
+            clause, following the blueprint's six fields in order:
             ENTRY, 1 sentence: place, time, who is physically present, one concrete sensory detail.
             ACTION, 2 sentences: what the lead character does toward the goal, step by step.
             OBSTACLE, 2 sentences: the opposition, failure, or changed fact, with a specific physical detail.
             CHOICE, 2 sentences: the decision, or a short spoken exchange, and the act that carries it out.
             COST, 1 sentence: what it risks or costs, and how the character reacts.
             RESULT, 1 sentence: the consequence that is now true, which hands the next scene its start state.
-            Never copy a blueprint sentence: render each field in fresh prose, and let the second sentence of
+            HARD CEILING: a scene is exactly ONE paragraph of those 9 sentences, 120-160 words, with any quoted
+            lines kept inside that paragraph (never on their own lines). Stop at the 9th sentence and start the next
+            tag; the output budget only fits all {n} scenes if no scene runs long, and a story cut off before scene
+            {n:02d} is a failure. Never copy a blueprint sentence: render each field in fresh prose, and let the second sentence of
             a two-sentence field add a physical detail, perception, or reaction the blueprint did not state.
 
             DRAMATIC QUALITY: make the protagonist's concrete goal and pressure clear in scene 1. Give the
@@ -329,13 +350,28 @@ class QwenDirectorPromptMixin:
             unexplained reversals, melodramatic coincidence, stock metaphors, moralizing, and exposition that
             restates what the audience already knows.
 
-            CAST: let the premise and causal plan determine the cast. There is no fixed minimum, target, or
-            maximum cast quota. Never add a person just to meet a count. Preserve every established core
-            identity; names and relationships are story facts, and each person is named clearly on first
-            mention. Each important character wants something specific and makes at least one decision that
-            affects the outcome when the plot gives them a role. Where the story supports interpersonal
-            conflict, aim for two meaningful in-person dialogue exchanges across different scenes. Remote
-            voices, recordings, holograms, documents, and AI are not physically present people.
+            CAST: the premise and causal plan determine the cast, and there is no fixed minimum, target, or
+            maximum cast quota in the runtime contract. As craft guidance, a drama between people is an
+            ensemble: when the premise allows company, write 3 or 4 named, living, physically present
+            people (a lone-survivor or isolation premise may use fewer, and never pad with a cameo). Each
+            one wants something different, acts or speaks on the page in at least three scenes, makes a
+            decision that changes the outcome, and has a fate shown by the final scene. Preserve every
+            established core identity; each person is named clearly on first mention. Aim for two or more
+            in-person dialogue exchanges across different scenes. Remote voices, recordings, holograms,
+            documents, and AI are not physically present people.
+
+            NAMES: the first sentence that mentions each person contains that person's full name exactly as
+            written in the CAST line (for example "Rylan Kade", never just "Rylan"). Afterwards refer to that
+            person by FIRST NAME only (or he/she), in narration and in every speaker attribution. Never use a
+            surname alone or a title alone ("Kael", "the doctor") and never rename a person. Attribute every
+            quoted line to a named, physically present speaker in the same sentence; there are no anonymous or
+            unnamed voices. Never put an absent character's name inside a quoted line.
+
+            CONSISTENCY: injuries stay physically plausible and are remembered by later scenes; nobody loses a
+            limb and keeps running, nobody acts after a fatal wound, and a dead person stays dead. Invent no
+            years, dates, or numbers that the story does not track. Every important character's fate, including
+            the protagonist's, is shown on the page by the last scene, as a concrete completed action; never end
+            with a character vanishing, a whispered moral, or a vague mystical line.
 
             CONTINUITY: track who is physically present versus heard remotely, each person's knowledge and
             fate, and the owner, location, and state of every important object. Show movement between
@@ -343,10 +379,31 @@ class QwenDirectorPromptMixin:
             act after death; a destroyed or inaccessible place cannot be revisited without an established
             route or safe interval.
 
-            DIALOGUE: use no more than two quoted lines per scene, each at or below {line_words} words so it
-            can fit one shot of about {shot_seconds:.1f} seconds. Dialogue is optional in any scene. Each line
-            must change a decision, reveal a conflict, shift trust, or establish useful information; never
-            repeat a line.
+            DIALOGUE: each scene contains 0, 1, or 2 quotation-mark pairs in total; count them before moving on,
+            because a third is a failure. Each quoted line is at most {line_words} words (ten words is too long) so it
+            fits one shot of about {shot_seconds:.1f} seconds, and one utterance is one quotation pair: never split a
+            line around "he said". Everything else people say is written as indirect speech without quotation
+            marks (Idris demanded the log; Elara refused). Never put quotation marks around written text, signs,
+            names, labels, logs, journals, or project titles, or around speech from recordings, holograms,
+            projections, or messages of absent people. When two or more people are present, give the scene
+            one short exchange. Each line must change a decision, reveal a conflict, shift trust, or establish
+            useful information; never repeat a line.
+
+            PROSE VARIETY: never begin three sentences in a row with the same word, including a name,
+            "The", or a pronoun, and begin at most two sentences per scene with a person's name, and open at most four scenes with the protagonist's name; open the others
+            with the place, an object, a sound, or another person. Do not use the same strong verb (stood,
+            scanned, shouted, pulsed, flickered) more than twice in the whole story. Vary sentence length, and open with a place, an action, a sound, an object,
+            or a subordinate clause. Do not reuse a gesture, simile, or sensory phrase from an earlier scene.
+
+            TENSE AND FILLER: write every scene in the past tense, including the last four scenes; never
+            drift into the present tense. Never repeat a sentence, or a closing line such as "the hum grew
+            louder", in another scene: each scene ends on its own new fact. Scene {n:02d} names every
+            surviving core character by first name and states where each one is and what became of them.
+
+            PAYOFF: every object, countdown, injury, or threat the story sets up is used, changed, or paid
+            off before the end. Scene {n-1:02d} is the climax, and it uses only tools, rules, and allies already
+            shown. Scene {n:02d} is the aftermath: it shows what each core character does, where they end up,
+            and what it cost them, as completed events.
 
             FORMAT: plain prose, exactly {n} explicitly marked scene blocks, each beginning on a new line with
             its exact tag [[SCENE_01]] through [[SCENE_{n:02d}]], followed by one space and the scene prose.
@@ -362,7 +419,7 @@ class QwenDirectorPromptMixin:
         n = int(DIRECTOR_STORY_SCENES)
         beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
         beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
-        line_words = max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))
+        line_words = min(9, max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2)))
 
         if mode == AI_STORY_MODE:
             premise_rule = (
@@ -377,9 +434,10 @@ class QwenDirectorPromptMixin:
             premise_rule = (
                 "Expand the supplied story while preserving its established character names and identities, "
                 "setting, chronology, key events, twists, and outcome. There is no fixed minimum, target, "
-                "or maximum cast quota. Never add characters just to meet a count. Add a named person only "
-                "when that person's choice materially changes the causal path; do not merge, rename, or drop "
-                "an established source character."
+                "or maximum cast quota, but a source with one named person gains two or three present people whose "
+                "choices change the causal path (craft guidance); do not merge, rename, or drop an established "
+                "source character. Scene 01 and scene 02 ENTRY and ACTION restate every source sentence in order, "
+                "reusing the source's own key nouns, verbs, names, and place words."
             )
 
         return textwrap.dedent(f"""\
@@ -394,10 +452,23 @@ class QwenDirectorPromptMixin:
             a failure.
 
             CAST CONTRACT: {premise_rule} Give core characters distinct goals, fears, leverage, and voices.
-            Their decisions, not coincidence or exposition alone, must cause important turns. At least two beats should contain consequential face-to-face conflict or dialogue when compatible with the premise; prefer 2-4 beats with a short exchange of up to two quoted lines. Do not force dialogue into an isolation-driven story. Keep the cast line to people who act as characters; places,
-            buildings, organizations, objects, devices, and abstract forces are not people.
+            Their decisions, not coincidence or exposition alone, must cause important turns. Every cast member is
+            alive and physically walks on screen in at least three beats, and is named in the ENTRY of each
+            of those beats; a person who exists only as a journal, recording, projection, radio voice, memory,
+            or corpse is NOT a cast member and is never listed in the CAST line; neither is anyone described as
+            vanished, missing, or dead, or heard only as a voice, hologram, or recording. For a drama
+            between people, build an ensemble of 3 or 4 named, living, physically present characters (craft
+            guidance, not a runtime quota; a lone-survivor premise may use fewer): a protagonist, an
+            opponent or rival, and one or two allies or complicating third parties whose wants collide. Each
+            appears and acts in at least three scenes and has a fate shown by scene {n:02d}. At least two beats, and prefer 2-4 beats,
+            contain a face-to-face exchange of up to two quoted lines between present characters (the Author voices
+            it; inside beats write speech as indirect speech without quotation marks, except at most one quoted
+            line of up to 9 words, only in the CHOICE field). Never put quotation marks around signs, names,
+            logs, or project titles, and there are no anonymous voices. Keep the
+            CAST line to people who act; places, organizations, objects, devices, and forces are not people.
+            Use each person's full name in the CAST line and first-name-only in beats after the first mention.
 
-            STORY DESIGN: establish a concrete protagonist goal and immediate pressure early; make each
+            STORY DESIGN: make the central secret specific and surprising, with an odd, concrete cause rooted in the setting; avoid a generic corporate cover-up, weapon, or countdown. Its twist must grow from an ordinary detail planted in scenes 01-04 that scene 06 or 08 recasts. Give every person one recurring physical habit or carried object, shown in at least two beats, and make allies and rivals want different things from each other and from the protagonist. Establish a concrete protagonist goal and immediate pressure early; make each
             scene change the situation, knowledge, leverage, danger, or relationship. Escalate obstacles
             through character choices. Give the middle a meaningful reversal that changes what the
             protagonist believes or can do; make the lowest point impose a real cost; make the climax
@@ -418,13 +489,28 @@ class QwenDirectorPromptMixin:
             Replay all {n} beats before output and repair physical, timeline, knowledge, and object-state
             contradictions without inventing an unseeded mechanism.
 
+            STORY SPINE (scene roles; follow them so the plot builds instead of wandering):
+            01 the protagonist's goal and first pressure; 02 an obstacle that forces a plan and introduces an
+            ally or rival; 03 a clue is planted and the first partial success; 04 the opponent shows their want
+            and the first real confrontation; 05 the plan is made and a countdown or stake is set; 06 the
+            point of no return: a reversal that changes what the clue means and removes any safe way back; 07 the cost of the reversal and a damaged
+            relationship; 08 the major setback, a betrayal or loss caused by a detail planted earlier, that forces a painful choice; 09 the protagonist
+            regroups and uses a planted detail; 10 the final approach, with an ally's choice that matters; 11 the
+            climax, won through the protagonist's costly choice and tools already shown; 12 the aftermath: where
+            every core character ends up, alive or not, and a lasting cost, since at least one core character loses something permanent. The protagonist survives unless the
+            premise demands otherwise. Spread the cast so an ally is on screen from scene 02 to 10, a rival from
+            scene 03 to 09 and again in 11, and any fourth person in scenes 05-08 and 12. Injuries stay plausible (no lost limbs followed by running). Write no years, dates, clock times, or countdown
+            numbers in any beat, and let no hologram, recording, projection, or journal speak or appear in a beat;
+            every beat after scene 06 stays as detailed as scene 01 (never under {beat_min} words).
+
             BEAT SHAPE (mandatory): every beat is ONE line made of six labelled fields in this exact order,
-            each field one sentence of 12-20 words with concrete nouns and verbs, about {beat_min}-{beat_max}
+            each field one full sentence of 15-22 words with concrete nouns and verbs,
+            joining two linked actions with as, while, or before; a field under 14 words is a failure, about {beat_min}-{beat_max}
             words per beat in total:
             ENTRY: the single primary location, who is physically present, and what the lead wants right now.
             ACTION: the lead's concrete physical action toward that want.
             OBSTACLE: the opposition, failure, or changed fact, with one specific physical detail.
-            CHOICE: the decision or short exchange it forces (a quoted line is allowed; keep dialogue sparse).
+            CHOICE: the decision or short exchange it forces (the only field that may contain quoted lines, at most two).
             COST: what the choice risks or costs, and how the character reacts.
             RESULT: what is now true, which directly causes the next scene.
             Write the labels exactly as shown, after the "SCENE nn:" prefix, on the same line. Every beat,
@@ -432,12 +518,29 @@ class QwenDirectorPromptMixin:
             different story fact or change; do not inflate with adjectives or repeat the same beat. Scene
             {n:02d} resolves the central objective and its RESULT shows what the protagonist's choice cost.
 
+            PAYOFF LEDGER: before writing, decide what each planted object, countdown, injury, and threat
+            becomes. Plant it in scenes 1-6, use it in scene {n-1:02d}, and settle it in scene {n:02d}. Scene {n-1:02d}
+            is the climax using only established tools and people; scene {n:02d} is the aftermath and states
+            where each core character ends up and what it cost.
+
+            BEAT EXAMPLE (one finished beat from an unrelated story, showing the required length and
+            labels; never reuse its names, objects, or events): SCENE 03: ENTRY: Marta Quill reaches the ferry
+            landing at dusk with her lantern swinging from her wrist, desperate for a seat on the last boat.
+            ACTION: She sprints along the frosted planks toward the pier, shouting for the pilot to wait while
+            the engine coughs. OBSTACLE: The pilot Teodor Vance points at a sign banning passengers after six
+            as the hull pulls away from the bollards. CHOICE: Marta holds her torn permit over the widening gap
+            and says, "Read the stamp, not the date." COST: If the stamp is judged forged she loses her only
+            route out tonight, and her thumb trembles over the ripped corner. RESULT: Teodor hurls the stern
+            line back and Marta boards, so the next scene begins aboard the moving boat.
+
             CAST FORMAT: first output exactly one line beginning CAST:; list every core character as
-            Name (role; what they want; how they speak) separated by |. Then output exactly {n} lines,
+            Name (role; what they want; how they speak; on screen in scenes NN, NN, NN) separated by |, giving
+            each person's on-screen scene numbers (at least three each; the protagonist is in all of them). Then
+            output exactly {n} lines,
             each beginning SCENE 01: through SCENE {n:02d}:, one line per scene with no line breaks inside a
             beat. Beats describe physical events, not camera directions. Spoken lines belong to a character
             physically present in that location, normally no longer than {line_words} words, and must change
-            a choice, trust, leverage, or understanding. Use at most two quoted lines in a beat and never
+            a choice, trust, leverage, or understanding. Use at most one quoted line in a beat and never
             repeat dialogue for padding. No preamble, JSON, extra lines, or commentary.
         """).strip()
 
@@ -550,6 +653,70 @@ class QwenDirectorPromptMixin:
             raise RuntimeError("Story architect CAST line contains duplicate names. No retry was attempted.")
         return "\n".join([cast_line] + normalized)
 
+    @staticmethod
+    def _blueprint_quote_markers(line: str) -> str:
+        kept = [0]
+
+        def _convert(m):
+            text = m.group(1)
+            words = len(text.split())
+            if words <= 3 and not re.search(r"[.!?,]$", text.strip()):
+                return text
+            if words <= 9 and kept[0] < 2:
+                kept[0] += 1
+                return "\u201c" + text.strip() + "\u201d"
+            return "(words to convey: " + text + ")"
+
+        return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
+
+    @staticmethod
+    def _blueprint_quote_markers(line: str) -> str:
+        kept = [0]
+
+        def _convert(m):
+            text = m.group(1)
+            words = len(text.split())
+            if words <= 3 and not re.search(r"[.!?,]$", text.strip()):
+                return text
+            if words <= 9 and kept[0] < 2:
+                kept[0] += 1
+                return "\u201c" + text.strip() + "\u201d"
+            return "(words to convey: " + text + ")"
+
+        return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
+
+    @staticmethod
+    def _blueprint_quote_markers(line: str) -> str:
+        kept = [0]
+
+        def _convert(m):
+            text = m.group(1)
+            words = len(text.split())
+            if words <= 3 and not re.search(r"[.!?,]$", text.strip()):
+                return text
+            if words <= 9 and kept[0] < 2:
+                kept[0] += 1
+                return "\u201c" + text.strip() + "\u201d"
+            return "(words to convey: " + text + ")"
+
+        return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
+
+    @staticmethod
+    def _blueprint_quote_markers(line: str) -> str:
+        kept = [0]
+
+        def _convert(m):
+            text = m.group(1)
+            words = len(text.split())
+            if words <= 3 and not re.search(r"[.!?,]$", text.strip()):
+                return text
+            if words <= 9 and kept[0] < 2:
+                kept[0] += 1
+                return "\u201c" + text.strip() + "\u201d"
+            return "(words to convey: " + text + ")"
+
+        return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
+
     def _story_text_user(
         self,
         mode: str,
@@ -568,14 +735,34 @@ class QwenDirectorPromptMixin:
             if anchors:
                 result += "\n\nSOURCE CHARACTER ANCHORS (preserve exact identity; not a cast limit):\n" + ", ".join(anchors)
 
+        if mode == EXPAND_USER_STORY_MODE:
+            result += (
+                "\n\nSOURCE EVENT LOCK: every sentence of the source story must survive, in order. Begin the story by restating each source sentence "
+                "as one plain sentence that keeps its own key nouns, verbs, character names, and place words (for example an abandoned station stays an "
+                "abandoned station, a sealed vault stays a sealed vault), then spend the rest of those scenes developing it with new action and "
+                "present, named people. Keep every source character's exact name and add the other planned people around them."
+            )
+
         if str(story_blueprint or "").strip():
             result += (
                 "\n\nCAUSAL BLUEPRINT (binding for events, names, objects and continuity; it is an outline, not the length model):\n"
-                + str(story_blueprint).strip()
+                + re.sub(
+                    r"(?m)^SCENE (\d{2}): ",
+                    lambda m: "SCENE " + m.group(1) + (" (write 9 sentences, 115-145 words): " if mode != EXPAND_USER_STORY_MODE else " (write 9 sentences, 120-150 words): "),
+                    "\n".join(
+                        # Short spoken lines stay quoted (at most two per beat) so the Writer
+                        # voices them as dialogue; labels lose their quotes; long or surplus
+                        # lines become "(words to convey: ...)" content markers.
+                        self._blueprint_quote_markers(line)
+                        for line in str(story_blueprint).strip().splitlines()
+                    ),
+                )
                 + "\n\nHOW TO EXPAND THE BLUEPRINT: each scene's labelled fields (ENTRY, ACTION, OBSTACLE, CHOICE, COST, RESULT) become exactly "
-                "1, 2, 2, 2, 1, 1 prose sentences, a 9-sentence scene of roughly 115-140 words. "
+                "1, 2, 2, 2, 1, 1 prose sentences, a 9-sentence scene of roughly 125-150 words, each sentence 15-18 words. "
                 "Never copy a blueprint sentence; the second sentence of each two-sentence field adds a physical detail, perception, or reaction "
-                "that the blueprint does not state. Do not let a short beat produce a short scene."
+                "that the blueprint does not state. Do not let a short beat produce a short scene; scenes 7-12 are as long as scene 1. "
+                "A '(words to convey: ...)' marker is content, not a quotation: voice at most two of them per scene as quoted lines of at most 9 words, "
+                "and give every other marked speech as indirect speech without quotation marks."
             )
 
         target = int(STORY_TARGET_WORDS)
@@ -583,7 +770,7 @@ class QwenDirectorPromptMixin:
         per = int(STORY_WORDS_PER_SCENE)
         stretch = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
         n = int(DIRECTOR_STORY_SCENES)
-        line_words = max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2))
+        line_words = min(9, max(6, int(((float(H3_FRAMES_PER_SHOT) / float(H3_FPS)) - 1.0) * 2.2)))
 
         result += (
             "\n\nCALIBRATION EXAMPLE (shows the required density and length of ONE scene; it belongs to an unrelated story, "
@@ -598,24 +785,27 @@ class QwenDirectorPromptMixin:
             "Each marked scene is one developed paragraph of 9 full sentences, as in the calibration example, never a summary. "
             "The story is " + str(target) + " words in total and must reach at least " + str(writing_floor)
             + " usable words; it may extend toward " + str(stretch) + " words when the causal story needs it. "
-            "Aim for about " + str(per) + " words per scene at the very least, and most scenes should land around 115-140. "
+            "Aim for about " + str(per) + " words per scene at the very least, and most scenes should land around 125-150. "
+            "HARD CEILING: each scene is ONE paragraph of exactly 9 sentences and 120-160 words, with quoted lines inside the paragraph and never on their own lines; "
+            "stop after the 9th sentence and start the next tag, because the output budget only fits all " + str(n) + " scenes if none runs long. "
             "Per-scene distribution is flexible guidance, not a quota, but every scene completes its shape "
             "(entry, action, obstacle, choice, cost, result) before the next tag begins, "
             "and scenes 9-" + f"{n:02d}" + " are as fully developed as scenes 1-3. Never pad or repeat ideas; each added sentence carries "
             "a new action, obstacle, reaction, or consequence. This is one writing pass: do not print a word count, and do not stop early because the plot "
             "has been summarized. "
-            "Preserve the plot-driven cast: do not omit planned core characters or force a numeric cast quota. "
-            "Qwen owns character names and relationships; keep exact canonical identities, name each person clearly on first mention, "
-            "and never rename or merge distinct people. Recurring core characters must act when the plot gives them a role. "
-            "CONTINUITY LOCK: every scene has one primary physical location; make transitions explicit and preserve knowledge, object, access, and fate continuity. "
-            "No unseeded cure, power, helper, object, or rule may solve the climax. Where the premise supports it, aim for two meaningful in-person dialogue exchanges across different scenes; each exchange must change a choice, expose conflict, or shift trust. At least two beats should contain consequential interpersonal conflict or dialogue when the premise supports it. "
+            "Keep every planned person physically on the page and acting in at least three scenes, with each fate shown by the last scene. The cast count itself is guidance, not a quota. "
+            "NAMES: the first sentence mentioning each person contains their full CAST name (for example Rylan Kade, never just Rylan); afterwards use first name only or he/she, never a surname alone or a title alone. Attribute every quoted line to a named, physically present speaker by first name in the same sentence, with no anonymous voices, and never name an absent character inside a quoted line. Write each scene's speech yourself: 0, 1, or 2 quotation-mark pairs per scene (a third is a failure), one pair per utterance, never split around 'he said'; all other speech is indirect, without quotation marks; no quotation marks around written text, signs, names, logs, journals, or project titles. "
+            "Write every scene in the past tense, including scenes 9-" + f"{n:02d}" + "; never switch to the present tense, and never repeat a sentence or closing line from an earlier scene. "
+            "Scene " + f"{n:02d}" + " is a full 9-sentence scene, never a summary that names every surviving core character with a concrete fate. "
+            "Keep exact canonical identities and never rename or merge people. "
+            "CONTINUITY LOCK: every scene has one primary physical location with explicit transitions; no unseeded cure, power, helper, or object solves the climax. "
+            "Where the premise supports it, aim for two meaningful in-person dialogue exchanges across different scenes that change a choice, expose conflict, or shift trust. At least two beats should contain consequential interpersonal conflict or dialogue when the premise supports it. "
             "Use no more than two quoted lines per scene, with each line at most " + str(line_words)
-            + " words so it fits one shot. Do not force speech into isolation-driven beats. "
-            "Use specific sensory details that serve an action, distinct voices, varied sentence openings and rhythm, "
-            "and avoid repetitive gestures, stock metaphors, exposition dumps, or moralizing summaries. "
+            + " words (ten words is too long) so it fits one shot; count the quotation pairs, three is too many. Do not force speech into isolation-driven beats. "
+            "Begin at most two sentences per scene with a person's name, and never open three sentences in a row with the same word. "
+            "Use fresh sensory details that serve an action; avoid stock images (breath visible, dust drifting, smirk, narrowed eyes, heartbeat, hummed) and moralizing summaries. "
             "Scene " + f"{n:02d}" + " must resolve the central objective and conflict on-page, show the completed observable consequence and the protagonist's immediate outcome, "
             "and end on a consequence that has already happened, not a future hook or unanswered question. "
-            "Never use camera, cut to, pans, zoom, or shot as narrative prose. "
             "Output only the " + str(n) + " tagged story blocks; no headings, planning notes, word counts, checklists, markdown separators, summaries, or postscript.\n\n"
             "Begin now with [[SCENE_01]] and write every scene in full through [[SCENE_" + f"{n:02d}" + "]]."
         )
@@ -772,7 +962,7 @@ class QwenDirectorPromptMixin:
         )
         speaker_pattern = (
             # "Then Lena" must not be parsed as a single speaker identity.
-            r"(?!(?i:(?:then|she|he|they|it|we|i|you|someone|somebody|everyone|everybody|anyone|anybody|nobody|no one))\s)"
+            r"(?!(?i:(?:the|a|an|this|that|these|those|then|she|he|they|it|we|i|you|someone|somebody|everyone|everybody|anyone|anybody|nobody|no one))\s)"
             r"(?:(?:Dr|Mr|Mrs|Ms|Prof|Capt|Cmdr|Lt|Sgt)\.\s+)?"
             + atom
             + rf"(?:\s+(?:{atom}|(?i:{role})))*"
@@ -797,9 +987,10 @@ class QwenDirectorPromptMixin:
         # AI/system voice descriptions often use a source-first construction rather
         # than `AURORA said`: `AURORA's voice echoed through the speakers:`.
         remote_voice_prefix = re.search(
-            rf"(?<!\w)(?P<speaker>{speaker_pattern})\s+voice\s+"
-            r"(?i:(?:echoed|echoes|crackled|crackles|boomed|booms|played|plays|"
-            r"came through|rang out|sounded))\b"
+            rf"(?<!\w)(?P<speaker>{speaker_pattern})\s+voice\b"
+            r"[^.!?\n]{0,64}?\b(?i:(?:echoed|echoes|crackled|crackles|boomed|booms|played|plays|"
+            r"came through|rang out|sounded|filled|fills|returned|returns|warned|warns|said|says|"
+            r"responded|responds|replied|replies|announced|announces|insisted|insists|spoke|speaks))\b"
             r"[^.!?\n]{0,48}[,;:—–-]?\s*$",
             before_clause,
         )
@@ -840,7 +1031,8 @@ class QwenDirectorPromptMixin:
         # hologram/radio/sign appeared one sentence earlier.
         local = before_clause if placement == "before" else after[:120]
         remote_source = bool(
-            re.search(r"\(\s*(?:hologram|projection|projected image|AI|remote)\s*\)", speaker, re.IGNORECASE)
+            remote_voice_prefix
+            or re.search(r"\(\s*(?:hologram|projection|projected image|AI|remote)\s*\)", speaker, re.IGNORECASE)
             or re.search(
                 r"\b(?:hologram|holographic projection|projected image|remote voice|"
                 r"over the radio|through the radio|over the intercom|through the intercom|"
@@ -853,6 +1045,7 @@ class QwenDirectorPromptMixin:
                 re.IGNORECASE,
             )
         )
+        # H3_REMOTE_VOICE_ATTRIBUTION_FIX_V1: a matched source-first voice construction is off-screen audio.
         return {
             "speaker": speaker,
             "placement": placement,
@@ -1032,7 +1225,7 @@ class QwenDirectorPromptMixin:
 
     Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist. The JSON lists `quote_classifications` first and `candidates` second: every speaker you attribute in an in_person_spoken quote who physically takes part in the story MUST also appear in `candidates`, together with every other named person who acts. `candidates` is never empty.
 
-    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON.
+    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. A name printed on a drawer, label, screen, journal, or directive is not an active character. A line spoken by one character that mentions another person is still the first character's dialogue, not evidence that the mentioned person is present or speaking. Only include a human as an active present-time cast member when the story shows that person physically acting/appearing or directly speaking in a present-time scene. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON.
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. `name_surface_index` and `name_surface_evidence` are recall aids generated from source text; they can contain places, objects, sentence-initial words, or other false positives. They are NOT a cast list. The evidence entries contain short source contexts around name-like surfaces that may be absent from compacted story evidence. Use them to check the source, and include a surface only when the source supports a person physically participating in present-time events. Qwen alone decides which names are people, how aliases resolve, and who belongs in `candidates`. The `candidates` array is the final cast decision; no downstream step will add names from these indexes, a planned cast, or dialogue speakers. A dialogue speaker must also be represented in `candidates` when that person physically participates in the story.
 
@@ -1073,6 +1266,11 @@ class QwenDirectorPromptMixin:
         ]
         canonical_names = {
             EntityResolver.normalize(str(item.get("name", ""))): str(item.get("name", "")).strip()
+            for item in accepted_candidates
+            if EntityResolver.normalize(str(item.get("name", "")))
+        }
+        accepted_entity_types = {
+            EntityResolver.normalize(str(item.get("name", ""))): str(item.get("entity_type", "")).strip().upper()
             for item in accepted_candidates
             if EntityResolver.normalize(str(item.get("name", "")))
         }
@@ -1120,19 +1318,24 @@ class QwenDirectorPromptMixin:
                 if source_attribution:
                     source_speaker = str(source_attribution.get("speaker", "") or "").strip()
                     canonical_source = resolve_roster_speaker(source_speaker)
-                    if canonical_source:
+                    source_key = EntityResolver.normalize(source_speaker)
+                    generic_ai_sources = {"ai", "the ai", "station ai", "system", "station system", "computer", "station computer"}
+                    semantic_canonical = resolve_roster_speaker(speaker)
+                    semantic_type = accepted_entity_types.get(EntityResolver.normalize(semantic_canonical or ""), "")
+
+                    # H3_GENERIC_REMOTE_SOURCE_FALLBACK_V1: a generic source label is not a new identity.
+                    # If Qwen identified the only grounded sentient roster member, retain that canonical name.
+                    if source_key in generic_ai_sources and semantic_canonical and semantic_type == "SENTIENT":
+                        speaker = semantic_canonical
+                        delivery = "remote"
+                    elif canonical_source:
                         speaker = canonical_source
-                        delivery = str(source_attribution.get("delivery", "in_person"))
+                        delivery = str(source_attribution.get("delivery", delivery))
                     elif source_speaker:
-                        # Keep an explicitly holographic/transmitted source as audio-only.
-                        # An unresolved in-person attribution is dropped below, never
-                        # guessed into the cast and never allowed to crash extraction.
+                        # Preserve explicitly identified remote-only entities only if source-grounded below.
                         speaker = source_speaker
                         delivery = str(source_attribution.get("delivery", delivery))
 
-                if not speaker:
-                    # Anonymous sound is not turned into a guessed speaker.
-                    continue
                 normalized_dialogue.append({
                     "text": str(source_quote["text"]),
                     "speaker": speaker,
@@ -2099,15 +2302,25 @@ class QwenDirectorPromptMixin:
                     _unmapped_speakers.add(_speakers[0])
                     continue
 
-                # Prefer the quote's exact source offset when the source paragraphs and
-                # production scenes are one-to-one. Text-only matching is ambiguous when the
-                # same line is intentionally repeated in two scenes (for example, a repeated
-                # argument or callback); the offset disambiguates the actual occurrence.
+                # H3_SOURCE_OFFSET_BINDING_V3: map against the full story paragraph index, not batch length.
                 _source_position = int(_segment.get("start", -1))
-                if len(_story_paragraphs) == len(scene_payloads) and 0 <= _source_position < len(str(story or "")):
-                    _source_paragraph_index = len(re.findall(r"\n\s*\n+", str(story or "")[:_source_position]))
-                    if 0 <= _source_paragraph_index < len(scene_payloads):
-                        _target_scene = scene_payloads[_source_paragraph_index]
+                _story_text_full = str(story or "")
+                if 0 <= _source_position < len(_story_text_full):
+                    _source_paragraph_index = len(re.findall(r"\n\s*\n+", _story_text_full[:_source_position]))
+                    if 0 <= _source_paragraph_index < len(_story_paragraphs):
+                        _source_scene_number = _source_paragraph_index + 1
+                        _target_scene = None
+                        for _candidate_scene in scene_payloads:
+                            if not isinstance(_candidate_scene, dict):
+                                continue
+                            _candidate_id = str(_candidate_scene.get("scene_id", "") or "").strip()
+                            _candidate_number = re.search(r"(\d+)$", _candidate_id)
+                            if _candidate_number and int(_candidate_number.group(1)) == _source_scene_number:
+                                _target_scene = _candidate_scene
+                                break
+                        # This quote belongs to another batch; that is expected, not an unmatched dialogue error.
+                        if _target_scene is None:
+                            continue
                         _target_scene_id = str(_target_scene.get("scene_id", "") or "").strip()
                         _target_paragraph_key = _dialogue_phrase_key(_story_paragraphs[_source_paragraph_index])
                         _use_key = (_target_scene_id, _phrase)
@@ -2121,7 +2334,9 @@ class QwenDirectorPromptMixin:
                             })
                             _used_phrases[_use_key] = _already_used + 1
                             _scene_cursor = max(_scene_cursor, _source_paragraph_index)
-                            continue
+                        else:
+                            _unmatched_utterances += 1
+                        continue
 
                 _attached = False
                 for _scene_index in range(_scene_cursor, len(scene_payloads)):
