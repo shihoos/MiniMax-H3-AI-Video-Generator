@@ -43,6 +43,8 @@ from planner.config import (
     PRESERVE_USER_STORY_MODE,
     director_enabled,
     director_critic_enabled,
+    H3_FPS,
+    H3_FRAMES_PER_SHOT,
 )
 
 from planner.qwen_director_runtime import (
@@ -1201,6 +1203,12 @@ class QwenDirector(
             characters,
         )
 
+        self._filter_quote_only_character_bindings(
+            scenes,
+            all_shots,
+            characters,
+        )
+
         # No Qwen-shot failure is fatal here: the deterministic compiler
         # completes production fields while preserving every valid creative
         # shot Qwen produced.
@@ -1578,6 +1586,65 @@ class QwenDirector(
         paragraphs[-1] = updated_paragraph
         return "\n\n".join(paragraphs), True
 
+    def _normalize_story_quotes(self, story: str) -> str:
+        """Deterministic, no-model cleanup of quotation marks so dialogue fits single shots.
+
+        Written text (signs, timers, labels, journal lines) loses its quotation marks, and each
+        scene keeps at most two short spoken pairs. Words are never added or removed.
+        """
+        written_before = re.compile(
+            r"(?:timestamp|label(?:ed|led)?|marked|sign|reads?|word|words|displaying|displays?|shows?|showing|"
+            r"handwriting|journal|entry|note|screen|log|printed|etched|scrawled|inscribed|text|message|"
+            r"countdown\s+(?:now\s+)?(?:hits|reads|shows)|titled|named|called)\s*[:,]?\s*$",
+            re.IGNORECASE,
+        )
+        pair = re.compile(r"\u201c([^\u201c\u201d]*)\u201d|\"([^\"]*)\"")
+
+        def _is_written(inner: str, before: str) -> bool:
+            text = inner.strip()
+            if not text:
+                return True
+            letters = [c for c in text if c.isalpha()]
+            if not letters:
+                return True
+            if not any(c.islower() for c in letters):
+                return True
+            if re.fullmatch(r"[\d:.,\s/-]+", text):
+                return True
+            return bool(written_before.search(before[-45:]))
+
+        paragraphs = re.split(r"(\n\s*\n+)", str(story or ""))
+        changed = 0
+        for index, part in enumerate(paragraphs):
+            if not part.strip() or re.fullmatch(r"\n\s*\n+", part):
+                continue
+            matches = list(pair.finditer(part))
+            if not matches:
+                continue
+            keep_speech = 0
+            pieces = []
+            cursor = 0
+            for match in matches:
+                inner = match.group(1) if match.group(1) is not None else match.group(2)
+                before = part[:match.start()]
+                strip = False
+                if _is_written(inner, before):
+                    strip = True
+                else:
+                    if len(re.findall(r"[\w'\u2019-]+", inner)) > 9 or keep_speech >= 2:
+                        strip = True
+                    else:
+                        keep_speech += 1
+                pieces.append(part[cursor:match.start()])
+                pieces.append(inner if strip else match.group(0))
+                cursor = match.end()
+                changed += 1 if strip else 0
+            pieces.append(part[cursor:])
+            paragraphs[index] = "".join(pieces)
+        if changed:
+            print(f"[QWEN] story_cleanup=unquoted {changed} written/overflow quotation pair(s); no model call", flush=True)
+        return "".join(paragraphs)
+
     def _story_quality_issues(self, story: str) -> list[str]:
         """Log-only structural craft diagnostics; never fail or rewrite the story."""
         text = str(story or "")
@@ -1814,6 +1881,7 @@ class QwenDirector(
         if removed_duplicate_ending:
             print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
 
+        candidate = self._normalize_story_quotes(candidate)
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
         print(f"[QWEN] story_length_after_cleanup words={word_count}", flush=True)
         if candidate and not self._ends_cleanly(candidate):
@@ -2186,6 +2254,87 @@ class QwenDirector(
                     for value in raw_values
                     if re.sub(r"\s+", " ", str(value or "")).strip()
                 ))[:limit]
+
+    @staticmethod
+    def _filter_quote_only_character_bindings(
+        scenes: list[dict],
+        shots: list[dict],
+        characters: list[dict],
+    ) -> None:
+        """Remove a visible shot binding when the only source mention is another character's quoted words.
+
+        This is a conservative validation rule, not cast discovery: it never adds a character and only
+        removes a shot/scene binding contradicted by the scene's source text.
+        """
+        quote_pattern = re.compile(r'"[^"\n]*"|“[^”\n]*”|‘[^’\n]*’')
+        scene_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in (scenes or [])
+            if isinstance(scene, dict) and str(scene.get("scene_id", "") or "").strip()
+        }
+
+        def _contains_surface(text: str, surface: str) -> bool:
+            value = str(surface or "").strip()
+            if not value:
+                return False
+            return re.search(r"(?<!\w)" + re.escape(value) + r"(?!\w)", text, re.IGNORECASE) is not None
+
+        def _quote_only(name: str, source_text: str, aliases: list[str]) -> bool:
+            quotes = " ".join(match.group(0) for match in quote_pattern.finditer(source_text))
+            if not any(_contains_surface(quotes, surface) for surface in [name, *aliases] if surface):
+                return False
+            unquoted = quote_pattern.sub(" ", source_text)
+            return not any(_contains_surface(unquoted, surface) for surface in [name, *aliases] if surface)
+
+        aliases_by_name = {}
+        for item in (characters or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "") or "").strip()
+            if not name:
+                continue
+            aliases = item.get("semantic_aliases", item.get("aliases", [])) or []
+            if not isinstance(aliases, (list, tuple, set)):
+                aliases = []
+            aliases_by_name[EntityResolver.normalize(name)] = [str(v).strip() for v in aliases if str(v).strip()]
+
+        removed = 0
+        for scene_id, scene in scene_by_id.items():
+            source_text = str(scene.get("description", "") or scene.get("story_summary", "") or "")
+            if not source_text:
+                continue
+            scene_names = scene.get("characters", [])
+            if isinstance(scene_names, list):
+                kept_scene_names = []
+                for value in scene_names:
+                    name = str(value or "").strip()
+                    aliases = aliases_by_name.get(EntityResolver.normalize(name), [])
+                    if name and _quote_only(name, source_text, aliases):
+                        removed += 1
+                        continue
+                    kept_scene_names.append(value)
+                scene["characters"] = kept_scene_names
+
+            for shot in (shots or []):
+                if not isinstance(shot, dict) or str(shot.get("scene_id", "") or "").strip() != scene_id:
+                    continue
+                names = shot.get("characters", [])
+                if not isinstance(names, list):
+                    continue
+                kept = []
+                for value in names:
+                    name = str(value or "").strip()
+                    aliases = aliases_by_name.get(EntityResolver.normalize(name), [])
+                    if name and _quote_only(name, source_text, aliases):
+                        removed += 1
+                        continue
+                    kept.append(value)
+                shot["characters"] = kept
+        if removed:
+            print(
+                f"[DIRECTOR] removed {removed} visible character binding(s) supported only by quoted mentions; no cast was added",
+                flush=True,
+            )
 
     @staticmethod
     def _enforce_scene_coherence(
