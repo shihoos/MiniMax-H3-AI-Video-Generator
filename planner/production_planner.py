@@ -3121,6 +3121,16 @@ class ProductionPlanner:
         if not isinstance(candidates, list):
             return result
         copied = [dict(item) if isinstance(item, dict) else item for item in candidates]
+        _placeholder_names = {"unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified", "speaker", "narrator", "voice", "someone", "stranger", "person", "character", "same", "other", "unspecified", "ai", "stationai", "theai", "computer", "system", "machine", "robot", "mainframe", "shipai", "creature", "monster", "beast", "entity", "thing", "hybrid", "figure", "hologram", "projection", "ghost", "specimen", "subject", "clone"}
+        copied = [
+            item for item in copied
+            if not (isinstance(item, dict) and re.sub(r"[^a-z]+", "", str(item.get("name", "") or "").lower()) in _placeholder_names)
+        ]
+        _placeholder_names = {"unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified", "speaker", "narrator", "voice", "someone", "stranger", "person", "character", "same", "other", "unspecified", "ai", "stationai", "theai", "computer", "system", "machine", "robot", "mainframe", "shipai", "creature", "monster", "beast", "entity", "thing", "hybrid", "figure", "hologram", "projection", "ghost", "specimen", "subject", "clone"}
+        copied = [
+            item for item in copied
+            if not (isinstance(item, dict) and re.sub(r"[^a-z]+", "", str(item.get("name", "") or "").lower()) in _placeholder_names)
+        ]
 
         named_owners = []
         for item in copied:
