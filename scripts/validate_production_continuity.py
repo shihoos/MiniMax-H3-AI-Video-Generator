@@ -250,8 +250,13 @@ def main() -> None:
     Shot(**normalized)
 
     # H3 duration-grid contract.
+    # H3_FRAMES_PER_SHOT (= 141 per configs/runtime_versions.yaml) is the configured
+    # minimum legal 17*n+5 frame count. Every 5.0s / 5.2s request below maps to the
+    # floor, because 5.0*24=120 and 5.2*24=124.8 are both below the 141-frame floor.
     assert DialogueTimeline.h3_legal_frames(5.0) == H3_FRAMES_PER_SHOT
-    assert abs(DialogueTimeline.h3_effective_duration_seconds(5.0) - 124 / 24.0) < 1e-9
+    assert abs(
+        DialogueTimeline.h3_effective_duration_seconds(5.0) - H3_FRAMES_PER_SHOT / 24.0
+    ) < 1e-9
     assert DialogueTimeline.h3_legal_frames(15.0) == 362
 
     # Requested shot timing is a target and rounds to the nearest legal frame count.
@@ -268,11 +273,14 @@ def main() -> None:
     }
     ProductionTimeline(timing_plan).build()
     timing_shot = timing_plan["shots"][0]
-    assert abs(timing_shot["duration_seconds"] - 124 / 24.0) < 5e-5
-    assert timing_shot["frames_per_shot"] == 124
-    assert DialogueTimeline._minimum_h3_duration_for_required_seconds(5.2) == (141, 141 / 24.0)
+    assert abs(timing_shot["duration_seconds"] - H3_FRAMES_PER_SHOT / 24.0) < 5e-5
+    assert timing_shot["frames_per_shot"] == H3_FRAMES_PER_SHOT
+    assert DialogueTimeline._minimum_h3_duration_for_required_seconds(5.2) == (
+        H3_FRAMES_PER_SHOT,
+        H3_FRAMES_PER_SHOT / 24.0,
+    )
     from execution.h3_workflow_builder import H3WorkflowBuilder
-    assert H3WorkflowBuilder._legal_frames(5.2) == 124
+    assert H3WorkflowBuilder._legal_frames(5.2) == H3_FRAMES_PER_SHOT
     assert abs(timing_shot["h3_effective_duration_seconds"] - timing_shot["duration_seconds"]) < 5e-5
     assert abs(timing_shot["requested_duration_seconds"] - 5.2) < 1e-9
 
