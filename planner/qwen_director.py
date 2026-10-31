@@ -360,6 +360,7 @@ class QwenDirector(
                 user_input,
                 source_character_names=source_character_names,
             )
+            story_blueprint = self._restore_source_places(mode, user_input, story_blueprint)
             # Author request (thinking OFF): one complete prose draft grounded in the plan.
             story_system = self._story_text_system(mode)
             story_user = self._story_text_user(
@@ -1590,7 +1591,7 @@ class QwenDirector(
         """Deterministic, no-model cleanup of quotation marks so dialogue fits single shots.
 
         Written text (signs, timers, labels, journal lines) loses its quotation marks, and each
-        scene keeps at most two short spoken pairs. Words are never added or removed.
+        scene keeps at most three short spoken pairs (one per shot). Words are never added or removed.
         """
         written_before = re.compile(
             r"(?:timestamp|label(?:ed|led)?|marked|sign|reads?|word|words|displaying|displays?|shows?|showing|"
@@ -1598,9 +1599,19 @@ class QwenDirector(
             r"countdown\s+(?:now\s+)?(?:hits|reads|shows)|titled|named|called)\s*[:,]?\s*$",
             re.IGNORECASE,
         )
+        speech_verb = re.compile(
+            r"\b(?:said|says|asked|asks|shouted|muttered|whispered|replied|demanded|growled|hissed|warned|snapped|called|"
+            r"cried|yelled|barked|sneered|laughed|murmured|answered|added|insisted|declared|announced|explained|"
+            r"exclaimed|breathed|sighed|screamed|urged|ordered|began|continued|stated|muttering|whispering|shouting|saying|asking|"
+            r"replying|demanding|growling|hissing|warning|snapping|yelling|crying|barking|insisting|declaring|announcing|explaining|"
+            r"exclaiming|murmuring|answering|adding|ordering|urging|screaming|sighing|laughing|stating|continuing|calling|whispers|mutters|"
+            r"shouts|replies|demands|warns|insists|spat|spoke|snarled|grunted|gasped|pleaded|begged|agreed|chuckled|scoffed|retorted|"
+            r"countered|offered|suggested|conceded|stammered|thundered|whimpered|spits|snarls)\b",
+            re.IGNORECASE,
+        )
         pair = re.compile(r"\u201c([^\u201c\u201d]*)\u201d|\"([^\"]*)\"")
 
-        def _is_written(inner: str, before: str) -> bool:
+        def _is_written(inner: str, before: str, after: str = "") -> bool:
             text = inner.strip()
             if not text:
                 return True
@@ -1611,9 +1622,58 @@ class QwenDirector(
                 return True
             if re.fullmatch(r"[\d:.,\s/-]+", text):
                 return True
+            # A short phrase with no sentence punctuation is a label or scare quote, not speech.
+            if (
+                len(re.findall(r"[\w'\u2019-]+", text)) <= 4
+                and not re.search(r"[.!?\u2026\u2014]$", text)
+                and not speech_verb.search(before[-45:])
+                and not speech_verb.search(after[:35])
+                and not re.match(r"\s*,?\s*(?:[A-Z][\w\u2019'-]*|he|she|they|I|we)\s+[a-z]+", after[:40])
+            ):
+                return True
+            # An unnamed voice cannot be a rostered speaker, so its line is narration.
+            tail = before[-70:]
+            if (
+                re.search(r"\b(?:an?|the)\s+(?:[a-z-]+\s+){0,2}voices?\b[^.!?]{0,30}$", tail, re.IGNORECASE)
+                and not re.search(r"[A-Z][\w-]*[\u2019']s\s+(?:[a-z-]+\s+)?voice\b[^.!?]{0,30}$", tail)
+            ):
+                return True
+            # A machine, hologram, recording, or radio that is itself the speaker is never a cast speaker, so its line stays narration.
+            if re.search(
+                r"\b(?:the|a|an)\s+(?:[a-z-]+\s+){0,2}(?:hologram|holograph\w*|projection|recording|computer|machine|intercom|loudspeaker|"
+                r"AI|radio|transmission|broadcast)\s+(?:[a-z]+ly\s+)?(?:" + speech_verb.pattern + r")\s*[:,]?\s*$",
+                before[-60:], re.IGNORECASE,
+            ):
+                return True
             return bool(written_before.search(before[-45:]))
 
-        paragraphs = re.split(r"(\n\s*\n+)", str(story or ""))
+        # One utterance split around its attribution ("A," Eli said, "b.") becomes one quoted line, so no half-line is lost.
+        _merge = re.compile(
+            r"\u201c([^\u201c\u201d]+?)\u201d\s+([A-Z][\w\u2019'-]*|he|she|they|I|we)((?:\s+[\w\u2019'-]+){0,3}?\s+(?i:"
+            + speech_verb.pattern + r"))\s*,\s*\u201c([a-z][^\u201c\u201d]*)\u201d"
+        )
+
+        def _merge_split(m):
+            first = m.group(1).rstrip()
+            if first.endswith((".", "!", "?")):
+                return m.group(0)
+            first = first.rstrip(",;:\u2014\u2013 ")
+            subject = m.group(2)
+            if re.search(r"(?:^|[.!?\u201d\"]\s*)$", m.string[:m.start()]) and subject[:1].islower():
+                subject = subject[:1].upper() + subject[1:]
+            return subject + m.group(3) + ", \u201c" + first + ", " + m.group(4).strip() + "\u201d"
+
+        # A blueprint "(words to convey: ...)" marker the Writer copied literally becomes the words themselves
+        # (quoted when it follows a speech verb, plain otherwise), so no template text reaches the story.
+        def _unmark(m):
+            body = m.group(1).strip()
+            lead = m.string[max(0, m.start() - 40):m.start()]
+            if re.search(r"(?:" + speech_verb.pattern + r"|\b[A-Za-z]+(?:ed|ing))\s*,?\s*$", lead, re.IGNORECASE):
+                return "\u201c" + body[:1].upper() + body[1:] + "\u201d"
+            return body
+        story = re.sub(r"\(words to convey:\s*([^()]*?)\)", _unmark, str(story or ""))
+        story = _merge.sub(_merge_split, str(story or ""))
+        paragraphs = re.split(r"(\n\s*\n+)", story)
         changed = 0
         for index, part in enumerate(paragraphs):
             if not part.strip() or re.fullmatch(r"\n\s*\n+", part):
@@ -1628,10 +1688,110 @@ class QwenDirector(
                 inner = match.group(1) if match.group(1) is not None else match.group(2)
                 before = part[:match.start()]
                 strip = False
-                if _is_written(inner, before):
+                if _is_written(inner, before, part[match.end():match.end() + 40]):
                     strip = True
                 else:
-                    if len(re.findall(r"[\w'\u2019-]+", inner)) > 9 or keep_speech >= 2:
+                    if keep_speech >= 3:
+                        # Surplus spoken line: remove the words cleanly instead of leaving a bare fragment.
+                        seg = part[cursor:match.start()]
+                        tail = part[match.end():]
+                        rest = tail.lstrip(" ,")
+                        mname = re.match(r"[A-Z][\w\u2019'-]*\s+", rest)
+                        lead_in = bool(
+                            re.search(r"(?:" + speech_verb.pattern + r")\s*[,:]\s*$", seg, re.IGNORECASE)
+                            or re.search(r"\b[A-Za-z]+(?:ed|ing)\s*[,:]\s*$", seg)
+                        )
+                        mpro = re.match(
+                            r"\s*,?\s*(?:he|she|they|it|I|we)\s+(?:" + speech_verb.pattern + r")[^.!?\n]{0,70}[.!?]",
+                            tail, re.IGNORECASE,
+                        )
+                        if mpro and re.search(r"(?:[.!?]\s*|^)$", seg):
+                            pieces.append(seg)
+                            cursor = match.end() + mpro.end()
+                            cursor += len(part[cursor:]) - len(part[cursor:].lstrip(" "))
+                            changed += 1
+                            continue
+                        if mname and speech_verb.match(rest[mname.end():]) and re.search(r"(?:[.!?]\s*|^)$", seg):
+                            pieces.append(seg)
+                            cursor = match.end() + (len(tail) - len(rest))
+                            changed += 1
+                            continue
+                        if not lead_in:
+                            seg2 = re.sub(r"\s*[,:]\s*$", "", seg) if re.search(r"[,:]\s*$", seg) else seg
+                            if seg2 != seg and (not tail.strip() or re.match(r"\s*[A-Z]", tail)):
+                                seg2 += "."
+                            pieces.append(seg2)
+                            cursor = match.end() + (1 if (seg2 == seg and seg.endswith(" ") and tail.startswith(" ")) else 0)
+                            changed += 1
+                            continue
+                        if lead_in:
+                            seg = re.sub(r"\s*[,:]\s*$", "", seg)
+                            if inner.rstrip().endswith((".", "!", "?")) and (not tail.strip() or re.match(r"\s*[A-Z]", tail)):
+                                seg += "."
+                            pieces.append(seg)
+                            cursor = match.end()
+                            changed += 1
+                            continue
+                        strip = True
+                    elif len(re.findall(r"[\w'\u2019-]+", inner)) > 9:
+                        # Keep the leading sentence(s) that fit one shot as speech; the rest becomes narration.
+                        sentences = re.split(r"(?<=[.!?])\s+", inner.strip())
+                        lead, used = [], 0
+                        for sentence in sentences:
+                            n_words = len(re.findall(r"[\w'\u2019-]+", sentence))
+                            if used + n_words <= 9:
+                                lead.append(sentence)
+                                used += n_words
+                            else:
+                                break
+                        if lead and len(lead) < len(sentences):
+                            # The remainder of an over-long line is dropped, not narrated (bare second-person speech reads as a glitch).
+                            lead_text = " ".join(lead)
+                            if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]):
+                                lead_text = re.sub(r"[.!?]+$", ",", lead_text)
+                            opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
+                            pieces.append(part[cursor:match.start()])
+                            pieces.append(opener + lead_text + closer)
+                            cursor = match.end()
+                            keep_speech += 1
+                            changed += 1
+                            continue
+                        # No whole sentence fits one shot: quote the first clause (3-9 words, ending at a comma/dash)
+                        # and leave the remainder as plain narration, so the spoken line is not lost.
+                        best = None
+                        for cm in re.finditer(r"[,;:\u2014\u2013\u2026]|\.\.\.|\s-\s", inner):
+                            n_pre = len(re.findall(r"[\w'\u2019-]+", inner[:cm.start()]))
+                            if 3 <= n_pre <= 9:
+                                best = cm
+                        if best is not None:
+                            prefix = inner[:best.start()].strip()
+                            remainder = inner[best.end():].strip(" \u2014\u2013-,;:")
+                            if prefix and remainder:
+                                opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
+                                pieces.append(part[cursor:match.start()])
+                                _endp = "," if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]) else "."
+                                pieces.append(opener + prefix + _endp + closer)
+                                cursor = match.end()
+                                keep_speech += 1
+                                changed += 1
+                                continue
+                        # No comma either: cut at the last natural connector so the line stays dialogue (4-9 words kept).
+                        _cut = None
+                        for cm in re.finditer(r"\s(?:to|and|but|because|before|so|while|until|if|when|or)\s", inner):
+                            n_pre = len(re.findall(r"[\w'\u2019-]+", inner[:cm.start()]))
+                            if 4 <= n_pre <= 9:
+                                _cut = cm
+                        if _cut is not None:
+                            prefix = inner[:_cut.start()].strip(" ,;:")
+                            if prefix:
+                                opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
+                                pieces.append(part[cursor:match.start()])
+                                _endp = "," if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]) else "."
+                                pieces.append(opener + prefix + _endp + closer)
+                                cursor = match.end()
+                                keep_speech += 1
+                                changed += 1
+                                continue
                         strip = True
                     else:
                         keep_speech += 1
@@ -1853,6 +2013,7 @@ class QwenDirector(
                 "Scene boundaries were preserved; no split, merge, retry, or repair call was attempted."
             )
         self._last_story_draft = raw
+        raw = self._revise_story_once(mode, user_input, raw, story_blueprint, source_character_names)
 
         # Log output length before cleanup. The acceptance floor is checked after cleanup,
         # so harmless deterministic cleanup cannot leave a too-short story marked successful.
@@ -1882,6 +2043,7 @@ class QwenDirector(
             print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
 
         candidate = self._normalize_story_quotes(candidate)
+        candidate = self._scrub_stock_phrases(candidate)
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
         print(f"[QWEN] story_length_after_cleanup words={word_count}", flush=True)
         if candidate and not self._ends_cleanly(candidate):
@@ -1933,6 +2095,309 @@ class QwenDirector(
                 flush=True,
             )
         return candidate, True
+
+    _REVISION_STOCK = (
+        "breath fogging", "breath visible", "fogging in the", "dust drifting", "smirk", "eyes narrowed",
+        "narrowed eyes", "heart pounding", "heartbeat", "pulse quickened", "hum vibrated", "echoed through",
+        "long shadows", "flickering emergency lights", "sent a shiver", "weight of",
+        "noticed a faint", "faint smell of", "felt heavier", "holding its breath", "pressing in on", "felt oppressive",
+    )
+    _REVISION_PRESENT = re.compile(
+        r"\b(?:he|she|they|[A-Z][a-z]{2,}) (?:is|has|steps|says|scans|stands|crouches|mutters|demands|replies|"
+        r"confronts|kicks|hisses|turns|moves|reaches|looks|watches|takes|pulls|presses|runs|grabs|finds|opens|"
+        r"holds|feels|knows|sees|hears|walks|pushes|shouts|whispers|begins|stops|falls|raises|lifts|drops|follows|"
+        r"leads|waits|nods|glances|stares|smiles|frowns|clenches|tightens|flickers|echoes|hums|reveals|emerges|"
+        r"appears|materializes|navigates|slinks|spots|draws|rises|shakes|grows|fills|lingers|stumbles|kneels|"
+        r"tears|slides|sparks|glows|creaks|groans|hesitates|rushes|climbs|swings|steadies|breathes)\b"
+    )
+
+    _REVISION_PRESENT_NOUN = re.compile(
+        r"\b(?:[Tt]he|[Hh]is|[Hh]er|[Tt]heir|[Ii]ts|[Aa]) (?:[a-z\u2019']+ ){0,2}"
+        r"(?:depresses|groans|creaks|flares|dims|shudders|collapses|retracts|hisses|glows|flickers|trembles|"
+        r"vibrates|pulses|slides|opens|closes|rises|shakes|fills|lingers|stops|begins|falls|swings)\b"
+    )
+
+    @classmethod
+    def _revision_metrics(cls, text: str) -> dict:
+        body = str(text or "")
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])[\"\u201d]?\s+", body) if s.strip()]
+        firsts = [re.sub(r"[^a-z]", "", s.split()[0].lower()) for s in sentences if s.split()]
+        runs = sum(1 for i in range(len(firsts) - 2) if firsts[i] and firsts[i] == firsts[i + 1] == firsts[i + 2])
+        lower = body.lower()
+        return {
+            "words": len(re.findall(r"\b[\w'\u2019-]+\b", body)),
+            "quotes": len(re.findall(r"\u201c[^\u201d]+\u201d|\"[^\"]+\"", body)),
+            "tense": (
+                lambda plain: len(cls._REVISION_PRESENT.findall(plain)) + len(cls._REVISION_PRESENT_NOUN.findall(plain))
+            )(re.sub(r"\u201c[^\u201d]*\u201d|\"[^\"]*\"", " ", body)),
+            "spoken": [
+                re.sub(r"\s+", " ", m.strip().lower())
+                for m in re.findall(r"\u201c([^\u201d]+)\u201d|\"([^\"]+)\"", body)
+                for m in m if m.strip()
+            ],
+            "stock": sum(lower.count(item) for item in cls._REVISION_STOCK),
+            "offenders": (
+                lambda plain: list(dict.fromkeys(
+                    cls._REVISION_PRESENT.findall(plain) + cls._REVISION_PRESENT_NOUN.findall(plain)
+                ))
+            )(re.sub(r"\u201c[^\u201d]*\u201d|\"[^\"]*\"", " ", body))[:10],
+            "runs": runs,
+            "years": set(re.findall(r"\b(?:1[0-9]{3}|20[0-9]{2})\b", body)),
+        }
+
+    def _revise_story_once(
+        self,
+        mode: str,
+        user_input: str,
+        draft: str,
+        story_blueprint: str | None,
+        source_character_names: list[str],
+    ) -> str:
+        """One optional editing call. The draft is kept unless the revision is verifiably no worse.
+
+        Never raises: any failure, truncation, or failed acceptance check keeps the draft.
+        """
+        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED
+
+        def keep(reason: str) -> str:
+            print(f"[QWEN] story_revision=kept_draft reason={reason}", flush=True)
+            return draft
+
+        try:
+            scenes = [p.strip() for p in re.split(r"\n\s*\n+", str(draft or "")) if p.strip()]
+            if len(scenes) != DIRECTOR_STORY_SCENES:
+                return keep("draft_topology")
+            before = self._revision_metrics(draft)
+            if before["words"] > 1900:
+                return keep("draft_too_long_for_context")
+            if before["words"] < int(self._story_min_words):
+                return keep("draft_below_floor")
+            tagged = "\n\n".join(f"[[SCENE_{i:02d}]] {text}" for i, text in enumerate(scenes, 1))
+            thin = before["words"] < 1300  # an under-developed story (below the 1320 target) is repaired once
+            _wc = lambda t: len(re.findall(r"\b[\w'\u2019-]+\b", t))
+            short_idx = [i for i, t in enumerate(scenes, 1) if _wc(t) < 120]
+            uneven = False  # the scene-lengthening mode is retired; the full rewrite above handles under-developed stories
+            if not thin and not uneven and before["tense"] < 6 and before["stock"] < 8 and before["runs"] < 3:
+                return keep("draft_ok_no_revision_needed")
+            if uneven:
+                system = (
+                    "You are a screenwriter's editor. Lengthen only the scenes you are told to lengthen, keeping every event, name, "
+                    "scene order, character fate, and quoted line exactly as written, and copy all other scenes word for word."
+                )
+                _listed = ", ".join(f"[[SCENE_{i:02d}]]" for i in short_idx)
+                user = (
+                    "In this 12-scene story the scenes " + _listed + " are too thin. Rewrite those scenes only, each as one paragraph of "
+                    "8-10 sentences and 125-140 words (never above 145): keep every existing sentence's meaning and every quoted line exactly as written, and add "
+                    "2-3 new sentences per scene (a decision, a cost, or a reaction that changes what happens next; no filler like \"noticed a faint\" or \"as if the room\"), all in "
+                    "the past tense with varied sentence openings. Copy every other scene exactly as given. No new characters, years, dates, or numbers. "
+                    "Scene 12 must end on a completed consequence, never a future hook (no \"would find\", \"was about to\", \"only the beginning\", \"questions remained\"). Output all 12 tagged scenes, each starting with its exact tag [[SCENE_01]] through [[SCENE_12]].\n\nSTORY:\n" + tagged
+                )
+            elif thin:
+                system = (
+                    "You are a screenwriter's editor. Expand the story you are given by developing every scene with more "
+                    "concrete action, perception, and consequence, without changing any event, name, scene order, character fate, "
+                    "or quoted line."
+                )
+                user = (
+                    "This 12-scene story is too thin. Rewrite it so every scene is one paragraph of 8-10 sentences of varied length "
+                    "(125-145 words each, never above 150), each starting with its exact tag [[SCENE_01]] through [[SCENE_12]]. For each scene add 2-3 "
+                    "new sentences that move the plot or reveal character (a decision, a cost, a reaction that changes what happens next), all in the "
+                    "past tense. Never add filler such as \"noticed a faint\", \"as if the room\", smells of ozone, or the air feeling heavy. Keep the meaning of every existing sentence and every quoted line exactly as written. Scenes 10-12 get as "
+                    "much detail as scene 1, and scene 12 ends on a concrete lasting cost already paid. No new characters, years, dates, or numbers. "
+                    "Current words per scene (scene:words): " + ", ".join(f"{i}:{_wc(t)}" for i, t in enumerate(scenes, 1)) + ". "
+                    "Every scene must end with at least 120 words, so no scene may be returned unchanged. "
+                    "Output only the 12 tagged scenes.\n\nSTORY:\n" + tagged
+                )
+            else:
+                offenders = "; ".join(before["offenders"]) or "any present-tense verb"
+                system = (
+                    "You are a meticulous fiction editor. Revise the story you are given without changing any event, name, "
+                    "character fate, scene order, or quoted line. Never shorten it and never add new characters."
+                )
+                user = (
+                    "Revise this 12-scene story and return all 12 scenes, each starting with its exact tag [[SCENE_01]] through "
+                    "[[SCENE_12]] and written as one paragraph. Fix these things:\n"
+                    "1. Put every sentence in the past tense. Present-tense fragments found include: " + offenders + ". Rewrite each one.\n"
+                    "2. Replace stock images (breath fogging or visible, dust drifting, smirk, narrowed eyes, heart pounding, humming or echoing) "
+                    "with one fresh, specific detail tied to the action.\n"
+                    "3. Never start three sentences in a row with the same word.\n"
+                    "4. Keep every quoted line exactly as written; add no years, dates, or numbers; keep every scene about as long as it is now and add no filler sentences.\n"
+                    "Output only the 12 tagged scenes.\n\nSTORY:\n" + tagged
+                )
+            budget = min(int(DIRECTOR_STORY_MAX_TOKENS), int(DIRECTOR_STORY_WRITER_MAX_TOKENS))
+            try:
+                rev = self._chat_text(
+                    system, user,
+                    minimum_completion=350, minimum_output_tokens=0,
+                    temperature=0.45, top_p=0.80,
+                    call_name="story_revision_pass", max_completion=budget,
+                    disable_thinking=True,
+                    seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
+                    creative=True,
+                )
+            except Exception as exc:  # truncation, context, transport: keep the draft
+                return keep(f"call_failed:{type(exc).__name__}")
+            rev = self._strip_story_markdown_emphasis(rev)
+            rev, _ = self._strip_story_nonprose_tail(rev)
+            rev = self._reflow_story_paragraphs(rev)
+            try:
+                rev = self._coerce_story_to_scene_paragraphs(rev)
+            except ValueError:
+                return keep("revision_scene_markers")
+            if len([p for p in re.split(r"\n\s*\n+", rev) if p.strip()]) != DIRECTOR_STORY_SCENES:
+                return keep("revision_topology")
+            if not self._ends_cleanly(rev):
+                return keep("revision_not_clean_end")
+            rev = self._scrub_stock_phrases(rev)
+            # Sentences the rewrite added that are stock filler ("noticed a faint...", "the air felt heavier") are dropped, never kept.
+            try:
+                _norm = lambda t: re.sub(r"\W+", " ", t.lower()).strip()
+                _old = {_norm(x) for sc_ in scenes for x in re.split(r"(?<=[.!?\u201d])\s+", sc_)}
+                _kept_scenes = []
+                for _sc in [p_.strip() for p_ in re.split(r"\n\s*\n+", rev) if p_.strip()]:
+                    _out = []
+                    for _sent in re.split(r"(?<=[.!?\u201d])\s+", _sc):
+                        _low = _sent.lower()
+                        if _norm(_sent) not in _old and "\u201c" not in _sent and any(_k in _low for _k in self._REVISION_STOCK):
+                            continue
+                        _out.append(_sent)
+                    _kept_scenes.append(" ".join(_out) if _out else _sc)
+                if len(_kept_scenes) == len(scenes):
+                    rev = "\n\n".join(_kept_scenes)
+            except Exception:
+                pass
+            after = self._revision_metrics(rev)
+            if uneven:
+                if after["words"] < int(1.04 * before["words"]):
+                    return keep(f"revision_not_longer:{before['words']}->{after['words']}")
+                if after["words"] > 1950:
+                    return keep("revision_overlong")
+            elif thin:
+                if after["words"] < int(1.12 * before["words"]):
+                    return keep(f"revision_not_longer:{before['words']}->{after['words']}")
+                if after["words"] > min(int(2.3 * before["words"]), 2000):
+                    return keep("revision_overlong")
+            else:
+                if after["words"] < max(int(0.95 * before["words"]), int(self._story_min_words)):
+                    return keep(f"revision_shorter:{before['words']}->{after['words']}")
+                if after["words"] > int(1.25 * before["words"]):
+                    return keep("revision_overlong")
+            kept_lines = sum(1 for line in before["spoken"] if line in after["spoken"])
+            if before["spoken"] and kept_lines < -(-len(before["spoken"]) * 85 // 100):
+                return keep(f"revision_changed_dialogue:{kept_lines}/{len(before['spoken'])}_lines_kept")
+            rev_scenes = [p.strip() for p in re.split(r"\n\s*\n+", rev) if p.strip()]
+            for idx, (old_scene, new_scene) in enumerate(zip(scenes, rev_scenes), 1):
+                old_w = len(re.findall(r"\b[\w'\u2019-]+\b", old_scene))
+                new_w = len(re.findall(r"\b[\w'\u2019-]+\b", new_scene))
+                if new_w < int(0.90 * old_w):
+                    return keep(f"revision_compressed_scene_{idx:02d}:{old_w}->{new_w}")
+                if False and uneven and idx in short_idx and new_w < int(1.05 * old_w):
+                    return keep(f"revision_scene_not_expanded_{idx:02d}:{old_w}->{new_w}")
+            if after["years"] - before["years"]:
+                return keep("revision_added_year")
+            names = list(dict.fromkeys(list(source_character_names or []) + list(self._blueprint_cast_names(story_blueprint))))
+            for name in names:
+                token = str(name).split()[0] if str(name).split() else ""
+                if not token:
+                    continue
+                n_before = len(re.findall(r"\b" + re.escape(token) + r"\b", draft))
+                n_after = len(re.findall(r"\b" + re.escape(token) + r"\b", rev))
+                if n_before >= 2 and n_after < int(0.7 * n_before):
+                    return keep(f"revision_lost_character:{token}")
+            if thin or uneven:
+                if after["tense"] > before["tense"] + 2 or after["stock"] > before["stock"] + 6 or after["runs"] > before["runs"] + 4:
+                    return keep("revision_prose_worse:" + ",".join(f"{k}{before[k]}->{after[k]}" for k in ("tense", "stock", "runs")))
+            else:
+                if before["tense"] >= 3 and after["tense"] > int(0.6 * before["tense"]):
+                    return keep(f"revision_tense_not_fixed:{before['tense']}->{after['tense']}")
+                if any(after[k] > before[k] for k in ("tense", "stock", "runs")):
+                    return keep("revision_not_better:" + ",".join(f"{k}{before[k]}->{after[k]}" for k in ("tense", "stock", "runs")))
+                if all(after[k] == before[k] for k in ("tense", "stock", "runs")):
+                    return keep("revision_no_improvement")
+            try:
+                self._validate_story_output_contracts(
+                    mode, user_input, rev, source_character_names=source_character_names, strict=True,
+                )
+            except Exception as exc:
+                # A rewrite most often fails the contract on its final sentence (a future hook). Keep the draft's last scene and re-check.
+                _fixed = False
+                try:
+                    _rs = [p.strip() for p in re.split(r"\n\s*\n+", rev) if p.strip()]
+                    if len(_rs) == len(scenes) and _rs[-1] != scenes[-1]:
+                        _alt = "\n\n".join(_rs[:-1] + [scenes[-1]])
+                        self._validate_story_output_contracts(
+                            mode, user_input, _alt, source_character_names=source_character_names, strict=True,
+                        )
+                        rev = _alt
+                        after = self._revision_metrics(rev)
+                        _fixed = True
+                        print("[QWEN] story_revision=final_scene_restored (rewrite ended on a hook; draft ending kept)", flush=True)
+                except Exception:
+                    _fixed = False
+                if not _fixed:
+                    return keep(f"revision_contract:{type(exc).__name__}:{str(exc)[:160]}")
+            print(
+                f"[QWEN] story_revision=accepted mode={'expand' if thin else ('lengthen' if uneven else 'polish')} words={before['words']}->{after['words']} "
+                f"tense_slips={before['tense']}->{after['tense']} stock_phrases={before['stock']}->{after['stock']} "
+                f"repeated_openers={before['runs']}->{after['runs']}",
+                flush=True,
+            )
+            return rev
+        except Exception as exc:  # never let the optional pass break generation
+            return keep(f"error:{type(exc).__name__}")
+
+    @staticmethod
+    def _restore_source_places(mode: str, source: str, blueprint: str) -> str:
+        """Expand mode: if the Architect renamed a source place (abandoned station -> rusted train station), restore it in scene 01."""
+        try:
+            if mode != EXPAND_USER_STORY_MODE or not blueprint:
+                return blueprint
+            skip = {"the", "a", "an", "his", "her", "their", "its", "into", "in", "of", "at", "to", "through", "and",
+                    "from", "inside", "entered", "reached", "stood", "by", "near", "outside", "enters", "entering"}
+            lines = str(blueprint).split("\n")
+            for adj, noun in re.findall(r"\b(abandoned|ruined|derelict|forgotten|collapsed|frozen)\s+([A-Za-z]{4,})\b", str(source or ""), re.IGNORECASE):
+                phrase = f"{adj} {noun}".lower()
+                if any(phrase in l.lower() for l in lines if re.match(r"\s*SCENE 0[12]\b", l)):
+                    continue
+                for i, line in enumerate(lines):
+                    if not re.match(r"\s*SCENE 01\b", line):
+                        continue
+                    m = re.search(r"\b" + re.escape(noun) + r"\b", line, re.IGNORECASE)
+                    if not m:
+                        break
+                    pre = line[:m.start()]
+                    for _ in range(2):
+                        mm = re.search(r"([A-Za-z-]+)\s+$", pre)
+                        if not mm or mm.group(1).lower() in skip:
+                            break
+                        pre = pre[:mm.start()]
+                    lines[i] = pre + adj.lower() + " " + line[m.start():]
+                    break
+            return "\n".join(lines)
+        except Exception:
+            return blueprint
+
+    @staticmethod
+    def _scrub_stock_phrases(story: str) -> str:
+        """Deterministic, no model call: drop worn-out trailing body-sensation clauses from narration (never inside quotes)."""
+        patterns = [
+            r",\s+(?:his|her|their|my)\s+(?:breath|heart|pulse|heartbeat)\s+(?:fogging|visible|pounding|racing|hammering|quickening|thudding|drumming)\b[^,.;!?\u201c\u201d]*?(?=\s+(?:as|while|and|but|before|when|then)\b|[,.;!?\u201c\u201d]|$)",
+            r",\s+casting\s+long\s+shadows\b[^,.;!?\u201c\u201d]*?(?=\s+(?:as|while|and|but|before|when|then)\b|[,.;!?\u201c\u201d]|$)",
+            r",\s+(?:sending|sent)\s+a\s+shiver\s+down\b[^,.;!?\u201c\u201d]*?(?=\s+(?:as|while|and|but|before|when|then)\b|[,.;!?\u201c\u201d]|$)",
+            r",\s+(?:his|her)\s+eyes\s+narrowed\b[^,.;!?\u201c\u201d]*?(?=\s+(?:as|while|and|but|before|when|then)\b|[,.;!?\u201c\u201d]|$)",
+        ]
+        try:
+            parts = re.split(r'(\u201c[^\u201d]*\u201d|"[^"]*")', str(story or ""))
+            removed = 0
+            for i in range(0, len(parts), 2):
+                for pat in patterns:
+                    parts[i], n = re.subn(pat, "", parts[i], flags=re.IGNORECASE)
+                    removed += n
+            if removed:
+                print(f"[QWEN] story_cleanup=removed {removed} stock body-sensation clause(s); no model call", flush=True)
+            return "".join(parts)
+        except Exception:
+            return str(story or "")
 
     @staticmethod
     def _blueprint_cast_names(story_blueprint: str | None) -> list[str]:
@@ -2008,8 +2473,8 @@ class QwenDirector(
             issues.append(f"topology: expected {DIRECTOR_STORY_SCENES} paragraphs, found {len(paragraphs)}")
         for index, paragraph in enumerate(paragraphs, start=1):
             quoted = re.findall(r'[\"“]([^\"”]{2,})[\"”]', paragraph)
-            if len(quoted) > 2:
-                issues.append(f"scene {index:02d}: {len(quoted)} quoted lines; aim for no more than 2 so speech can fit separate shots")
+            if len(quoted) > 3:
+                issues.append(f"scene {index:02d}: {len(quoted)} quoted lines; aim for no more than 3 so speech can fit separate shots")
             long_lines = [line for line in quoted if len(re.findall(r"[\w'’-]+", line)) > 9]
             if long_lines:
                 issues.append(f"scene {index:02d}: a quoted line exceeds 9 words and may exceed a 5.17-second shot")
