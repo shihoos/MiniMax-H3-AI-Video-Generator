@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from planner.cinematic_compiler import CinematicCompiler
+from planner.config import H3_FRAMES_PER_SHOT
 from pipeline.continuity_ledger import ContinuityLedger
 from pipeline.dialogue_timeline import DialogueTimeline
 from pipeline.timeline import ProductionTimeline
@@ -249,7 +250,7 @@ def main() -> None:
     Shot(**normalized)
 
     # H3 duration-grid contract.
-    assert DialogueTimeline.h3_legal_frames(5.0) == 124
+    assert DialogueTimeline.h3_legal_frames(5.0) == H3_FRAMES_PER_SHOT
     assert abs(DialogueTimeline.h3_effective_duration_seconds(5.0) - 124 / 24.0) < 1e-9
     assert DialogueTimeline.h3_legal_frames(15.0) == 362
 
