@@ -772,8 +772,8 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prompt must explicitly reject a fixed numeric cast quota")
         _assert("physically" in low and "dialogue" in low,
                 f"{mode}: prompt must require active character participation and interactions")
-        _assert("no scene has a fixed sentence-count requirement" in low and "one shot" in low,
-                f"{mode}: scene sentences must be flexible and dialogue must fit a shot")
+        _assert("scene shape" in low and "unfinished" in low and "one shot" in low,
+                f"{mode}: scenes must follow the sentence-slot shape and dialogue must fit a shot")
         _assert("word counts" in low and "postscript" in low,
                 f"{mode}: prompt must forbid count reports and output after the story")
         from planner.config import STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
@@ -824,8 +824,12 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
         )
 
     _assert(
-        str(STORY_MIN_WORDS) in system and str(STORY_MIN_WORDS) in writer,
-        "system and user prompts must agree on the hard minimum",
+        str(STORY_MIN_WORDS) not in system and str(STORY_MIN_WORDS) not in writer,
+        "the fail-safe acceptance floor must not be exposed to the writer as a number",
+    )
+    _assert(
+        "1300" in system and "1300" in writer,
+        "system and user prompts must agree on the writing floor",
     )
     _assert(
         str(STORY_TARGET_WORDS) in system and str(STORY_TARGET_WORDS) in writer,
@@ -993,7 +997,7 @@ def test_story_minimum_is_a_hard_floor_without_retry():
     accepted_result, accepted_generated, accepted_calls, accepted_error = run(floor_words)
     _assert(STORY_MIN_WORDS == STORY_ACCEPT_MIN_WORDS == 816,
             f"minimum and acceptance floor must be 816: {STORY_MIN_WORDS}, {STORY_ACCEPT_MIN_WORDS}")
-    _assert(accepted_generated and accepted_error is None and len(accepted_calls) == 1,
+    _assert(accepted_generated and accepted_error is None and len([c for c in accepted_calls if c.get("call_name") != "story_revision_pass"]) == 1,
             f"story meeting the lower boundary must pass with one writer call: {accepted_error}")
     _assert(len(re.findall(r"\b[\w'’-]+\b", accepted_result)) >= STORY_MIN_WORDS,
             "accepted story must meet the minimum word boundary")
@@ -1093,7 +1097,7 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
             temperature=temperature, top_p=top_p, source_character_names=[],
         )
     count = len([p for p in re.split(r"\n\s*\n+", result) if p.strip()])
-    _assert(generated and len(calls) == 1, f"story must have exactly one prose-writing call: {len(calls)}")
+    _assert(generated and len([c for c in calls if c.get("call_name") != "story_revision_pass"]) == 1, f"story must have exactly one prose-writing call: {len(calls)}")
     _assert(calls[0].get("disable_thinking") is True, "prose writer must explicitly disable Qwen3 thinking")
     _assert(calls[0].get("creative") is True, "prose writer must use the configured creative-writing penalty")
     _assert(calls[0].get("temperature") == DIRECTOR_STORY_WRITER_TEMPERATURE == 0.7
