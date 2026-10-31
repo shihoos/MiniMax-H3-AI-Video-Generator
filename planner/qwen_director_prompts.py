@@ -40,7 +40,6 @@ from planner.entity_resolver import EntityResolver
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
-import re
 
 CAMERA_SHOT_OPTIONS = (
     "extreme wide",
