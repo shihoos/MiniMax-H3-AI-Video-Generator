@@ -57,15 +57,15 @@ def _verbose() -> bool:
 
 
 def _stage_mode() -> str:
-    value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto").strip().lower()
+    # Direct loading from /kaggle/input is the default. Staging is opt-in only.
+    # "auto" remains accepted for backward compatibility, but no longer stages.
+    value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "off").strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return "on"
-    if value in {"0", "false", "no", "off"}:
+    if value in {"0", "false", "no", "off", "auto", "default", ""}:
         return "off"
-    if value in {"auto", "default", ""}:
-        return "auto"
     raise RuntimeError(
-        "H3_DIRECTOR_STAGE_LOCAL must be one of: auto, 0, 1."
+        "H3_DIRECTOR_STAGE_LOCAL must be one of: 0, 1 (auto is treated as 0)."
     )
 
 
@@ -88,9 +88,26 @@ def _filesystem_type(path: Path) -> str:
         return ""
 
 
+# H3_AUTOFIX_FAST_PORT_PROBE_V1
+def _h3_probe_host(host: str, port: int, timeout: float = 0.25) -> bool:
+    """H3_AUTOFIX_FAST_PORT_PROBE_V1: quick TCP connect probe."""
+    import socket as _h3_socket
+    _ph = host
+    if _ph in ("0.0.0.0", "::", ""):
+        _ph = "127.0.0.1"
+    try:
+        with _h3_socket.socket(_h3_socket.AF_INET, _h3_socket.SOCK_STREAM) as _s:
+            _s.settimeout(float(timeout))
+            return _s.connect_ex((_ph, int(port))) == 0
+    except Exception:
+        return False
+
+
 def _should_stage_local(source_path: Path) -> bool:
-    mode = _stage_mode()
-    if mode == "off":
+    # Never copy multi-GB model checkpoints by default, even when Kaggle Input
+    # is backed by a network/FUSE filesystem. Explicit H3_DIRECTOR_STAGE_LOCAL=1
+    # is the only opt-in escape hatch for a deliberate staging experiment.
+    if _stage_mode() != "on":
         return False
 
     try:
@@ -107,13 +124,7 @@ def _should_stage_local(source_path: Path) -> bool:
     except OSError:
         under_kaggle_input = "/kaggle/input/" in str(resolved)
 
-    if not under_kaggle_input:
-        return False
-    if mode == "on":
-        return True
-
-    fs_type = _filesystem_type(resolved)
-    return fs_type.startswith(("nfs", "lustre", "s3fs", "gcsfuse", "fuse"))
+    return under_kaggle_input
 
 
 class StoryTruncated(RuntimeError):
@@ -249,6 +260,45 @@ def _with_faulthandler_watchdog(func):
     return wrapped
 
 
+# H3_AUTOFIX_SHUTDOWN_BEFORE_RENDER_V1
+def shutdown_qwen_before_render(director=None) -> None:
+    """SIGTERM the shared vLLM process only after verifying cmdline identity."""
+    import signal as _h3_signal
+    proc = _SHARED_VLLM_PROCESS
+    if proc is None:
+        return
+    pid = proc.pid
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except FileNotFoundError:
+        return
+    except Exception as _exc:
+        print(f"[QWEN] shutdown_qwen_before_render: cannot read cmdline: {_exc}", flush=True)
+        return
+    cmdline = raw.replace(b"\x00", b" ").decode("utf-8", "replace")
+    need_port = f"--port {int(DIRECTOR_VLLM_PORT)}"
+    if not ("vllm.entrypoints.cli.main" in cmdline
+            and " serve" in cmdline
+            and "qwen3-14b-awq" in cmdline
+            and need_port in cmdline):
+        print(
+            f"[QWEN] shutdown_qwen_before_render: refusing SIGTERM pid {pid}; "
+            f"cmdline mismatch (tail={cmdline[:300]!r})",
+            flush=True,
+        )
+        return
+    print(f"[QWEN] shutdown_qwen_before_render: SIGTERM pid {pid}", flush=True)
+    try:
+        proc.send_signal(_h3_signal.SIGTERM)
+        proc.wait(timeout=15)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
 class QwenDirectorRuntimeMixin:
     @staticmethod
     def _optional_directory_env(name: str) -> Path | None:
@@ -280,9 +330,9 @@ class QwenDirectorRuntimeMixin:
     @staticmethod
     def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
         """Stage network-mounted Kaggle models to transient local scratch when policy selects staging."""
-        # AUTO stages only when the dataset path is on a recognized network filesystem.
-        # Set H3_DIRECTOR_STAGE_LOCAL=0 to force direct dataset loading, or =1 to force
-        # local scratch staging. Scratch is /kaggle/tmp or /tmp, never /kaggle/working.
+        # Direct loading from Kaggle Input is the default; no model checkpoint copy
+        # is made to /tmp or /kaggle/working. Set H3_DIRECTOR_STAGE_LOCAL=1 only
+        # when deliberately opting into a transient local scratch copy.
         if not _should_stage_local(source_path):
             return source_path
 
@@ -1139,7 +1189,10 @@ class QwenDirectorRuntimeMixin:
             allow_port_reuse = shared_process_alive or keep_alive or external_server
             reuse_deadline = time.monotonic() + reuse_timeout
             last_error = ""
-            while allow_port_reuse and time.monotonic() < reuse_deadline:
+            # H3_AUTOFIX_FAST_PORT_PROBE_V1: skip reuse loop entirely if port closed
+            _h3_port_open_initial = _h3_probe_host(DIRECTOR_VLLM_HOST, DIRECTOR_VLLM_PORT)
+            # H3_AUTOFIX_UNCONDITIONAL_PREFLIGHT_V1
+            while _h3_port_open_initial and time.monotonic() < reuse_deadline:
                 try:
                     health = session.get(health_url, timeout=1.5)
                     if health.status_code == 200:
@@ -1196,6 +1249,16 @@ class QwenDirectorRuntimeMixin:
                     flush=True,
                 )
                 return
+
+            # H3_AUTOFIX_PORT_GUARD_V1: refuse to spawn on occupied-but-unhealthy port
+            if _h3_probe_host(DIRECTOR_VLLM_HOST, DIRECTOR_VLLM_PORT):
+                raise RuntimeError(
+                    f"[H3_AUTOFIX_PORT_GUARD_V1] Port "
+                    f"{DIRECTOR_VLLM_HOST}:{DIRECTOR_VLLM_PORT} is already occupied "
+                    f"by a server that is not a healthy {model_name!r} instance. "
+                    f"last_reuse_error={last_error!r}. "
+                    f"Stop the offending process, or set H3_DIRECTOR_VLLM_EXTERNAL=1 to attach externally."
+                )
 
             host = DIRECTOR_VLLM_HOST
             port = DIRECTOR_VLLM_PORT
@@ -1277,7 +1340,7 @@ class QwenDirectorRuntimeMixin:
                 "enforce_eager": eagle_enforce_eager,
             }, separators=(",", ":"))
 
-            max_batched_tokens = os.getenv("H3_DIRECTOR_VLLM_MAX_NUM_BATCHED_TOKENS", "8192").strip()
+            max_batched_tokens = os.getenv("H3_DIRECTOR_VLLM_MAX_NUM_BATCHED_TOKENS", "10240").strip()
 
             command = [
                 str(vllm_python),
@@ -1394,19 +1457,21 @@ class QwenDirectorRuntimeMixin:
             child_env = os.environ.copy()
             # Disable FlashInfer sampler probe on SM75 (T4) to silence warnings and use native paths cleanly
             child_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+            # Always allow normal AOT cache lookup, with compilation fallback when
+            # an artifact is missing. Do not let an inherited value of "1" force
+            # every AOT artifact to exist before the server can start.
+            child_env["VLLM_FORCE_AOT_LOAD"] = "0"
 
-            configured_cache_root = os.getenv("H3_DIRECTOR_VLLM_CACHE_ROOT", "").strip()
-            cache_root = configured_cache_root or ""
-
-            cache_path = None
-            if cache_root:
-                cache_path = Path(cache_root).expanduser()
-                try:
-                    cache_path.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    session.close()
-                    raise
-                child_env["VLLM_CACHE_ROOT"] = str(cache_path)
+            # Use the repository's existing cache directory, not ~/.cache/vllm
+            # and not a second cache path supplied by a stale notebook cell.
+            # This stores compiled vLLM artifacts only; model weights stay in /kaggle/input.
+            cache_path = Path(self.project_root).expanduser().resolve() / ".vllm_cache"
+            try:
+                cache_path.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                session.close()
+                raise
+            child_env["VLLM_CACHE_ROOT"] = str(cache_path)
 
             startup_plan_value = os.getenv(
                 "H3_DIRECTOR_VLLM_ENABLE_STARTUP_PLAN",
@@ -1440,7 +1505,7 @@ class QwenDirectorRuntimeMixin:
             _startup_t0 = time.perf_counter()
             if _verbose(): print(
                 "[QWEN] vLLM startup config",
-                f"cache_root={cache_path or 'default(/root/.cache/vllm)'}",
+                f"cache_root={cache_path}",
                 f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
                 f"enforce_eager={enforce_eager_base_val in {'1', 'true', 'yes', 'on'}}",
                 f"eagle_enforce_eager={eagle_enforce_eager}",
@@ -1480,34 +1545,45 @@ class QwenDirectorRuntimeMixin:
                     process,
                 )
 
+                # H3_AUTOFIX_TWO_MODE_WARMUP_V1: exercise both sampler paths so
+                # _thinking_budget_kernel and _topp_sb_* JIT once at startup.
+                # Warn, do not raise, on failure.
                 if warmup_sampler_jit:
                     warmup_url = self._vllm_base_url() + "/chat/completions"
-                    warmup_payload = {
+                    _h3_thinking = {
                         "model": model_name,
                         "messages": [{"role": "user", "content": "Say OK."}],
-                        "max_tokens": 2,
+                        "max_tokens": 5,
+                        "thinking_token_budget": 1280,
                         "temperature": DIRECTOR_STORY_THINKING_TEMPERATURE,
                         "top_p": DIRECTOR_STORY_THINKING_TOP_P,
-                        # Exercise the bounded architect's Qwen3 thinking sampler;
-                        # the actual per-request reasoning budget is applied on its call.
                         "top_k": DIRECTOR_STORY_THINKING_TOP_K,
                         "min_p": DIRECTOR_STORY_THINKING_MIN_P,
                         "chat_template_kwargs": {"enable_thinking": True},
                     }
                     try:
-                        warmup_response = session.post(
-                            warmup_url,
-                            json=warmup_payload,
-                            timeout=60,
-                        )
-                        warmup_response.raise_for_status()
-                        if _verbose():
-                            print("[QWEN] vLLM sampler-JIT warmup completed", flush=True)
-                    except Exception as exc:
-                        raise RuntimeError(
-                            "vLLM sampler-JIT warmup failed. Disable "
-                            "H3_DIRECTOR_VLLM_WARMUP_SAMPLER_JIT to skip it."
-                        ) from exc
+                        _r = session.post(warmup_url, json=_h3_thinking, timeout=60)
+                        _r.raise_for_status()
+                        print("[QWEN] sampler-JIT warmup completed mode=thinking", flush=True)
+                    except Exception as _h3_exc:
+                        print(f"[QWEN] sampler-JIT warmup warning mode=thinking: {_h3_exc}", flush=True)
+                    _h3_creative = {
+                        "model": model_name,
+                        "messages": [{"role": "user", "content": "Say OK."}],
+                        "max_tokens": 5,
+                        "temperature": DIRECTOR_STORY_THINKING_TEMPERATURE,
+                        "top_p": DIRECTOR_STORY_THINKING_TOP_P,
+                        "top_k": DIRECTOR_STORY_WRITER_TOP_K,
+                        "min_p": DIRECTOR_STORY_WRITER_MIN_P,
+                        "presence_penalty": DIRECTOR_STORY_PRESENCE_PENALTY,
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    }
+                    try:
+                        _r = session.post(warmup_url, json=_h3_creative, timeout=60)
+                        _r.raise_for_status()
+                        print("[QWEN] sampler-JIT warmup completed mode=creative", flush=True)
+                    except Exception as _h3_exc:
+                        print(f"[QWEN] sampler-JIT warmup warning mode=creative: {_h3_exc}", flush=True)
 
                 if _SHARED_VLLM_TOKENIZER is None:
                     from transformers import AutoTokenizer
