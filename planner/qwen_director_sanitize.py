@@ -1587,17 +1587,16 @@ class QwenDirectorSanitizeMixin:
         if not value:
             return True
 
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", value) if part.strip()]
+        final_scene = paragraphs[-1] if paragraphs else value
         sentences = [
             sentence.strip()
-            for sentence in re.split(r"(?<=[.!?])\s+", value)
+            for sentence in re.split(r"(?<=[.!?])\s+", final_scene)
             if sentence.strip()
         ]
-        final_sentence = sentences[-1].lower() if sentences else value.lower()
-        # Only the terminal sentence determines whether the story itself ends on
-        # a future hook. Earlier sentences may legitimately mention plans,
-        # uncertainty, or threats that are resolved by the final sentence.
-        # Looking through the whole final paragraph caused false positives and
-        # unnecessary story rewrites.
+        final_sentence = sentences[-1].lower() if sentences else final_scene.lower()
+        # Check the whole final scene for explicit sequel promises, not only its
+        # final punctuation-delimited sentence (which can hide an earlier hook).
         hook_patterns = (
             r"\b(?:he|she|they|[a-z][a-z'-]*(?:\s+[a-z][a-z'-]*){0,2})\s+(?:would|will|could|might)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
             r"\bwould begin\b",
@@ -1618,9 +1617,18 @@ class QwenDirectorSanitizeMixin:
             r"\bfirst step of\b",
         )
 
-        return any(
-            re.search(pattern, final_sentence, flags=re.IGNORECASE)
-            for pattern in hook_patterns
+        scene_hook_patterns = (
+            # Contraction must be attached to the pronoun (I'll / we'll / he'll).
+            # Accept both straight and typographic apostrophes.
+            r"\b(?:i|we|he|she|they|[a-z][a-z'-]*)[’']ll\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
+            r"\b(?:i|we|he|she|they|[a-z][a-z'-]*)\s+(?:will|shall)\s+(?:find|follow|face|continue|discover|uncover|return|seek|search|learn|pursue)\b",
+            r"\b(?:one day|someday|some day)\b.{0,80}\b(?:find|discover|return|uncover|face)\b",
+            r"\b(?:the hunt|the search|the journey|the fight)\s+(?:would|will|had)\s+(?:continue|begin|start)\b",
+            r"\b(?:promised|vowed|swore)\s+(?:to|that they would|that he would|that she would)\s+(?:find|discover|return|uncover|search)\b",
+        )
+        return (
+            any(re.search(pattern, final_sentence, flags=re.IGNORECASE) for pattern in hook_patterns)
+            or any(re.search(pattern, final_scene, flags=re.IGNORECASE) for pattern in scene_hook_patterns)
         )
 
     @staticmethod
