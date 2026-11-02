@@ -57,8 +57,10 @@ director:
     # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
     max_tokens: 3600
     thinking_token_budget: 1280
-    beat_words_min: 85
-    beat_words_max: 105
+    # The Architect returns compact causal beats plus explicit plot-engine and per-scene continuity fields.
+    # This keeps the planning pass focused and avoids spending tokens on a rigid template.
+    beat_words_min: 55
+    beat_words_max: 120
   # Two-stage story flow: Architect thinks/plans once; Author writes once without thinking.
   story_sampling:
     thinking:
@@ -81,14 +83,14 @@ director:
   story_contract:
     scene_count: 12
     shots_per_scene: 3
-    words_per_scene: 110
-    target_words: 1320
-    # Hard lower boundary for acceptance; not an exact target or a reason to cut an ending.
-    minimum_words: 816
-    # Stretch guidance: 110 words x 12 scenes = about 1,320 words when the story needs it.
-    writer_words_per_scene: 130
+    words_per_scene: 130
+    target_words: 1560
+    # Hard minimum: generated AI/Expand stories must contain at least 1,400 usable words.
+    minimum_words: 1400
+    # Stretch guidance, not a quota: allow longer scenes when the causal story needs room.
+    writer_words_per_scene: 145
     # Must match minimum_words; below-floor output fails without retry or repair.
-    accept_min_words: 816
+    accept_min_words: 1400
     # The narrative determines the cast size; no numeric minimum, target, or maximum.
     cast_size_policy: plot_driven
   prompt_limits:
