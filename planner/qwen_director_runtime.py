@@ -57,15 +57,15 @@ def _verbose() -> bool:
 
 
 def _stage_mode() -> str:
-    # Direct loading from /kaggle/input is the default. Staging is opt-in only.
-    # "auto" remains accepted for backward compatibility, but no longer stages.
     value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "off").strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return "on"
-    if value in {"0", "false", "no", "off", "auto", "default", ""}:
+    if value in {"0", "false", "no", "off"}:
         return "off"
+    if value in {"auto", "default", ""}:
+        return "auto"
     raise RuntimeError(
-        "H3_DIRECTOR_STAGE_LOCAL must be one of: 0, 1 (auto is treated as 0)."
+        "H3_DIRECTOR_STAGE_LOCAL must be one of: auto, 0, 1."
     )
 
 
@@ -104,10 +104,8 @@ def _h3_probe_host(host: str, port: int, timeout: float = 0.25) -> bool:
 
 
 def _should_stage_local(source_path: Path) -> bool:
-    # Never copy multi-GB model checkpoints by default, even when Kaggle Input
-    # is backed by a network/FUSE filesystem. Explicit H3_DIRECTOR_STAGE_LOCAL=1
-    # is the only opt-in escape hatch for a deliberate staging experiment.
-    if _stage_mode() != "on":
+    mode = _stage_mode()
+    if mode == "off":
         return False
 
     try:
@@ -124,7 +122,13 @@ def _should_stage_local(source_path: Path) -> bool:
     except OSError:
         under_kaggle_input = "/kaggle/input/" in str(resolved)
 
-    return under_kaggle_input
+    if not under_kaggle_input:
+        return False
+    if mode == "on":
+        return True
+
+    fs_type = _filesystem_type(resolved)
+    return fs_type.startswith(("nfs", "lustre", "s3fs", "gcsfuse", "fuse"))
 
 
 class StoryTruncated(RuntimeError):
@@ -202,6 +206,10 @@ _STAGE_SPACE_LOCK = threading.Lock()
 _STAGE_RESERVED_BYTES = 0
 
 
+# H3_V51_KEEP_ALIVE_DEFAULT_V1: a story-only run leaves the server running so the next run attaches in seconds (set H3_DIRECTOR_VLLM_KEEP_ALIVE=0 to turn off).
+os.environ.setdefault("H3_DIRECTOR_VLLM_KEEP_ALIVE", "1")
+
+
 def _shutdown_shared_vllm_at_exit() -> None:
     global _SHARED_VLLM_PROCESS, _SHARED_VLLM_LOG_HANDLE, _SHARED_VLLM_TOKENIZER
     if os.getenv("H3_DIRECTOR_VLLM_KEEP_ALIVE", "0").strip().lower() in {"1", "true", "yes", "on"}:
@@ -260,12 +268,74 @@ def _with_faulthandler_watchdog(func):
     return wrapped
 
 
+# H3_V51_STRAY_VLLM_V1
+def _h3_pid_alive(pid: int) -> bool:
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text()
+    except Exception:
+        return False
+    return stat.rsplit(")", 1)[-1].strip()[:1] not in {"Z", "X", ""}
+
+
+def _h3_find_vllm_pids() -> list:
+    """PIDs of a Director vLLM server (same cmdline identity check as shutdown_qwen_before_render), whichever process started it."""
+    found = []
+    need_port = f"--port {int(DIRECTOR_VLLM_PORT)}"
+    try:
+        names = os.listdir("/proc")
+    except Exception:
+        return found
+    for name in names:
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        try:
+            cmd = Path(f"/proc/{name}/cmdline").read_bytes().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except Exception:
+            continue
+        if ("vllm.entrypoints.cli.main" in cmd and " serve" in cmd
+                and "qwen3-14b-awq" in cmd and need_port in cmd and _h3_pid_alive(int(name))):
+            found.append(int(name))
+    return found
+
+
+def _h3_kill_stray_vllm(reason: str = "", grace: float = 30.0) -> int:
+    """SIGTERM (then SIGKILL) every Director vLLM server and wait until the port is free. Returns how many were found."""
+    import signal as _sig
+    pids = _h3_find_vllm_pids()
+    if not pids:
+        return 0
+    print(f"[QWEN] stopping vLLM Director pid(s) {pids} ({reason})", flush=True)
+    for pid in pids:
+        try:
+            os.kill(pid, _sig.SIGTERM)
+        except Exception:
+            pass
+    end = time.monotonic() + float(grace)
+    while time.monotonic() < end and any(_h3_pid_alive(p) for p in pids):
+        time.sleep(0.25)
+    for pid in pids:
+        if _h3_pid_alive(pid):
+            try:
+                os.killpg(os.getpgid(pid), _sig.SIGKILL)
+            except Exception:
+                try:
+                    os.kill(pid, _sig.SIGKILL)
+                except Exception:
+                    pass
+    end = time.monotonic() + 20.0
+    while time.monotonic() < end and (_h3_probe_host(DIRECTOR_VLLM_HOST, DIRECTOR_VLLM_PORT) or any(_h3_pid_alive(p) for p in pids)):
+        time.sleep(0.25)
+    return len(pids)
+
+
 # H3_AUTOFIX_SHUTDOWN_BEFORE_RENDER_V1
 def shutdown_qwen_before_render(director=None) -> None:
     """SIGTERM the shared vLLM process only after verifying cmdline identity."""
     import signal as _h3_signal
     proc = _SHARED_VLLM_PROCESS
     if proc is None:
+        # H3_V51: a server kept alive from an earlier run is not our child, but it still holds the GPUs the renderer needs.
+        _h3_kill_stray_vllm("freeing the GPUs before render")
         return
     pid = proc.pid
     try:
@@ -330,9 +400,9 @@ class QwenDirectorRuntimeMixin:
     @staticmethod
     def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
         """Stage network-mounted Kaggle models to transient local scratch when policy selects staging."""
-        # Direct loading from Kaggle Input is the default; no model checkpoint copy
-        # is made to /tmp or /kaggle/working. Set H3_DIRECTOR_STAGE_LOCAL=1 only
-        # when deliberately opting into a transient local scratch copy.
+        # AUTO stages only when the dataset path is on a recognized network filesystem.
+        # Set H3_DIRECTOR_STAGE_LOCAL=0 to force direct dataset loading, or =1 to force
+        # local scratch staging. Scratch is /kaggle/tmp or /tmp, never /kaggle/working.
         if not _should_stage_local(source_path):
             return source_path
 
@@ -1142,7 +1212,7 @@ class QwenDirectorRuntimeMixin:
                 model_ok = False
             if health_ok and model_ok:
                 return
-            time.sleep(2.0)
+            time.sleep(0.5)
 
         raise RuntimeError(
             "Timed out waiting for the Qwen3-14B-AWQ vLLM server. "
@@ -1192,6 +1262,22 @@ class QwenDirectorRuntimeMixin:
             # H3_AUTOFIX_FAST_PORT_PROBE_V1: skip reuse loop entirely if port closed
             _h3_port_open_initial = _h3_probe_host(DIRECTOR_VLLM_HOST, DIRECTOR_VLLM_PORT)
             # H3_AUTOFIX_UNCONDITIONAL_PREFLIGHT_V1
+            # H3_V51: a server left from an aborted or finished run may still be loading (its port opens only at the end); wait for it instead of failing or starting a second one.
+            _h3_waiting_stray = False
+            if not external_server and _h3_find_vllm_pids():
+                try:
+                    _h3_healthy = session.get(health_url, timeout=1.5).status_code == 200
+                except Exception:
+                    _h3_healthy = False
+                if not _h3_healthy:
+                    _h3_waiting_stray = True
+                    _h3_port_open_initial = True
+                    try:
+                        _h3_wait = float(os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "900"))
+                    except (TypeError, ValueError):
+                        _h3_wait = 900.0
+                    reuse_deadline = time.monotonic() + _h3_wait
+                    print("[QWEN] a vLLM Director server from an earlier run is still starting; waiting for it instead of restarting", flush=True)
             while _h3_port_open_initial and time.monotonic() < reuse_deadline:
                 try:
                     health = session.get(health_url, timeout=1.5)
@@ -1202,6 +1288,15 @@ class QwenDirectorRuntimeMixin:
                             if data and model_name in {
                                 str(item.get("id", "")) for item in data
                             }:
+                                try:
+                                    _h3_ml = int(next((item.get("max_model_len") or 0 for item in data if str(item.get("id", "")) == model_name), 0))
+                                except Exception:
+                                    _h3_ml = 0
+                                if (not external_server) and _h3_ml and _h3_ml != int(DIRECTOR_VLLM_MAX_MODEL_LEN):
+                                    print(f"[QWEN] running vLLM has context={_h3_ml} but {int(DIRECTOR_VLLM_MAX_MODEL_LEN)} is configured; restarting it", flush=True)
+                                    _h3_kill_stray_vllm("stale context")
+                                    _h3_waiting_stray = False
+                                    break
                                 self._vllm_session = session
                                 self._vllm_process = _SHARED_VLLM_PROCESS
                                 self._vllm_log_handle = None
@@ -1225,6 +1320,10 @@ class QwenDirectorRuntimeMixin:
                                 return
                 except Exception as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
+                if _h3_waiting_stray and not _h3_find_vllm_pids():
+                    print("[QWEN] the earlier vLLM server exited; starting a fresh one", flush=True)
+                    _h3_waiting_stray = False
+                    break
                 time.sleep(0.5)
 
             if external_server:
@@ -1250,6 +1349,9 @@ class QwenDirectorRuntimeMixin:
                 )
                 return
 
+            if _h3_waiting_stray and _h3_find_vllm_pids():
+                print("[QWEN] the earlier vLLM server never became ready; stopping it and starting fresh", flush=True)
+                _h3_kill_stray_vllm("startup wait expired")
             # H3_AUTOFIX_PORT_GUARD_V1: refuse to spawn on occupied-but-unhealthy port
             if _h3_probe_host(DIRECTOR_VLLM_HOST, DIRECTOR_VLLM_PORT):
                 raise RuntimeError(
@@ -1457,20 +1559,28 @@ class QwenDirectorRuntimeMixin:
             child_env = os.environ.copy()
             # Disable FlashInfer sampler probe on SM75 (T4) to silence warnings and use native paths cleanly
             child_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-            # Always allow normal AOT cache lookup, with compilation fallback when
-            # an artifact is missing. Do not let an inherited value of "1" force
-            # every AOT artifact to exist before the server can start.
+            # H3_AUTOFIX_FORCE_AOT_LOAD_OFF_V1
             child_env["VLLM_FORCE_AOT_LOAD"] = "0"
 
-            # Use the repository's existing cache directory, not ~/.cache/vllm
-            # and not a second cache path supplied by a stale notebook cell.
-            # This stores compiled vLLM artifacts only; model weights stay in /kaggle/input.
-            cache_path = Path(self.project_root).expanduser().resolve() / ".vllm_cache"
+            # H3_PERSISTENT_VLLM_CACHE_ROOT_V1
+            # Keep compiled artifacts inside the existing repository cache.
+            # Full model checkpoints remain in Kaggle Input.
+            configured_cache_root = os.getenv(
+                "H3_DIRECTOR_VLLM_CACHE_ROOT", ""
+            ).strip()
+
+            cache_path = (
+                Path(configured_cache_root).expanduser()
+                if configured_cache_root
+                else Path(self.project_root) / ".vllm_cache"
+            ).resolve()
+
             try:
                 cache_path.mkdir(parents=True, exist_ok=True)
             except Exception:
                 session.close()
                 raise
+
             child_env["VLLM_CACHE_ROOT"] = str(cache_path)
 
             startup_plan_value = os.getenv(
@@ -1505,7 +1615,7 @@ class QwenDirectorRuntimeMixin:
             _startup_t0 = time.perf_counter()
             if _verbose(): print(
                 "[QWEN] vLLM startup config",
-                f"cache_root={cache_path}",
+                f"cache_root={cache_path or 'default(/root/.cache/vllm)'}",
                 f"startup_plan={'1' if startup_plan_value in {'1', 'true', 'yes', 'on'} else '0'}",
                 f"enforce_eager={enforce_eager_base_val in {'1', 'true', 'yes', 'on'}}",
                 f"eagle_enforce_eager={eagle_enforce_eager}",
@@ -1851,6 +1961,7 @@ class QwenDirectorRuntimeMixin:
         creative: bool = False,
         enable_thinking: bool = False,
         thinking_token_budget: int | None = None,
+        n_samples: int = 1,
     ) -> dict:
         if self._vllm_session is None:
             raise RuntimeError("Qwen director model is not loaded.")
@@ -1883,6 +1994,8 @@ class QwenDirectorRuntimeMixin:
             payload["thinking_token_budget"] = int(thinking_token_budget)
         if response_format is not None:
             payload["response_format"] = response_format
+        if int(n_samples or 1) > 1:
+            payload["n"] = int(n_samples)
 
         url = self._vllm_base_url() + "/chat/completions"
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
@@ -2145,6 +2258,63 @@ class QwenDirectorRuntimeMixin:
 
         return parsed
 
+    # H3_V53_BEST_OF_N_V1
+    def _h3_pick_best_story(self, response, call_name):
+        """Keep the best of the N Writer samples as choices[0]: complete drafts of 1400-1800 words with the fewest defects first."""
+        try:
+            choices = list(response.get("choices") or [])
+            if len(choices) < 2:
+                return response
+            metrics = getattr(self, "_revision_metrics", None)
+
+            def _n(v):
+                if isinstance(v, (list, tuple, set, dict)):
+                    return len(v)
+                try:
+                    return int(v or 0)
+                except Exception:
+                    return 0
+
+            rows = []
+            for idx, ch in enumerate(choices):
+                text = str(((ch or {}).get("message") or {}).get("content") or "")
+                text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
+                body = re.sub(r"\s*\[\[SCENE_\d+\]\]\s*", "\n\n", text).strip()
+                words = len(re.findall(r"\b[\w'’-]+\b", body))
+                tags = len(set(re.findall(r"\[\[SCENE_(\d+)\]\]", text)))
+                bad = 0
+                if metrics is not None and body:
+                    try:
+                        m = metrics(body)
+                        bad = (_n(m.get("tense")) + _n(m.get("stock")) + 3 * _n(m.get("dups")) + _n(m.get("vague"))
+                               + 3 * _n(m.get("label")) + 3 * _n(m.get("relative")) + 2 * _n(m.get("runs"))
+                               + _n(m.get("nocost")) + _n(m.get("nofate")))
+                    except Exception:
+                        bad = 0
+                complete = str((ch or {}).get("finish_reason") or "") != "length" and tags >= 12
+                if complete and 1400 <= words <= 1800:
+                    key = (0, bad, abs(words - 1550))
+                elif complete and words > 1800:
+                    key = (1, words, 0)
+                elif complete:
+                    key = (2, -words, 0)
+                else:
+                    key = (3, -words, 0)
+                rows.append((key, idx, words, bad))
+            rows.sort()
+            best = rows[0][1]
+            if best != 0:
+                choices.insert(0, choices.pop(best))
+                response["choices"] = choices
+            print(
+                f"[QWEN] {call_name} samples={len(choices)} words={[r[2] for r in sorted(rows, key=lambda r: r[1])]} "
+                f"defects={[r[3] for r in sorted(rows, key=lambda r: r[1])]} kept=sample {best + 1}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(f"[QWEN] best-of-N selection skipped: {type(exc).__name__}: {exc}", flush=True)
+        return response
+
     def _chat_text(
         self,
         system_prompt: str,
@@ -2210,6 +2380,13 @@ class QwenDirectorRuntimeMixin:
         response = None
         error_text = ""
 
+        _h3_n = 1
+        if str(call_name).endswith("story_text_pass"):
+            try:
+                _h3_n = max(1, min(5, int(os.getenv("H3_STORY_WRITER_SAMPLES", "3"))))
+            except (TypeError, ValueError):
+                _h3_n = 3
+
         print(f"[QWEN] START {call_name}", flush=True)
 
         try:
@@ -2223,7 +2400,10 @@ class QwenDirectorRuntimeMixin:
                 creative=creative,
                 enable_thinking=not disable_thinking,
                 thinking_token_budget=thinking_token_budget,
+                n_samples=_h3_n,
             )
+            if _h3_n > 1:
+                response = self._h3_pick_best_story(response, call_name)
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             raise
