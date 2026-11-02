@@ -6,6 +6,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import yaml
+
 
 ROOT = (
     Path(__file__)
@@ -130,6 +132,100 @@ def get(
             f"ComfyUI returned invalid JSON "
             f"for {endpoint}."
         ) from exc
+
+
+def _director_request_json(url: str, payload: dict | None = None, timeout: int = 30) -> dict:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {"Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        url=url,
+        data=data,
+        headers=headers,
+        method="GET" if data is None else "POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Director vLLM returned HTTP {exc.code} for {url}: {detail}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Unable to contact Director vLLM at {url}: {exc}") from exc
+    if not raw:
+        raise RuntimeError(f"Director vLLM returned an empty JSON response for {url}")
+    try:
+        result = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Director vLLM returned invalid JSON for {url}") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Director vLLM returned a non-object response for {url}")
+    return result
+
+
+def check_director_vllm() -> None:
+    """Optional live vLLM smoke test; opt in after the Director server is ready."""
+    enabled = os.getenv("H3_VERIFY_DIRECTOR_VLLM", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        print("SKIP Director vLLM live smoke test (set H3_VERIFY_DIRECTOR_VLLM=1 after the Director is ready)")
+        return
+    runtime_path = ROOT / "configs" / "runtime_versions.yaml"
+    runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
+    director = runtime.get("director", {}) or {}
+    expected_version = str(director.get("vllm_version", "") or "").strip()
+    if expected_version != "0.32.0":
+        raise RuntimeError(f"Director runtime manifest must pin vLLM 0.32.0, got {expected_version!r}")
+    configured_base = os.getenv(
+        "H3_DIRECTOR_VLLM_BASE_URL",
+        f"http://{director.get('host', '127.0.0.1')}:{int(director.get('port', 8000))}/v1",
+    ).rstrip("/")
+    root = configured_base[:-3] if configured_base.endswith("/v1") else configured_base
+    model_name = os.getenv(
+        "H3_DIRECTOR_VLLM_MODEL_NAME",
+        Path(str(director.get("model_path", "Qwen3-14B-AWQ"))).name,
+    )
+    timeout = max(5, int(os.getenv("H3_DIRECTOR_VLLM_SMOKE_TIMEOUT", "180")))
+
+    health_url = root + "/health"
+    health_request = urllib.request.Request(health_url, method="GET")
+    try:
+        with urllib.request.urlopen(health_request, timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Director vLLM health returned HTTP {response.status}")
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Director vLLM health returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise RuntimeError(f"Director vLLM health check failed: {exc}") from exc
+
+    version = _director_request_json(root + "/version", timeout=30)
+    observed_version = str(version.get("version", "") or "").strip()
+    if observed_version != expected_version:
+        raise RuntimeError(f"Director vLLM version mismatch: expected={expected_version}, actual={observed_version!r}")
+    models = _director_request_json(root + "/v1/models", timeout=30)
+    model_ids = {str(item.get("id", "")) for item in models.get("data", []) if isinstance(item, dict)}
+    if model_name not in model_ids:
+        raise RuntimeError(f"Director vLLM model {model_name!r} is missing; observed={sorted(model_ids)}")
+
+    # One generated token exercises the real chat endpoint and EAGLE-3 path,
+    # rather than accepting a health-only success as proof of readiness.
+    completion = _director_request_json(
+        root + "/v1/chat/completions",
+        {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_tokens": 1,
+            "seed": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+        timeout=timeout,
+    )
+    choices = completion.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("Director vLLM chat completion returned no choices")
+    print(f"PASS Director vLLM version={observed_version} model={model_name} EAGLE-3 chat endpoint")
 
 
 def check_basic_endpoints(
@@ -406,6 +502,7 @@ def main() -> None:
     print(
         "\nAll configured H3 workers are ready."
     )
+    check_director_vllm()
 
 
 if __name__ == "__main__":
