@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import faulthandler
 import gc
@@ -9,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -45,6 +43,8 @@ from planner.config import (
     DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH,
     DIRECTOR_VLLM_SPECULATIVE_TOKENS,
     DIRECTOR_VLLM_GENERATION_CONFIG,
+    DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY,
+    DIRECTOR_VLLM_VERSION,
     DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE,
     director_enabled,
 )
@@ -54,38 +54,6 @@ NO_THINK_SUFFIX = "\n/no_think"
 
 def _verbose() -> bool:
     return os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _stage_mode() -> str:
-    value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "off").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return "on"
-    if value in {"0", "false", "no", "off"}:
-        return "off"
-    if value in {"auto", "default", ""}:
-        return "auto"
-    raise RuntimeError(
-        "H3_DIRECTOR_STAGE_LOCAL must be one of: auto, 0, 1."
-    )
-
-
-def _stage_enabled() -> bool:
-    return _stage_mode() == "on"
-
-
-def _filesystem_type(path: Path) -> str:
-    try:
-        result = subprocess.run(
-            ["stat", "-f", "-c", "%T", str(path)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-        )
-        return result.stdout.strip().lower()
-    except Exception:
-        return ""
 
 
 # H3_AUTOFIX_FAST_PORT_PROBE_V1
@@ -101,34 +69,6 @@ def _h3_probe_host(host: str, port: int, timeout: float = 0.25) -> bool:
             return _s.connect_ex((_ph, int(port))) == 0
     except Exception:
         return False
-
-
-def _should_stage_local(source_path: Path) -> bool:
-    mode = _stage_mode()
-    if mode == "off":
-        return False
-
-    try:
-        resolved = source_path.resolve()
-    except OSError:
-        resolved = source_path
-
-    try:
-        under_kaggle_input = (
-            Path("/kaggle/input").resolve() in resolved.parents
-            or str(resolved).startswith("/kaggle/input/")
-            or str(resolved) == "/kaggle/input"
-        )
-    except OSError:
-        under_kaggle_input = "/kaggle/input/" in str(resolved)
-
-    if not under_kaggle_input:
-        return False
-    if mode == "on":
-        return True
-
-    fs_type = _filesystem_type(resolved)
-    return fs_type.startswith(("nfs", "lustre", "s3fs", "gcsfuse", "fuse"))
 
 
 class StoryTruncated(RuntimeError):
@@ -160,51 +100,6 @@ _SHARED_VLLM_PROCESS: subprocess.Popen | None = None
 _SHARED_VLLM_LOG_HANDLE = None
 _SHARED_VLLM_LOG_PATH: Path | None = None
 _SHARED_VLLM_TOKENIZER = None
-
-def _parallel_copy_file(src, dst, workers: int = 8, chunk_bytes: int = 64 * 1024 * 1024, progress=None) -> None:
-    """Copy one large file with several concurrent ranged reads.
-
-    A single sequential reader is latency-bound on network-mounted datasets; disjoint
-    byte ranges read in parallel (pread/pwrite, thread-safe) keep the link busy.
-    The destination is preallocated and its final size is verified.
-    """
-    src, dst = str(src), str(dst)
-    size = os.path.getsize(src)
-    with open(dst, "wb") as handle:
-        handle.truncate(size)
-    ranges = [(offset, min(chunk_bytes, size - offset)) for offset in range(0, size, chunk_bytes)]
-    io_block = 8 * 1024 * 1024
-
-    def copy_range(item):
-        offset, length = item
-        fd_src = os.open(src, os.O_RDONLY)
-        fd_dst = os.open(dst, os.O_WRONLY)
-        try:
-            done = 0
-            while done < length:
-                buf = os.pread(fd_src, min(io_block, length - done), offset + done)
-                if not buf:
-                    raise IOError(f"short read at byte {offset + done} of {src}")
-                written = 0
-                while written < len(buf):
-                    written += os.pwrite(fd_dst, buf[written:], offset + done + written)
-                done += len(buf)
-                if progress is not None:
-                    progress(len(buf))
-        finally:
-            os.close(fd_src)
-            os.close(fd_dst)
-
-    with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="h3-stage-copy") as pool:
-        for _ in pool.map(copy_range, ranges):
-            pass
-    if os.path.getsize(dst) != size:
-        raise IOError(f"size mismatch after copy: {dst}")
-
-
-_STAGE_SPACE_LOCK = threading.Lock()
-_STAGE_RESERVED_BYTES = 0
-
 
 # H3_V51_KEEP_ALIVE_DEFAULT_V1: a story-only run leaves the server running so the next run attaches in seconds (set H3_DIRECTOR_VLLM_KEEP_ALIVE=0 to turn off).
 os.environ.setdefault("H3_DIRECTOR_VLLM_KEEP_ALIVE", "1")
@@ -398,252 +293,13 @@ class QwenDirectorRuntimeMixin:
         return value
 
     @staticmethod
-    def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
-        """Stage network-mounted Kaggle models to transient local scratch when policy selects staging."""
-        # AUTO stages only when the dataset path is on a recognized network filesystem.
-        # Set H3_DIRECTOR_STAGE_LOCAL=0 to force direct dataset loading, or =1 to force
-        # local scratch staging. Scratch is /kaggle/tmp or /tmp, never /kaggle/working.
-        if not _should_stage_local(source_path):
-            return source_path
-
-        resolved = source_path.resolve()
-        is_kaggle_input = False
-        try:
-            is_kaggle_input = (
-                Path("/kaggle/input").resolve() in resolved.parents
-                or str(resolved).startswith("/kaggle/input")
-            )
-        except Exception:
-            is_kaggle_input = "/kaggle/input" in str(resolved)
-
-        if not is_kaggle_input:
-            return source_path
-
-        scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
-        target_dir = scratch / "staged_models" / resolved.name
-        manifest_name = ".h3_stage_manifest.json"
-
-        def checkpoint_fingerprint(directory: Path) -> dict:
-            """Build a cheap content/layout identity without hashing multi-GB weight files."""
-            config_path = directory / "config.json"
-            index_path = directory / "model.safetensors.index.json"
-
-            def sha256_small_file(path: Path) -> str:
-                digest = hashlib.sha256()
-                with path.open("rb") as handle:
-                    while True:
-                        chunk = handle.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-                return digest.hexdigest()
-
-            fingerprint: dict = {
-                "schema": 1,
-                "config_sha256": sha256_small_file(config_path) if config_path.is_file() else "",
-                "index_sha256": sha256_small_file(index_path) if index_path.is_file() else "",
-                "files": {},
-            }
-
-            if index_path.is_file():
-                index = json.loads(index_path.read_text(encoding="utf-8"))
-                weight_map = index.get("weight_map", {})
-                if not isinstance(weight_map, dict) or not weight_map:
-                    raise ValueError(f"Invalid checkpoint weight_map: {index_path}")
-                names = sorted({str(value) for value in weight_map.values()})
-            else:
-                names = sorted(
-                    str(path.relative_to(directory))
-                    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
-                    for path in directory.glob(pattern)
-                    if path.is_file()
-                )
-
-            for name in names:
-                path = directory / name
-                if not path.is_file():
-                    raise FileNotFoundError(f"Missing checkpoint weight file: {path}")
-                fingerprint["files"][name] = path.stat().st_size
-
-            tokenizer_path = directory / "tokenizer.json"
-            if tokenizer_path.is_file():
-                fingerprint["tokenizer_size"] = tokenizer_path.stat().st_size
-            return fingerprint
-
-        def is_valid_checkpoint(directory: Path, expected_fingerprint: dict | None = None) -> bool:
-            """Fail closed on structure and, when present, the staged identity manifest."""
-            config_path = directory / "config.json"
-            if not config_path.is_file():
-                return False
-
-            index_file = directory / "model.safetensors.index.json"
-            try:
-                if index_file.is_file():
-                    index = json.loads(index_file.read_text(encoding="utf-8"))
-                    weight_map = index.get("weight_map", {})
-                    if not isinstance(weight_map, dict) or not weight_map:
-                        return False
-                    if not all(
-                        (directory / str(filename)).is_file()
-                        for filename in set(weight_map.values())
-                    ):
-                        return False
-                elif not any(
-                    any(directory.glob(pattern))
-                    for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth")
-                ):
-                    return False
-            except Exception:
-                return False
-
-            # Preserve tokenizer completeness for models that provide tokenizer.json.
-            source_has_tokenizer = (resolved / "tokenizer.json").is_file()
-            if source_has_tokenizer and not (directory / "tokenizer.json").is_file():
-                return False
-
-            if expected_fingerprint is not None:
-                manifest_path = directory / manifest_name
-                if not manifest_path.is_file():
-                    return False
-                try:
-                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except Exception:
-                    return False
-                if manifest != expected_fingerprint:
-                    return False
-
-            return True
-
-        try:
-            source_fingerprint = checkpoint_fingerprint(resolved)
-        except Exception as exc:
-            print(
-                f"[QWEN] Failed to fingerprint {label}; using direct mount. Error: {exc}",
-                flush=True,
-            )
-            return source_path
-
-        if target_dir.is_dir() and is_valid_checkpoint(target_dir, source_fingerprint):
-            if _verbose():
-                print(f"[QWEN] Reusing locally staged {label} at {target_dir}", flush=True)
-            return target_dir
-
-        reservation_bytes = 0
-        try:
-            stat = os.statvfs(scratch)
-            avail_bytes = stat.f_bavail * stat.f_frsize
-            source_size = sum(
-                path.stat().st_size
-                for path in resolved.rglob("*")
-                if path.is_file()
-            )
-            reservation_bytes = source_size + 2 * (1024**3)
-            global _STAGE_RESERVED_BYTES
-            with _STAGE_SPACE_LOCK:
-                effective_free = avail_bytes - _STAGE_RESERVED_BYTES
-                if effective_free < reservation_bytes:
-                    print(
-                        f"[QWEN] Insufficient scratch space to stage {label} "
-                        f"({effective_free / 1e9:.1f}GB available, {source_size / 1e9:.1f}GB needed). "
-                        "Using direct mount.",
-                        flush=True,
-                    )
-                    return source_path
-                _STAGE_RESERVED_BYTES += reservation_bytes
-        except Exception:
-            print(
-                f"[QWEN] Could not verify scratch capacity for {label}; using direct mount.",
-                flush=True,
-            )
-            return source_path
-
-        if _verbose():
-            print(
-                f"[QWEN] Staging {label} to local scratch ({target_dir})...",
-                flush=True,
-            )
-        start_time = time.perf_counter()
-        target_dir.parent.mkdir(parents=True, exist_ok=True)
-        tmp_target = target_dir.with_name(f"{target_dir.name}.tmp_{os.getpid()}")
-
-        try:
-            if tmp_target.exists():
-                shutil.rmtree(tmp_target, ignore_errors=True)
-
-            copied_bytes = [0]
-            last_print_time = [time.perf_counter()]
-
-            def tracked_copy(src, dst, *, follow_symlinks=True):
-                """Chunked copy function to track and report staging progress."""
-                try:
-                    stage_workers = int(os.getenv("H3_DIRECTOR_STAGE_WORKERS", "8"))
-                except ValueError:
-                    stage_workers = 8
-                if stage_workers > 1 and os.path.getsize(src) >= 256 * 1024 * 1024:
-                    def _note(n):
-                        copied_bytes[0] += n
-                    try:
-                        _parallel_copy_file(src, dst, workers=stage_workers, progress=_note)
-                        shutil.copystat(src, dst, follow_symlinks=follow_symlinks)
-                        return dst
-                    except Exception as exc:  # fall back to the proven sequential path
-                        if _verbose():
-                            print(f"[QWEN] parallel copy failed ({exc}); retrying sequentially", flush=True)
-                length = 16 * 1024 * 1024
-                with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
-                    while True:
-                        buf = fsrc.read(length)
-                        if not buf:
-                            break
-                        fdst.write(buf)
-                        copied_bytes[0] += len(buf)
-                        now = time.perf_counter()
-                        if _verbose() and now - last_print_time[0] > 5.0:
-                            print(
-                                f"[QWEN] Staging {label}: "
-                                f"{copied_bytes[0] / 1e9:.1f}GB / {source_size / 1e9:.1f}GB...",
-                                flush=True,
-                            )
-                            last_print_time[0] = now
-                shutil.copystat(src, dst, follow_symlinks=follow_symlinks)
-                return dst
-
-            shutil.copytree(resolved, tmp_target, copy_function=tracked_copy)
-            (tmp_target / manifest_name).write_text(
-                json.dumps(source_fingerprint, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-
-            for _name, _size in source_fingerprint.get("files", {}).items():
-                _staged = tmp_target / _name
-                if not _staged.is_file() or _staged.stat().st_size != _size:
-                    raise RuntimeError(f"staged file size mismatch: {_name}")
-
-            if not is_valid_checkpoint(tmp_target, source_fingerprint):
-                raise RuntimeError(
-                    f"staged {label} checkpoint failed post-copy validation"
-                )
-
-            if target_dir.exists():
-                shutil.rmtree(target_dir, ignore_errors=True)
-            tmp_target.rename(target_dir)
-        except Exception as exc:
-            if tmp_target.exists():
-                shutil.rmtree(tmp_target, ignore_errors=True)
-            print(
-                f"[QWEN] Failed to stage {label}, falling back to direct mount. Error: {exc}",
-                flush=True,
-            )
-            return source_path
-        finally:
-            if reservation_bytes:
-                with _STAGE_SPACE_LOCK:
-                    _STAGE_RESERVED_BYTES = max(0, _STAGE_RESERVED_BYTES - reservation_bytes)
-
-        elapsed = time.perf_counter() - start_time
-        if _verbose():
-            print(f"[QWEN] Staged {label} in {elapsed:.2f}s", flush=True)
-        return target_dir
+    def _use_direct_checkpoint(source_path: Path, label: str) -> Path:
+        """Validate and retain the original checkpoint path; model staging is disabled."""
+        path = Path(source_path).expanduser().resolve()
+        if not path.is_dir():
+            raise FileNotFoundError(f"{label} checkpoint directory is missing: {path}")
+        print(f"[QWEN] direct_checkpoint_loading label={label!r} path={path} staging=disabled", flush=True)
+        return path
 
     def _record_qwen_call(
         self,
@@ -1167,9 +823,155 @@ class QwenDirectorRuntimeMixin:
             self._model_path.name if self._model_path is not None else "Qwen3-14B-AWQ",
         )
 
+    @staticmethod
+    def _checkpoint_shard_summary(checkpoint: Path) -> dict:
+        """Return shard sizes from the index without opening multi-GB weight files."""
+        checkpoint = Path(checkpoint).expanduser().resolve()
+        files: set[str] = set()
+        for index_path in sorted(checkpoint.glob("*.index.json")):
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                weight_map = index.get("weight_map", {}) if isinstance(index, dict) else {}
+                if isinstance(weight_map, dict):
+                    files.update(str(name) for name in weight_map.values())
+            except Exception as exc:
+                raise RuntimeError(f"Invalid checkpoint shard index: {index_path}: {exc}") from exc
+        if not files:
+            for pattern in ("*.safetensors", "*.bin", "*.pt", "*.pth"):
+                files.update(path.name for path in checkpoint.glob(pattern) if path.is_file())
+        sizes = []
+        for name in sorted(files):
+            path = (checkpoint / name).resolve()
+            if not path.is_relative_to(checkpoint):
+                raise RuntimeError(f"Checkpoint index references a path outside its dataset directory: {name!r}")
+            if not path.is_file():
+                raise FileNotFoundError(f"Checkpoint index references a missing shard: {path}")
+            sizes.append((name, int(path.stat().st_size)))
+        largest_name, largest_bytes = max(sizes, key=lambda item: item[1], default=(None, 0))
+        return {
+            "directory": str(checkpoint),
+            "shard_count": len(sizes),
+            "total_shard_bytes": sum(size for _, size in sizes),
+            "largest_shard_name": largest_name,
+            "largest_shard_bytes": largest_bytes,
+        }
+
+    def _begin_startup_metrics(self, qwen_path: Path, eagle_path: Path) -> None:
+        try:
+            import psutil
+            memory = psutil.virtual_memory()
+            self._startup_metrics = {
+                "schema": 1,
+                "vllm_version_expected": DIRECTOR_VLLM_VERSION,
+                "safetensors_load_strategy": DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY,
+                "model_staging": False,
+                "qwen_checkpoint": self._checkpoint_shard_summary(qwen_path),
+                "eagle3_checkpoint": self._checkpoint_shard_summary(eagle_path),
+                "system_ram_total_bytes": int(memory.total),
+                "system_ram_available_before_bytes": int(memory.available),
+                "system_ram_available_min_bytes": int(memory.available),
+                "process_tree_rss_peak_bytes": 0,
+                "startup_started_unix": time.time(),
+                "startup_seconds_to_ready": None,
+                "weight_load_log_events_seconds": [],
+                "status": "starting",
+            }
+            shard_bytes = max(
+                self._startup_metrics["qwen_checkpoint"]["largest_shard_bytes"],
+                self._startup_metrics["eagle3_checkpoint"]["largest_shard_bytes"],
+            )
+            director = __import__("planner.config", fromlist=["RUNTIME"]).RUNTIME["director"]
+            factor = float(director.get("eager_ram_safety_factor", 1.25))
+            reserve = float(director.get("eager_ram_warning_reserve_gib", 4.0)) * (1024 ** 3)
+            required = int(shard_bytes * factor + reserve)
+            available = int(memory.available)
+            self._startup_metrics["eager_ram_headroom_required_bytes"] = required
+            self._startup_metrics["eager_ram_headroom_available_bytes"] = available
+            if DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY == "eager" and available < required:
+                print(
+                    "[QWEN][RAM WARNING] eager loading headroom is below the configured "
+                    f"safety target: available={available / (1024 ** 3):.2f} GiB "
+                    f"required≈{required / (1024 ** 3):.2f} GiB",
+                    flush=True,
+                )
+        except Exception as exc:
+            raise RuntimeError(f"Unable to initialize Director startup diagnostics: {exc}") from exc
+
+    def _sample_startup_metrics(self, process: subprocess.Popen | None) -> None:
+        metrics = getattr(self, "_startup_metrics", None)
+        if not isinstance(metrics, dict):
+            return
+        try:
+            import psutil
+            memory = psutil.virtual_memory()
+            metrics["system_ram_available_min_bytes"] = min(
+                int(metrics.get("system_ram_available_min_bytes", memory.available)),
+                int(memory.available),
+            )
+            rss = 0
+            if process is not None and process.poll() is None:
+                try:
+                    root = psutil.Process(process.pid)
+                    rss += int(root.memory_info().rss)
+                    for child in root.children(recursive=True):
+                        try:
+                            rss += int(child.memory_info().rss)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            metrics["process_tree_rss_peak_bytes"] = max(
+                int(metrics.get("process_tree_rss_peak_bytes", 0)), rss
+            )
+        except Exception as exc:
+            metrics.setdefault("diagnostic_warnings", []).append(
+                f"memory sampling unavailable: {type(exc).__name__}: {exc}"
+            )
+
+    def _finish_startup_metrics(self, status: str, error: str = "") -> None:
+        metrics = getattr(self, "_startup_metrics", None)
+        if not isinstance(metrics, dict):
+            return
+        self._sample_startup_metrics(getattr(self, "_vllm_process", None))
+        metrics["status"] = str(status)
+        metrics["startup_seconds_to_ready"] = round(
+            max(0.0, time.time() - float(metrics.get("startup_started_unix", time.time()))), 3
+        )
+        if error:
+            metrics["error"] = str(error)[:2000]
+        log_path = Path(getattr(self, "_vllm_log_path", ""))
+        if log_path.is_file():
+            try:
+                log_text = log_path.read_text(encoding="utf-8", errors="replace")
+                metrics["weight_load_log_events_seconds"] = [
+                    float(value) for value in re.findall(
+                        r"Loading weights took\s+([0-9]+(?:\.[0-9]+)?)\s+seconds?", log_text, re.IGNORECASE
+                    )
+                ]
+            except Exception as exc:
+                metrics.setdefault("diagnostic_warnings", []).append(
+                    f"vLLM log parsing unavailable: {type(exc).__name__}: {exc}"
+                )
+        metrics_path = (
+            log_path.with_suffix(log_path.suffix + ".startup-metrics.json")
+            if log_path.name
+            else None
+        )
+        if metrics_path is not None:
+            try:
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path.write_text(
+                    json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+                print(f"[QWEN] startup_metrics={metrics_path}", flush=True)
+            except Exception as exc:
+                print(f"[QWEN][WARN] unable to persist startup metrics: {exc}", flush=True)
+
     def _wait_for_vllm(self, session: requests.Session, process: subprocess.Popen | None) -> None:
         health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
         models_url = self._vllm_base_url() + "/models"
+        version_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/version"
         deadline = time.monotonic() + float(
             os.getenv("H3_DIRECTOR_VLLM_STARTUP_TIMEOUT", "900")
         )
@@ -1177,7 +979,12 @@ class QwenDirectorRuntimeMixin:
         last_error = ""
         health_ok = False
         model_ok = False
+        version_ok = False
         while time.monotonic() < deadline:
+            health_ok = False
+            model_ok = False
+            version_ok = False
+            self._sample_startup_metrics(process)
             if process is not None and process.poll() is not None:
                 log_path = Path(getattr(self, "_vllm_log_path", ""))
                 log_tail = ""
@@ -1210,13 +1017,24 @@ class QwenDirectorRuntimeMixin:
             except Exception as exc:
                 last_error = f"models {type(exc).__name__}: {exc}"
                 model_ok = False
-            if health_ok and model_ok:
+            try:
+                response = session.get(version_url, timeout=5)
+                if response.status_code == 200:
+                    version_data = response.json()
+                    observed_version = str(version_data.get("version", "")).strip() if isinstance(version_data, dict) else ""
+                    version_ok = observed_version == DIRECTOR_VLLM_VERSION
+                    if not version_ok:
+                        last_error = f"vLLM version mismatch: observed={observed_version!r}, expected={DIRECTOR_VLLM_VERSION!r}"
+            except Exception as exc:
+                last_error = f"version {type(exc).__name__}: {exc}"
+                version_ok = False
+            if health_ok and model_ok and version_ok:
                 return
             time.sleep(0.5)
 
         raise RuntimeError(
             "Timed out waiting for the Qwen3-14B-AWQ vLLM server. "
-            f"health_ok={health_ok}, model_ok={model_ok}, last_error={last_error}. "
+            f"health_ok={health_ok}, model_ok={model_ok}, version_ok={version_ok}, last_error={last_error}. "
             f"Log: {getattr(self, '_vllm_log_path', 'unknown')}"
         )
 
@@ -1246,6 +1064,7 @@ class QwenDirectorRuntimeMixin:
 
             health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
             models_url = self._vllm_base_url() + "/models"
+            version_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/version"
             keep_alive = os.getenv("H3_DIRECTOR_VLLM_KEEP_ALIVE", "0").strip().lower() in {
                 "1", "true", "yes", "on"
             }
@@ -1288,6 +1107,19 @@ class QwenDirectorRuntimeMixin:
                             if data and model_name in {
                                 str(item.get("id", "")) for item in data
                             }:
+                                version_response = session.get(version_url, timeout=1.5)
+                                version_data = version_response.json() if version_response.status_code == 200 else {}
+                                observed_server_version = str(version_data.get("version", "")).strip() if isinstance(version_data, dict) else ""
+                                if observed_server_version != DIRECTOR_VLLM_VERSION:
+                                    last_error = (
+                                        f"running vLLM version={observed_server_version!r}; "
+                                        f"expected={DIRECTOR_VLLM_VERSION!r}"
+                                    )
+                                    if not external_server:
+                                        _h3_kill_stray_vllm("stale vLLM version")
+                                        _h3_port_open_initial = False
+                                        break
+                                    raise RuntimeError(last_error)
                                 try:
                                     _h3_ml = int(next((item.get("max_model_len") or 0 for item in data if str(item.get("id", "")) == model_name), 0))
                                 except Exception:
@@ -1396,21 +1228,14 @@ class QwenDirectorRuntimeMixin:
                 )
 
             try:
-                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="h3-model-prep") as executor:
-                    model_future = executor.submit(
-                        self._stage_to_local_scratch,
-                        self._model_path,
-                        "Qwen3-14B-AWQ",
-                    )
-                    speculator_source_future = executor.submit(self._find_speculator_model)
-                    speculator_source = speculator_source_future.result()
-                    speculator_future = executor.submit(
-                        self._stage_to_local_scratch,
-                        speculator_source,
-                        "Qwen3-14B EAGLE-3 speculator",
-                    )
-                    self._model_path = model_future.result()
-                    speculator_model = speculator_future.result()
+                # Keep both checkpoints on their original Kaggle dataset mounts.
+                # This deliberately avoids multi-GB copies to /tmp or /kaggle/tmp.
+                self._model_path = self._use_direct_checkpoint(
+                    self._model_path, "Qwen3-14B-AWQ"
+                )
+                speculator_model = self._use_direct_checkpoint(
+                    self._find_speculator_model(), "Qwen3-14B EAGLE-3 speculator"
+                )
             except Exception:
                 session.close()
                 raise
@@ -1490,21 +1315,16 @@ class QwenDirectorRuntimeMixin:
             if enforce_eager_base_val in {"1", "true", "yes", "on"}:
                 command.append("--enforce-eager")
 
-            safetensors_strategy = os.getenv(
-                "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
-                "",
-            ).strip().lower()
-            if safetensors_strategy in {"eager", "lazy", "prefetch", "torchao"}:
-                command.extend([
-                    "--safetensors-load-strategy",
-                    safetensors_strategy,
-                ])
-            elif safetensors_strategy not in {"", "none", "default"}:
-                session.close()
-                raise RuntimeError(
-                    "Unsupported H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY: "
-                    f"{safetensors_strategy!r}"
-                )
+            safetensors_strategy = DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY
+            command.extend([
+                "--safetensors-load-strategy",
+                safetensors_strategy,
+            ])
+            print(
+                f"[QWEN] safetensors_load_strategy={safetensors_strategy} "
+                f"vllm={DIRECTOR_VLLM_VERSION}",
+                flush=True,
+            )
 
             kv_cache_memory_bytes = os.getenv(
                 "H3_DIRECTOR_VLLM_KV_CACHE_MEMORY_BYTES",
@@ -1633,6 +1453,18 @@ class QwenDirectorRuntimeMixin:
                 raise
 
             process = None
+            # Record the log path before starting the process so even a Popen
+            # failure can persist a complete failed-startup diagnostics file.
+            self._vllm_log_path = log_path
+            self._vllm_process = None
+            try:
+                self._begin_startup_metrics(self._model_path, speculator_model)
+            except Exception:
+                try:
+                    log_handle.close()
+                finally:
+                    session.close()
+                raise
             try:
                 process = subprocess.Popen(
                     command,
@@ -1650,10 +1482,15 @@ class QwenDirectorRuntimeMixin:
                 self._vllm_log_path = log_path
                 self._vllm_session = session
 
-                self._wait_for_vllm(
-                    session,
-                    process,
-                )
+                try:
+                    self._wait_for_vllm(
+                        session,
+                        process,
+                    )
+                except Exception as startup_exc:
+                    self._finish_startup_metrics("failed", str(startup_exc))
+                    raise
+                self._finish_startup_metrics("ready")
 
                 # H3_AUTOFIX_TWO_MODE_WARMUP_V1: exercise both sampler paths so
                 # _thinking_budget_kernel and _topp_sb_* JIT once at startup.
@@ -1731,6 +1568,17 @@ class QwenDirectorRuntimeMixin:
                             process.wait(timeout=5)
                         except Exception:
                             pass
+                # Persist diagnostics for failures that happen before the
+                # health/version checks (including subprocess creation errors).
+                metrics = getattr(self, "_startup_metrics", None)
+                if isinstance(metrics, dict) and metrics.get("status") == "starting":
+                    try:
+                        self._finish_startup_metrics("failed", str(exc))
+                    except Exception as metrics_exc:
+                        print(
+                            f"[QWEN][WARN] unable to finalize startup metrics: {metrics_exc}",
+                            flush=True,
+                        )
                 try:
                     log_handle.close()
                 except Exception:
@@ -1965,6 +1813,34 @@ class QwenDirectorRuntimeMixin:
     ) -> dict:
         if self._vllm_session is None:
             raise RuntimeError("Qwen director model is not loaded.")
+
+        requested_output_tokens = int(max_tokens)
+        if requested_output_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {requested_output_tokens}.")
+        tokenizer = getattr(self, "_tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("Qwen director tokenizer is not loaded for context validation.")
+        try:
+            prompt_ids = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                enable_thinking=bool(enable_thinking),
+            )
+            prompt_token_count = len(prompt_ids)
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to count the exact Qwen chat-template prompt before sending "
+                "the vLLM request; refusing to risk context-window overflow."
+            ) from exc
+        context_limit = int(DIRECTOR_VLLM_MAX_MODEL_LEN)
+        context_safety_tokens = 128
+        if prompt_token_count + requested_output_tokens + context_safety_tokens > context_limit:
+            raise RuntimeError(
+                "Qwen Director request exceeds the configured context reservation: "
+                f"prompt={prompt_token_count}, output={requested_output_tokens}, "
+                f"safety={context_safety_tokens}, context={context_limit}."
+            )
 
         payload = {
             "model": self._vllm_model_name(),
