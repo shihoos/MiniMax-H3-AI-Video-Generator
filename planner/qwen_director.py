@@ -11,6 +11,12 @@ import re
 
 from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
+from planner.story_contracts import (
+    audit_story_against_blueprint,
+    ensure_cinematic_coverage,
+    validate_blueprint_state_contract,
+    validate_cinematic_coverage,
+)
 from pipeline.production_checkpoint import ProductionCheckpoint
 from pipeline.dialogue_timeline import DialogueTimeline
 
@@ -25,6 +31,8 @@ from planner.config import (
     STORY_WRITER_WORDS_PER_SCENE,
     STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
+    STORY_PLAN_BEAT_MIN_WORDS,
+    STORY_PLAN_BEAT_MAX_WORDS,
     DIRECTOR_N_CTX,
     DIRECTOR_SHOT_STORY_CONTEXT_CHARS,
     DIRECTOR_STORY_MAX_TOKENS,
@@ -1191,6 +1199,21 @@ class QwenDirector(
                         f"scene={sid} count={len(current)} expected={self.SHOTS_PER_SCENE}",
                     )
 
+            # Complementary coverage is an enforced camera contract, not a movement quota.
+            # It may adjust framing metadata only; it never rewrites events, dialogue, or characters.
+            current, camera_adjustments = ensure_cinematic_coverage(current, sid)
+            for adjustment in camera_adjustments:
+                self._record_recovery("cinematic_coverage_framing_normalized", adjustment)
+            if len(current) != self.SHOTS_PER_SCENE:
+                raise RuntimeError(
+                    f"Cinematic coverage contract failed for {sid}: expected {self.SHOTS_PER_SCENE} shots, got {len(current)}."
+                )
+            camera_issues = validate_cinematic_coverage(current, sid)
+            framing_errors = [issue for issue in camera_issues if "distinct framing" in issue]
+            if framing_errors:
+                raise RuntimeError("Cinematic coverage contract failed: " + "; ".join(framing_errors))
+            for issue in camera_issues:
+                self._record_recovery("cinematic_coverage_warning", issue)
             repaired_shots.extend(current)
 
         all_shots = repaired_shots
@@ -1588,10 +1611,10 @@ class QwenDirector(
         return "\n\n".join(paragraphs), True
 
     def _normalize_story_quotes(self, story: str) -> str:
-        """Deterministic, no-model cleanup of quotation marks so dialogue fits single shots.
+        """Deterministic, no-model cleanup so at most two concise spoken lines remain per scene.
 
-        Written text (signs, timers, labels, journal lines) loses its quotation marks, and each
-        scene keeps at most three short spoken pairs (one per shot). Words are never added or removed.
+        Written text loses quotation marks. Surplus quoted speech is stripped conservatively;
+        no new words or dialogue are invented and no model call is made.
         """
         written_before = re.compile(
             r"(?:timestamp|label(?:ed|led)?|marked|sign|reads?|word|words|displaying|displays?|shows?|showing|"
@@ -1691,7 +1714,7 @@ class QwenDirector(
                 if _is_written(inner, before, part[match.end():match.end() + 40]):
                     strip = True
                 else:
-                    if keep_speech >= 3:
+                    if keep_speech >= 2:
                         # Surplus spoken line: remove the words cleanly instead of leaving a bare fragment.
                         seg = part[cursor:match.start()]
                         tail = part[match.end():]
@@ -1918,13 +1941,114 @@ class QwenDirector(
             # make another planning request. Incomplete plans fail explicitly.
             raw = str(exc.partial or "")
             try:
-                return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+                blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+                self._validate_story_blueprint_contract(
+                    mode,
+                    blueprint,
+                    user_input,
+                    source_character_names=source_character_names,
+                )
+                return blueprint
             except RuntimeError as plan_error:
                 raise RuntimeError(
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
                     f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
                 ) from plan_error
-        return self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+        blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+        self._validate_story_blueprint_contract(
+            mode,
+            blueprint,
+            user_input,
+            source_character_names=source_character_names,
+        )
+        return blueprint
+
+    def _validate_story_blueprint_contract(
+        self,
+        mode: str,
+        blueprint: str,
+        source_story: str,
+        *,
+        source_character_names: list[str] | None = None,
+    ) -> None:
+        """Fail before the long Author pass when the causal plan is incomplete or self-contradictory."""
+        fields: dict[str, str] = {}
+        beats: dict[int, str] = {}
+        cast_line = ""
+        for line in str(blueprint or "").splitlines():
+            if line.startswith("CAST:"):
+                cast_line = line
+                continue
+            field_match = re.match(
+                r"^(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|CONTINUITY_LEDGER):\s*(.+)$",
+                line,
+            )
+            if field_match:
+                fields[field_match.group(1)] = field_match.group(2).strip()
+                continue
+            scene_match = re.match(r"^SCENE\s+(\d{2}):\s*(.+)$", line)
+            if scene_match:
+                beats[int(scene_match.group(1))] = scene_match.group(2).strip()
+
+        required = (
+            "LOGLINE", "PROTAGONIST_GOAL", "OPPOSITION", "PRESSURE",
+            "STORY_ENGINE", "REVERSAL", "CLIMAX_CHOICE", "RESOLUTION",
+            "RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS", "CONTINUITY_LEDGER",
+        )
+        errors: list[str] = []
+        missing = [name for name in required if not fields.get(name)]
+        if missing:
+            errors.append("missing plot architecture fields: " + ", ".join(missing))
+        for name, value in fields.items():
+            count = len(re.findall(r"\b[\w'’-]+\b", value))
+            if name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() in {"none", "n/a", "-"}:
+                count = 0
+            minimum = 35 if name == "CONTINUITY_LEDGER" else (10 if name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"} else 7)
+            if count < minimum and not (name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() == "none"):
+                errors.append(f"{name} is underdeveloped ({count} words; minimum {minimum})")
+        if len(beats) != DIRECTOR_STORY_SCENES or set(beats) != set(range(1, DIRECTOR_STORY_SCENES + 1)):
+            errors.append(f"expected exactly {DIRECTOR_STORY_SCENES} unique scene beats")
+        else:
+            for number, beat in beats.items():
+                count = len(re.findall(r"\b[\w'’-]+\b", beat))
+                if count < STORY_PLAN_BEAT_MIN_WORDS:
+                    errors.append(f"scene {number:02d} blueprint beat is too short ({count} words)")
+                if count > max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120):
+                    errors.append(f"scene {number:02d} blueprint beat is overlong ({count} words)")
+            normalized = [re.sub(r"[^a-z0-9]+", " ", beats[i].casefold()).strip() for i in range(1, DIRECTOR_STORY_SCENES + 1)]
+            for index in range(1, len(normalized)):
+                a, b = normalized[index - 1], normalized[index]
+                if a and b and a == b:
+                    errors.append(f"scene {index + 1:02d} repeats the preceding scene beat")
+
+        cast_names = self._blueprint_cast_names(blueprint)
+        if not cast_line or not cast_names:
+            errors.append("CAST line has no valid named people")
+        # A source character is a continuity anchor, not an optional suggestion.
+        if mode == EXPAND_USER_STORY_MODE:
+            known = set()
+            for name in cast_names:
+                known.add(EntityResolver.normalize(name))
+                known.add(EntityResolver.normalize(EntityResolver.strip_honorific(name)))
+            missing_sources = [
+                name for name in (source_character_names or [])
+                if EntityResolver.normalize(name) not in known
+                and EntityResolver.normalize(EntityResolver.strip_honorific(name)) not in known
+            ]
+            if missing_sources:
+                errors.append("Architect dropped source character(s): " + ", ".join(missing_sources))
+        # Scene beats must form a consequential chain, not twelve disconnected summaries.
+        if len(beats) == DIRECTOR_STORY_SCENES:
+            low = " ".join(beats[i].casefold() for i in range(1, DIRECTOR_STORY_SCENES + 1))
+            causal_terms = re.findall(r"\b(?:because|therefore|so|but|forcing|causing|which meant|as a result|consequently)\b", low)
+            if len(causal_terms) < 5:
+                errors.append("scene chain contains too few explicit causal links")
+        errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
+        if errors:
+            raise RuntimeError(
+                "Story Architect rejected before prose generation: " + "; ".join(list(dict.fromkeys(errors))[:16])
+                + ". No retry or repair call was attempted."
+            )
 
     def _generate_story_once(
         self,
@@ -2013,7 +2137,6 @@ class QwenDirector(
                 "Scene boundaries were preserved; no split, merge, retry, or repair call was attempted."
             )
         self._last_story_draft = raw
-        raw = self._revise_story_once(mode, user_input, raw, story_blueprint, source_character_names)
 
         # Log output length before cleanup. The acceptance floor is checked after cleanup,
         # so harmless deterministic cleanup cannot leave a too-short story marked successful.
@@ -2071,20 +2194,26 @@ class QwenDirector(
                 + f"Final story topology must contain exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
                 f"(got {paragraph_count}). No retry or paragraph reshaping was attempted."
             )
+        # Run the completion contract again after deterministic quote/stock cleanup.
+        # It is local validation only; no repair request is ever sent.
+        self._validate_story_completion_contract(mode, candidate)
+        blocking = self._story_hard_quality_errors(candidate, story_blueprint, user_input)
+        if blocking:
+            raise RuntimeError(
+                failure_prefix + "hard story-quality gate rejected the single Author draft: "
+                + "; ".join(blocking[:12])
+                + ". No retry or repair call was attempted."
+            )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
         issues.extend(self._story_sentence_contract_issues(candidate))
         issues.extend(self._story_craft_issues(candidate))
-        issues.extend(
-            "contract: " + str(item)
-            for item in (getattr(self, "_last_story_contract_warnings", []) or [])
-        )
         if issues:
             print(
-                "[QWEN] story_static_checks=WARN",
+                "[QWEN] story_static_checks=INFO",
                 f"words={word_count}",
                 f"paragraphs={paragraph_count}",
-                "issues=" + "; ".join(issues[:6]),
+                "advisory=" + "; ".join(issues[:6]),
                 flush=True,
             )
         else:
@@ -2092,358 +2221,102 @@ class QwenDirector(
                 "[QWEN] story_static_checks=PASS",
                 f"words={word_count}",
                 f"paragraphs={paragraph_count}",
-                "semantic_quality=NOT_EVALUATED",
+                "semantic_quality=ARCHITECTURE_VALIDATED_NOT_HUMAN_JUDGED",
                 flush=True,
             )
         return candidate, True
 
-    _REVISION_STOCK = (
-        "breath fogging", "breath visible", "fogging in the", "dust drifting", "smirk", "eyes narrowed",
-        "narrowed eyes", "heart pounding", "heartbeat", "pulse quickened", "hum vibrated", "echoed through",
-        "long shadows", "flickering emergency lights", "sent a shiver", "weight of",
-        "mind racing", "stakes were higher", "tension between", "he knew that", "would remain buried", "hinting at", "noticed a faint", "faint smell of", "felt heavier", "holding its breath", "pressing in on", "felt oppressive",
-    )
-    _REVISION_PRESENT = re.compile(
-        r"\b(?:he|she|they|[A-Z][a-z]{2,}) (?:is|has|steps|says|scans|stands|crouches|mutters|demands|replies|"
-        r"confronts|kicks|hisses|turns|moves|reaches|looks|watches|takes|pulls|presses|runs|grabs|finds|opens|"
-        r"holds|feels|knows|sees|hears|walks|pushes|shouts|whispers|begins|stops|falls|raises|lifts|drops|follows|"
-        r"leads|waits|nods|glances|stares|smiles|frowns|clenches|tightens|flickers|echoes|hums|reveals|emerges|"
-        r"appears|materializes|navigates|slinks|spots|draws|rises|shakes|grows|fills|lingers|stumbles|kneels|"
-        r"tears|slides|sparks|glows|creaks|groans|hesitates|rushes|climbs|swings|steadies|breathes)\b"
-    )
-
-    _REVISION_PRESENT_NOUN = re.compile(
-        r"\b(?:[Tt]he|[Hh]is|[Hh]er|[Tt]heir|[Ii]ts|[Aa]) (?:[a-z\u2019']+ ){0,2}"
-        r"(?:depresses|groans|creaks|flares|dims|shudders|collapses|retracts|hisses|glows|flickers|trembles|"
-        r"vibrates|pulses|slides|opens|closes|rises|shakes|fills|lingers|stops|begins|falls|swings)\b"
-    )
-
-    @classmethod
-    def _revision_metrics(cls, text: str) -> dict:
-        body = str(text or "")
-        sentences = [s.strip() for s in re.split(r"(?<=[.!?])[\"\u201d]?\s+", body) if s.strip()]
-        firsts = [re.sub(r"[^a-z]", "", s.split()[0].lower()) for s in sentences if s.split()]
-        runs = sum(1 for i in range(len(firsts) - 2) if firsts[i] and firsts[i] == firsts[i + 1] == firsts[i + 2])
-        lower = body.lower()
-        # Near-identical sentences repeated in a later scene (a stock beat the Writer reuses) count as duplicates.
-        _seen, dups, _quotes_seen = [], 0, set()
-        for _para in [p_ for p_ in re.split(r"\n\s*\n+", body) if p_.strip()]:
-            _here = []
-            _qs = {re.sub(r"\W+", " ", q_.lower()).strip() for q_ in re.findall(r"\u201c([^\u201d]{12,})\u201d", _para)}
-            dups += len(_qs & _quotes_seen)
-            _quotes_seen |= _qs
-            for _s in re.split(r"(?<=[.!?\u201d])\s+", _para):
-                _w = set(re.findall(r"[a-z']+", _s.lower()))
-                if len(_w) < 6:
-                    continue
-                if any(len(_w & _o) / float(len(_w | _o)) >= 0.7 for _o in _seen):
-                    dups += 1
-                _here.append(_w)
-            _seen.extend(_here)
-        _abs = re.compile(
-            r"\b(?:as if|as though|felt|sensed|aware|oppressive|thick with|weight of|silence|silent|tension|storm|fought against|impending|hung in the balance|"
-            r"unclear|unreadable|palpable|secrets?|determined to|realized|understood|wondered|questions?|than they had imagined|edge of something|never fade|"
-            r"running out of time|scars remained|howl\w*|echoes? of|waiting to be|fate of|intentions?|truth|knew|knowing)\b", re.IGNORECASE)
-        _phys = re.compile(
-            r"\b(?:doors?|keys?|keycards?|marks?|cracks?|papers?|tapes?|blood\w*|scuffs?|wires?|pipes?|snow|metal|seals?|hinges?|locks?|latch\w*|hatch\w*|panels?|levers?|"
-            r"photos?|envelopes?|notes?|maps?|screens?|consoles?|radios?|bulbs?|lights?|floors?|walls?|ladders?|crates?|box\w*|containers?|drones?|scanners?|cutters?|"
-            r"flashlights?|lamps?|badges?|cards?|files?|folders?|ledgers?|logs?|footprints?|gloves?|boots?|coats?|ropes?|wrenche?s?|crowbars?|vials?|glass|ice|frost|"
-            r"steam|alarms?|clicks?|clangs?|thuds?|hiss\w*|beeps?|tones?|buzz\w*|stairs?|corridors?|tunnels?|hands?|fingers?|drills?|switch\w*|terminals?|chains?|"
-            r"bolts?|handles?|windows?|ceilings?|shelf|shelves|tables?|desks?|chairs?|cables?)\b", re.IGNORECASE)
-        vague = 0
-        vague_idx = []
-        for _pi, _para in enumerate([p_ for p_ in re.split(r"\n\s*\n+", body) if p_.strip()], 1):
-            _last = [x for x in re.split(r"(?<=[.!?\u201d])\s+", _para.strip()) if x.strip()]
-            if _last:
-                _end = re.sub(r"\u201c[^\u201d]*\u201d", " ", _last[-1])
-                if _abs.search(_end) or not _phys.search(_end):
-                    vague += 1
-                    vague_idx.append((_pi, _end.strip()))
-        return {
-            "vague_idx": vague_idx,
-            "vague": vague,
-            "dups": dups,
-            "words": len(re.findall(r"\b[\w'\u2019-]+\b", body)),
-            "quotes": len(re.findall(r"\u201c[^\u201d]+\u201d|\"[^\"]+\"", body)),
-            "tense": (
-                lambda plain: len(cls._REVISION_PRESENT.findall(plain)) + len(cls._REVISION_PRESENT_NOUN.findall(plain))
-            )(re.sub(r"\u201c[^\u201d]*\u201d|\"[^\"]*\"", " ", body)),
-            "spoken": [
-                re.sub(r"\s+", " ", m.strip().lower())
-                for m in re.findall(r"\u201c([^\u201d]+)\u201d|\"([^\"]+)\"", body)
-                for m in m if m.strip()
-            ],
-            "stock": sum(lower.count(item) for item in cls._REVISION_STOCK),
-            "offenders": (
-                lambda plain: list(dict.fromkeys(
-                    cls._REVISION_PRESENT.findall(plain) + cls._REVISION_PRESENT_NOUN.findall(plain)
-                ))
-            )(re.sub(r"\u201c[^\u201d]*\u201d|\"[^\"]*\"", " ", body))[:10],
-            "runs": runs,
-            "years": set(re.findall(r"\b(?:1[0-9]{3}|20[0-9]{2})\b", body)),
-        }
-
-    def _revise_story_once(
+    def _story_hard_quality_errors(
         self,
-        mode: str,
-        user_input: str,
-        draft: str,
+        story: str,
         story_blueprint: str | None,
-        source_character_names: list[str],
-    ) -> str:
-        """One optional editing call. The draft is kept unless the revision is verifiably no worse.
+        source_story: str = "",
+    ) -> list[str]:
+        """Deterministic hard gates for repetition, dialogue fit, and planned cast realization."""
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
+        errors: list[str] = []
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
+            return [f"expected {DIRECTOR_STORY_SCENES} scene paragraphs, got {len(paragraphs)}"]
 
-        Never raises: any failure, truncation, or failed acceptance check keeps the draft.
-        """
-        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED
+        # Exact stock phrasing is permitted once; repeated use is a hard failure.
+        stock_phrases = (
+            "breath fogging", "breath visible", "fogging in the", "dust drifting", "dust drifted",
+            "eyes narrowed", "narrowed eyes", "heart pounding", "heartbeat", "pulse quickened",
+            "hum vibrated", "echoed through", "long shadows", "flickering emergency lights",
+            "sent a shiver", "weight of", "mind racing", "stakes were higher", "tension between",
+            "he knew that", "would remain buried", "hinting at", "noticed a faint", "faint smell of",
+            "felt heavier", "holding its breath", "pressing in on", "felt oppressive",
+        )
+        plain = re.sub(r'["“][^"”]*["”]', " ", str(story or "")).casefold()
+        stock_hits = [(phrase, len(re.findall(r"\b" + re.escape(phrase) + r"\b", plain))) for phrase in stock_phrases]
+        repeated_stock = [phrase for phrase, count in stock_hits if count > 1]
+        total_stock = sum(count for _, count in stock_hits)
+        if repeated_stock:
+            errors.append("repeated stock phrases: " + ", ".join(repeated_stock[:5]))
+        if total_stock > 3:
+            errors.append(f"stock-phrase load is too high ({total_stock} matches; maximum 3)")
 
-        def keep(reason: str) -> str:
-            print(f"[QWEN] story_revision=kept_draft reason={reason}", flush=True)
-            return draft
-
-        try:
-            scenes = [p.strip() for p in re.split(r"\n\s*\n+", str(draft or "")) if p.strip()]
-            if len(scenes) != DIRECTOR_STORY_SCENES:
-                return keep("draft_topology")
-            import contextlib as _cl, io as _io
-            with _cl.redirect_stdout(_io.StringIO()):
-                _draft_scrubbed = self._scrub_stock_phrases(draft)
-            before = self._revision_metrics(_draft_scrubbed)
-            _src_low = str(user_input or "")
-            _label_rx = re.compile(r"\b(?:Project|Operation|Experiment|Protocol|Program|Initiative)\s+(?:[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?|\d+)\b")
-            _loss_rx = re.compile(
-                r"\b(?:lost|loses|gave up|given up|sacrific\w*|surrender\w*|left behind|gave away|burned|destroyed|never (?:again|saw|returned)|died|dead|killed|paid|forfeit\w*)\b",
-                re.IGNORECASE)
-
-            _rel_rx = re.compile(r"\b(?:daughter|son|wife|husband|child|children|brother|sister|mother|father|twin|baby)\b", re.IGNORECASE)
-            _titles = {"dr", "mr", "mrs", "ms", "prof", "captain", "capt", "colonel", "col", "sir", "lady"}
-            _cast_tokens = []
-            for _nm in dict.fromkeys(list(source_character_names or []) + list(self._blueprint_cast_names(story_blueprint))):
-                _toks = [t_ for t_ in re.findall(r"[A-Za-z\u2019'-]+", str(_nm)) if t_.lower().strip(".") not in _titles and len(t_) > 2]
-                if _toks:
-                    _cast_tokens.append((str(_nm), _toks))
-
-            def _extra(_t):
-                _labels = sorted({m_.group(0) for m_ in _label_rx.finditer(_t) if m_.group(0) not in _src_low})
-                _paras = [p_ for p_ in re.split(r"\n\s*\n+", _t) if p_.strip()]
-                _rels = sorted({m_.group(0).lower() for m_ in _rel_rx.finditer(_t) if not re.search(r"\b" + m_.group(0) + r"\b", _src_low, re.IGNORECASE)})
-                _last = _paras[-1] if _paras else ""
-                _nofate = [n_ for n_, toks_ in _cast_tokens if not any(re.search(r"\b" + re.escape(t_) + r"\b", _last) for t_ in toks_)]
-                return {"label": len(_labels), "label_list": _labels[:3], "nocost": 0 if _loss_rx.search(" ".join(_paras[-2:])) else 1,
-                        "relative": len(_rels), "relative_list": _rels[:3], "nofate": len(_nofate), "nofate_list": _nofate[:4]}
-            before.update(_extra(_draft_scrubbed))
-            _also = ""
-            if before["label"]:
-                _also += (" Replace the code-named label(s) " + ", ".join(before["label_list"]) + " with a plain, specific description of what the thing actually is "
-                          "(who made it and why), used the same way everywhere it appears.")
-            if before["relative"]:
-                _also += (" The story mentions an off-screen relative or child (" + ", ".join(before["relative_list"]) + ") who is not in the cast: replace each such mention with a cast member, "
-                          "an object, or a detail that needs no new person.")
-            if before["nofate"]:
-                _also += (" Scene 12 never mentions " + ", ".join(before["nofate_list"]) + ": add one sentence for each saying where that person is and what became of them, as a completed action.")
-            if before["nocost"]:
-                _also += (" In scene 12 add one sentence stating what the protagonist permanently lost or gave up, as a completed action "
-                          "(a person, an object, a belief), so the ending is a finished consequence.")
-            _low_d = _draft_scrubbed.lower()
-            _stock_found = [p_ for p_ in self._REVISION_STOCK if p_ in _low_d][:8]
-            _run_where = []
-            for _si, _sc_ in enumerate([p_ for p_ in re.split(r"\n\s*\n+", _draft_scrubbed) if p_.strip()], 1):
-                _fw = [re.sub(r"[^a-z]", "", x_.split()[0].lower()) for x_ in re.split(r"(?<=[.!?\u201d])\s+", _sc_) if x_.split()]
-                for _k in range(len(_fw) - 2):
-                    if _fw[_k] and _fw[_k] == _fw[_k + 1] == _fw[_k + 2]:
-                        _run_where.append(f"scene {_si} (\"{_fw[_k]}\")")
-                        break
-            _runs_fix = "; ".join(_run_where[:6])
-            if before["words"] > 1900:
-                return keep("draft_too_long_for_context")
-            if before["words"] < int(self._story_min_words):
-                return keep("draft_below_floor")
-            tagged = "\n\n".join(f"[[SCENE_{i:02d}]] {text}" for i, text in enumerate(scenes, 1))
-            thin = before["words"] < 1400  # rescue only: a first draft this short gets one full rewrite; normal drafts get the quality pass
-            _wc = lambda t: len(re.findall(r"\b[\w'\u2019-]+\b", t))
-            short_idx = [i for i, t in enumerate(scenes, 1) if _wc(t) < 120]
-            uneven = False  # the scene-lengthening mode is retired; the full rewrite above handles under-developed stories
-            _major = before["tense"] >= 6 or before["stock"] >= 8 or before["dups"] >= 2 or before["vague"] >= 4 or before["label"] >= 1 or before["relative"] >= 1
-            _minor = sum(1 for c_ in (before["runs"] >= 1, before["dups"] >= 1, before["vague"] >= 3, before["nocost"] >= 1, before["nofate"] >= 1) if c_)
-            if not thin and not uneven and not _major and _minor < 2:
-                return keep("draft_ok_no_revision_needed")
-            if uneven:
-                system = (
-                    "You are a screenwriter's editor. Lengthen only the scenes you are told to lengthen, keeping every event, name, "
-                    "scene order, character fate, and quoted line exactly as written, and copy all other scenes word for word."
-                )
-                _listed = ", ".join(f"[[SCENE_{i:02d}]]" for i in short_idx)
-                user = (
-                    "In this 12-scene story the scenes " + _listed + " are too thin. Rewrite those scenes only, each as one paragraph of "
-                    "8-10 sentences and 125-140 words (never above 145): keep every existing sentence's meaning and every quoted line exactly as written, and add "
-                    "2-3 new sentences per scene (a decision, a cost, or a reaction that changes what happens next; no filler like \"noticed a faint\" or \"as if the room\"), all in "
-                    "the past tense with varied sentence openings. Copy every other scene exactly as given. No new characters, years, dates, or numbers. "
-                    "Scene 12 must end on a completed consequence, never a future hook (no \"would find\", \"was about to\", \"only the beginning\", \"questions remained\"). Output all 12 tagged scenes, each starting with its exact tag [[SCENE_01]] through [[SCENE_12]].\n\nSTORY:\n" + tagged
-                )
-            elif thin:
-                system = (
-                    "You are a screenwriter's editor. Expand the story you are given by developing every scene with more "
-                    "concrete action, perception, and consequence, without changing any event, name, scene order, character fate, "
-                    "or quoted line."
-                )
-                user = (
-                    "This 12-scene story is too thin. Rewrite it so every scene is one paragraph of about 11 sentences "
-                    "(130-150 words each, never above 160), each starting with its exact tag [[SCENE_01]] through [[SCENE_12]]. For each scene add exactly 3 "
-                    "new sentences, each a new physical action, object, or consequence that changes what happens next (never a thought, a feeling, or what a character knows), all in the "
-                    "past tense. Never add filler such as \"noticed a faint\", \"as if the room\", smells of ozone, or the air feeling heavy, and never write \"his mind racing\", \"the tension grew\", \"he knew that\", or \"the stakes were higher\". Never start three sentences in a row with the same word. End every scene on a physical, observable fact (an object, a mark, a door or lock state, a sound) that the next scene uses, never on tension, silence, or a future threat. Keep the meaning of every existing sentence and every quoted line exactly as written. Scenes 10-12 get as "
-                    "much detail as scene 1, and scene 12 ends on a concrete lasting cost already paid. No new characters, years, dates, or numbers. "
-                    "Current words per scene (scene:words): " + ", ".join(f"{i}:{_wc(t)}" for i, t in enumerate(scenes, 1)) + ". "
-                    "Every scene must end with at least 120 words, so no scene may be returned unchanged. "
-                    + _also.strip() + " Output only the 12 tagged scenes.\n\nSTORY:\n" + tagged
-                )
-            else:
-                offenders = "; ".join(before["offenders"]) or "any present-tense verb"
-                _end_fix = "; ".join(f'scene {_i} (now: "{_t[:90]}")' for _i, _t in before["vague_idx"][:9])
-                system = (
-                    "You are a meticulous fiction editor. Revise the story you are given without changing any event, name, "
-                    "character fate, scene order, or quoted line. Keep every scene within 5% of its current length (swap words, do not add sentences) and never add new characters."
-                )
-                user = (
-                    "Revise this 12-scene story and return all 12 scenes, each starting with its exact tag [[SCENE_01]] through "
-                    "[[SCENE_12]] and written as one paragraph. Fix these things:\n"
-                    "1. Put every sentence in the past tense. Present-tense fragments found include: " + offenders + ". Rewrite each one.\n"
-                    "2. Replace stock images (breath fogging or visible, dust drifting, smirk, narrowed eyes, heart pounding, humming or echoing) "
-                    "with one fresh, specific detail tied to the action." + (" These appear in the story and each must be replaced: " + ", ".join(_stock_found) + "." if _stock_found else "") + "\n"
-                    "3. Never start three sentences in a row with the same word" + (": change the openers in " + _runs_fix if _runs_fix else "") + ".\n"
-                    "4. Where a sentence repeats an earlier scene almost word for word (for example a phone call that interrupts a conversation, or someone arriving to cut a conversation off, used twice), replace it with a new, specific action or consequence of the same length that belongs only to this scene. A quoted line may appear in only one scene: if a later scene repeats it, turn the later one into indirect speech.\n"
-                    "5. Make every character distinct: each one acts on what they want and speaks in their own manner, and no scene ends without a consequence the next scene uses. Replace vague lines ('secrets pressing down', 'tension in the air', 'intentions unclear') with a concrete fact, object, or decision from this story.\n"
-                    "6. " + (("Rewrite only the final sentence of these scenes so each ends on a physical, observable fact (an object, a mark, a door or lock state, a sound) that the next scene uses, never on tension, silence, a storm, an unclear intention, or a future threat: " + _end_fix + ". No two scenes end the same way.\n") if _end_fix else "Keep every scene ending physical and concrete; no two scenes end the same way.\n") +
-                    ("7. " + _also.strip() + "\n" if _also else "")
-                    + "8. Keep every quoted line exactly as written; add no years, dates, or numbers; every scene keeps about its current length (within 5% longer or shorter), and add no filler sentences.\n"
-                    "Output only the 12 tagged scenes.\n\nSTORY:\n" + tagged
-                )
-            budget = min(int(DIRECTOR_STORY_MAX_TOKENS), int(DIRECTOR_STORY_WRITER_MAX_TOKENS))
-            try:
-                rev = self._chat_text(
-                    system, user,
-                    minimum_completion=350, minimum_output_tokens=0,
-                    temperature=0.45, top_p=0.80,
-                    call_name="story_revision_pass", max_completion=budget,
-                    disable_thinking=True,
-                    seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                    creative=True,
-                )
-            except Exception as exc:  # truncation, context, transport: keep the draft
-                return keep(f"call_failed:{type(exc).__name__}")
-            rev = self._strip_story_markdown_emphasis(rev)
-            rev, _ = self._strip_story_nonprose_tail(rev)
-            rev = self._reflow_story_paragraphs(rev)
-            try:
-                rev = self._coerce_story_to_scene_paragraphs(rev)
-            except ValueError:
-                return keep("revision_scene_markers")
-            if len([p for p in re.split(r"\n\s*\n+", rev) if p.strip()]) != DIRECTOR_STORY_SCENES:
-                return keep("revision_topology")
-            if not self._ends_cleanly(rev):
-                return keep("revision_not_clean_end")
-            rev = self._scrub_stock_phrases(rev)
-            # Sentences the rewrite added that are stock filler ("noticed a faint...", "the air felt heavier") are dropped, never kept.
-            try:
-                _norm = lambda t: re.sub(r"\W+", " ", t.lower()).strip()
-                _old = {_norm(x) for sc_ in scenes for x in re.split(r"(?<=[.!?\u201d])\s+", sc_)}
-                _kept_scenes = []
-                for _sc in [p_.strip() for p_ in re.split(r"\n\s*\n+", rev) if p_.strip()]:
-                    _out = []
-                    for _sent in re.split(r"(?<=[.!?\u201d])\s+", _sc):
-                        _low = _sent.lower()
-                        if _norm(_sent) not in _old and "\u201c" not in _sent and any(_k in _low for _k in self._REVISION_STOCK):
-                            continue
-                        _out.append(_sent)
-                    _kept_scenes.append(" ".join(_out) if _out else _sc)
-                if len(_kept_scenes) == len(scenes):
-                    rev = "\n\n".join(_kept_scenes)
-            except Exception:
-                pass
-            after = self._revision_metrics(rev)
-            after.update(_extra(rev))
-            if uneven:
-                if after["words"] < int(1.04 * before["words"]):
-                    return keep(f"revision_not_longer:{before['words']}->{after['words']}")
-                if after["words"] > 1950:
-                    return keep("revision_overlong")
-            elif thin:
-                if after["words"] < int(1.12 * before["words"]):
-                    return keep(f"revision_not_longer:{before['words']}->{after['words']}")
-                if after["words"] > min(int(2.3 * before["words"]), 2000):
-                    return keep("revision_overlong")
-            else:
-                if after["words"] < max(int(0.95 * before["words"]), int(self._story_min_words)):
-                    return keep(f"revision_shorter:{before['words']}->{after['words']}")
-                if after["words"] > max(int(1.10 * before["words"]), before["words"] + 60):
-                    return keep("revision_overlong")
-            kept_lines = sum(1 for line in before["spoken"] if line in after["spoken"])
-            if before["spoken"] and kept_lines < -(-len(before["spoken"]) * 85 // 100):
-                return keep(f"revision_changed_dialogue:{kept_lines}/{len(before['spoken'])}_lines_kept")
-            rev_scenes = [p.strip() for p in re.split(r"\n\s*\n+", rev) if p.strip()]
-            for idx, (old_scene, new_scene) in enumerate(zip(scenes, rev_scenes), 1):
-                old_w = len(re.findall(r"\b[\w'\u2019-]+\b", old_scene))
-                new_w = len(re.findall(r"\b[\w'\u2019-]+\b", new_scene))
-                if new_w < int(0.90 * old_w):
-                    return keep(f"revision_compressed_scene_{idx:02d}:{old_w}->{new_w}")
-                if False and uneven and idx in short_idx and new_w < int(1.05 * old_w):
-                    return keep(f"revision_scene_not_expanded_{idx:02d}:{old_w}->{new_w}")
-            if after["years"] - before["years"]:
-                return keep("revision_added_year")
-            names = list(dict.fromkeys(list(source_character_names or []) + list(self._blueprint_cast_names(story_blueprint))))
-            for name in names:
-                token = str(name).split()[0] if str(name).split() else ""
-                if not token:
+        # A repeated sentence across scenes is a direct prose duplication, not a motif.
+        sentence_scene: dict[str, int] = {}
+        for scene_index, paragraph in enumerate(paragraphs, 1):
+            for sentence in re.split(r"(?<=[.!?])\s+", paragraph):
+                tokens = re.findall(r"[a-z0-9']+", sentence.casefold())
+                if len(tokens) < 8:
                     continue
-                n_before = len(re.findall(r"\b" + re.escape(token) + r"\b", draft))
-                n_after = len(re.findall(r"\b" + re.escape(token) + r"\b", rev))
-                if n_before >= 2 and n_after < int(0.7 * n_before):
-                    return keep(f"revision_lost_character:{token}")
-            if thin or uneven:
-                if after["tense"] > before["tense"] + 2 or after["stock"] > before["stock"] + 6 or (not thin and after["runs"] > before["runs"] + 4):
-                    return keep("revision_prose_worse:" + ",".join(f"{k}{before[k]}->{after[k]}" for k in ("tense", "stock", "runs")))
-            else:
-                if before["tense"] >= 3 and after["tense"] > int(0.6 * before["tense"]):
-                    return keep(f"revision_tense_not_fixed:{before['tense']}->{after['tense']}")
-                if any(after[k] > before[k] for k in ("tense", "stock", "runs", "dups", "vague", "label", "nocost", "relative", "nofate")):
-                    return keep("revision_not_better:" + ",".join(f"{k}{before[k]}->{after[k]}" for k in ("tense", "stock", "runs", "dups", "vague", "label", "nocost", "relative", "nofate")))
-                _trig = [k for k, t_ in (("tense", 6), ("stock", 8), ("runs", 1), ("dups", 1), ("vague", 3), ("label", 1), ("nocost", 1), ("relative", 1), ("nofate", 1)) if before[k] >= t_]
-                if _trig and not any(after[k] < before[k] for k in _trig):
-                    return keep("revision_trigger_not_improved:" + ",".join(f"{k}{before[k]}->{after[k]}" for k in _trig))
-                if all(after[k] == before[k] for k in ("tense", "stock", "runs", "dups", "vague", "label", "nocost", "relative", "nofate")):
-                    return keep("revision_no_improvement")
-            try:
-                self._validate_story_output_contracts(
-                    mode, user_input, rev, source_character_names=source_character_names, strict=True,
-                )
-            except Exception as exc:
-                # A rewrite most often fails the contract on its final sentence (a future hook). Keep the draft's last scene and re-check.
-                _fixed = False
-                try:
-                    _rs = [p.strip() for p in re.split(r"\n\s*\n+", rev) if p.strip()]
-                    if len(_rs) == len(scenes) and _rs[-1] != scenes[-1]:
-                        _alt = "\n\n".join(_rs[:-1] + [scenes[-1]])
-                        self._validate_story_output_contracts(
-                            mode, user_input, _alt, source_character_names=source_character_names, strict=True,
-                        )
-                        rev = _alt
-                        after = self._revision_metrics(rev)
-                        after.update(_extra(rev))
-                        _fixed = True
-                        print("[QWEN] story_revision=final_scene_restored (rewrite ended on a hook; draft ending kept)", flush=True)
-                except Exception:
-                    _fixed = False
-                if not _fixed:
-                    return keep(f"revision_contract:{type(exc).__name__}:{str(exc)[:160]}")
-            print(
-                f"[QWEN] story_revision=accepted mode={'expand' if thin else ('lengthen' if uneven else 'polish')} words={before['words']}->{after['words']} "
-                f"tense_slips={before['tense']}->{after['tense']} stock_phrases={before['stock']}->{after['stock']} "
-                f"repeated_openers={before['runs']}->{after['runs']} "
-                + "fixed=[" + ", ".join(f"{k}:{before[k]}->{after[k]}" for k in ("tense", "stock", "runs", "dups", "vague", "label", "nocost", "relative", "nofate") if after[k] < before[k]) + "]",
-                flush=True,
-            )
-            return rev
-        except Exception as exc:  # never let the optional pass break generation
-            return keep(f"error:{type(exc).__name__}")
+                key = " ".join(tokens)
+                previous = sentence_scene.get(key)
+                if previous is not None and previous != scene_index:
+                    errors.append(f"sentence duplicated in scenes {previous:02d} and {scene_index:02d}")
+                else:
+                    sentence_scene[key] = scene_index
+
+        # A 3+ consecutive opener run is obvious templating and is not left as a warning.
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(story or "")) if s.strip()]
+        first_words = [re.findall(r"[\w'’-]+", s.casefold())[:1] for s in sentences]
+        run = 1
+        for index in range(1, len(first_words)):
+            run = run + 1 if first_words[index] and first_words[index] == first_words[index - 1] else 1
+            if run >= 3:
+                errors.append("three consecutive sentences share the same opening word")
+                break
+
+        # Dialogue should fit the available shot time: no more than two concise spoken lines per scene.
+        quote_pattern = re.compile(r'"([^"\n]+)"|“([^”\n]+)”')
+        for scene_index, paragraph in enumerate(paragraphs, 1):
+            quotes = [next((g for g in match.groups() if g is not None), "") for match in quote_pattern.finditer(paragraph)]
+            if len(quotes) > 2:
+                errors.append(f"scene {scene_index:02d} has {len(quotes)} spoken quote pairs (maximum 2)")
+            if any(len(re.findall(r"[\w'’-]+", quote)) > 9 for quote in quotes):
+                errors.append(f"scene {scene_index:02d} contains a spoken line longer than 9 words")
+
+        # Entity, relationship, scene-event, and state-transition grounding are hard contracts.
+        if story_blueprint:
+            errors.extend(audit_story_against_blueprint(
+                story, story_blueprint, source_story, DIRECTOR_STORY_SCENES
+            ))
+
+        # The Architect's declared physical appearances are binding for the prose pass.
+        for line in str(story_blueprint or "").splitlines():
+            if not line.startswith("CAST:"):
+                continue
+            for entry in line[5:].split("|"):
+                name_match = re.match(r"\s*([^()]+?)\s*\((.*)\)\s*$", entry)
+                if not name_match:
+                    continue
+                name, metadata = name_match.group(1).strip(), name_match.group(2)
+                scene_match = re.search(r"on-screen scenes\s*:\s*([0-9, ]+)", metadata, re.IGNORECASE)
+                if not scene_match:
+                    continue
+                planned = [int(v) for v in re.findall(r"\d+", scene_match.group(1))]
+                surfaces = self._name_surfaces(name)
+                for scene_number in planned:
+                    if not 1 <= scene_number <= len(paragraphs):
+                        errors.append(f"CAST entry {name!r} contains invalid on-screen scene {scene_number}")
+                        continue
+                    paragraph = paragraphs[scene_number - 1]
+                    if not any(re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", paragraph, re.IGNORECASE) for surface in surfaces):
+                        errors.append(f"CAST character {name!r} missing from declared on-screen scene {scene_number:02d}")
+        return list(dict.fromkeys(errors))
 
     @staticmethod
     def _restore_source_places(mode: str, source: str, blueprint: str) -> str:
@@ -2851,6 +2724,47 @@ class QwenDirector(
             unquoted = quote_pattern.sub(" ", source_text)
             return not any(_contains_surface(unquoted, surface) for surface in [name, *aliases] if surface)
 
+        remote_context_re = re.compile(
+            r"\b(?:radio|walkie-talkie|intercom|comms|communications? relay|phone|telephone|"
+            r"transmission|communicator|speaker|terminal|loudspeaker|console)\b[^.!?]{0,90}"
+            r"\b(?:crackled|hissed|buzzed|played|transmitted|relayed|repeated|announced|said|"
+            r"spoke|came through|was heard|sounded)\b|"
+            r"\b(?:voice|words|message|signal)\b[^.!?]{0,90}"
+            r"\b(?:came|crackled|hissed|buzzed|played|transmitted|relayed|announced|said|"
+            r"spoke|was heard|sounded)\b[^.!?]{0,90}\b(?:through|over|from|on)\s+"
+            r"(?:the|a|an)?\s*(?:radio|walkie-talkie|intercom|comms|phone|telephone|"
+            r"transmission|communicator|speaker|terminal|loudspeaker|console)\b|"
+            r"\b(?:through|over|from|on)\s+(?:the|a|an)?\s*(?:radio|walkie-talkie|"
+            r"intercom|comms|phone|telephone|transmission|communicator|speaker|terminal|"
+            r"loudspeaker|console)\b|\bover the line\b",
+            re.IGNORECASE,
+        )
+        physical_action_re = re.compile(
+            r"\b(?:appeared|arrived|entered|stood|standing|stepped|walked|emerged|joined|came in|"
+            r"leaned|sat|crouched|knelt|waited|watched|faced|held|gripped|reached|touched|"
+            r"crossed|climbed|followed|looked|turned|pushed|pulled|shoved|blocked|knocked|"
+            r"lifted|grabbed|moved|ran|sprinted|sat down|stood up)\b",
+            re.IGNORECASE,
+        )
+
+        def _remote_only_visible_mention(name: str, source_text: str, aliases: list[str]) -> bool:
+            surfaces = [value for value in [name, *aliases] if value]
+            unquoted = quote_pattern.sub(" ", source_text)
+            remote_seen = False
+            for surface in surfaces:
+                for match in re.finditer(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", unquoted, re.IGNORECASE):
+                    left = max(unquoted.rfind(".", 0, match.start()), unquoted.rfind("?", 0, match.start()), unquoted.rfind("!", 0, match.start())) + 1
+                    ends = [x for x in (unquoted.find(".", match.end()), unquoted.find("?", match.end()), unquoted.find("!", match.end())) if x >= 0]
+                    right = min(ends) + 1 if ends else len(unquoted)
+                    sentence = unquoted[left:right]
+                    if not remote_context_re.search(sentence):
+                        continue
+                    remote_seen = True
+                    local_window = sentence[max(0, match.start() - left - 90):match.start() - left] + " " + sentence[match.end() - left:match.end() - left + 90]
+                    if physical_action_re.search(local_window):
+                        return False
+            return remote_seen
+
         aliases_by_name = {}
         for item in (characters or []):
             if not isinstance(item, dict):
@@ -2874,7 +2788,8 @@ class QwenDirector(
                 for value in scene_names:
                     name = str(value or "").strip()
                     aliases = aliases_by_name.get(EntityResolver.normalize(name), [])
-                    if name and _quote_only(name, source_text, aliases):
+                    if name and (_quote_only(name, source_text, aliases)
+                                 or _remote_only_visible_mention(name, source_text, aliases)):
                         removed += 1
                         continue
                     kept_scene_names.append(value)
@@ -2890,14 +2805,15 @@ class QwenDirector(
                 for value in names:
                     name = str(value or "").strip()
                     aliases = aliases_by_name.get(EntityResolver.normalize(name), [])
-                    if name and _quote_only(name, source_text, aliases):
+                    if name and (_quote_only(name, source_text, aliases)
+                                 or _remote_only_visible_mention(name, source_text, aliases)):
                         removed += 1
                         continue
                     kept.append(value)
                 shot["characters"] = kept
         if removed:
             print(
-                f"[DIRECTOR] removed {removed} visible character binding(s) supported only by quoted mentions; no cast was added",
+                f"[DIRECTOR] removed {removed} unsupported visible character binding(s); no cast was added",
                 flush=True,
             )
 
@@ -3630,6 +3546,13 @@ class QwenDirector(
         # places a character physically in the scene. Arbitrary earlier device nouns
         # do not establish this state.
         remote_channel_end_by_paragraph: dict[int, int] = {}
+        local_speech_attribution_re = re.compile(
+            r"\b(?:[A-Z][A-Za-z\u2019'’-]*(?:\s+[A-Z][A-Za-z\u2019'’-]*)?|he|she|they)\s+"
+            r"(?:said|says|asked|asks|replied|replies|whispered|whispers|shouted|shouts|"
+            r"muttered|mutters|answered|answers|warned|warns|hissed|hisses|snapped|snaps|"
+            r"called|calls|barked|barks|added|adds|insisted|insists|demanded|demands)\b",
+            re.IGNORECASE,
+        )
 
         def quote_delivery(position: int, end_position: int, semantic_delivery: str = "") -> str:
             """Classify a quote as visible in-person audio, live remote audio, or excluded.
@@ -3664,7 +3587,27 @@ class QwenDirector(
             active_remote_end = remote_channel_end_by_paragraph.get(paragraph_start)
             if active_remote_end is not None and active_remote_end <= position:
                 intervening_text = text[active_remote_end:position]
-                if physical_presence_re.search(intervening_text):
+                # A fresh local speaker attribution ends the prior remote channel.
+                local_attributions = list(local_speech_attribution_re.finditer(intervening_text))
+                local_turn = False
+                if local_attributions:
+                    last_attr = local_attributions[-1]
+                    sentence_start = max(
+                        intervening_text.rfind(".", 0, last_attr.start()),
+                        intervening_text.rfind("?", 0, last_attr.start()),
+                        intervening_text.rfind("!", 0, last_attr.start()),
+                    ) + 1
+                    sentence_end_candidates = [
+                        x for x in (
+                            intervening_text.find(".", last_attr.end()),
+                            intervening_text.find("?", last_attr.end()),
+                            intervening_text.find("!", last_attr.end()),
+                        ) if x >= 0
+                    ]
+                    sentence_end = min(sentence_end_candidates) + 1 if sentence_end_candidates else len(intervening_text)
+                    attribution_sentence = intervening_text[sentence_start:sentence_end]
+                    local_turn = not bool(remote_context_re.search(attribution_sentence))
+                if physical_presence_re.search(intervening_text) or local_turn:
                     remote_channel_end_by_paragraph.pop(paragraph_start, None)
                 else:
                     return "remote"
@@ -4636,7 +4579,10 @@ class QwenDirector(
                         raise ValueError(
                             f"Duplicate source dialogue ID {dialogue_id!r} in scene {scene_id!r}."
                         )
-                    local[dialogue_id] = {"speaker": speaker, "text": text}
+                    delivery = str(entry.get("delivery", "in_person") or "in_person").strip().lower()
+                    if delivery not in {"in_person", "remote"}:
+                        delivery = "in_person"
+                    local[dialogue_id] = {"speaker": speaker, "text": text, "delivery": delivery}
                     all_ids.append(dialogue_id)
             result[scene_id] = local
         if len(all_ids) != len(set(all_ids)):
@@ -4644,84 +4590,171 @@ class QwenDirector(
         return result, sorted(all_ids)
 
     def _h3_balance_scene_dialogue(self, shots, source_dialogue_index):
-        """Balance dialogue independently within each scene in a batched shot list."""
-        try:
-            import itertools
-            out = [dict(s) if isinstance(s, dict) else s for s in (shots or [])]
-            if not isinstance(source_dialogue_index, dict):
-                return out
-            groups = {}
-            for idx, shot in enumerate(out):
-                if not isinstance(shot, dict):
-                    continue
-                scene = str(shot.get("scene_id", "") or "").strip()
-                if not scene:
-                    shot_id = str(shot.get("shot_id", "") or "").strip()
-                    match = re.match(r"(scene_\d+)_shot_", shot_id)
-                    scene = match.group(1) if match else ""
-                if scene:
-                    groups.setdefault(scene, []).append(idx)
-            for scene, indexes in groups.items():
-                scene_shots = [out[i] for i in indexes]
-                if len(scene_shots) < 2:
-                    continue
-                ids, valid = [], True
-                for shot in scene_shots:
-                    events = shot.get("dialogue_events") or []
-                    if not isinstance(events, list):
-                        valid = False; break
-                    for event in events:
-                        if not isinstance(event, dict):
-                            valid = False; break
-                        did = str(event.get("source_dialogue_id", "") or "").strip()
-                        if not did or did not in source_dialogue_index or not did.startswith(scene + "_d"):
-                            valid = False; break
-                        ids.append(did)
-                    if not valid: break
-                if not valid or len(ids) < 2 or len(ids) != len(set(ids)):
-                    continue
-                def _order(did):
-                    m = re.search(r"_d(\d+)$", did)
-                    return (int(m.group(1)), did) if m else (10**9, did)
-                ids.sort(key=_order)
-                n, k = len(ids), len(scene_shots)
-                if n > k:  # one source line per shot; do not worsen over-budget scenes
-                    continue
-                durations = []
-                for did in ids:
-                    item = source_dialogue_index.get(did)
-                    if not isinstance(item, dict) or not str(item.get("speaker", "") or "").strip():
-                        valid = False; break
-                    durations.append(max(1, len(str(item.get("text", "") or "").split())) / 145.0 * 60.0 + 0.15)
-                if not valid: continue
-                current = [[str(e["source_dialogue_id"]).strip() for e in (sh.get("dialogue_events") or [])] for sh in scene_shots]
-                current_loads = [sum(durations[ids.index(d)] for d in g if d in ids) for g in current]
-                current_max = max(current_loads, default=0.0)
-                best = None
-                for cuts in itertools.combinations_with_replacement(range(n + 1), k - 1):
-                    bounds = (0, *cuts, n)
-                    assigned = [ids[bounds[j]:bounds[j+1]] for j in range(k)]
-                    if any(len(g) > 1 for g in assigned): continue
-                    allowed = True
-                    for sh, group in zip(scene_shots, assigned):
-                        visible = {str(c).strip().casefold() for c in (sh.get("characters") or [])}
-                        for did in group:
-                            speaker = str(source_dialogue_index[did].get("speaker", "")).strip().casefold()
-                            if speaker not in visible:
-                                allowed = False; break
-                        if not allowed: break
-                    if not allowed: continue
-                    loads = [sum(durations[ids.index(d)] for d in g) for g in assigned]
-                    key = (max(loads, default=0.0), sum(x*x for x in loads))
-                    if best is None or key < best[0]: best = (key, assigned)
-                if best is None or best[0][0] >= current_max - 0.25: continue
-                for sh, group in zip(scene_shots, best[1]):
-                    sh["dialogue_events"] = [{"source_dialogue_id": did} for did in group]
-                print(f"[DIRECTOR] dialogue_load_balanced scene={scene} lines={n} worst_shot={current_max:.1f}s->{best[0][0]:.1f}s", flush=True)
+        """Assign every whitelisted source utterance exactly once, repairing duplicate/omitted IDs locally.
+
+        In-person lines are assigned only to shots showing their speaker (the speaker is bound
+        visibly when necessary because source delivery establishes physical presence). Remote
+        lines remain audio-only and prefer a shot with a visible listener. No text is rewritten.
+        """
+        out = [dict(s) if isinstance(s, dict) else s for s in (shots or [])]
+        if not isinstance(source_dialogue_index, dict) or not source_dialogue_index:
             return out
-        except Exception as exc:
-            print(f"[DIRECTOR] dialogue balancing skipped: {type(exc).__name__}: {exc}", flush=True)
-            return list(shots or [])
+        groups: dict[str, list[int]] = {}
+        for idx, shot in enumerate(out):
+            if not isinstance(shot, dict):
+                continue
+            scene = str(shot.get("scene_id", "") or "").strip()
+            if not scene:
+                shot_id = str(shot.get("shot_id", "") or "").strip()
+                match = re.match(r"(scene_\d+)_shot_", shot_id)
+                scene = match.group(1) if match else ""
+            if scene:
+                groups.setdefault(scene, []).append(idx)
+
+        def _record(kind: str, detail: str) -> None:
+            callback = getattr(self, "_record_recovery", None)
+            if callable(callback):
+                callback(kind, detail)
+
+        def _ordered_ids(index: dict[str, dict]) -> list[str]:
+            def key(value: str):
+                match = re.search(r"_d(\d+)$", value)
+                return (int(match.group(1)), value) if match else (10**9, value)
+            return sorted(index, key=key)
+
+        for scene, indexes in groups.items():
+            if not indexes:
+                continue
+            local_index = {
+                str(key): value for key, value in source_dialogue_index.items()
+                if str(key).startswith(scene + "_d") and isinstance(value, dict)
+                and str(value.get("speaker", "") or "").strip()
+                and str(value.get("text", "") or "").strip()
+            }
+            if not local_index:
+                continue
+            scene_shots = [out[i] for i in indexes]
+            ids = _ordered_ids(local_index)
+            in_person_speakers = {
+                str(item.get("speaker", "") or "").strip().casefold()
+                for item in local_index.values()
+                if str(item.get("delivery", "in_person") or "in_person").strip().lower() != "remote"
+            }
+            remote_only_speakers = {
+                str(item.get("speaker", "") or "").strip().casefold()
+                for item in local_index.values()
+                if str(item.get("delivery", "in_person") or "in_person").strip().lower() == "remote"
+            } - in_person_speakers
+            # Remote-only sources are audio, never physical shot bindings. Strip model
+            # hallucinations before distributing the authoritative source dialogue IDs.
+            for shot in scene_shots:
+                if remote_only_speakers:
+                    shot["characters"] = [
+                        str(value).strip() for value in (shot.get("characters") or [])
+                        if str(value).strip().casefold() not in remote_only_speakers
+                    ]
+                    if isinstance(shot.get("speaking_characters"), list):
+                        shot["speaking_characters"] = [
+                            str(value).strip() for value in shot["speaking_characters"]
+                            if str(value).strip().casefold() not in remote_only_speakers
+                        ]
+            current_assignments: dict[str, int] = {}
+            seen: set[str] = set()
+            duplicate_ids: set[str] = set()
+            foreign_ids: set[str] = set()
+            for local_pos, shot in enumerate(scene_shots):
+                events = shot.get("dialogue_events") or []
+                if not isinstance(events, list):
+                    continue
+                for event in events:
+                    if not isinstance(event, dict):
+                        continue
+                    did = str(event.get("source_dialogue_id", "") or "").strip()
+                    if not did:
+                        continue
+                    if did not in local_index:
+                        foreign_ids.add(did)
+                        continue
+                    if did in seen:
+                        duplicate_ids.add(did)
+                        continue
+                    seen.add(did)
+                    current_assignments[did] = local_pos
+
+            loads = [0.0 for _ in scene_shots]
+            assigned: list[list[str]] = [[] for _ in scene_shots]
+            used_slots: set[int] = set()
+            for did in ids:
+                item = local_index[did]
+                speaker = str(item.get("speaker", "") or "").strip()
+                delivery = str(item.get("delivery", "in_person") or "in_person").strip().lower()
+                remote = delivery == "remote"
+                text = str(item.get("text", "") or "")
+                duration = max(0.5, len(re.findall(r"\b[\w'’-]+\b", text)) / 2.35)
+                candidates = []
+                for slot, shot in enumerate(scene_shots):
+                    visible = [str(v).strip() for v in (shot.get("characters") or []) if str(v).strip()]
+                    visible_norm = {v.casefold() for v in visible}
+                    is_visible = speaker.casefold() in visible_norm
+                    # A remote source is never made visible; an in-person speaker must be.
+                    if not remote and visible and not is_visible:
+                        # It is safe to add the physically present speaker to the shot because
+                        # the source dialogue classifier has already marked this utterance in-person.
+                        pass
+                    same_model_slot = current_assignments.get(did) == slot
+                    # For normal one/two-line scenes, prefer distinct shots. When source scenes
+                    # contain more lines than shots, share the least-loaded shot deterministically.
+                    distinct_penalty = 1 if (len(ids) <= len(scene_shots) and slot in used_slots) else 0
+                    listener_bonus = 0 if (remote and visible) else 1 if remote else 0
+                    visibility_penalty = 0 if (remote or is_visible) else 1
+                    score = (
+                        distinct_penalty,
+                        visibility_penalty,
+                        loads[slot],
+                        0 if same_model_slot else 1,
+                        listener_bonus,
+                        slot,
+                    )
+                    candidates.append((score, slot, is_visible))
+                _, chosen, is_visible = min(candidates, key=lambda x: x[0])
+                shot = scene_shots[chosen]
+                visible = [str(v).strip() for v in (shot.get("characters") or []) if str(v).strip()]
+                if not remote and not any(v.casefold() == speaker.casefold() for v in visible):
+                    visible.append(speaker)
+                    shot["characters"] = list(dict.fromkeys(visible))
+                assigned[chosen].append(did)
+                loads[chosen] += duration
+                used_slots.add(chosen)
+
+            for shot, assigned_ids in zip(scene_shots, assigned):
+                shot["dialogue_events"] = [{"source_dialogue_id": did} for did in assigned_ids]
+            final_ids = [
+                str(event.get("source_dialogue_id", "") or "").strip()
+                for shot in scene_shots for event in (shot.get("dialogue_events") or [])
+                if isinstance(event, dict)
+            ]
+            if len(final_ids) != len(set(final_ids)) or set(final_ids) != set(ids):
+                raise RuntimeError(
+                    f"Dialogue assignment contract failed for {scene}: every source ID must appear exactly once."
+                )
+            # A remote-only speaker must not remain in any visible shot binding.
+            for shot in scene_shots:
+                visible = {str(v).strip().casefold() for v in (shot.get("characters") or [])}
+                leak = visible & remote_only_speakers
+                if leak:
+                    raise RuntimeError(
+                        f"Remote-only dialogue speaker leaked into visible bindings for {scene}: {sorted(leak)}"
+                    )
+            if duplicate_ids:
+                _record("duplicate_shot_dialogue_reference_rebalanced", f"scene={scene} ids={','.join(sorted(duplicate_ids))}")
+            if foreign_ids:
+                _record("foreign_shot_dialogue_reference_dropped", f"scene={scene} ids={','.join(sorted(foreign_ids))}")
+            missing_ids = set(ids) - seen
+            if missing_ids:
+                _record("omitted_source_dialogue_restored", f"scene={scene} ids={','.join(sorted(missing_ids))}")
+            if len(ids) > 1:
+                _record("source_dialogue_rebalanced", f"scene={scene} lines={len(ids)} shots={len(scene_shots)} exactly_once=true")
+        return out
 
     def _expand_shot_batch_dialogue_references(
         self,
@@ -4774,6 +4807,7 @@ class QwenDirector(
                 expanded_events.append({
                     "speaker": str(source["speaker"]),
                     "text": str(source["text"]),
+                    "delivery": str(source.get("delivery", "in_person") or "in_person"),
                     "continues_from_previous_shot": False,
                     "continues_to_next_shot": False,
                 })
