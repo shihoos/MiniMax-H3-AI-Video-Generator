@@ -104,10 +104,11 @@ def _validate_control_plane_requirements() -> None:
         if name and version:
             requirements[name.lower().replace("_", "-")] = version.split(";", 1)[0].strip()
 
-    for name in ("transformers", "tokenizers"):
-        if not requirements.get(name):
+    expected_pins = {"transformers": "5.17.0", "tokenizers": "0.23.3", "psutil": "7.0.0"}
+    for name, expected in expected_pins.items():
+        if requirements.get(name) != expected:
             raise RuntimeError(
-                f"requirements.txt must contain an exact {name}== pin for deterministic Director token accounting."
+                f"requirements.txt must pin {name}=={expected}; got {requirements.get(name)!r}."
             )
 
     # The warm probe must enforce the same package pins as the cold install.
@@ -115,10 +116,20 @@ def _validate_control_plane_requirements() -> None:
     probe_start = bootstrap_source.index("def _probe_director_venv(")
     probe_end = bootstrap_source.index("def _sage_build_stamp_path(", probe_start)
     warm_probe = bootstrap_source[probe_start:probe_end]
-    required = ('_exact_requirement_pin("transformers")', '_exact_requirement_pin("tokenizers")',
-                "transformers.__version__", "tokenizers.__version__", "from transformers import Qwen3Config")
+    required = (
+        '_exact_requirement_pin("transformers")',
+        '_exact_requirement_pin("tokenizers")',
+        "transformers.__version__",
+        "tokenizers.__version__",
+        "from transformers import Qwen3Config",
+        "sys.version_info[:2] == (3, 12)",
+        "torch.__version__",
+        "torch.version.cuda == '13.0'",
+        "from vllm.config.load import LoadConfig",
+        "safetensors_load_strategy",
+    )
     if any(item not in warm_probe for item in required):
-        raise RuntimeError("Bootstrap warm vLLM reuse must verify the locked Transformers/tokenizers pins and Qwen3Config import.")
+        raise RuntimeError("Bootstrap warm vLLM reuse must verify Python 3.12, vLLM load API, Torch/CUDA, Transformers/tokenizers and Qwen3 imports.")
 
 def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
     """Return recognized main() call targets in lexical source order.
@@ -226,6 +237,105 @@ def _validate_custom_node_ordering() -> None:
         raise RuntimeError("Custom-node dependency cycles must fail closed.")
 
 
+def _validate_runtime_upgrade_contract(runtime: dict) -> None:
+    comfy = dict(runtime.get("comfyui", {}) or {})
+    director = dict(runtime.get("director", {}) or {})
+    python = dict(runtime.get("python", {}) or {})
+    pytorch = dict(runtime.get("pytorch", {}) or {})
+    if comfy.get("expected_version") != "0.43.2":
+        raise RuntimeError("ComfyUI must be pinned to v0.43.2.")
+    if comfy.get("revision") != "423cbd20511becb1f16122ab518e92e58bfa03d9":
+        raise RuntimeError("ComfyUI must use the exact 0.43.2 release commit.")
+    if comfy.get("h3_t4_value_clone_workaround") is not False:
+        raise RuntimeError("The obsolete H3 V-clone workaround must be disabled.")
+    if comfy.get("h3_vae_decoder_dtype_patch") is not True:
+        raise RuntimeError("The H3 VAE dtype guard must remain enabled.")
+    if director.get("vllm_version") != "0.32.0":
+        raise RuntimeError("vLLM must be pinned to 0.32.0.")
+    if director.get("vllm_torch_version") != "2.13.0" or director.get("vllm_cuda") != "cu130":
+        raise RuntimeError("Isolated vLLM environment must use Torch 2.13.0/cu130.")
+    if director.get("safetensors_load_strategy") != "eager":
+        raise RuntimeError("Eager safetensors loading must be the default strategy.")
+    if director.get("vllm_env_dir") != "/tmp/h3_qwen_vllm_032_tf517_tok0233":
+        raise RuntimeError("vLLM 0.32 must use a fresh, version-specific isolated environment.")
+    if str(python.get("kaggle", "")) != "3.12":
+        raise RuntimeError("Kaggle runtime Python must be 3.12.")
+    if pytorch.get("version") != "2.10.0" or pytorch.get("cuda") != "cu130":
+        raise RuntimeError("ComfyUI main process Torch must remain 2.10.0/cu130.")
+    if director.get("tensor_parallel_size") != 2 or director.get("gpu_memory_utilization") != 0.9 or director.get("max_num_seqs") != 1:
+        raise RuntimeError("Director TP=2, GPU memory=0.9, max_num_seqs=1 must be preserved.")
+    if director.get("speculative_method") != "eagle3" or director.get("speculative_tokens") != 2:
+        raise RuntimeError("Director EAGLE-3 speculative settings must be preserved.")
+    if director.get("context") != 10240 or director.get("story_max_tokens") != 6500:
+        raise RuntimeError("Director context/story global ceilings must be preserved.")
+    story = dict(director.get("story_contract", {}) or {})
+    writing = dict(director.get("story_sampling", {}).get("writing", {}) or {})
+    if story.get("minimum_words", 0) < 1400 or story.get("accept_min_words") != story.get("minimum_words"):
+        raise RuntimeError("The 1,400+ word single-pass story contract must be preserved.")
+    if writing.get("max_tokens") != 3000:
+        raise RuntimeError("Director story Writer token ceiling must remain 3,000.")
+    if story.get("scene_count") != 12 or story.get("shots_per_scene") != 3:
+        raise RuntimeError("12 scenes x 3 shots story topology must be preserved.")
+    if runtime.get("generation", {}).get("frames_per_shot") != 141:
+        raise RuntimeError("Current 141-frame shot topology must be preserved; do not revert to 124.")
+
+
+def _validate_director_runtime_source() -> None:
+    path = ROOT / "planner/qwen_director_runtime.py"
+    source = path.read_text(encoding="utf-8")
+    for marker in (
+        "DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
+        "--safetensors-load-strategy",
+        "DIRECTOR_VLLM_VERSION",
+        '"/version"',
+        "def _use_direct_checkpoint(",
+        "def _begin_startup_metrics(",
+        "def _finish_startup_metrics(",
+        "apply_chat_template(",
+    ):
+        if marker not in source:
+            raise RuntimeError(f"Director runtime source is missing required v0.32 contract: {marker}")
+    forbidden = (
+        "_stage_to_local_scratch",
+        "H3_DIRECTOR_STAGE_LOCAL",
+        "/tmp/staged_models",
+        "ThreadPoolExecutor",
+        "shutil.copytree",
+        "shutil.copy2",
+    )
+    for marker in forbidden:
+        if marker in source:
+            raise RuntimeError(f"Director checkpoint staging must be removed: {marker}")
+    if "model_staging\": False" not in source and '"model_staging": False' not in source:
+        raise RuntimeError("Director startup telemetry must record model_staging=false.")
+
+
+def _validate_bootstrap_upgrade_source() -> None:
+    path = ROOT / "kaggle/bootstrap.py"
+    source = path.read_text(encoding="utf-8")
+    for marker in (
+        "--torch-backend",
+        "vllm=={vllm_version}",
+        "from vllm.config.load import LoadConfig",
+        "safetensors_load_strategy",
+        "423cbd20511becb1f16122ab518e92e58bfa03d9",
+        "memory_usage_factor = 0.17",
+        "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]",
+        "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters",
+        "h3_embedding._validate_upstream_forward(MiniMaxH3Model._forward)",
+    ):
+        if marker not in source:
+            raise RuntimeError(f"Bootstrap is missing required runtime upgrade contract: {marker}")
+    for marker in (
+        "condition_proj(text_states.to(torch.float32))",
+        "low_precision_attention=False",
+        "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
+        "MINIMAX_H3_PROJECT_" + "T4_MEMORY_COMPAT_V3",
+    ):
+        if marker in source:
+            raise RuntimeError(f"Obsolete ComfyUI 0.34 H3 compatibility logic remains: {marker}")
+
+
 def main() -> int:
     runtime_path = ROOT / "configs" / "runtime_versions.yaml"
     manifest_path = ROOT / "configs" / "custom_nodes.yaml"
@@ -244,6 +354,9 @@ def main() -> int:
     _validate_custom_node_ordering()
     _validate_control_plane_requirements()
     _validate_bootstrap_order()
+    _validate_runtime_upgrade_contract(runtime)
+    _validate_director_runtime_source()
+    _validate_bootstrap_upgrade_source()
     director = dict(runtime.get("director", {}) or {})
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("Director backend must be vllm.")
