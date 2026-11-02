@@ -256,6 +256,26 @@ DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION = float(
 
 DIRECTOR_VLLM_MAX_MODEL_LEN = int(RUNTIME["director"]["context"])
 
+# vLLM safetensors loader is an explicit runtime contract. The environment
+# override exists for controlled A/B testing (for example, prefetch vs eager).
+_director_loader_default = str(
+    RUNTIME["director"].get("safetensors_load_strategy", "eager")
+).strip().lower()
+DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY = os.getenv(
+    "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
+    _director_loader_default,
+).strip().lower()
+if DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY not in {"eager", "lazy", "prefetch", "torchao"}:
+    raise RuntimeError(
+        "Director safetensors_load_strategy must be one of eager/lazy/prefetch/torchao; "
+        f"got {DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY!r}."
+    )
+DIRECTOR_VLLM_VERSION = str(RUNTIME["director"].get("vllm_version", "")).strip()
+DIRECTOR_VLLM_TORCH_VERSION = str(RUNTIME["director"].get("vllm_torch_version", "")).strip()
+DIRECTOR_VLLM_CUDA = str(RUNTIME["director"].get("vllm_cuda", "")).strip().lower()
+if not DIRECTOR_VLLM_VERSION or not DIRECTOR_VLLM_TORCH_VERSION or DIRECTOR_VLLM_CUDA != "cu130":
+    raise RuntimeError("Director vLLM version/PyTorch/CUDA runtime lock is incomplete.")
+
 DIRECTOR_VLLM_HOST = os.getenv(
     "H3_DIRECTOR_VLLM_HOST",
     str(RUNTIME["director"].get("host", "127.0.0.1")),
