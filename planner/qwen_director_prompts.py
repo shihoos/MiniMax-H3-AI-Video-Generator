@@ -40,6 +40,7 @@ from planner.entity_resolver import EntityResolver
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
+import re
 
 CAMERA_SHOT_OPTIONS = (
     "extreme wide",
@@ -234,12 +235,47 @@ CALIBRATION_SCENE_EXAMPLE = (
 
 
 class QwenDirectorPromptMixin:
+    @staticmethod
+    def _lift_late_scenes(text: str) -> str:
+        """The Writer's scenes shrink as it goes (about 190 words in scene 1 but 99 in scene 12), so later scenes ask for more."""
+        def _bump(m):
+            k = int(m.group(1))
+            extra = 0 if k < 5 else (10 if k < 9 else 20)
+            return f"SCENE {m.group(1)} (write {m.group(2)} sentences, {int(m.group(3)) + extra}+ words)"
+        return re.sub(r"SCENE (\d\d) \(write (\d+) sentences, (\d+)\+ words\)", _bump, text)
+
+    @staticmethod
+    def _expand_longer(text: str) -> str:
+        """Expand mode asks for an 11-sentence scene because its Writer delivers about two thirds of the length it is asked for."""
+        for _pat, _rep in (
+            (r"9 sentences averaging 14-18 words,\s+usually 120-150 words", "11 sentences averaging 14-18 words, usually 150-180 words"),
+            (r"full scene of 9 sentences", "full scene of 11 sentences"),
+            (r"paragraph of 9 sentences in one primary physical", "paragraph of 11 sentences in one primary physical"),
+            (r"ENTRY, 1 sentence:", "ENTRY, 2 sentences:"),
+            (r"COST, 1 sentence:", "COST, 2 sentences:"),
+            (r"those 9 sentences, 120-160 words", "those 11 sentences, 150-190 words"),
+            (r"Stop at the 9th sentence", "Stop at the 11th sentence"),
+            (r"exactly 1, 2, 2, 2, 1, 1 prose sentences, a 9-sentence scene of roughly \d+-\d+ words(?:, each sentence 16-20 words)?", "exactly 2, 2, 2, 2, 2, 1 prose sentences, an 11-sentence scene of roughly 150-180 words"),
+            (r"Every scene is at least 120 words", "Every scene is at least 140 words"),
+            (r"ENTRY \(1 sentence\)", "ENTRY (2 sentences)"),
+            (r"COST \(1 sentence\)", "COST (2 sentences)"),
+            (r"\(write 9 sentences, \d+\+ words\)", "(write 11 sentences, 150+ words)"),
+            (r"one developed paragraph of 9 full sentences", "one developed paragraph of 11 full sentences"),
+            (r"most scenes should land around \d+-\d+", "most scenes should land around 150-180"),
+            (r"exactly 9 sentences and 120-160 words", "exactly 11 sentences and 150-190 words"),
+            (r"stop after the 9th sentence", "stop after the 11th sentence"),
+            (r"full 9-sentence scene", "full 11-sentence scene"),
+        ):
+            text = re.sub(_pat, _rep, text)
+        return text
+
     def _story_text_system(
         self,
         mode: str,
     ) -> str:
         """Configured scene-length prose contract with a craft brief; one author call, no retries."""
-        return self._fill_story_length(self._story_text_system_raw(mode))
+        _txt = self._fill_story_length(self._story_text_system_raw(mode))
+        return self._expand_longer(_txt)
 
     @staticmethod
     def _fill_story_length(text: str) -> str:
@@ -300,24 +336,25 @@ class QwenDirectorPromptMixin:
             LENGTH CONTRACT (mandatory): write exactly {n} explicitly marked scene blocks. The expected
             target is {target} usable story words and the finished story must reach at least {writing_floor};
             it may stretch toward {stretch} when the story needs it. Write about {per} words per scene at the
-            very least, the natural size of the SCENE SHAPE below (8-10 sentences of varied length,
-            usually 125-150 words). Scenes 9-{n:02d} are written with the same fullness as
+            very least, the natural size of the SCENE SHAPE below (9 sentences averaging 14-18 words,
+            usually 120-150 words). Scenes 9-{n:02d} are written with the same fullness as
             scenes 1-3; the ending is never rushed. Per-scene length is flexible, but a scene of five or six
             sentences, or under 120 words, is unfinished, so keep writing until its shape is complete. Scene
-            {n:02d} is a full scene of 8-10 sentences, never a summary. Do not pad with adjectives
+            {n:02d} is a full scene of 9 sentences, never a summary. Do not pad with adjectives
             or repeated ideas: every added sentence carries a new action, obstacle, reaction, or consequence.
 
-            SCENE SHAPE: write each scene as one developed paragraph of 8-10 sentences in one primary physical
-            location, each sentence carrying a concrete detail, with lengths varied (some short, some up to 25 words), following the blueprint's six fields in order:
+            SCENE SHAPE: write each scene as one developed paragraph of 9 sentences in one primary physical
+            location, each sentence a full 14-18 word sentence with a concrete detail and a subordinate
+            clause, following the blueprint's six fields in order:
             ENTRY, 1 sentence: place, time, who is physically present, one concrete sensory detail.
             ACTION, 2 sentences: what the lead character does toward the goal, step by step.
             OBSTACLE, 2 sentences: the opposition, failure, or changed fact, with a specific physical detail.
             CHOICE, 2 sentences: the decision, or a short spoken exchange, and the act that carries it out.
             COST, 1 sentence: what it risks or costs, and how the character reacts.
             RESULT, 1 sentence: the consequence that is now true, which hands the next scene its start state.
-            HARD CEILING: a scene is exactly ONE paragraph of those 8-10 sentences, 120-155 words, with any quoted
-            lines kept inside that paragraph (never on their own lines). Stop after the 10th sentence at the latest and start the next
-            tag; the output budget only fits all {n} scenes if no scene runs long, and a story cut off before scene
+            SCENE SIZE, identical for every scene: a scene is exactly ONE paragraph of those 9 sentences, 120-160 words, with any quoted
+            lines kept inside that paragraph (never on their own lines). Stop at the 9th sentence and start the next
+            tag; the output budget fits all {n} scenes at this size, so never shorten the later scenes (every scene needs as many sentences as scene 1), and a story cut off before scene
             {n:02d} is a failure. Never copy a blueprint sentence: render each field in fresh prose, and let the second sentence of
             a two-sentence field add a physical detail, perception, or reaction the blueprint did not state.
 
@@ -451,7 +488,7 @@ class QwenDirectorPromptMixin:
             CAST line to people who act; places, organizations, objects, devices, and forces are not people.
             Use each person's full name in the CAST line and first-name-only in beats after the first mention.
 
-            STORY DESIGN: make the central secret specific and surprising, with an odd, concrete cause rooted in the setting; avoid a generic corporate cover-up or weapon secret, and use a countdown only when this particular story needs one. Its twist must grow from an ordinary detail planted in scenes 01-04 that scene 06 or 08 recasts. Give every person one recurring physical habit or carried object, shown in at least two beats, and make allies and rivals want different things from each other and from the protagonist. Establish a concrete protagonist goal and immediate pressure early; make each
+            STORY DESIGN: make the central secret specific and surprising, with an odd, concrete cause rooted in the setting; avoid a generic corporate cover-up or weapon secret, and use a countdown only when this particular story needs one. BANNED STOCK SECRETS: no virus, bioweapon, experiment, cure, radiation, biohazard, contamination, alien, lab, clone, or "Project <Codename>" label; the secret is one odd, specific, human fact rooted in this setting (a wrong measurement kept for years, a death never reported, a rescue that was faked, a promise someone is still keeping). PERSONAL LINK: the protagonist is tied to the secret by scene 05 through their own earlier report, signature, or mistake, or a past tie to another CAST member (never a new off-screen relative, a death, or a past event that would change what the source says), and scene 11's costly choice is about that link. A hidden fact concerns the secret or another CAST member, never a new off-screen relative. COLLIDING WANTS: the CAST wants cannot all be satisfied (at most one person gets what they want), and each person hides a DIFFERENT kind of fact (never two people hiding the same thing, such as two lost relatives), revealed through an action or an object in one beat between scenes 04 and 10. SCENE 06 REVERSAL: the protagonist learns that a belief about the secret or about an ally was false, and scenes 07-12 pursue a changed goal. ONE PHYSICAL CLUE PER BEAT: every RESULT leaves something the characters can see, hold, or hear (an object, a mark, a door state, a recorded sound) that a later scene uses; never a feeling or a realization. NO REPEATED DEVICE: no two scenes are interrupted or closed the same way (phone call, someone arriving, alarm, power failure, collapse), and no sentence or closing image is reused. Its twist must grow from an ordinary detail planted in scenes 01-04 that scene 06 or 08 recasts. Give every person one recurring physical habit or carried object, shown in at least two beats, and make allies and rivals want different things from each other and from the protagonist. Establish a concrete protagonist goal and immediate pressure early; make each
             scene change the situation, knowledge, leverage, danger, or relationship. Escalate obstacles
             through character choices. Give the middle a meaningful reversal that changes what the
             protagonist believes or can do; make the lowest point impose a real cost; make the climax
@@ -519,7 +556,7 @@ class QwenDirectorPromptMixin:
             line back and Marta boarded, so the next scene began aboard the moving boat.
 
             CAST FORMAT (on screen means standing in the room, never a radio, comms, phone, or recording voice; no CAST person is ever written as a voice): first output exactly one line beginning CAST:; list every core character (a drama between people has four: protagonist, opponent, ally, and a complicating fourth) as
-            Name (role; what they want; how they speak; on screen in scenes NN, NN, NN) separated by |, giving
+            Name (role; what they want and what they hide, written "wants X, hides Y"; how they speak; on screen in scenes NN, NN, NN) separated by |; a new person's Name is a first name plus a surname with no title (a title such as Dr. belongs in the role), written that way in every beat, and a source character keeps the source name, giving
             each person's on-screen scene numbers (at least three each; the protagonist is in all of them). Then
             output exactly {n} lines,
             each beginning SCENE 01: through SCENE {n:02d}:, one line per scene with no line breaks inside a
@@ -678,7 +715,7 @@ class QwenDirectorPromptMixin:
                 # Over-long line: keep its first clause (3-9 words) as a quoted line; a "(words to convey)" marker made the
                 # Writer drop the quotation marks and lose the dialogue event entirely.
                 best = None
-                for cm in re.finditer(r"[,;:\u2014\u2013]|(?<=[.!?])\s", text):
+                for cm in re.finditer(r"[,;:\u2014\u2013\u2026]|\.{3}|(?<=[.!?])\s", text):
                     n_pre = len(text[:cm.start()].split())
                     if 3 <= n_pre <= 9:
                         best = cm
@@ -689,8 +726,28 @@ class QwenDirectorPromptMixin:
                         tail = m.string[m.end():]
                         end = "." if re.match(r"\s*(?:[A-Z]{4,}:|$)", tail) else ","
                         return "\u201c" + prefix + end + "\u201d"
+            if kept[0] < 2 and words > 9:
+                kept[0] += 1
+                return "\u201c" + " ".join(text.split()[:8]).rstrip(",;:\u2014\u2013\u2026.!? ") + ".\u201d"
             return text.strip()  # surplus line: plain narration, never a template marker the Writer could copy
 
+        def _bare(m):
+            body = m.group(2).strip()
+            if re.match(r"(?:he|she|they|his|her|their)\b", body, re.IGNORECASE):
+                return m.group(0)
+            parts = re.split(r"(?<=[,;:\u2014\u2013\u2026])\s*|(?<=[.!?])\s+", body)
+            out = ""
+            for part in parts:
+                cand = (out + " " + part).strip()
+                if len(cand.split()) > 9:
+                    break
+                out = cand
+            if len(out.split()) < 3:
+                out = " ".join(body.split()[:8])
+            out = out.rstrip(",;:\u2014\u2013\u2026.!? ") + "."
+            return m.group(1) + ", \u201c" + out + "\u201d "
+
+        line = re.sub(r"\b((?:muttered|snapped|hissed|whispered|said|screamed|asked|replied|shouted|growled|murmured|barked|cried|demanded))\s*,\s*([A-Z][^\u201c\u201d\"\n.!?]{2,}(?:\u2026[^\u201c\u201d\"\n.!?]*)*[.!?]+(?:\s+(?:I|You|We|It|That|Don|Let|Why|What|How|Then|But|And|No|Yes)\b[^\u201c\u201d\"\n.!?]*[.!?]+)?)(?=\s|$)", _bare, line)
         return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
 
     def _story_text_user(
@@ -728,7 +785,10 @@ class QwenDirectorPromptMixin:
                 "\n\nCAUSAL BLUEPRINT (binding for events, names, objects and continuity; it is an outline, not the length model):\n"
                 + re.sub(
                     r"(?m)^SCENE (\d{2}): ",
-                    lambda m: "SCENE " + m.group(1) + ((" (write 10 sentences, 140-165 words): " if int(m.group(1)) >= 9 else " (write 9-10 sentences, 130-155 words): ") if (mode != EXPAND_USER_STORY_MODE or long_beats) else (" (write 10 sentences, 145-170 words): " if int(m.group(1)) >= 9 else " (write 9-10 sentences, 135-160 words): ")),
+                    lambda m: "SCENE " + m.group(1) + (" (write 9 sentences, 125+ words): " if mode == EXPAND_USER_STORY_MODE else " (write 9 sentences, 135+ words): "),
+                    re.sub(
+                        r"\b(ENTRY|ACTION|OBSTACLE|CHOICE|COST|RESULT): ",
+                        lambda m: m.group(1) + {"ENTRY": " (1 sentence): ", "ACTION": " (2 sentences): ", "OBSTACLE": " (2 sentences): ", "CHOICE": " (2 sentences): ", "COST": " (1 sentence): ", "RESULT": " (1 sentence): "}[m.group(1)],
                     self._scrub_unsourced_years("\n".join(
                         # Short spoken lines stay quoted (at most two per beat) so the Writer
                         # voices them as dialogue; labels lose their quotes; long or surplus
@@ -736,10 +796,11 @@ class QwenDirectorPromptMixin:
                         self._blueprint_quote_markers(line)
                         for line in str(story_blueprint).strip().splitlines()
                     ), source_text),
+                    ),
                 )
                 + "\n\nHOW TO EXPAND THE BLUEPRINT: each scene's labelled fields (ENTRY, ACTION, OBSTACLE, CHOICE, COST, RESULT) become "
-                "roughly 8-10 prose sentences in all (about 130-155 words, never under 120) of varied length, mixing short sentences of 6-10 words with longer ones. "
-                "Treat each beat as raw material: open a scene with a place, a sound, or an object, reorder sentences where it reads better, and add one fresh concrete detail the blueprint does not state. Added sentences are action, perception, and consequence, never extra spoken lines: a scene has at most 3 quoted lines in total. Every scene is at least 120 words: when a beat is short, add two more sentences of consequence (a decision, a cost, a reaction), never filler. "
+                "exactly 1, 2, 2, 2, 1, 1 prose sentences, a 9-sentence scene of roughly 120-150 words, each sentence 14-18 words. "
+                "Treat each beat as raw material: open a scene with a place, a sound, or an object, reorder sentences where it reads better, and add one fresh concrete detail the blueprint does not state. Added sentences are action, perception, and consequence, never extra spoken lines: a scene has at most 3 quoted lines in total. "
                 "Never copy a blueprint sentence; the second sentence of each two-sentence field adds a physical detail, perception, or reaction "
                 "that the blueprint does not state. Do not let a short beat produce a short scene; scenes 7-12 are as long as scene 1. "
                 "A '(words to convey: ...)' marker is content, not a quotation: voice at most two of them per scene as quoted lines of at most 9 words, "
@@ -764,12 +825,13 @@ class QwenDirectorPromptMixin:
             "\n\nWRITER OUTPUT CONTRACT: Return exactly " + str(n) + " scene blocks in numeric order. "
             "Prefix each block with its exact structural tag [[SCENE_01]] through [[SCENE_" + f"{n:02d}" + "]], "
             "followed by one space and that scene's prose. Use every tag exactly once; the application removes these tags. "
-            "Each marked scene is one developed paragraph of 8-10 full sentences, as in the calibration example, never a summary. "
+            "Each marked scene is one developed paragraph of 9 full sentences, as in the calibration example, never a summary. "
             "The story is " + str(target) + " words in total and must reach at least " + str(writing_floor)
             + " usable words; it may extend toward " + str(stretch) + " words when the causal story needs it. "
-            "Aim for about " + str(per) + " words per scene at the very least, and most scenes should land around 125-150. "
-            "HARD CEILING: each scene is ONE paragraph of 8-10 sentences and 120-155 words, with quoted lines inside the paragraph and never on their own lines; "
-            "stop after the 10th sentence at the latest and start the next tag, because the output budget only fits all " + str(n) + " scenes if none runs long. "
+            "Aim for about " + str(per) + " words per scene at the very least, and most scenes should land around 120-150. "
+            "SCENE SIZE, identical for every scene: each scene is ONE paragraph of exactly 9 sentences and 120-160 words, with quoted lines inside the paragraph and never on their own lines; "
+            "stop after the 9th sentence and start the next tag, because the output budget fits all " + str(n) + " scenes at this size, so never shorten the later scenes: every scene needs as many sentences as scene 1. "
+            "SCENE ENDINGS: the last sentence of every scene names something physical that the characters can see, hold, or hear (an object, a mark, a door or lock state, a sound) and that the next scene uses; never end a scene on a realization, a feeling, tension, silence, unclear intentions, a storm, or a future threat, and never end two scenes the same way (a phone call, someone arriving, an alarm, a power failure). When the blueprint reveals the secret or a hidden fact, show it through an action or an object, never a summary. "
             "Per-scene distribution is flexible guidance, not a quota, but every scene completes its shape "
             "(entry, action, obstacle, choice, cost, result) before the next tag begins, "
             "and scenes 9-" + f"{n:02d}" + " are as fully developed as scenes 1-3. Never pad or repeat ideas; each added sentence carries "
@@ -791,7 +853,7 @@ class QwenDirectorPromptMixin:
             "Output only the " + str(n) + " tagged story blocks; no headings, planning notes, word counts, checklists, markdown separators, summaries, or postscript.\n\n"
             "Begin now with [[SCENE_01]] and write every scene in full through [[SCENE_" + f"{n:02d}" + "]]."
         )
-        return result
+        return self._lift_late_scenes(self._expand_longer(result))
 
     def _sampling_for_mode(
         self,
