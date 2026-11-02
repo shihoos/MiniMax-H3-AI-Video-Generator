@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib.metadata as importlib_metadata
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -137,6 +139,50 @@ def load_json(
 
 
 # ============================================================
+# MAIN COMFYUI PYTORCH RUNTIME
+# ============================================================
+
+def check_main_pytorch() -> None:
+    runtime = load_yaml(RUNTIME_MANIFEST)
+    config = runtime.get("pytorch", {}) or {}
+    version = str(config.get("version", "") or "").strip()
+    cuda_tag = str(config.get("cuda", "") or "").strip().lower()
+    if version != "2.10.0" or cuda_tag != "cu130":
+        raise RuntimeError("Main ComfyUI runtime must remain PyTorch 2.10.0/cu130.")
+    expected_torch = f"{version}+{cuda_tag}"
+    try:
+        import torch
+    except Exception as exc:
+        raise RuntimeError("Unable to import the main ComfyUI PyTorch runtime.") from exc
+    actual_torch = str(torch.__version__)
+    expected_cuda = "13.0"
+    if actual_torch != expected_torch or str(torch.version.cuda) != expected_cuda:
+        raise RuntimeError(
+            "Main ComfyUI PyTorch runtime mismatch: "
+            f"expected={expected_torch}/{expected_cuda}, "
+            f"actual={actual_torch}/{torch.version.cuda}."
+        )
+    expected_tv = str(config.get("torchvision_version", "") or "").strip()
+    expected_ta = str(config.get("torchaudio_version", "") or "").strip()
+    if importlib_metadata.version("torchvision") != expected_tv:
+        raise RuntimeError("Main ComfyUI torchvision version does not match runtime_versions.yaml.")
+    if importlib_metadata.version("torchaudio") != expected_ta:
+        raise RuntimeError("Main ComfyUI torchaudio version does not match runtime_versions.yaml.")
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        raise RuntimeError("Main H3 runtime requires both configured Tesla T4 GPUs to be visible.")
+    capabilities = [torch.cuda.get_device_capability(index) for index in range(torch.cuda.device_count())]
+    if any(capability != (7, 5) for capability in capabilities):
+        raise RuntimeError(f"Main H3 runtime expects SM75 Tesla T4 GPUs; got {capabilities}.")
+    director = runtime.get("director", {}) or {}
+    director_env = Path(str(director.get("vllm_env_dir", ""))).expanduser().resolve()
+    main_python = Path(sys.executable).resolve()
+    director_python = director_env / "bin" / "python"
+    if director_python.resolve() == main_python:
+        raise RuntimeError("vLLM Director must not share the ComfyUI Python environment.")
+    print(f"MAIN PYTORCH: PASS torch={actual_torch} cuda={torch.version.cuda} GPUs={capabilities}")
+
+
+# ============================================================
 # DIRECTOR
 # ============================================================
 
@@ -268,6 +314,11 @@ def check_director() -> None:
     print("DIRECTOR SPECULATOR:", speculator)
     director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
     version = str(director.get("vllm_version", "") or "").strip()
+    if version != "0.32.0":
+        raise RuntimeError(f"Director vLLM must be exactly 0.32.0, got {version!r}.")
+    loader_strategy = str(director.get("safetensors_load_strategy", "") or "").strip().lower()
+    if loader_strategy != "eager":
+        raise RuntimeError("runtime_versions.yaml Director safetensors_load_strategy must default to eager.")
     transformers_version = _exact_requirement_pin("transformers")
     tokenizers_version = _exact_requirement_pin("tokenizers")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
@@ -286,11 +337,28 @@ def check_director() -> None:
     venv_python = env_dir / "bin" / "python"
     if not version or not venv_python.is_file():
         raise RuntimeError("Pinned vLLM environment is missing; run bootstrap first.")
+    torch_version = str(director.get("vllm_torch_version", "") or "").strip()
+    cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
+    expected_torch = f"{torch_version}+{cuda_tag}"
+    if cuda_tag != "cu130" or not torch_version:
+        raise RuntimeError("Director vLLM runtime must explicitly lock PyTorch 2.13.0/cu130.")
+    if str(load_yaml(RUNTIME_MANIFEST).get("python", {}).get("kaggle", "")) != "3.12":
+        raise RuntimeError("Kaggle runtime must use Python 3.12 for the pinned vLLM environment.")
     probe = (
-        "import vllm, transformers, tokenizers; "
+        "import sys, inspect, vllm, torch, transformers, tokenizers; "
         "from transformers import Qwen3Config; "
         "from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM; "
+        "from vllm.config.load import LoadConfig; "
+        "assert sys.version_info[:2] == (3, 12), sys.version; "
+        f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
+        "assert torch.version.cuda == '13.0', torch.version.cuda; "
+        "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
+        "assert torch.cuda.is_available() and torch.cuda.device_count() == 2; "
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
         "print('vLLM version:', vllm.__version__); "
+        "print('Director Torch version:', torch.__version__); "
+        "print('Director CUDA runtime:', torch.version.cuda); "
+        "print('safetensors loader API: PASS'); "
         "print('Transformers version:', transformers.__version__); "
         "print('tokenizers version:', tokenizers.__version__); "
         "print('Qwen3 imports: PASS')"
@@ -334,36 +402,42 @@ def check_director() -> None:
 
 def check_comfyui() -> None:
     runtime = load_yaml(RUNTIME_MANIFEST)
-    config = runtime.get("comfyui", {})
+    config = runtime.get("comfyui", {}) or {}
     main_py = COMFY / "main.py"
     if not main_py.is_file():
         raise RuntimeError(f"ComfyUI is not installed: {main_py}")
-
     expected_version = str(config.get("expected_version", "") or "").strip()
     revision = str(config.get("revision", "") or "").strip()
+    if expected_version != "0.43.2" or revision != "423cbd20511becb1f16122ab518e92e58bfa03d9":
+        raise RuntimeError("Runtime manifest must lock ComfyUI v0.43.2 to its exact release commit.")
     if not (COMFY / ".git").is_dir():
         raise RuntimeError(f"ComfyUI is not a git checkout: {COMFY}")
+    head = subprocess.run(["git", "-C", str(COMFY), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+    expected_head = subprocess.run(["git", "-C", str(COMFY), "rev-list", "-n", "1", revision], capture_output=True, text=True, check=True).stdout.strip()
+    if head != expected_head:
+        raise RuntimeError(f"ComfyUI revision mismatch: {head} != {expected_head}")
+    tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
+    if tagged not in {"0.43.2", "v0.43.2"}:
+        raise RuntimeError(f"ComfyUI release tag mismatch: expected=v0.43.2, actual={tagged or 'untagged'}")
 
-    head = subprocess.run(
-        ["git", "-C", str(COMFY), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    if revision:
-        expected_head = subprocess.run(
-            ["git", "-C", str(COMFY), "rev-list", "-n", "1", revision],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        if head != expected_head:
-            raise RuntimeError(
-                f"ComfyUI revision mismatch: {head} != {expected_head}"
-            )
-
-    print("COMFYUI RUNTIME: PASS", expected_version or revision)
-
-
-# ============================================================
-# H3 MODELS
-# ============================================================
+    model_source = (COMFY / "comfy/ldm/minimax/model.py").read_text(encoding="utf-8")
+    vae_source = (COMFY / "comfy/ldm/minimax/vae.py").read_text(encoding="utf-8")
+    supported_source = (COMFY / "comfy/supported_models.py").read_text(encoding="utf-8")
+    required_model = ("class MiniMaxH3Model", "def _embed_and_pack(", "preferred_attention=self.comfy_attention")
+    missing = [marker for marker in required_model if marker not in model_source]
+    if missing:
+        raise RuntimeError("ComfyUI H3 model.py source contract mismatch: " + ", ".join(missing))
+    if "v = v.clone()" in model_source:
+        raise RuntimeError("Obsolete H3 value clone is present in ComfyUI 0.43.2 model.py")
+    if "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters" not in vae_source:
+        raise RuntimeError("H3 VAE decoder dtype patch marker is missing")
+    if "decoder_parameter.dtype" not in vae_source:
+        raise RuntimeError("H3 VAE decoder dtype guard is incomplete")
+    if "memory_usage_factor = 0.17" not in supported_source:
+        raise RuntimeError("MiniMax H3 memory_usage_factor must be 0.17 for the T4 runtime")
+    if "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]" not in supported_source:
+        raise RuntimeError("MiniMax H3 FP16 inference dtype is not registered")
+    print("COMFYUI RUNTIME: PASS", tagged, head)
 
 def check_models() -> None:
 
@@ -698,6 +772,8 @@ def check_delivery() -> None:
 # ============================================================
 
 def main():
+
+    check_main_pytorch()
 
     check_director()
 
