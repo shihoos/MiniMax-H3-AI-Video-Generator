@@ -4,9 +4,11 @@ python:
   wrapt_version: 2.4.1
 comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
-  expected_version: 0.34.0
-  revision: 12d5279438bfefc058a269eae805ceab6047777f
-  h3_t4_value_clone_workaround: true
+  expected_version: 0.43.2
+  revision: 423cbd20511becb1f16122ab518e92e58bfa03d9
+  # v0.43.2 already avoids the redundant H3 V clone; do not reapply the obsolete v0.34 patch.
+  h3_t4_value_clone_workaround: false
+  h3_vae_decoder_dtype_patch: true
 cuda_runtime:
   runtime_package: nvidia-cuda-runtime
   runtime_version: 13.3.29
@@ -33,10 +35,16 @@ director:
   model_path: /kaggle/input/qwen3-14b-awq
   format: safetensors-awq
   backend: vllm
-  vllm_version: 0.31.0
-  # vLLM 0.31.0 supports Transformers >=5.10.4,<5.18.0; the project's 5.17.0 pin is within range.
+  vllm_version: 0.32.0
+  # The vLLM runtime is isolated from ComfyUI and uses its CUDA 13.0 / PyTorch 2.13.0 stack.
+  vllm_torch_version: 2.13.0
+  vllm_cuda: cu130
+  safetensors_load_strategy: eager
+  eager_ram_safety_factor: 1.25
+  eager_ram_warning_reserve_gib: 4.0
+  # vLLM 0.32.0 accepts Transformers 5.16.1-5.19.x and tokenizers >=0.23.2.
   allow_transformers_vllm_constraint_override: false
-  vllm_env_dir:  /tmp/h3_qwen_vllm_031_tf517_tok0233
+  vllm_env_dir: /tmp/h3_qwen_vllm_032_tf517_tok0233
   context: 10240
   max_tokens: 7000
   story_max_tokens: 6500
@@ -52,7 +60,7 @@ director:
   speculative_tokens: 2
   generation_config: vllm
   # Bounded Qwen3 hybrid story flow: reason about structure, then write clean prose.
-  # Native thinking_token_budget is supported by this vLLM 0.31.0 runtime.
+  # Native thinking_token_budget is supported by the pinned vLLM 0.32.0 runtime.
   story_architecture:
     # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
     max_tokens: 3600
