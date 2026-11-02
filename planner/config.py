@@ -209,8 +209,12 @@ if DIRECTOR_STORY_SCENES < 4 or DIRECTOR_SHOTS_PER_SCENE < 1 or STORY_WORDS_PER_
     raise RuntimeError("runtime_versions.yaml story_contract topology values are invalid.")
 if STORY_TARGET_WORDS != DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE:
     raise RuntimeError("runtime_versions.yaml story_contract target_words must equal scene_count * words_per_scene.")
-if not 1 <= STORY_MIN_WORDS <= STORY_TARGET_WORDS:
-    raise RuntimeError("runtime_versions.yaml story_contract minimum_words must be between 1 and target_words.")
+if STORY_WORDS_PER_SCENE * DIRECTOR_STORY_SCENES < STORY_MIN_WORDS:
+    raise RuntimeError("runtime_versions.yaml per-scene target does not support the hard minimum story length.")
+if STORY_MIN_WORDS < 1400 or STORY_ACCEPT_MIN_WORDS < 1400:
+    raise RuntimeError("AI/Expand story_contract minimum_words and accept_min_words must both be at least 1,400.")
+if not 1400 <= STORY_MIN_WORDS <= STORY_TARGET_WORDS:
+    raise RuntimeError("runtime_versions.yaml story_contract minimum_words must be between 1,400 and target_words.")
 if DIRECTOR_STORY_CAST_SIZE_POLICY != "plot_driven":
     raise RuntimeError(
         "runtime_versions.yaml story_contract cast_size_policy must be 'plot_driven'; "
