@@ -2258,63 +2258,6 @@ class QwenDirectorRuntimeMixin:
 
         return parsed
 
-    # H3_V53_BEST_OF_N_V1
-    def _h3_pick_best_story(self, response, call_name):
-        """Keep the best of the N Writer samples as choices[0]: complete drafts of 1400-1800 words with the fewest defects first."""
-        try:
-            choices = list(response.get("choices") or [])
-            if len(choices) < 2:
-                return response
-            metrics = getattr(self, "_revision_metrics", None)
-
-            def _n(v):
-                if isinstance(v, (list, tuple, set, dict)):
-                    return len(v)
-                try:
-                    return int(v or 0)
-                except Exception:
-                    return 0
-
-            rows = []
-            for idx, ch in enumerate(choices):
-                text = str(((ch or {}).get("message") or {}).get("content") or "")
-                text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL)
-                body = re.sub(r"\s*\[\[SCENE_\d+\]\]\s*", "\n\n", text).strip()
-                words = len(re.findall(r"\b[\w'’-]+\b", body))
-                tags = len(set(re.findall(r"\[\[SCENE_(\d+)\]\]", text)))
-                bad = 0
-                if metrics is not None and body:
-                    try:
-                        m = metrics(body)
-                        bad = (_n(m.get("tense")) + _n(m.get("stock")) + 3 * _n(m.get("dups")) + _n(m.get("vague"))
-                               + 3 * _n(m.get("label")) + 3 * _n(m.get("relative")) + 2 * _n(m.get("runs"))
-                               + _n(m.get("nocost")) + _n(m.get("nofate")))
-                    except Exception:
-                        bad = 0
-                complete = str((ch or {}).get("finish_reason") or "") != "length" and tags >= 12
-                if complete and 1400 <= words <= 1800:
-                    key = (0, bad, abs(words - 1550))
-                elif complete and words > 1800:
-                    key = (1, words, 0)
-                elif complete:
-                    key = (2, -words, 0)
-                else:
-                    key = (3, -words, 0)
-                rows.append((key, idx, words, bad))
-            rows.sort()
-            best = rows[0][1]
-            if best != 0:
-                choices.insert(0, choices.pop(best))
-                response["choices"] = choices
-            print(
-                f"[QWEN] {call_name} samples={len(choices)} words={[r[2] for r in sorted(rows, key=lambda r: r[1])]} "
-                f"defects={[r[3] for r in sorted(rows, key=lambda r: r[1])]} kept=sample {best + 1}",
-                flush=True,
-            )
-        except Exception as exc:
-            print(f"[QWEN] best-of-N selection skipped: {type(exc).__name__}: {exc}", flush=True)
-        return response
-
     def _chat_text(
         self,
         system_prompt: str,
@@ -2380,12 +2323,8 @@ class QwenDirectorRuntimeMixin:
         response = None
         error_text = ""
 
+        # One Author completion only. No n=3 candidate fan-out, ranking, or revision pass.
         _h3_n = 1
-        if str(call_name).endswith("story_text_pass"):
-            try:
-                _h3_n = max(1, min(5, int(os.getenv("H3_STORY_WRITER_SAMPLES", "3"))))
-            except (TypeError, ValueError):
-                _h3_n = 3
 
         print(f"[QWEN] START {call_name}", flush=True)
 
@@ -2402,8 +2341,6 @@ class QwenDirectorRuntimeMixin:
                 thinking_token_budget=thinking_token_budget,
                 n_samples=_h3_n,
             )
-            if _h3_n > 1:
-                response = self._h3_pick_best_story(response, call_name)
         except Exception as exc:
             error_text = f"{type(exc).__name__}: {exc}"
             raise
