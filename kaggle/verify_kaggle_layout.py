@@ -234,6 +234,38 @@ def verify_runtime_config() -> None:
         fail("Director Writer max_tokens must remain 3000")
     print("[PASS] Runtime configuration")
 
+def verify_director_runtime_source() -> None:
+    """Validate Director launch contracts in the Director runtime, not bootstrap."""
+    runtime_path = ROOT / "planner" / "qwen_director_runtime.py"
+    require_file(runtime_path)
+    source = runtime_path.read_text(encoding="utf-8")
+    required = (
+        "DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
+        "--safetensors-load-strategy",
+        "DIRECTOR_VLLM_VERSION",
+        '"/version"',
+        "def _use_direct_checkpoint(",
+        "def _begin_startup_metrics(",
+        "def _finish_startup_metrics(",
+        "apply_chat_template(",
+    )
+    for marker in required:
+        if marker not in source:
+            fail(f"Director runtime source is missing required contract: {marker}")
+    if '"model_staging": False' not in source and "'model_staging': False" not in source:
+        fail("Director startup telemetry must record model_staging=false")
+    for forbidden in (
+        "_stage_to_local_scratch",
+        "H3_DIRECTOR_STAGE_LOCAL",
+        "/tmp/staged_models",
+        "shutil.copytree",
+        "shutil.copy2",
+    ):
+        if forbidden in source:
+            fail(f"Director must load the checkpoint directly from its mounted source: {forbidden}")
+    print("[PASS] Director runtime source")
+
+
 def verify_sage_attention_patch_recipe() -> None:
     """Verify the inline SageAttention SM75 source-replacement recipe and live result."""
     source = BOOTSTRAP.read_text(encoding="utf-8")
@@ -601,6 +633,54 @@ def verify_python() -> None:
     print(f"[PASS] Python syntax: {checked} files")
 
 
+def _extract_embedded_runtime_targets(bootstrap_text: str) -> tuple[str, ...]:
+    """Read the literal runtime target tuple from the bootstrap AST.
+
+    This intentionally ignores source quote style. Comparing quoted source
+    substrings made the layout verifier reject valid double-quoted paths.
+    """
+    try:
+        tree = ast.parse(bootstrap_text, filename=str(BOOTSTRAP))
+    except SyntaxError as exc:
+        fail(f"Bootstrap source is not valid Python: {exc}")
+
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "apply_embedded_h3_runtime_overlay"
+    ]
+    if len(functions) != 1:
+        fail(
+            "Bootstrap must define exactly one "
+            "apply_embedded_h3_runtime_overlay() function"
+        )
+
+    assignments = [
+        node
+        for node in ast.walk(functions[0])
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target_node, ast.Name) and target_node.id == "targets"
+            for target_node in node.targets
+        )
+    ]
+    if len(assignments) != 1:
+        fail(
+            "Bootstrap embedded H3 runtime overlay must define exactly one "
+            "literal targets tuple"
+        )
+    try:
+        targets = ast.literal_eval(assignments[0].value)
+    except (TypeError, ValueError, SyntaxError) as exc:
+        fail(f"Bootstrap embedded runtime targets are not literal: {exc}")
+    if not isinstance(targets, (tuple, list)) or not all(
+        isinstance(target, str) for target in targets
+    ):
+        fail("Bootstrap embedded runtime targets must be a tuple/list of strings")
+    return tuple(targets)
+
+
 def verify_bootstrap() -> None:
     bootstrap = ROOT / "kaggle/bootstrap.py"
     require_file(bootstrap)
@@ -608,15 +688,19 @@ def verify_bootstrap() -> None:
     for name in ("apply_embedded_h3_runtime_overlay", "verify_runtime_files", "patch_h3_fp16_runtime", "patch_h3_vae_decoder_dtype", "patch_h3_embedding_memory_compatibility"):
         if name not in text:
             fail(f"Bootstrap is missing required runtime operation: {name}")
-    embedded_targets = (
-        "'comfy/ldm/minimax/model.py'",
-        "'comfy/ldm/minimax/vae.py'",
-        "'comfy/supported_models.py'",
-        "'custom_nodes/ComfyUI-MiniMax-H3-Turbo/__init__.py'",
-    )
-    for target in embedded_targets:
-        if target not in text:
-            fail(f"Bootstrap embedded runtime target is missing: {target}")
+    embedded_targets = set(_extract_embedded_runtime_targets(text))
+    required_targets = {
+        "comfy/ldm/minimax/model.py",
+        "comfy/ldm/minimax/vae.py",
+        "comfy/supported_models.py",
+        "custom_nodes/ComfyUI-MiniMax-H3-Turbo/__init__.py",
+    }
+    missing_targets = sorted(required_targets.difference(embedded_targets))
+    if missing_targets:
+        fail(
+            "Bootstrap embedded runtime targets are missing: "
+            + ", ".join(missing_targets)
+        )
     required_contracts = (
         "preferred_attention=self.comfy_attention",
         "def _embed_and_pack(",
@@ -624,8 +708,6 @@ def verify_bootstrap() -> None:
         "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]",
         "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters",
         "decoder_parameter = next(self.decoder.parameters(), None)",
-        "--safetensors-load-strategy",
-        "DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
         "vllm=={vllm_version}",
         "torch.cuda.device_count() == {tensor_parallel_size}",
     )
@@ -650,6 +732,7 @@ def verify_bootstrap() -> None:
 def main() -> None:
     verify_bootstrap()
     verify_runtime_config()
+    verify_director_runtime_source()
     verify_sage_attention_patch_recipe()
     verify_custom_nodes()
     verify_comfy_runtime()
