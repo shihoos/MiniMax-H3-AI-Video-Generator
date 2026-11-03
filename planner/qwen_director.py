@@ -4,7 +4,6 @@ from copy import deepcopy
 from contextlib import redirect_stdout
 import io
 from pathlib import Path
-import os
 import json
 import random
 import re
@@ -26,10 +25,8 @@ from planner.config import (
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
-    STORY_WORDS_PER_SCENE,
     STORY_TARGET_WORDS,
     STORY_WRITER_WORDS_PER_SCENE,
-    STORY_MIN_WORDS,
     STORY_ACCEPT_MIN_WORDS,
     STORY_PLAN_BEAT_MIN_WORDS,
     STORY_PLAN_BEAT_MAX_WORDS,
@@ -42,11 +39,6 @@ from planner.config import (
     DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
     DIRECTOR_STORY_THINKING_TEMPERATURE,
     DIRECTOR_STORY_THINKING_TOP_P,
-    DIRECTOR_STORY_THINKING_TOP_K,
-    DIRECTOR_STORY_THINKING_MIN_P,
-    DIRECTOR_STORY_WRITER_TOP_K,
-    DIRECTOR_STORY_WRITER_MIN_P,
-    DIRECTOR_STORY_PRESENCE_PENALTY,
     EXPAND_USER_STORY_MODE,
     PRESERVE_USER_STORY_MODE,
     director_enabled,
