@@ -78,17 +78,12 @@ def verify_workflow(path: Path, turbo: bool) -> None:
     scheduler = get_node(workflow, "BasicScheduler")
     guider = get_node(workflow, "BasicGuider")
 
-    forbidden = {
-        "MiniMaxH3FP16Safe",
-        "MiniMaxH3_FP16_T4",
-    }
-
+    forbidden = {"MiniMaxH3FP16Safe", "MiniMaxH3_FP16_T4"}
     present_forbidden = {
         node.get("type")
         for node in workflow.get("nodes", [])
         if node.get("type") in forbidden
     }
-
     if present_forbidden:
         fail(
             f"Forbidden production nodes present in {path}: "
@@ -197,8 +192,6 @@ def verify_runtime_config() -> None:
         fail("ComfyUI version must be 0.43.2")
     if comfy.get("revision") != "423cbd20511becb1f16122ab518e92e58bfa03d9":
         fail("ComfyUI revision must be the exact v0.43.2 commit")
-    if comfy.get("h3_t4_value_clone_workaround") is not False:
-        fail("The obsolete H3 V-clone workaround must remain disabled on ComfyUI 0.43.2")
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
         fail("The v0.43.2 H3 VAE decoder dtype guard must be enabled")
 
@@ -253,17 +246,9 @@ def verify_sage_attention_patch_recipe() -> None:
         )
         return
 
-    forbidden = (
-        "SAGE_SM75_PATCH",
-        "git apply --check",
-        'patch_sha256',
-    )
-    present_forbidden = [needle for needle in forbidden if needle in source]
-    if present_forbidden:
-        fail(
-            "Bootstrap still contains retired SageAttention patch machinery:\n"
-            + "\n".join(present_forbidden)
-        )
+    for forbidden in ("SAGE_SM75_PATCH", "git apply --check", "patch_sha256"):
+        if forbidden in source:
+            fail(f"Bootstrap contains retired SageAttention patch machinery: {forbidden}")
 
     required_recipe = (
         '_apply_sage_sm75_source_corrections',
@@ -293,8 +278,7 @@ def verify_sage_attention_patch_recipe() -> None:
     runtime = yaml.safe_load(RUNTIME.read_text(encoding="utf-8")) or {}
     sage = runtime.get("sage_attention") or {}
     if "patch_sha256" in sage:
-        fail("runtime_versions.yaml still contains retired sage_attention.patch_sha256")
-
+        fail("runtime_versions.yaml contains the retired sage_attention.patch_sha256 field")
     directory = str(sage.get("directory", "") or "").strip()
     if not directory:
         fail("runtime_versions.yaml sage_attention.directory is required")
@@ -393,14 +377,11 @@ def verify_h3_optimization_source() -> None:
             fail(f"H3 embedding guarded fallback contract is missing: {marker}")
     if "MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V3" in embedding_source:
         fail("Obsolete project-patched H3 embedding forward remains in the pinned plugin")
-
     for name, required in {
         "providers.py": (
-            "# MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT",
-            "# MINIMAX_H3_T4_FORCE_BOUNDED_QKV",
+            "# MINIMAX_H3_T4_PRESERVE_BOUNDED_QKV",
         ),
         "apply.py": (
-            "# MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV",
             "# MINIMAX_H3_T4_QKV_RUNTIME_SELECTION",
         ),
         "bf16.py": (
@@ -411,6 +392,17 @@ def verify_h3_optimization_source() -> None:
         for marker in required:
             if marker not in source:
                 fail(f"H3-Optimizations {name} patch marker is missing: {marker}")
+        if name == "providers.py":
+            tree = ast.parse(source, filename=name)
+            helper = next(
+                (node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_resolve_preserve_precision_qkv"),
+                None,
+            )
+            if helper is None:
+                fail("H3-Optimizations preserve-precision helper is missing")
+            helper_text = ast.get_source_segment(source, helper) or ""
+            if "memory_optimize" in helper_text or "request ==" in helper_text:
+                fail("H3-Optimizations resolver-only variables leaked into the preserve helper")
 
     print("[PASS] H3-Optimizations source patches")
 
@@ -448,7 +440,8 @@ def verify_comfy_runtime() -> None:
     ):
         if forbidden in model_text:
             fail(f"Obsolete ComfyUI 0.34 H3 forward patch is present: {forbidden}")
-
+    if "mm.MLP.forward =" in model_text or "mm.DiTBlock.forward =" in model_text:
+        fail("Forbidden global MLP/DiTBlock monkey-patch remains in H3 model")
     for required in (
         "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters",
         "decoder_parameter = next(self.decoder.parameters(), None)",
@@ -456,15 +449,17 @@ def verify_comfy_runtime() -> None:
     ):
         if required not in vae_text:
             fail(f"H3 VAE decoder dtype patch is incomplete: {required}")
+    try:
+        from kaggle.bootstrap import _validate_h3_vae_decoder_source
+        _validate_h3_vae_decoder_source(vae_text, str(vae))
+    except RuntimeError as exc:
+        fail(f"H3 VAE _decode_pixels AST contract failed: {exc}")
     if "memory_usage_factor = 0.17" not in supported_text:
         fail("MiniMax H3 T4 memory-estimation factor must be 0.17")
     if "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]" not in supported_text:
         fail("MiniMax H3 must register FP16 inference support")
     if "class MiniMaxH3TurboLoRA" not in turbo_text:
         fail("MiniMaxH3TurboLoRA runtime node is missing")
-    if "mm.MLP.forward =" in model_text or "mm.DiTBlock.forward =" in model_text:
-        fail("Forbidden legacy global MLP/DiTBlock monkey-patch remains in H3 model")
-
     try:
         head = subprocess.check_output(["git", "-C", str(COMFY), "rev-parse", "HEAD"], text=True).strip()
         tag = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
@@ -491,6 +486,10 @@ def verify_custom_nodes() -> None:
         for group in config["custom_nodes"].values()
         for node in group
     }
+    forbidden = {"ComfyUI-MiniMaxH3FP16Safe", "ComfyUI-MiniMaxH3_FP16_T4"}
+    present_forbidden = forbidden & installed
+    if present_forbidden:
+        fail(f"Forbidden experimental nodes present: {sorted(present_forbidden)}")
 
     required = {
         "Comfyui_Minimax_h3_latent_Upscaler",
@@ -507,19 +506,6 @@ def verify_custom_nodes() -> None:
         fail(
             "Required custom nodes missing from manifest: "
             f"{sorted(missing)}"
-        )
-
-    forbidden = {
-        "MiniMaxH3_FP16_T4",
-        "ComfyUI-MiniMaxH3FP16Safe",
-    }
-
-    present = forbidden & installed
-
-    if present:
-        fail(
-            "Forbidden experimental nodes present: "
-            f"{sorted(present)}"
         )
 
     print("[PASS] Custom-node manifest")
@@ -652,9 +638,9 @@ def verify_bootstrap() -> None:
         "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
     ):
         if forbidden in text:
-            fail(f"Bootstrap still contains an obsolete H3 compatibility patch: {forbidden}")
+            fail(f"Bootstrap contains obsolete ComfyUI 0.34 H3 compatibility logic: {forbidden}")
     if "mm.MLP.forward =" in text or "mm.DiTBlock.forward =" in text:
-        fail("Bootstrap still contains the forbidden legacy global MLP/DiTBlock monkey-patch")
+        fail("Bootstrap contains forbidden global MLP/DiTBlock monkey-patching")
     if "patch_h3_sage_attention" not in text:
         fail("Bootstrap is missing the H3 T4 SageAttention patch operation")
     if "__SAGE_SMOOTH_K_TEXT__" not in text or "__SAGE_QK_QUANT_GRAN_TEXT__" not in text:
