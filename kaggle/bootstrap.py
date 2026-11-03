@@ -1,8 +1,10 @@
 from __future__ import annotations
-import hashlib
+
+import ast
 import importlib.metadata as importlib_metadata
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -638,7 +640,6 @@ def apply_embedded_h3_runtime_overlay() -> None:
     runtime = load_yaml(RUNTIME_MANIFEST)
     patch_h3_fp16_runtime(runtime)
     patch_h3_vae_decoder_dtype(runtime)
-    patch_t4_h3_value_clone(runtime)
     model_text = (COMFY / "comfy/ldm/minimax/model.py").read_text(encoding="utf-8")
     vae_text = (COMFY / "comfy/ldm/minimax/vae.py").read_text(encoding="utf-8")
     supported_text = (COMFY / "comfy/supported_models.py").read_text(encoding="utf-8")
@@ -658,8 +659,6 @@ def apply_embedded_h3_runtime_overlay() -> None:
     missing = [f"{name}: {item}" for name, markers in checks.items() for item in markers if item not in sources[name]]
     if missing:
         raise RuntimeError("H3 v0.43.2 source verification failed:\n" + "\n".join(missing))
-    if "v = v.clone()" in model_text:
-        raise RuntimeError("Obsolete V clone remains in ComfyUI H3 model.py")
     print("[H3 COMFY PATCH] v0.43.2 native forward + T4 dtype/memory/VAE overlay verified")
 
 
@@ -865,19 +864,6 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
             "ComfyUI H3 model.py does not match the v0.43.2 source contract; "
             "refusing to apply an old T4 forward patch: " + ", ".join(missing)
         )
-    if "v = v.clone()" in model_text:
-        raise RuntimeError("ComfyUI v0.43.2 unexpectedly contains the obsolete H3 V clone source.")
-    # Build forbidden signatures from fragments so the bootstrap itself does
-    # not carry old 0.34 patch snippets that a repository audit could mistake
-    # for transformations to be applied.
-    forbidden_old_patches = (
-        "condition_proj(text_states.to(" + "torch.float32))",
-        "low_precision_" + "attention=False",
-        "self.out_proj((out / " + "64.0).to(torch.float16))",
-    )
-    if any(marker in model_text for marker in forbidden_old_patches):
-        raise RuntimeError("Obsolete ComfyUI v0.34 H3 forward modifications are present in model.py.")
-
     source = supported.read_text(encoding="utf-8")
     if "memory_usage_factor = 0.17" not in source:
         old_factor = "memory_usage_factor = 0.114"
@@ -895,20 +881,60 @@ def patch_h3_fp16_runtime(runtime: dict) -> None:
     print("[H3 COMFY PATCH] native v0.43.2 H3 forward retained; T4 FP16 dtype and memory estimate enabled")
 
 
-def patch_t4_h3_value_clone(runtime: dict) -> None:
-    """Verify the upstream v0.43.2 H3 attention path already avoids the old V clone."""
-    enabled = bool(runtime.get("comfyui", {}).get("h3_t4_value_clone_workaround", False))
-    if enabled:
-        raise RuntimeError("h3_t4_value_clone_workaround must be false for the pinned ComfyUI 0.43.2 source.")
-    target = COMFY / "comfy/ldm/minimax/model.py"
-    if not target.is_file():
-        raise RuntimeError(f"H3 model source not found: {target}")
-    text = target.read_text(encoding="utf-8")
-    if "v = v.clone()" in text:
-        raise RuntimeError("Pinned ComfyUI source contains a V clone; this release's attention path must be reviewed before use.")
-    if "preferred_attention=self.comfy_attention" not in text:
-        raise RuntimeError("Pinned ComfyUI H3 attention signature is not the expected v0.43.2 implementation.")
-    print("[H3 T4 PATCH] native v0.43.2 V handling verified; no source mutation required")
+def _validate_h3_vae_decoder_source(source: str, filename: str) -> None:
+    """Fail closed unless the pinned VAE class retains a valid guarded decoder."""
+    marker = "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters"
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        raise RuntimeError(
+            f"Patched H3 VAE source is not valid Python: {filename}:{exc.lineno}: {exc.msg}"
+        ) from exc
+
+    vae_classes = [
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "MiniMaxH3VideoVAE"
+    ]
+    if len(vae_classes) != 1:
+        raise RuntimeError(
+            "Refusing to accept H3 VAE patch: expected exactly one top-level "
+            "MiniMaxH3VideoVAE class."
+        )
+    methods = [
+        node for node in vae_classes[0].body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_decode_pixels"
+    ]
+    if len(methods) != 1:
+        raise RuntimeError(
+            "H3 VAE decoder patch is invalid: MiniMaxH3VideoVAE must retain "
+            "exactly one _decode_pixels(self, z) method."
+        )
+
+    method = methods[0]
+    if len(method.args.args) < 2 or [arg.arg for arg in method.args.args[:2]] != ["self", "z"]:
+        raise RuntimeError(
+            "H3 VAE decoder patch is invalid: _decode_pixels must accept self and z."
+        )
+    segment = ast.get_source_segment(source, method) or ""
+    required = (
+        marker,
+        "z = self.post_quant_conv(z)",
+        "decoder_parameter = next(self.decoder.parameters(), None)",
+        "if decoder_parameter is not None and z.dtype != decoder_parameter.dtype:",
+        "z = z.to(decoder_parameter.dtype)",
+        "return self.decoder(z)",
+    )
+    missing = [item for item in required if item not in segment]
+    if missing:
+        raise RuntimeError(
+            "H3 VAE decoder patch is missing required method statements: "
+            + ", ".join(missing)
+        )
+    if len(method.body) != 4 or not isinstance(method.body[2], ast.If):
+        raise RuntimeError(
+            "H3 VAE decoder patch has an unexpected _decode_pixels control-flow shape."
+        )
 
 
 def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
@@ -920,37 +946,45 @@ def patch_h3_vae_decoder_dtype(runtime: dict) -> None:
     target = COMFY / "comfy" / "ldm" / "minimax" / "vae.py"
     if not target.is_file():
         raise RuntimeError(f"H3 VAE source not found: {target}")
-    text = target.read_text(encoding="utf-8")
+
+    source = target.read_text(encoding="utf-8")
     marker = "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters"
-    if marker in text:
-        compile(text, str(target), "exec")
-        print("[H3 VAE PATCH] already applied")
+    if marker in source:
+        # A marker alone is not evidence of a valid patch. In particular, a
+        # previous broken patch could leave the marker while deleting the def.
+        _validate_h3_vae_decoder_source(source, str(target))
+        print("[H3 VAE PATCH] already applied and AST-verified")
         return
+
     pattern = re.compile(
-        r"(?m)^(?P<indent>[ \t]*)def _decode_pixels\(self, z\):[ \t]*\n"
+        r"(?m)^(?P<defline>[ \t]*def _decode_pixels\(self, z\):)[ \t]*\n"
         r"(?P<bodyindent>[ \t]+)return self\.decoder\(self\.post_quant_conv\(z\)\)[ \t]*$"
     )
-    matches = list(pattern.finditer(text))
+    matches = list(pattern.finditer(source))
     if len(matches) != 1:
         raise RuntimeError(
-            "Refusing to patch H3 VAE: expected exactly one v0.43.2 "
+            "Refusing to patch H3 VAE: expected exactly one pinned v0.43.2 "
             "MiniMaxH3VideoVAE._decode_pixels(self, z) return expression."
         )
+
     match = matches[0]
     indent = match.group("bodyindent")
-    replacement = (
-        f"{indent}z = self.post_quant_conv(z)\n"
-        f"{indent}{marker}\n"
-        f"{indent}decoder_parameter = next(self.decoder.parameters(), None)\n"
-        f"{indent}if decoder_parameter is not None and z.dtype != decoder_parameter.dtype:\n"
-        f"{indent}    z = z.to(decoder_parameter.dtype)\n"
-        f"{indent}return self.decoder(z)"
+    replacement = "\n".join(
+        (
+            match.group("defline"),
+            f"{indent}z = self.post_quant_conv(z)",
+            f"{indent}{marker}",
+            f"{indent}decoder_parameter = next(self.decoder.parameters(), None)",
+            f"{indent}if decoder_parameter is not None and z.dtype != decoder_parameter.dtype:",
+            f"{indent}    z = z.to(decoder_parameter.dtype)",
+            f"{indent}return self.decoder(z)",
+        )
     )
-    patched = text[:match.start()] + match.group(0).replace(match.group(0), replacement, 1) + text[match.end():]
+    patched = source[:match.start()] + replacement + source[match.end():]
     compile(patched, str(target), "exec")
+    _validate_h3_vae_decoder_source(patched, str(target))
     target.write_text(patched, encoding="utf-8")
-    print("[H3 VAE PATCH] v0.43.2 _decode_pixels dtype guard applied")
-
+    print("[H3 VAE PATCH] v0.43.2 _decode_pixels dtype guard applied and AST-verified")
 
 
 def _exact_requirement_pin(package_name: str) -> str:
@@ -1335,12 +1369,12 @@ def prepare_locked_h3_optimization_source(runtime: dict) -> None:
 
 
 def patch_h3_bounded_qkv(runtime: dict) -> None:
-    """Apply the tested T4 bounded native QKV fix to locked H3-Optimizations.
+    """Patch the locked H3-Optimizations resolver for the H3 T4 QKV edge case.
 
-    H3-Optimizations is cloned at runtime, so the project-owned QKV safety fix
-    is applied here rather than vendoring or changing the locked upstream
-    repository. The patch is deliberately exact, idempotent, and fails closed
-    if the pinned H3-Optimizations source contract changes.
+    The rule belongs inside resolve_qkv_provider's Preserve-precision branch:
+    the resolver owns request semantics, while _resolve_preserve_precision_qkv
+    does not receive request or memory_optimize. The apply layer only adds
+    selected-provider telemetry and never overrides an explicit user request.
     """
     node_dir = CUSTOM / "H3-Optimizations"
     providers = node_dir / "h3_optimizations" / "qkv" / "providers.py"
@@ -1349,7 +1383,6 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
     configured_revision = str(
         runtime.get("h3_optimization", {}).get("revision", "")
     ).strip()
-
     if configured_revision != expected_revision:
         raise RuntimeError(
             "Refusing the H3 T4 bounded-QKV patch because runtime_versions.yaml "
@@ -1374,230 +1407,84 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
             raise RuntimeError(f"H3-Optimizations source is missing: {target}")
 
     provider_source = providers.read_text(encoding="utf-8")
-    provider_markers = (
-        "# MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT",
-        "# MINIMAX_H3_T4_FORCE_BOUNDED_QKV",
-    )
+    provider_marker = "# MINIMAX_H3_T4_PRESERVE_BOUNDED_QKV"
     provider_contract = (
-        "QKV_BF16_CHUNKED",
-        "inventory.qkv_convrot_int8_256",
+        "request == FUSED_QKV_PRESERVE_BF16",
         "backend_kind == 'existing'",
         "memory_optimize",
-        "[H3T4_BOUNDED_QKV_SELECTED]",
+        "inventory.qkv_convrot_int8_256",
+        "QKV_BF16_CHUNKED",
+        "reason=force_t4_bounded_native_projection",
     )
-    provider_count = sum(marker in provider_source for marker in provider_markers)
-    if provider_count == len(provider_markers):
+    if provider_marker in provider_source:
         missing = [needle for needle in provider_contract if needle not in provider_source]
         if missing:
             raise RuntimeError(
-                "H3 T4 bounded-QKV provider markers exist but the source contract "
+                "H3 T4 bounded-QKV provider marker exists but the resolver contract "
                 "is incomplete; refusing to continue:\n" + "\n".join(missing)
             )
         compile(provider_source, str(providers), "exec")
-        print("[H3 T4 QKV PATCH] providers.py already patched: VERIFIED")
-    elif provider_count:
-        raise RuntimeError(
-            "H3 T4 bounded-QKV provider patch is only partially present; refusing "
-            "to guess or merge an unknown source state."
-        )
+        print("[H3 T4 QKV PATCH] providers.py already patched: AST/contract verified")
     else:
-        preserve_anchor = """        return QKVProviderResolution(
-            (
-                QKV_DENSE_KITCHEN_CHUNKED
-                if backend_kind == 'comfy_kitchen_int8'
-                else QKV_STREAMED_BF16_KITCHEN
-            ),
-            backend_kind != 'comfy_kitchen_int8',
-            'checkpoint-native ConvRot-256 INT8 QKV streams BF16 projection chunks into the Kitchen INT8 carrier',
-        )
-    if not _qkv_is_native_bf16(inventory):"""
-        preserve_replacement = """        return QKVProviderResolution(
-            (
-                QKV_DENSE_KITCHEN_CHUNKED
-                if backend_kind == 'comfy_kitchen_int8'
-                else QKV_STREAMED_BF16_KITCHEN
-            ),
-            backend_kind != 'comfy_kitchen_int8',
-            'checkpoint-native ConvRot-256 INT8 QKV streams BF16 projection chunks into the Kitchen INT8 carrier',
-        )
-    # MINIMAX_H3_T4_BOUNDED_QKV_GEMM_LIMIT
-    #
-    # The ref2va pruned ConvRot-256 INT8 H3 checkpoint has a 21,504-wide
-    # packed QKV projection. For the T4/native existing-attention path,
-    # projecting the complete packed sequence in one INT8 GEMM can exceed
-    # the kernel's 32-bit indexing domain:
-    #
-    #     sequence * qkv_width >= 2**31
-    #
-    # Preserve native semantics, but force the existing bounded QKV
-    # projector so the native ConvRot weights are consumed in token chunks.
-    if (
-        backend_kind == 'existing'
-        and memory_optimize
-        and inventory.qkv_convrot_int8_256
-        and request == FUSED_QKV_PRESERVE_BF16
-    ):
-        return QKVProviderResolution(
-            QKV_BF16_CHUNKED,
-            False,
-            (
-                'T4 H3 safety: bounded native ConvRot-256 INT8 QKV '
-                'projection selected for existing dense attention to avoid '
-                'full-sequence INT8 GEMM 32-bit indexing overflow'
-            ),
-        )
-
-    if not _qkv_is_native_bf16(inventory):"""
-        if provider_source.count(preserve_anchor) != 1:
-            raise RuntimeError(
-                "H3-Optimizations 0.2.41 providers.py no longer matches the locked "
-                "QKV preserve-precision source contract; refusing to patch."
+        resolver_anchor = """    if request == FUSED_QKV_PRESERVE_BF16:
+        return _resolve_preserve_precision_qkv(
+            inventory, backend_kind, kitchen_producer_available
+        )"""
+        resolver_replacement = """    if request == FUSED_QKV_PRESERVE_BF16:
+        # MINIMAX_H3_T4_PRESERVE_BOUNDED_QKV
+        # Keep the special case in this resolver: request and memory_optimize
+        # are parameters here, not locals of _resolve_preserve_precision_qkv.
+        # The native ConvRot-256 INT8 projection is processed in bounded token
+        # chunks for the existing dense-attention Preserve-precision path.
+        if (
+            backend_kind == 'existing'
+            and memory_optimize
+            and inventory.qkv_convrot_int8_256
+        ):
+            print(
+                '[H3T4_BOUNDED_QKV_SELECTED] '
+                'backend=existing '
+                'memory_optimize=True '
+                'qkv=ConvRot-256-INT8 '
+                'provider=chunked_bf16_qkv '
+                'reason=force_t4_bounded_native_projection',
+                flush=True,
             )
-        provider_source = provider_source.replace(
-            preserve_anchor, preserve_replacement, 1
-        )
-
-        resolver_anchor = """    fp8_available=False,
-):
-    if request == FUSED_QKV_OFF:"""
-        resolver_replacement = """    fp8_available=False,
-):
-    # MINIMAX_H3_T4_FORCE_BOUNDED_QKV
-    #
-    # MiniMax H3 Ref2VA pruned ConvRot-256 INT8 has a very wide packed
-    # QKV projection (56 heads * 128 head_dim * 3 = 21504 output width).
-    # On Tesla T4, the full-sequence INT8 GEMM can exceed the kernel's
-    # 32-bit indexing domain for long H3 sequences.
-    #
-    # For existing ComfyUI dense attention, always route this native
-    # ConvRot-256 INT8 checkpoint through the bounded native QKV projector.
-    if (
-        backend_kind == 'existing'
-        and memory_optimize
-        and inventory.qkv_convrot_int8_256
-    ):
-        print(
-            '[H3T4_BOUNDED_QKV_SELECTED] '
-            'backend=existing '
-            'memory_optimize=True '
-            'qkv=ConvRot-256-INT8 '
-            'provider=chunked_bf16_qkv '
-            'reason=force_t4_bounded_native_projection',
-            flush=True,
-        )
-        return QKVProviderResolution(
-            QKV_BF16_CHUNKED,
-            False,
-            'T4 H3 safety: force bounded native ConvRot-256 INT8 QKV '
-            'for existing dense attention',
-        )
-
-    if request == FUSED_QKV_OFF:"""
+            return QKVProviderResolution(
+                QKV_BF16_CHUNKED,
+                False,
+                'T4 H3 safety: bounded native ConvRot-256 INT8 QKV '
+                'projection selected for existing dense attention',
+            )
+        return _resolve_preserve_precision_qkv(
+            inventory, backend_kind, kitchen_producer_available
+        )"""
         if provider_source.count(resolver_anchor) != 1:
             raise RuntimeError(
                 "H3-Optimizations 0.2.41 providers.py no longer matches the locked "
-                "QKV resolver source contract; refusing to patch."
+                "Preserve-precision resolver contract; refusing to patch."
             )
-        provider_source = provider_source.replace(
-            resolver_anchor, resolver_replacement, 1
-        )
+        provider_source = provider_source.replace(resolver_anchor, resolver_replacement, 1)
         compile(provider_source, str(providers), "exec")
         providers.write_text(provider_source, encoding="utf-8")
         print("[H3 T4 QKV PATCH] providers.py patched: PASS")
 
     apply_text = apply_source.read_text(encoding="utf-8")
-    apply_markers = (
-        "# MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV",
-        "# MINIMAX_H3_T4_QKV_RUNTIME_SELECTION",
-    )
+    apply_marker = "# MINIMAX_H3_T4_QKV_RUNTIME_SELECTION"
     apply_contract = (
-        "qkv.provider_id == QKV_STANDARD",
-        "tuple(getattr(environment, 'capability', ()) or ()) == (7, 5)",
-        "qkv = QKVProviderResolution(",
-        "StreamedDenseBF16QKVProjector(",
         "QKV runtime selection: provider=%s projector=%s",
+        "getattr(attention.projector, 'chunk_rows', None)",
     )
-    apply_count = sum(marker in apply_text for marker in apply_markers)
-    if apply_count == len(apply_markers):
+    if apply_marker in apply_text:
         missing = [needle for needle in apply_contract if needle not in apply_text]
         if missing:
             raise RuntimeError(
-                "H3 T4 bounded-QKV apply markers exist but the source contract is "
-                "incomplete; refusing to continue:\n" + "\n".join(missing)
+                "H3 T4 QKV apply telemetry marker exists but its source contract "
+                "is incomplete; refusing to continue:\n" + "\n".join(missing)
             )
         compile(apply_text, str(apply_source), "exec")
-        print("[H3 T4 QKV PATCH] apply.py already patched: VERIFIED")
-    elif apply_count:
-        raise RuntimeError(
-            "H3 T4 bounded-QKV apply patch is only partially present; refusing "
-            "to guess or merge an unknown source state."
-        )
+        print("[H3 T4 QKV PATCH] apply.py telemetry already present: VERIFIED")
     else:
-        qkv_anchor = """    qkv = resolve_qkv_provider(
-        inventory,
-        request=(FUSED_QKV_OFF if memory is None else _qkv_request(plan)),
-        backend_kind=dense.backend_kind,
-        kitchen_producer_available=producer_api_available(
-            device=getattr(environment, 'device_index', None)
-        ),
-        triton_available=dense_carrier_available,
-        memory_optimize=memory is not None,
-        fp8_available=_fp8_execution_available(environment),
-    )
-    backend = None
-    projector = None"""
-        qkv_replacement = """    qkv = resolve_qkv_provider(
-        inventory,
-        request=(FUSED_QKV_OFF if memory is None else _qkv_request(plan)),
-        backend_kind=dense.backend_kind,
-        kitchen_producer_available=producer_api_available(
-            device=getattr(environment, 'device_index', None)
-        ),
-        triton_available=dense_carrier_available,
-        memory_optimize=memory is not None,
-        fp8_available=_fp8_execution_available(environment),
-    )
-    # MINIMAX_H3_T4_APPLY_FORCE_STREAMED_QKV
-    #
-    # T4/SM75 safety rule:
-    # MiniMax H3 long-sequence Ref2VA cannot safely use the ordinary full-QKV
-    # projection at this sequence length. Force the package-owned streamed
-    # native QKV projector at the integration point where it is actually
-    # attached to H3 attention.
-    #
-    # QKV_BF16_CHUNKED does NOT mean "convert the model to BF16".
-    # StreamedDenseBF16QKVProjector uses projection_mode="native", which selects
-    # the native checkpoint-aware binding (ConvRot INT8 / W4A8 / FP8 / BF16).
-    #
-    # Only replace STANDARD fallback. If a compatible specialized provider
-    # was already selected, preserve that provider.
-    if (
-        memory is not None
-        and dense.backend_kind == ATTENTION_EXISTING
-        and tuple(getattr(environment, 'capability', ()) or ()) == (7, 5)
-        and qkv.provider_id == QKV_STANDARD
-    ):
-        qkv = QKVProviderResolution(
-            QKV_BF16_CHUNKED,
-            False,
-            'T4 safety: forced streamed native H3 QKV at integration layer',
-        )
-        logging.warning(
-            '%s T4 BOUNDED QKV FORCED: provider=%s backend=%s',
-            LOG_PREFIX,
-            qkv.provider_id,
-            dense.backend_kind,
-        )
-
-    backend = None
-    projector = None"""
-        if apply_text.count(qkv_anchor) != 1:
-            raise RuntimeError(
-                "H3-Optimizations 0.2.41 apply.py no longer matches the locked "
-                "QKV integration source contract; refusing to patch."
-            )
-        apply_text = apply_text.replace(qkv_anchor, qkv_replacement, 1)
-
         log_anchor = """        environment.device_name,
     )
     if phase == 'prepare':"""
@@ -1618,36 +1505,45 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
         if apply_text.count(log_anchor) != 1:
             raise RuntimeError(
                 "H3-Optimizations 0.2.41 apply.py no longer matches the locked "
-                "QKV reconciliation source contract; refusing to patch."
+                "QKV runtime telemetry contract; refusing to patch."
             )
         apply_text = apply_text.replace(log_anchor, log_replacement, 1)
         compile(apply_text, str(apply_source), "exec")
         apply_source.write_text(apply_text, encoding="utf-8")
-        print("[H3 T4 QKV PATCH] apply.py patched: PASS")
+        print("[H3 T4 QKV PATCH] apply.py telemetry patched: PASS")
 
-    # Final source-level verification after both files are handled.
+    # Confirm the branch is in the right function, after explicit Off handling,
+    # and that its helper no longer references out-of-scope resolver variables.
     provider_source = providers.read_text(encoding="utf-8")
     apply_text = apply_source.read_text(encoding="utf-8")
-    final_required = {
-        str(providers): provider_markers + provider_contract + (
-            "request == FUSED_QKV_PRESERVE_BF16",
-            "reason=force_t4_bounded_native_projection",
-        ),
-        str(apply_source): apply_markers + apply_contract + (
-            "projection_mode=_streamed_projection_mode(qkv, inventory)",
-            "getattr(attention.projector, 'chunk_rows', None)",
-        ),
-    }
-    final_sources = {
-        str(providers): provider_source,
-        str(apply_source): apply_text,
-    }
-    missing = [
-        f"{path}: {needle}"
-        for path, needles in final_required.items()
-        for needle in needles
-        if needle not in final_sources[path]
-    ]
+    resolver = provider_source.split("def resolve_qkv_provider(", 1)
+    if len(resolver) != 2:
+        raise RuntimeError("H3 provider resolver definition is missing after patch.")
+    resolver_tail = resolver[1]
+    preserve_position = resolver_tail.find("if request == FUSED_QKV_PRESERVE_BF16:")
+    off_position = resolver_tail.find("if request == FUSED_QKV_OFF:")
+    if off_position < 0 or preserve_position < 0 or off_position > preserve_position:
+        raise RuntimeError(
+            "H3 T4 QKV resolver patch must preserve the explicit QKV Off guard before Preserve-precision handling."
+        )
+    helper = provider_source.split("def _resolve_preserve_precision_qkv(", 1)[1].split(
+        "def resolve_qkv_provider(", 1
+    )[0]
+    if "memory_optimize" in helper or "request ==" in helper:
+        raise RuntimeError(
+            "H3 T4 QKV patch left resolver-only variables inside the preserve helper."
+        )
+    required = (
+        provider_marker,
+        "request == FUSED_QKV_PRESERVE_BF16",
+        "backend_kind == 'existing'",
+        "memory_optimize",
+        "inventory.qkv_convrot_int8_256",
+        "QKV_BF16_CHUNKED",
+        apply_marker,
+        *apply_contract,
+    )
+    missing = [needle for needle in required if needle not in provider_source + apply_text]
     if missing:
         raise RuntimeError(
             "H3 T4 bounded-QKV patch verification failed:\n" + "\n".join(missing)
@@ -1655,7 +1551,7 @@ def patch_h3_bounded_qkv(runtime: dict) -> None:
     compile(provider_source, str(providers), "exec")
     compile(apply_text, str(apply_source), "exec")
     print(
-        "[H3 T4 QKV PATCH] PASS: providers.py + apply.py patched/verified "
+        "[H3 T4 QKV PATCH] PASS: locked providers.py + apply.py patched/verified "
         f"at H3-Optimizations {actual_revision}"
     )
 
@@ -1837,37 +1733,43 @@ def patch_h3_sage_attention(runtime: dict) -> None:
 ):
     """Consume bounded Q slabs with the pinned SM75 SageAttention kernel."""
     del layer_index, transformer_options
-    import torch
-    from sageattention import sageattn
 
-    output = attention_output_buffer(projected.x)
-    attention_dtype = torch.float16
-    local_device = projected.k.device
-    if local_device.type != 'cuda':
-        raise RuntimeError(
-            'H3 T4 SageAttention requires CUDA K/V tensors; got %s' % local_device
-        )
-    if int(module.head_dim) not in (64, 128):
-        raise RuntimeError(
-            'H3 T4 SageAttention SM75 supports head_dim 64/128; got %d'
-            % int(module.head_dim)
-        )
-    if int(module.heads) != 56:
-        raise RuntimeError(
-            'MiniMax H3 T4 SageAttention integration expects 56 heads; got %d'
-            % int(module.heads)
-        )
-
-    k_attention = projected.k.to(
-        device=local_device,
-        dtype=attention_dtype,
-    ).contiguous()
-    v_attention = projected.v.to(
-        device=local_device,
-        dtype=attention_dtype,
-    ).contiguous()
-
+    # The streamed projector may own a live Comfy weight binding. Enter the
+    # release guard before imports, allocations, and casts so any setup or
+    # execution failure releases that binding deterministically.
+    k_attention = None
+    v_attention = None
     try:
+        import torch
+        from sageattention import sageattn
+
+        output = attention_output_buffer(projected.x)
+        attention_dtype = torch.float16
+        local_device = projected.k.device
+        if local_device.type != 'cuda':
+            raise RuntimeError(
+                'H3 T4 SageAttention requires CUDA K/V tensors; got %s' % local_device
+            )
+        if int(module.head_dim) not in (64, 128):
+            raise RuntimeError(
+                'H3 T4 SageAttention SM75 supports head_dim 64/128; got %d'
+                % int(module.head_dim)
+            )
+        if int(module.heads) != 56:
+            raise RuntimeError(
+                'MiniMax H3 T4 SageAttention integration expects 56 heads; got %d'
+                % int(module.heads)
+            )
+
+        k_attention = projected.k.to(
+            device=local_device,
+            dtype=attention_dtype,
+        ).contiguous()
+        v_attention = projected.v.to(
+            device=local_device,
+            dtype=attention_dtype,
+        ).contiguous()
+
         # MINIMAX_H3_T4_SAGE_ATTENTION
         if not getattr(_finish_streamed_dense_bf16_projected, '_h3_t4_logged', False):
             print(
@@ -2001,8 +1903,6 @@ def patch_h3_embedding_memory_compatibility(runtime: dict) -> None:
     missing = [item for item in required if item not in source]
     if missing:
         raise RuntimeError("Pinned H3-Optimizations embedding guard is incomplete: " + ", ".join(missing))
-    if "MINIMAX_H3_PROJECT_" + "T4_MEMORY_COMPAT_V3" in source:
-        raise RuntimeError("Obsolete project-patched H3 embedding implementation is present; restore the pinned plugin source.")
     print("[H3 OPT MEMORY] pinned embedding implementation retained; incompatible ComfyUI _forward must fall back to native path")
 
 
@@ -2075,6 +1975,8 @@ node_dir = Path(os.environ["H3_NODE_ROOT"]).resolve()
 import torch
 import sageattention
 from sageattention import sageattn
+from sageattention import _qattn_sm75 as _sage_sm75
+from sageattention import core as _sage_core
 actual_torch = str(torch.__version__)
 actual_cuda = str(torch.version.cuda)
 if actual_torch != expected_torch:
@@ -2149,8 +2051,7 @@ required_attention_markers = (
 missing_attention_markers = [m for m in required_attention_markers if m not in attention_source]
 if missing_attention_markers:
     raise RuntimeError("H3 Sage attention source marker verification failed: " + ", ".join(missing_attention_markers))
-# Pinned 9f1c9a29... package export contract is checked below:
-# SM75_CUDA_ENABLED at package level + direct _fused extension import.
+# Package wrapper flags do not prove the underlying SM75 binary was loaded.
 expected_sage_version = str(os.environ.get("H3_EXPECTED_SAGE_VERSION", "")).strip()
 if expected_sage_version and str(getattr(sageattention, "__version__", "")).strip() != expected_sage_version:
     raise RuntimeError(
@@ -2160,16 +2061,16 @@ sage_package = Path(getattr(sageattention, "__file__", "")).resolve()
 expected_sage_root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
 if not sage_package.is_relative_to(expected_sage_root / "sageattention"):
     raise RuntimeError(f"SageAttention imported outside pinned checkout: {sage_package}")
-# Match install_sageattention_sm75(): the pinned package exports
-# SM75_CUDA_ENABLED; the fused extension is verified by direct import.
 if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
-    raise RuntimeError("SageAttention SM75 CUDA extension is not enabled in fresh H3 verification")
-try:
-    from sageattention import _fused as _sage_fused
-except Exception as exc:
-    raise RuntimeError(
-        "SageAttention fused CUDA extension is not importable in fresh H3 verification"
-    ) from exc
+    raise RuntimeError("SageAttention SM75 CUDA wrapper is not enabled in fresh H3 verification")
+if not bool(getattr(_sage_core, "SM75_ENABLED", False)):
+    raise RuntimeError("Fresh H3 verification could not load SageAttention _qattn_sm75")
+if not bool(getattr(_sage_core, "FUSED_ENABLED", False)):
+    raise RuntimeError("Fresh H3 verification could not load SageAttention _fused")
+if not callable(getattr(_sage_sm75, "qk_int8_sv_f16_accum_f32_attn_sm75", None)):
+    raise RuntimeError("Fresh H3 verification found no SM75 CUDA attention entrypoint")
+if not callable(getattr(_sage_core, "per_warp_int8_cuda", None)):
+    raise RuntimeError("Fresh H3 verification found no fused per-warp quantizer")
 actual_revision = subprocess.check_output(
     ["git", "-C", str(node_dir), "rev-parse", "HEAD"],
     text=True,
@@ -2719,13 +2620,14 @@ import torch
 import torch.nn.functional as F
 import sageattention
 from sageattention import sageattn
+from sageattention import _qattn_sm75 as _sage_sm75
+from sageattention import core as _sage_core
 
 expected = os.environ["H3_EXPECTED_SAGE_VERSION"]
 root = Path(os.environ["H3_SAGE_ROOT"]).resolve()
 physical_gpu_id = os.environ["H3_SAGE_PHYSICAL_GPU_ID"]
 
-# Pinned 9f1c9a29... package export contract: __init__.py defines
-# SM75_CUDA_ENABLED and does not define SM75_ENABLED/FUSED_ENABLED.
+# Package wrapper flags do not prove the underlying SM75 binary was loaded.
 if str(getattr(sageattention, "__version__", "")).strip() != expected:
     raise RuntimeError(
         f"SageAttention version mismatch: expected={expected}, actual={getattr(sageattention, '__version__', '')}"
@@ -2734,18 +2636,16 @@ if str(getattr(sageattention, "__version__", "")).strip() != expected:
 package_file = Path(getattr(sageattention, "__file__", "")).resolve()
 if not package_file.is_relative_to(root / "sageattention"):
     raise RuntimeError(f"SageAttention imported outside pinned checkout: {package_file}")
-# The pinned SageAttention package exports SM75_CUDA_ENABLED from
-# sageattention/__init__.py. FUSED_ENABLED is internal to core.py and is
-# intentionally verified by importing the compiled _fused extension itself.
-# Keep these checks identical to the fresh-process H3 verifier below.
 if not bool(getattr(sageattention, "SM75_CUDA_ENABLED", False)):
-    raise RuntimeError("SageAttention SM75 CUDA extension is not enabled")
-try:
-    from sageattention import _fused as _sage_fused
-except Exception as exc:
-    raise RuntimeError(
-        "SageAttention fused CUDA extension is not importable"
-    ) from exc
+    raise RuntimeError("SageAttention SM75 CUDA wrapper is not enabled")
+if not bool(getattr(_sage_core, "SM75_ENABLED", False)):
+    raise RuntimeError("SageAttention core could not load the compiled _qattn_sm75 extension")
+if not bool(getattr(_sage_core, "FUSED_ENABLED", False)):
+    raise RuntimeError("SageAttention core could not load the compiled _fused extension")
+if not callable(getattr(_sage_sm75, "qk_int8_sv_f16_accum_f32_attn_sm75", None)):
+    raise RuntimeError("SageAttention _qattn_sm75 extension lacks its SM75 attention entrypoint")
+if not callable(getattr(_sage_core, "per_warp_int8_cuda", None)):
+    raise RuntimeError("SageAttention fused per-warp quantizer is unavailable")
 if not torch.cuda.is_available():
     raise RuntimeError("CUDA is unavailable during SageAttention verification")
 capability = torch.cuda.get_device_capability(0)
