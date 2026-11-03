@@ -237,17 +237,29 @@ def _validate_custom_node_ordering() -> None:
         raise RuntimeError("Custom-node dependency cycles must fail closed.")
 
 
-def _validate_runtime_upgrade_contract(runtime: dict) -> None:
+def _validate_runtime_configuration_contract(runtime: dict) -> None:
     comfy = dict(runtime.get("comfyui", {}) or {})
     director = dict(runtime.get("director", {}) or {})
     python = dict(runtime.get("python", {}) or {})
+    cuda_runtime = dict(runtime.get("cuda_runtime", {}) or {})
+    h3_optimization = dict(runtime.get("h3_optimization", {}) or {})
+    retired_config = {
+        "comfyui.h3_t4_value_clone_workaround": "h3_t4_value_clone_workaround" in comfy,
+        "cuda_runtime.runtime_package": "runtime_package" in cuda_runtime,
+        "cuda_runtime.cublas_package": "cublas_package" in cuda_runtime,
+        "h3_optimization.sparse_attention": "sparse_attention" in h3_optimization,
+    }
+    active_retired = [name for name, present in retired_config.items() if present]
+    if active_retired:
+        raise RuntimeError(
+            "Runtime manifest contains retired, unconsumed configuration fields: "
+            + ", ".join(active_retired)
+        )
     pytorch = dict(runtime.get("pytorch", {}) or {})
     if comfy.get("expected_version") != "0.43.2":
         raise RuntimeError("ComfyUI must be pinned to v0.43.2.")
     if comfy.get("revision") != "423cbd20511becb1f16122ab518e92e58bfa03d9":
         raise RuntimeError("ComfyUI must use the exact 0.43.2 release commit.")
-    if comfy.get("h3_t4_value_clone_workaround") is not False:
-        raise RuntimeError("The obsolete H3 V-clone workaround must be disabled.")
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
         raise RuntimeError("The H3 VAE dtype guard must remain enabled.")
     if director.get("vllm_version") != "0.32.0":
@@ -295,24 +307,92 @@ def _validate_director_runtime_source() -> None:
     ):
         if marker not in source:
             raise RuntimeError(f"Director runtime source is missing required v0.32 contract: {marker}")
-    forbidden = (
+    if "model_staging\": False" not in source and '"model_staging": False' not in source:
+        raise RuntimeError("Director startup telemetry must record model_staging=false.")
+    for marker in (
         "_stage_to_local_scratch",
         "H3_DIRECTOR_STAGE_LOCAL",
         "/tmp/staged_models",
-        "ThreadPoolExecutor",
         "shutil.copytree",
         "shutil.copy2",
-    )
-    for marker in forbidden:
+    ):
         if marker in source:
-            raise RuntimeError(f"Director checkpoint staging must be removed: {marker}")
-    if "model_staging\": False" not in source and '"model_staging": False' not in source:
-        raise RuntimeError("Director startup telemetry must record model_staging=false.")
+            raise RuntimeError(f"Director must load the checkpoint directly from its mounted source: {marker}")
+
+
+def _validate_single_pass_story_writer(runtime: dict) -> None:
+    """Lock the requested 1,400-word, 12-scene, one-author-call contract."""
+    director = dict(runtime.get("director", {}) or {})
+    contract = dict(director.get("story_contract", {}) or {})
+    sampling = dict(director.get("story_sampling", {}) or {})
+    writing = dict(sampling.get("writing", {}) or {})
+    architecture = dict(director.get("story_architecture", {}) or {})
+    if int(director.get("story_max_tokens", 0) or 0) != 6500:
+        raise RuntimeError("Global Director story ceiling must remain 6,500 tokens.")
+    if int(architecture.get("max_tokens", 0) or 0) != 3600:
+        raise RuntimeError("Story Architect ceiling must remain 3,600 tokens.")
+    if int(writing.get("max_tokens", 0) or 0) != 3000:
+        raise RuntimeError("Single-pass Story Author ceiling must be 3,000 tokens.")
+    if int(contract.get("minimum_words", 0) or 0) < 1400 or int(contract.get("accept_min_words", 0) or 0) != int(contract.get("minimum_words", 0) or 0):
+        raise RuntimeError("Story acceptance must enforce the 1,400-word minimum with no lower secondary floor.")
+    if int(contract.get("scene_count", 0) or 0) != 12 or int(contract.get("shots_per_scene", 0) or 0) != 3:
+        raise RuntimeError("Story topology must remain exactly 12 scenes x 3 shots.")
+    if int(contract.get("target_words", 0) or 0) != int(contract.get("scene_count", 0) or 0) * int(contract.get("words_per_scene", 0) or 0):
+        raise RuntimeError("Story target must equal scene count multiplied by per-scene guidance.")
+
+    director_path = ROOT / "planner/qwen_director.py"
+    director_source = director_path.read_text(encoding="utf-8")
+    tree = ast.parse(director_source, filename=str(director_path))
+    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
+    if author is None:
+        raise RuntimeError("Single-pass story author method is missing.")
+    author_calls = [
+        node for node in ast.walk(author)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_chat_text"
+    ]
+    if len(author_calls) != 1:
+        raise RuntimeError(f"Story author must make exactly one _chat_text call; found {len(author_calls)}.")
+    if any(isinstance(node, (ast.For, ast.While)) for node in ast.walk(author)):
+        raise RuntimeError("Story author must not loop to retry or repair the story.")
+
+    runtime_path = ROOT / "planner/qwen_director_runtime.py"
+    runtime_source = runtime_path.read_text(encoding="utf-8")
+    runtime_tree = ast.parse(runtime_source, filename=str(runtime_path))
+    post = next((node for node in ast.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_post_chat"), None)
+    if post is None:
+        raise RuntimeError("Qwen runtime _post_chat method is missing.")
+    requests = [
+        node for node in ast.walk(post)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "post"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "_vllm_session"
+    ]
+    if len(requests) != 1:
+        raise RuntimeError(f"One model completion must issue exactly one HTTP POST; found {len(requests)}.")
+    if "sampling_extra_fallback" in runtime_source:
+        raise RuntimeError("Qwen runtime still retries with weakened sampling parameters.")
+    print("PASS single-pass story contract: 1,400-word floor, 12x3 topology, 3,000-token Author, one HTTP request")
 
 
 def _validate_bootstrap_upgrade_source() -> None:
     path = ROOT / "kaggle/bootstrap.py"
     source = path.read_text(encoding="utf-8")
+    for forbidden in (
+        "condition_proj(text_states.to(torch.float32))",
+        "low_precision_attention=False",
+        "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
+        "MINIMAX_H3_PROJECT_T4_MEMORY_COMPAT_V3",
+    ):
+        if forbidden in source:
+            raise RuntimeError(f"Bootstrap contains obsolete H3 compatibility logic: {forbidden}")
+    if "import re\n" not in source:
+        raise RuntimeError("Bootstrap uses regular expressions and must import re explicitly.")
+    if "def _validate_h3_vae_decoder_source" not in source:
+        raise RuntimeError("Bootstrap is missing the AST-level H3 VAE decoder postcondition.")
     for marker in (
         "--torch-backend",
         "vllm=={vllm_version}",
@@ -323,17 +403,15 @@ def _validate_bootstrap_upgrade_source() -> None:
         "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]",
         "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters",
         "h3_embedding._validate_upstream_forward(MiniMaxH3Model._forward)",
+        "from sageattention import _qattn_sm75 as _sage_sm75",
+        "from sageattention import core as _sage_core",
+        'getattr(_sage_core, "SM75_ENABLED", False)',
+        'getattr(_sage_core, "FUSED_ENABLED", False)',
+        "qk_int8_sv_f16_accum_f32_attn_sm75",
+        "per_warp_int8_cuda",
     ):
         if marker not in source:
             raise RuntimeError(f"Bootstrap is missing required runtime upgrade contract: {marker}")
-    for marker in (
-        "condition_proj(text_states.to(torch.float32))",
-        "low_precision_attention=False",
-        "# H3-T4-WORKAROUND: removed redundant V clone for SM75",
-        "MINIMAX_H3_PROJECT_" + "T4_MEMORY_COMPAT_V3",
-    ):
-        if marker in source:
-            raise RuntimeError(f"Obsolete ComfyUI 0.34 H3 compatibility logic remains: {marker}")
 
 
 def main() -> int:
@@ -354,7 +432,8 @@ def main() -> int:
     _validate_custom_node_ordering()
     _validate_control_plane_requirements()
     _validate_bootstrap_order()
-    _validate_runtime_upgrade_contract(runtime)
+    _validate_runtime_configuration_contract(runtime)
+    _validate_single_pass_story_writer(runtime)
     _validate_director_runtime_source()
     _validate_bootstrap_upgrade_source()
     director = dict(runtime.get("director", {}) or {})
@@ -399,16 +478,10 @@ def main() -> int:
 
     bootstrap_path = ROOT / "kaggle/bootstrap.py"
     bootstrap_source = bootstrap_path.read_text(encoding="utf-8")
-    if "--disable-log-requests" in qwen_runtime_source:
-        raise RuntimeError(
-            "Obsolete vLLM --disable-log-requests flag is forbidden in the Director command."
-        )
-    if "--no-enable-log-requests" in qwen_runtime_source:
-        raise RuntimeError(
-            "The pinned Director runtime must not depend on the optional "
-            "--no-enable-log-requests flag; request logging is already disabled by default."
-        )
     bootstrap_tree = ast.parse(bootstrap_source, filename=str(bootstrap_path))
+    for forbidden in ("--disable-log-requests", "--no-enable-log-requests"):
+        if forbidden in qwen_runtime_source:
+            raise RuntimeError(f"Pinned vLLM runtime must not pass obsolete flag {forbidden}.")
     bootstrap_defs = {
         node.name
         for node in ast.walk(bootstrap_tree)
