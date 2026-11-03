@@ -1,6 +1,4 @@
 from pathlib import Path
-import os
-import ast
 import re
 import sys
 
@@ -96,13 +94,13 @@ def test_shot_schema_tracks_instance_topology():
     _assert("dramatic_purpose" in metadata.get("required", []),
             "Qwen must supply story-grounded dramatic purpose in the existing shot batch")
     from planner.qwen_director_scene import QwenDirectorSceneMixin
-    annotated = QwenDirectorSceneMixin._annotate_scene_functions([
+    annotated = QwenDirectorSceneMixin._annotate_scene_context([
         {"description": "The witness refuses to identify the person in the photograph."},
         {"description": "The protagonist quietly returns the key after learning the cost.",
          "dramatic_purpose": "The protagonist accepts the cost of the choice."},
     ])
     _assert(all("scene_function" not in item for item in annotated),
-            "deterministic scene compiler must not force dramatic function by index")
+            "deterministic scene context must not assign fixed dramatic roles by scene position")
     _assert(annotated[1].get("dramatic_purpose") == "The protagonist accepts the cost of the choice.",
             "scene context preparation must preserve story-dependent dramatic purpose")
     sample_metadata = {"location": "coastal archive", "time_of_day": "blue hour", "weather": "steady rain",
