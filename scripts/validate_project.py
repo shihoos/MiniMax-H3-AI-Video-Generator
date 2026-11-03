@@ -96,7 +96,7 @@ REQUIRED_FILES = [
     "kaggle/verify_live_runtime.py",
     "kaggle/verify_kaggle_layout.py",
     "scripts/validate_runtime_contract.py",
-    
+
     # --------------------------------------------------------
     # UI / SCRIPTS
     # --------------------------------------------------------
@@ -1586,20 +1586,12 @@ def validate_examples() -> None:
     require(bool(str(data["story"]).strip()), "Example story cannot be empty.")
 
     stale_fields = {
-        "use_character_references",
-        "use_general_references",
-        "use_audio",
-        "use_music",
-        "use_ic_lora_detailer",
-        "use_ltx_spatial_upscaler",
+        "use_character_references", "use_general_references", "use_audio",
+        "use_music", "use_ic_lora_detailer", "use_ltx_spatial_upscaler",
         "multi_gpu_mode",
     }
     stale = stale_fields & set(data)
-    require(
-        not stale,
-        "Production example contains obsolete fields: "
-        + ", ".join(sorted(stale)),
-    )
+    require(not stale, "Production example contains obsolete fields: " + ", ".join(sorted(stale)))
 
     print("PASS production example configuration")
 
@@ -1868,7 +1860,8 @@ def main() -> None:
     validate_production_orchestrator_contract()
     validate_runtime_config_alignment()
     check_parallel_safe_contract()
-        
+    from scripts import validate_runtime_contract
+    validate_runtime_contract.main()
 
     
     print(
