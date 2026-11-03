@@ -1876,25 +1876,10 @@ class QwenDirectorRuntimeMixin:
         url = self._vllm_base_url() + "/chat/completions"
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
         response = self._vllm_session.post(url, json=payload, timeout=timeout)
-        if response.status_code == 400 and any(
-            key in response.text for key in ("presence_penalty", "top_k", "min_p")
-        ):
-            # Some vLLM API versions differ in which sampling extras they expose.
-            # Remove only extras named by the error; if the server does not identify
-            # a field, remove the optional extras together. Never alter temperature,
-            # top_p, seed, or thinking mode in this compatibility fallback.
-            extras = ("presence_penalty", "top_k", "min_p")
-            rejected = [key for key in extras if key in response.text]
-            if not rejected:
-                rejected = [key for key in extras if key in payload]
-            for key in rejected:
-                payload.pop(key, None)
-            print(
-                "[QWEN] sampling_extra_fallback rejected=" + ",".join(rejected),
-                flush=True,
-            )
-            response = self._vllm_session.post(url, json=payload, timeout=timeout)
-
+        # Deliberately do not retry a rejected completion with weakened sampling.
+        # The pinned vLLM 0.32 API supports top_k, min_p and presence_penalty;
+        # a compatibility retry would silently change the author's sampling
+        # contract and make a supposedly single-pass story issue two requests.
         if response.status_code >= 400:
             body = response.text[:4000]
             raise RuntimeError(
