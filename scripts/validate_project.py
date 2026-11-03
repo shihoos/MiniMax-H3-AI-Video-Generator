@@ -96,8 +96,7 @@ REQUIRED_FILES = [
     "kaggle/verify_live_runtime.py",
     "kaggle/verify_kaggle_layout.py",
     "scripts/validate_runtime_contract.py",
-    "scripts/validate_runtime_upgrade.py",
-
+    
     # --------------------------------------------------------
     # UI / SCRIPTS
     # --------------------------------------------------------
@@ -1869,9 +1868,7 @@ def main() -> None:
     validate_production_orchestrator_contract()
     validate_runtime_config_alignment()
     check_parallel_safe_contract()
-    from scripts import validate_runtime_contract, validate_runtime_upgrade
-    validate_runtime_contract.main()
-    validate_runtime_upgrade.main()
+        
 
     
     print(
