@@ -1612,7 +1612,7 @@ class QwenDirectorPromptMixin:
         dialogue_ids_by_scene: dict[str, list[str]] | None = None,
     ) -> dict:
         """Base schema plus hard length bounds, so a repetition loop inside a free-text field
-        cannot run to the token cap (observed: 3600 tokens, finish_reason=length, run aborted).
+        cannot run to the token cap (observed: 5400 tokens, finish_reason=length, run aborted).
         Limits are >= 1.7x the longest value seen in real traces; the sanitizer trims prompts to 40 words anyway."""
         schema = self._shot_batch_json_schema_base(
             scene_count=scene_count,
