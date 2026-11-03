@@ -1,17 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True)
-class AliasDecision:
-    alias: str
-    canonical: str
-    confidence: float
-    reason: str
-
-
 class EntityResolver:
     """
     Deterministic-first character entity resolver.
