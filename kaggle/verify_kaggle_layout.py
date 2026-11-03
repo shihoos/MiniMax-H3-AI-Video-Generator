@@ -11,6 +11,8 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 COMFY = ROOT / "ComfyUI"
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
