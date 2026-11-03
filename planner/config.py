@@ -339,7 +339,6 @@ DIRECTOR_VLLM_GENERATION_CONFIG = str(
 # normal production callers do not need to pass these settings around.
 _runtime_cfg = dict(RUNTIME.get("runtime", {}) or {})
 _assembly_cfg = dict(RUNTIME.get("assembly", {}) or {})
-_generation_cfg = dict(RUNTIME.get("generation", {}) or {})
 delivery_cfg = dict(RUNTIME.get("delivery", {}) or {})
 
 
@@ -599,12 +598,9 @@ H3_LIVE_PREVIEW = feature_enabled("live_preview", True)
 H3_CONTEXT_IR_VERSION = int(os.getenv("H3_CONTEXT_IR_VERSION", str(RUNTIME.get("features", {}).get("context_ir_version", 2))))
 H3_VLM_ENABLED = feature_enabled("vlm_enabled", True)
 H3_QA_ENABLED = feature_enabled("qa_enabled", True)
-H3_SELECTIVE_RETAKE = feature_enabled("selective_retake", True)
 H3_DIRECTOR_CRITIC = director_critic_enabled()
 H3_VLM_REFERENCE_ANALYSIS = feature_enabled("vlm_reference_analysis", True)
 H3_VLM_VISUAL_QA = feature_enabled("vlm_visual_qa", True)
-H3_AUTO_RETAKE = feature_enabled("auto_retake", True)
-H3_MAX_AUTO_RETAKES_PER_SHOT = max(0, int(os.getenv("H3_MAX_AUTO_RETAKES_PER_SHOT", str(RUNTIME.get("features", {}).get("max_auto_retakes_per_shot", 1)))))
 
 
 # ============================================================
@@ -707,33 +703,14 @@ VALID_STORY_MODES = {
 }
 
 
-# ============================================================
-# WORKFLOW MODES
-# ============================================================
-
+# Workflow/profile identifiers are imported by the planner and production runner.
 WORKFLOW_AUTO = "auto"
 WORKFLOW_REF2VA = "ref2va"
 WORKFLOW_TURBO_REF2VA = "turbo_ref2va"
 WORKFLOW_UPSCALE = "upscale"
 
-ALL_WORKFLOW_MODES = {
-    WORKFLOW_AUTO,
-    WORKFLOW_REF2VA,
-    WORKFLOW_TURBO_REF2VA,
-    WORKFLOW_UPSCALE,
-}
-
-
-# ============================================================
-# PROFILES
-# ============================================================
-
 PROFILE_BASE = "base"
 PROFILE_TURBO = "turbo"
 PROFILE_UPSCALE = "upscale"
 
-ALL_PROFILES = {
-    PROFILE_BASE,
-    PROFILE_TURBO,
-    PROFILE_UPSCALE,
-}
+
