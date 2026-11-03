@@ -6,13 +6,9 @@ comfyui:
   repository: https://github.com/Comfy-Org/ComfyUI.git
   expected_version: 0.43.2
   revision: 423cbd20511becb1f16122ab518e92e58bfa03d9
-  # v0.43.2 already avoids the redundant H3 V clone; do not reapply the obsolete v0.34 patch.
-  h3_t4_value_clone_workaround: false
   h3_vae_decoder_dtype_patch: true
 cuda_runtime:
-  runtime_package: nvidia-cuda-runtime
   runtime_version: 13.3.29
-  cublas_package: nvidia-cublas
   cublas_version: 13.6.1.10
 generation:
   width: 1344
@@ -177,4 +173,3 @@ h3_optimization:
   qkv_streaming_mode: Auto
   attention_memory_mode: Lower VRAM (slower)
   chunk_rows: 2560
-  sparse_attention: false
