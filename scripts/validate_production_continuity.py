@@ -384,35 +384,38 @@ def validate_production_isolation(root: Path) -> None:
 def validate_reference_manifest_semantics(root: Path) -> None:
     from pipeline.storyboard_reference_builder import StoryboardReferenceBuilder
 
-    builder = StoryboardReferenceBuilder(root, "manifest_test")
-    manifest_path = builder.root / "reference_role_manifest.json"
-    payload = {
-        "manifest_version": 2,
-        "production_id": "manifest_test",
-        "storyboard": {},
-        "shots": {},
-    }
-    manifest_path.write_text(json.dumps(payload), encoding="utf-8")
-    refs = ["/tmp/identity.png", "/tmp/storyboard.png"]
-    roles = [
-        {"path": refs[0], "role": "character_identity", "priority": 95},
-        {"path": refs[1], "role": "storyboard", "priority": 90},
-    ]
-    bindings = ["<Picture 1> = identity", "<Picture 2> = storyboard"]
-    entry = StoryboardReferenceBuilder.update_manifest(
-        manifest_path, "shot_001", refs, roles, bindings, actual_runtime_order=False
-    )
-    assert entry["actual_runtime_order"] is False
-    StoryboardReferenceBuilder.assert_manifest_invariant(entry, refs, bindings)
-    entry = StoryboardReferenceBuilder.update_manifest(
-        manifest_path, "shot_001", list(reversed(refs)), list(reversed(roles)),
-        ["<Picture 1> = storyboard", "<Picture 2> = identity"],
-        actual_runtime_order=True,
-    )
-    assert entry["actual_runtime_order"] is True
-    StoryboardReferenceBuilder.assert_manifest_invariant(
-        entry, list(reversed(refs)), ["<Picture 1> = storyboard", "<Picture 2> = identity"]
-    )
+    # Keep this regression isolated so running the validator never leaves test
+    # manifests, lock files, or cache artifacts in the user's project data.
+    with tempfile.TemporaryDirectory(prefix="h3-reference-manifest-test-") as temp_root:
+        builder = StoryboardReferenceBuilder(Path(temp_root), "manifest_test")
+        manifest_path = builder.root / "reference_role_manifest.json"
+        payload = {
+            "manifest_version": 2,
+            "production_id": "manifest_test",
+            "storyboard": {},
+            "shots": {},
+        }
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+        refs = ["/tmp/identity.png", "/tmp/storyboard.png"]
+        roles = [
+            {"path": refs[0], "role": "character_identity", "priority": 95},
+            {"path": refs[1], "role": "storyboard", "priority": 90},
+        ]
+        bindings = ["<Picture 1> = identity", "<Picture 2> = storyboard"]
+        entry = StoryboardReferenceBuilder.update_manifest(
+            manifest_path, "shot_001", refs, roles, bindings, actual_runtime_order=False
+        )
+        assert entry["actual_runtime_order"] is False
+        StoryboardReferenceBuilder.assert_manifest_invariant(entry, refs, bindings)
+        entry = StoryboardReferenceBuilder.update_manifest(
+            manifest_path, "shot_001", list(reversed(refs)), list(reversed(roles)),
+            ["<Picture 1> = storyboard", "<Picture 2> = identity"],
+            actual_runtime_order=True,
+        )
+        assert entry["actual_runtime_order"] is True
+        StoryboardReferenceBuilder.assert_manifest_invariant(
+            entry, list(reversed(refs)), ["<Picture 1> = storyboard", "<Picture 2> = identity"]
+        )
 
 
 def validate_ffprobe_stream_duration() -> None:
