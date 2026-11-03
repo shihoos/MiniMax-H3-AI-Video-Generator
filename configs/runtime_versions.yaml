@@ -59,7 +59,7 @@ director:
   # Native thinking_token_budget is supported by the pinned vLLM 0.32.0 runtime.
   story_architecture:
     # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
-    max_tokens: 3600
+    max_tokens: 5400
     thinking_token_budget: 1280
     # The Architect returns compact causal beats plus explicit plot-engine and per-scene continuity fields.
     # This keeps the planning pass focused and avoids spending tokens on a rigid template.
