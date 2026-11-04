@@ -262,7 +262,9 @@ def main() -> None:
     # Runtime/config contract.
     # ------------------------------------------------------------------
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    assert "Pillow==12.3.0" in requirements
+    # Pillow is installed last by the bootstrap (Gradio 6.31 caps Pillow<13), pinned in runtime_versions.yaml.
+    assert "Pillow==" not in requirements
+    assert str(yaml.safe_load((ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8"))["storyboard"]["pillow_version"]) == "13.0.0"
     assert "websocket-client==1.9.1" in requirements
     runtime = (ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")
     runtime_config = yaml.safe_load(runtime)
