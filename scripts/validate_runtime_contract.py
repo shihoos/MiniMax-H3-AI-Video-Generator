@@ -143,7 +143,7 @@ def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
 
-        if node.func.id == "_run_timed" and len(node.args) >= 2:
+        if node.func.id in {"_run_timed", "_timed_call"} and len(node.args) >= 2:
             target = node.args[1]
             if isinstance(target, ast.Name):
                 recognized.append((node.lineno, target.id))
@@ -272,8 +272,10 @@ def _validate_runtime_configuration_contract(runtime: dict) -> None:
         raise RuntimeError("vLLM 0.32 must use a fresh, version-specific isolated environment.")
     if str(python.get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime Python must be 3.12.")
-    if pytorch.get("version") != "2.10.0" or pytorch.get("cuda") != "cu130":
-        raise RuntimeError("ComfyUI main process Torch must remain 2.10.0/cu130.")
+    if pytorch.get("version") != "2.15.0" or pytorch.get("cuda") != "cu132":
+        raise RuntimeError("ComfyUI main process Torch must be 2.15.0/cu132.")
+    if pytorch.get("torchvision_version") != "0.29.2+cu132" or pytorch.get("torchaudio_version") != "2.11.1+cu132":
+        raise RuntimeError("ComfyUI torchvision/torchaudio must be 0.29.2+cu132 / 2.11.1+cu132 (the pair released with Torch 2.15.0).")
     if director.get("tensor_parallel_size") != 2 or director.get("gpu_memory_utilization") != 0.9 or director.get("max_num_seqs") != 1:
         raise RuntimeError("Director TP=2, GPU memory=0.9, max_num_seqs=1 must be preserved.")
     if director.get("speculative_method") != "eagle3" or director.get("speculative_tokens") != 2:
