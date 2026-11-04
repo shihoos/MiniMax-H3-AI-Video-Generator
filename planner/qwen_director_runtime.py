@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import faulthandler
 import gc
@@ -8,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -69,6 +71,89 @@ def _h3_probe_host(host: str, port: int, timeout: float = 0.25) -> bool:
             return _s.connect_ex((_ph, int(port))) == 0
     except Exception:
         return False
+
+
+# H3_V6_PARALLEL_STAGING: Kaggle's /kaggle/input is a GCSFUSE mount. One sequential reader gets ~10-15 MB/s per stream, and
+# two tensor-parallel workers each read every shard, so loading straight from it took 6+ minutes per shard. Copying the
+# checkpoint once with many concurrent ranged reads, then loading from local disk, restores the ~5 minute start.
+def _stage_mode() -> str:
+    value = os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return "on"
+    if value in {"0", "false", "no", "off"}:
+        return "off"
+    if value in {"auto", "default", ""}:
+        return "auto"
+    raise RuntimeError("H3_DIRECTOR_STAGE_LOCAL must be one of: auto, 0, 1.")
+
+
+def _filesystem_type(path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "-c", "%T", str(path)],
+            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5,
+        )
+        return result.stdout.strip().lower()
+    except Exception:
+        return ""
+
+
+def _should_stage_local(source_path: Path) -> bool:
+    """Stage only checkpoints on Kaggle's network-backed input mount (or when forced)."""
+    mode = _stage_mode()
+    if mode == "off":
+        return False
+    try:
+        resolved = source_path.resolve()
+    except OSError:
+        resolved = source_path
+    if not str(resolved).startswith("/kaggle/input/"):
+        return False
+    if mode == "on":
+        return True
+    fs_type = _filesystem_type(resolved)
+    # An unreadable filesystem type under /kaggle/input is treated as network storage: copying is the safe choice.
+    return fs_type == "" or fs_type.startswith(("nfs", "lustre", "s3fs", "gcsfuse", "fuse"))
+
+
+def _parallel_copy_file(src, dst, workers: int = 64, chunk_bytes: int = 32 * 1024 * 1024, progress=None) -> None:
+    """Copy one large file with many concurrent ranged reads (pread/pwrite are thread-safe)."""
+    src, dst = str(src), str(dst)
+    size = os.path.getsize(src)
+    with open(dst, "wb") as handle:
+        handle.truncate(size)
+    ranges = [(offset, min(chunk_bytes, size - offset)) for offset in range(0, size, chunk_bytes)]
+    io_block = 8 * 1024 * 1024
+
+    def copy_range(item):
+        offset, length = item
+        fd_src = os.open(src, os.O_RDONLY)
+        fd_dst = os.open(dst, os.O_WRONLY)
+        try:
+            done = 0
+            while done < length:
+                buf = os.pread(fd_src, min(io_block, length - done), offset + done)
+                if not buf:
+                    raise IOError(f"short read at byte {offset + done} of {src}")
+                written = 0
+                while written < len(buf):
+                    written += os.pwrite(fd_dst, buf[written:], offset + done + written)
+                done += len(buf)
+                if progress is not None:
+                    progress(len(buf))
+        finally:
+            os.close(fd_src)
+            os.close(fd_dst)
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="h3-stage-copy") as pool:
+        for _ in pool.map(copy_range, ranges):
+            pass
+    if os.path.getsize(dst) != size:
+        raise IOError(f"size mismatch after copy: {dst}")
+
+
+_STAGE_SPACE_LOCK = threading.Lock()
+_STAGE_RESERVED_BYTES = 0
 
 
 class StoryTruncated(RuntimeError):
@@ -293,13 +378,124 @@ class QwenDirectorRuntimeMixin:
         return value
 
     @staticmethod
-    def _use_direct_checkpoint(source_path: Path, label: str) -> Path:
-        """Validate and retain the original checkpoint path; model staging is disabled."""
-        path = Path(source_path).expanduser().resolve()
-        if not path.is_dir():
-            raise FileNotFoundError(f"{label} checkpoint directory is missing: {path}")
-        print(f"[QWEN] direct_checkpoint_loading label={label!r} path={path} staging=disabled", flush=True)
-        return path
+    def _stage_to_local_scratch(source_path: Path, label: str) -> Path:
+        """Return a local copy of a /kaggle/input checkpoint (copied once with parallel ranged reads and reused).
+
+        Falls back to the original path when staging is off, not needed, impossible (space), or fails.
+        H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading; =1 forces staging. Scratch is /kaggle/tmp or /tmp.
+        """
+        global _STAGE_RESERVED_BYTES
+        source_path = Path(source_path).expanduser()
+        if not source_path.is_dir():
+            raise FileNotFoundError(f"{label} checkpoint directory is missing: {source_path}")
+        if not _should_stage_local(source_path):
+            print(f"[QWEN] checkpoint_source label={label!r} path={source_path} staging=off", flush=True)
+            return source_path
+        resolved = source_path.resolve()
+        scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
+        target_dir = scratch / "staged_models" / resolved.name
+        manifest_name = ".h3_stage_manifest.json"
+        files = sorted(p for p in resolved.rglob("*") if p.is_file())
+        fingerprint = {
+            "schema": 2,
+            "files": {str(p.relative_to(resolved)): int(p.stat().st_size) for p in files},
+        }
+        total = sum(fingerprint["files"].values())
+
+        def valid(directory: Path) -> bool:
+            try:
+                manifest = json.loads((directory / manifest_name).read_text(encoding="utf-8"))
+                if manifest != fingerprint:
+                    return False
+                return all(
+                    (directory / name).is_file() and (directory / name).stat().st_size == size
+                    for name, size in fingerprint["files"].items()
+                ) and (directory / "config.json").is_file()
+            except Exception:
+                return False
+
+        if target_dir.is_dir() and valid(target_dir):
+            print(f"[QWEN] staged_checkpoint=reused label={label!r} path={target_dir}", flush=True)
+            return target_dir
+
+        reservation = total + 2 * (1024 ** 3)
+        try:
+            avail = os.statvfs(scratch).f_bavail * os.statvfs(scratch).f_frsize
+            with _STAGE_SPACE_LOCK:
+                if avail - _STAGE_RESERVED_BYTES < reservation:
+                    print(
+                        f"[QWEN] staging_skipped label={label!r}: {(avail - _STAGE_RESERVED_BYTES) / 2**30:.1f} GiB free, "
+                        f"{reservation / 2**30:.1f} GiB needed; loading directly",
+                        flush=True,
+                    )
+                    return source_path
+                _STAGE_RESERVED_BYTES += reservation
+        except Exception:
+            print(f"[QWEN] staging_skipped label={label!r}: cannot verify scratch space; loading directly", flush=True)
+            return source_path
+
+        try:
+            # Measured on Kaggle GCSFUSE: 1 reader 68 MiB/s, 16 -> 463, 64 -> 813 MiB/s (still rising).
+            workers = max(1, int(os.getenv("H3_DIRECTOR_STAGE_WORKERS", "64")))
+        except ValueError:
+            workers = 64
+        started = time.perf_counter()
+        tmp_target = target_dir.with_name(f"{target_dir.name}.tmp_{os.getpid()}")
+        copied = [0]
+        last_print = [started]
+        lock = threading.Lock()
+
+        def note(count: int) -> None:
+            with lock:
+                copied[0] += count
+                now = time.perf_counter()
+                if now - last_print[0] >= 10.0:
+                    last_print[0] = now
+                    rate = copied[0] / max(now - started, 1e-6) / (1024 ** 2)
+                    eta = (total - copied[0]) / max(rate * (1024 ** 2), 1.0)
+                    print(
+                        f"[QWEN] staging {label}: {copied[0] / 2**30:.2f}/{total / 2**30:.2f} GiB "
+                        f"{rate:.0f} MiB/s eta={eta:.0f}s",
+                        flush=True,
+                    )
+
+        print(
+            f"[QWEN] staging_start label={label!r} size={total / 2**30:.2f} GiB workers={workers} "
+            f"source={resolved} target={target_dir}",
+            flush=True,
+        )
+        try:
+            if tmp_target.exists():
+                shutil.rmtree(tmp_target, ignore_errors=True)
+            for path in files:
+                relative = path.relative_to(resolved)
+                destination = tmp_target / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if path.stat().st_size >= 64 * 1024 * 1024:
+                    _parallel_copy_file(path, destination, workers=workers, progress=note)
+                else:
+                    shutil.copyfile(path, destination)
+                    note(path.stat().st_size)
+            (tmp_target / manifest_name).write_text(json.dumps(fingerprint, sort_keys=True), encoding="utf-8")
+            if not valid(tmp_target):
+                raise RuntimeError("staged checkpoint failed post-copy validation")
+            if target_dir.exists():
+                shutil.rmtree(target_dir, ignore_errors=True)
+            tmp_target.rename(target_dir)
+        except Exception as exc:
+            shutil.rmtree(tmp_target, ignore_errors=True)
+            print(f"[QWEN] staging_failed label={label!r}: {exc}; loading directly from the dataset mount", flush=True)
+            return source_path
+        finally:
+            with _STAGE_SPACE_LOCK:
+                _STAGE_RESERVED_BYTES = max(0, _STAGE_RESERVED_BYTES - reservation)
+        elapsed = time.perf_counter() - started
+        print(
+            f"[QWEN] staging_done label={label!r} {total / 2**30:.2f} GiB in {elapsed:.0f}s "
+            f"({total / max(elapsed, 1e-6) / 2**20:.0f} MiB/s)",
+            flush=True,
+        )
+        return target_dir
 
     def _record_qwen_call(
         self,
@@ -856,6 +1052,41 @@ class QwenDirectorRuntimeMixin:
             "largest_shard_bytes": largest_bytes,
         }
 
+    @classmethod
+    def _resolve_safetensors_strategy(cls, qwen_path: Path, eagle_path: Path) -> str:
+        """Use eager loading only when RAM can hold it.
+
+        Eager reads each whole shard into memory, and every tensor-parallel worker loads every shard, so the
+        peak is roughly tensor_parallel * largest_shard. Measured on Kaggle: 9.29 GiB checkpoint, 5.78 GiB free
+        RAM -> eager thrashed (6+ minutes per shard). Lazy (mmap) from local disk loaded the same weights in 29 s.
+        An explicit H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY is always honoured.
+        """
+        configured = DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY
+        if configured != "eager" or os.getenv("H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY", "").strip():
+            return configured
+        try:
+            import psutil
+            shard = max(
+                cls._checkpoint_shard_summary(qwen_path)["largest_shard_bytes"],
+                cls._checkpoint_shard_summary(eagle_path)["largest_shard_bytes"],
+            )
+            director = __import__("planner.config", fromlist=["RUNTIME"]).RUNTIME["director"]
+            factor = float(director.get("eager_ram_safety_factor", 1.25))
+            reserve = float(director.get("eager_ram_warning_reserve_gib", 4.0)) * (1024 ** 3)
+            required = int(int(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE) * shard * factor + reserve)
+            available = int(psutil.virtual_memory().available)
+        except Exception as exc:
+            print(f"[QWEN] safetensors_load_strategy=lazy (eager headroom could not be measured: {exc})", flush=True)
+            return "lazy"
+        if available < required:
+            print(
+                "[QWEN] safetensors_load_strategy=lazy "
+                f"(eager requested, but needs ~{required / 2**30:.1f} GiB free RAM and only {available / 2**30:.1f} GiB is available)",
+                flush=True,
+            )
+            return "lazy"
+        return "eager"
+
     def _begin_startup_metrics(self, qwen_path: Path, eagle_path: Path) -> None:
         try:
             import psutil
@@ -863,8 +1094,8 @@ class QwenDirectorRuntimeMixin:
             self._startup_metrics = {
                 "schema": 1,
                 "vllm_version_expected": DIRECTOR_VLLM_VERSION,
-                "safetensors_load_strategy": DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY,
-                "model_staging": False,
+                "safetensors_load_strategy": getattr(self, "_effective_safetensors_strategy", DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY),
+                "model_staging": str(qwen_path).startswith(("/tmp/staged_models", "/kaggle/tmp/staged_models")),
                 "qwen_checkpoint": self._checkpoint_shard_summary(qwen_path),
                 "eagle3_checkpoint": self._checkpoint_shard_summary(eagle_path),
                 "system_ram_total_bytes": int(memory.total),
@@ -887,7 +1118,7 @@ class QwenDirectorRuntimeMixin:
             available = int(memory.available)
             self._startup_metrics["eager_ram_headroom_required_bytes"] = required
             self._startup_metrics["eager_ram_headroom_available_bytes"] = available
-            if DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY == "eager" and available < required:
+            if getattr(self, "_effective_safetensors_strategy", "") == "eager" and available < required:
                 print(
                     "[QWEN][RAM WARNING] eager loading headroom is below the configured "
                     f"safety target: available={available / (1024 ** 3):.2f} GiB "
@@ -1228,14 +1459,17 @@ class QwenDirectorRuntimeMixin:
                 )
 
             try:
-                # Keep both checkpoints on their original Kaggle dataset mounts.
-                # This deliberately avoids multi-GB copies to /tmp or /kaggle/tmp.
-                self._model_path = self._use_direct_checkpoint(
-                    self._model_path, "Qwen3-14B-AWQ"
-                )
-                speculator_model = self._use_direct_checkpoint(
-                    self._find_speculator_model(), "Qwen3-14B EAGLE-3 speculator"
-                )
+                # Stage both checkpoints concurrently (parallel ranged reads); falls back to the dataset path.
+                _speculator_source = self._find_speculator_model()
+                with ThreadPoolExecutor(max_workers=2, thread_name_prefix="h3-stage") as _stage_pool:
+                    _qwen_future = _stage_pool.submit(
+                        self._stage_to_local_scratch, self._model_path, "Qwen3-14B-AWQ"
+                    )
+                    _spec_future = _stage_pool.submit(
+                        self._stage_to_local_scratch, _speculator_source, "Qwen3-14B EAGLE-3 speculator"
+                    )
+                    self._model_path = _qwen_future.result()
+                    speculator_model = _spec_future.result()
             except Exception:
                 session.close()
                 raise
@@ -1315,7 +1549,8 @@ class QwenDirectorRuntimeMixin:
             if enforce_eager_base_val in {"1", "true", "yes", "on"}:
                 command.append("--enforce-eager")
 
-            safetensors_strategy = DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY
+            safetensors_strategy = self._resolve_safetensors_strategy(self._model_path, speculator_model)
+            self._effective_safetensors_strategy = safetensors_strategy
             command.extend([
                 "--safetensors-load-strategy",
                 safetensors_strategy,
