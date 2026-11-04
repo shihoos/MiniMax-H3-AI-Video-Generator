@@ -300,24 +300,20 @@ def _validate_director_runtime_source() -> None:
         "--safetensors-load-strategy",
         "DIRECTOR_VLLM_VERSION",
         '"/version"',
-        "def _use_direct_checkpoint(",
+        "def _stage_to_local_scratch(",
+        "def _parallel_copy_file(",
+        "def _resolve_safetensors_strategy(",
         "def _begin_startup_metrics(",
         "def _finish_startup_metrics(",
         "apply_chat_template(",
     ):
         if marker not in source:
             raise RuntimeError(f"Director runtime source is missing required v0.32 contract: {marker}")
-    if "model_staging\": False" not in source and '"model_staging": False' not in source:
-        raise RuntimeError("Director startup telemetry must record model_staging=false.")
-    for marker in (
-        "_stage_to_local_scratch",
-        "H3_DIRECTOR_STAGE_LOCAL",
-        "/tmp/staged_models",
-        "shutil.copytree",
-        "shutil.copy2",
-    ):
-        if marker in source:
-            raise RuntimeError(f"Director must load the checkpoint directly from its mounted source: {marker}")
+    if '"model_staging":' not in source:
+        raise RuntimeError("Director startup telemetry must record model_staging.")
+    # Staging is the fast path: /kaggle/input is GCSFUSE and direct loading took 6+ minutes per shard.
+    if 'os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto")' not in source:
+        raise RuntimeError("Model staging must default to auto (H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading).")
 
 
 def _validate_single_pass_story_writer(runtime: dict) -> None:
