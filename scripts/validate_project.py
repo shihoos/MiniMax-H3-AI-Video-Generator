@@ -370,10 +370,15 @@ def validate_dependency_manifests() -> None:
         "requirements.txt must pin Gradio.",
     )
 
+    # Pillow is installed last by kaggle/bootstrap.py (Gradio 6.x metadata caps Pillow<13),
+    # so the pin lives in configs/runtime_versions.yaml storyboard.pillow_version.
+    import yaml
+    runtime_cfg = yaml.safe_load((ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8"))
+    pillow_pin = str((runtime_cfg.get("storyboard", {}) or {}).get("pillow_version", "")).strip()
     require(
-        re.search(r"(?m)^Pillow==[^\s#]+\s*$", base_text) is not None
-        or re.search(r"(?m)^Pillow>=[^\s#]+(?:,[^\s#]+)*\s*$", base_text) is not None,
-        "requirements.txt must declare Pillow for the storyboard builder.",
+        re.fullmatch(r"\d+\.\d+\.\d+", pillow_pin) is not None
+        or re.search(r"(?m)^Pillow(==|>=)[^\s#]+", base_text) is not None,
+        "Pillow must be pinned in requirements.txt or runtime_versions.yaml storyboard.pillow_version.",
     )
 
     legacy = ROOT / "requirements-kaggle.txt"
