@@ -489,6 +489,9 @@ class QwenDirectorRuntimeMixin:
         finally:
             with _STAGE_SPACE_LOCK:
                 _STAGE_RESERVED_BYTES = max(0, _STAGE_RESERVED_BYTES - reservation)
+        # A fresh 12 GiB copy leaves dirty page-cache pages that cannot be reclaimed until written out. Flush them in the
+        # background while vLLM boots, so loading never competes with them for memory.
+        threading.Thread(target=os.sync, name="h3-stage-sync", daemon=True).start()
         elapsed = time.perf_counter() - started
         print(
             f"[QWEN] staging_done label={label!r} {total / 2**30:.2f} GiB in {elapsed:.0f}s "
@@ -1052,20 +1055,45 @@ class QwenDirectorRuntimeMixin:
             "largest_shard_bytes": largest_bytes,
         }
 
+    @staticmethod
+    def _container_available_memory() -> int:
+        """Free RAM as the container sees it: the smaller of psutil's host figure and the cgroup limit minus usage.
+
+        The host-wide figure alone is misleading on Kaggle (seen 5.78 GiB and 29.9 GiB in different sessions) and ignores
+        the notebook kernel's own memory. Page cache counts as used here, which errs on the safe side.
+        """
+        import psutil
+        available = int(psutil.virtual_memory().available)
+        for limit_file, usage_file in (
+            ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current"),
+            ("/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+        ):
+            try:
+                raw = Path(limit_file).read_text().strip()
+                if raw == "max" or int(raw) >= 1 << 60:
+                    continue
+                available = min(available, int(raw) - int(Path(usage_file).read_text().strip()))
+                break
+            except Exception:
+                continue
+        return max(0, available)
+
     @classmethod
     def _resolve_safetensors_strategy(cls, qwen_path: Path, eagle_path: Path) -> str:
-        """Use eager loading only when RAM can hold it.
+        """Pick the safetensors loader.
 
-        Eager reads each whole shard into memory, and every tensor-parallel worker loads every shard, so the
-        peak is roughly tensor_parallel * largest_shard. Measured on Kaggle: 9.29 GiB checkpoint, 5.78 GiB free
-        RAM -> eager thrashed (6+ minutes per shard). Lazy (mmap) from local disk loaded the same weights in 29 s.
+        - Local disk (the staged copy): always lazy (mmap). Eager makes each tensor-parallel worker pull its whole shard into
+          RAM (~tensor_parallel x 4.65 GiB) with no benefit on local disk; it exhausted memory and killed the notebook.
+        - Network mount (direct loading): eager only if the container has the RAM headroom, otherwise lazy.
         An explicit H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY is always honoured.
         """
         configured = DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY
         if configured != "eager" or os.getenv("H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY", "").strip():
             return configured
+        if not any(str(p).startswith("/kaggle/input/") for p in (qwen_path, eagle_path)):
+            print("[QWEN] safetensors_load_strategy=lazy (checkpoints are on local disk; eager would only add RAM pressure)", flush=True)
+            return "lazy"
         try:
-            import psutil
             shard = max(
                 cls._checkpoint_shard_summary(qwen_path)["largest_shard_bytes"],
                 cls._checkpoint_shard_summary(eagle_path)["largest_shard_bytes"],
@@ -1074,14 +1102,14 @@ class QwenDirectorRuntimeMixin:
             factor = float(director.get("eager_ram_safety_factor", 1.25))
             reserve = float(director.get("eager_ram_warning_reserve_gib", 4.0)) * (1024 ** 3)
             required = int(int(DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE) * shard * factor + reserve)
-            available = int(psutil.virtual_memory().available)
+            available = cls._container_available_memory()
         except Exception as exc:
             print(f"[QWEN] safetensors_load_strategy=lazy (eager headroom could not be measured: {exc})", flush=True)
             return "lazy"
         if available < required:
             print(
                 "[QWEN] safetensors_load_strategy=lazy "
-                f"(eager requested, but needs ~{required / 2**30:.1f} GiB free RAM and only {available / 2**30:.1f} GiB is available)",
+                f"(eager needs ~{required / 2**30:.1f} GiB free RAM, container has {available / 2**30:.1f} GiB)",
                 flush=True,
             )
             return "lazy"
@@ -1115,7 +1143,7 @@ class QwenDirectorRuntimeMixin:
             factor = float(director.get("eager_ram_safety_factor", 1.25))
             reserve = float(director.get("eager_ram_warning_reserve_gib", 4.0)) * (1024 ** 3)
             required = int(shard_bytes * factor + reserve)
-            available = int(memory.available)
+            available = self._container_available_memory()
             self._startup_metrics["eager_ram_headroom_required_bytes"] = required
             self._startup_metrics["eager_ram_headroom_available_bytes"] = available
             if getattr(self, "_effective_safetensors_strategy", "") == "eager" and available < required:
