@@ -32,13 +32,11 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.32.0
-  # The vLLM runtime is isolated from ComfyUI and uses its CUDA 13.0 / PyTorch 2.13.0 stack.
   vllm_torch_version: 2.13.0
   vllm_cuda: cu130
   safetensors_load_strategy: eager
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
-  # vLLM 0.32.0 accepts Transformers 5.16.1-5.19.x and tokenizers >=0.23.2.
   allow_transformers_vllm_constraint_override: false
   vllm_env_dir: /tmp/h3_qwen_vllm_032_tf517_tok0233
   context: 10240
@@ -55,17 +53,11 @@ director:
   speculative_model_path: /kaggle/input/eagle-3
   speculative_tokens: 2
   generation_config: vllm
-  # Bounded Qwen3 hybrid story flow: reason about structure, then write clean prose.
-  # Native thinking_token_budget is supported by the pinned vLLM 0.32.0 runtime.
   story_architecture:
-    # Total completion cap includes reasoning and the emitted cast + 12 scene beats.
     max_tokens: 5400
     thinking_token_budget: 1280
-    # The Architect returns compact causal beats plus explicit plot-engine and per-scene continuity fields.
-    # This keeps the planning pass focused and avoids spending tokens on a rigid template.
     beat_words_min: 55
     beat_words_max: 120
-  # Two-stage story flow: Architect thinks/plans once; Author writes once without thinking.
   story_sampling:
     thinking:
       temperature: 0.6
@@ -82,20 +74,15 @@ director:
       min_p: 0.0
       presence_penalty: 0.8
       max_tokens: 3000
-      # Keep zero: vLLM min_tokens suppresses EOS, not semantic under-length output.
       minimum_output_tokens: 0
   story_contract:
     scene_count: 12
     shots_per_scene: 3
     words_per_scene: 130
     target_words: 1560
-    # Hard minimum: generated AI/Expand stories must contain at least 1,400 usable words.
     minimum_words: 1400
-    # Stretch guidance, not a quota: allow longer scenes when the causal story needs room.
     writer_words_per_scene: 145
-    # Must match minimum_words; below-floor output fails without retry or repair.
     accept_min_words: 1400
-    # The narrative determines the cast size; no numeric minimum, target, or maximum.
     cast_size_policy: plot_driven
   prompt_limits:
     story_context_chars: 12000
@@ -108,8 +95,10 @@ director:
 storyboard:
   host: 0.0.0.0
   port: 8765
-  gradio_version: 6.26.0
-  pillow_version: 12.3.0
+  gradio_version: 6.31.0
+  # Installed last with --no-deps because Gradio 6.31.0 still declares Pillow<13;
+  # Pillow 13.0.0 is the patched release for CVE-2026-112403.
+  pillow_version: 13.0.0
 runtime:
   comfyui_startup_timeout_seconds: 300
   comfyui_request_timeout_seconds: 60
@@ -151,11 +140,15 @@ storage:
   keep_worker_logs: true
   keep_concat_file: false
 pytorch:
-  version: 2.10.0
-  cuda: cu130
-  index: https://download.pytorch.org/whl/cu130
-  torchvision_version: 0.25.0
-  torchaudio_version: 2.10.0
+  # PyTorch 2.15 is the latest stable release. It publishes CUDA 13.2 (not cu130)
+  # wheels and retains Turing/SM75 support. Require the CUDA 13 minimum driver.
+  version: 2.15.0
+  cuda: cu132
+  index: https://download.pytorch.org/whl/cu132
+  torchvision_version: 0.29.2+cu132
+  # TorchAudio 2.11.1 uses the stable PyTorch ABI and supports Torch >=2.11.
+  torchaudio_version: 2.11.1+cu132
+  minimum_driver_version: '580.00'
 sage_attention:
   repository: https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git
   revision: 9f1c9a29be73abc3e92a56649bb24ce4278aea47
