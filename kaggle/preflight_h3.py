@@ -147,15 +147,15 @@ def check_main_pytorch() -> None:
     config = runtime.get("pytorch", {}) or {}
     version = str(config.get("version", "") or "").strip()
     cuda_tag = str(config.get("cuda", "") or "").strip().lower()
-    if version != "2.10.0" or cuda_tag != "cu130":
-        raise RuntimeError("Main ComfyUI runtime must remain PyTorch 2.10.0/cu130.")
+    if version != "2.15.0" or cuda_tag != "cu132":
+        raise RuntimeError("Main ComfyUI runtime must use PyTorch 2.15.0/cu132.")
     expected_torch = f"{version}+{cuda_tag}"
     try:
         import torch
     except Exception as exc:
         raise RuntimeError("Unable to import the main ComfyUI PyTorch runtime.") from exc
     actual_torch = str(torch.__version__)
-    expected_cuda = "13.0"
+    expected_cuda = f"{cuda_tag[2:4]}.{cuda_tag[4:]}"
     if actual_torch != expected_torch or str(torch.version.cuda) != expected_cuda:
         raise RuntimeError(
             "Main ComfyUI PyTorch runtime mismatch: "
