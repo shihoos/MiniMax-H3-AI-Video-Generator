@@ -1,9 +1,12 @@
+
 # Control-plane dependencies used by the repository.
 # GPU/model runtimes are installed separately because their wheels are
 # platform/CUDA-specific and are controlled by configs/runtime_versions.yaml.
+# Pillow is intentionally installed last from storyboard.pillow_version.
+# Gradio 6.31.0 metadata still caps Pillow below 13; the runtime bootstrap
+# applies the audited Pillow 13 security update with --no-deps and tests Gradio.
 PyYAML==6.0.2
-gradio==6.26.0
-Pillow==12.3.0
+gradio==6.31.0
 websocket-client==1.9.1
 jsonschema==4.26.0
 requests==2.32.5
