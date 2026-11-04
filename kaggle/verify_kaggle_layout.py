@@ -198,10 +198,10 @@ def verify_runtime_config() -> None:
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
         fail("The v0.43.2 H3 VAE decoder dtype guard must be enabled")
 
-    if pytorch.get("version") != "2.10.0" or pytorch.get("cuda") != "cu130":
-        fail("The main ComfyUI PyTorch runtime must remain 2.10.0/cu130")
-    if pytorch.get("torchvision_version") != "0.25.0" or pytorch.get("torchaudio_version") != "2.10.0":
-        fail("The main ComfyUI torchvision/torchaudio lock must remain unchanged")
+    if pytorch.get("version") != "2.15.0" or pytorch.get("cuda") != "cu132":
+        fail("The main ComfyUI PyTorch runtime must be 2.15.0/cu132")
+    if pytorch.get("torchvision_version") != "0.29.2+cu132" or pytorch.get("torchaudio_version") != "2.11.1+cu132":
+        fail("The main ComfyUI torchvision/torchaudio lock must be 0.29.2+cu132 / 2.11.1+cu132")
 
     if director.get("vllm_version") != "0.32.0":
         fail("Director vLLM version must be 0.32.0")
@@ -214,10 +214,10 @@ def verify_runtime_config() -> None:
     if str(config.get("python", {}).get("kaggle", "")) != "3.12":
         fail("Kaggle runtime Python must be 3.12")
 
-    if pytorch.get("version") != "2.10.0":
-        fail("PyTorch version must be 2.10.0")
-    if pytorch.get("cuda") != "cu130":
-        fail("PyTorch CUDA target must be cu130")
+    if pytorch.get("version") != "2.15.0":
+        fail("PyTorch version must be 2.15.0")
+    if pytorch.get("cuda") != "cu132":
+        fail("PyTorch CUDA target must be cu132")
     if config["h3_optimization"]["chunk_rows"] != 2560:
         fail("H3 chunk_rows must be 2560")
     if config["h3_optimization"]["attention_memory_mode"] != "Lower VRAM (slower)":
