@@ -186,12 +186,12 @@ def _probe_pillow(expected_version: str) -> bool:
     if not expected_version:
         return False
     probe = (
+        # Exercise only Pillow's public API. Pillow 13.0.0's private typing module
+        # imports numbers._IntegralLike, which is absent on Kaggle's CPython 3.12.
         "import io, importlib.metadata as md; import PIL; from PIL import Image; "
-        "from PIL._typing import _Ink; import gradio as gr; "
+        "import gradio as gr; "
         f"assert PIL.__version__ == {expected_version!r}; "
         f"assert md.version('Pillow') == {expected_version!r}; "
-        "assert Image.__version__ == PIL.__version__; "
-        "assert _Ink is not None; "
         "image = Image.new('RGB', (32, 24), (40, 80, 120)); "
         "image = image.resize((16, 12)); buffer = io.BytesIO(); "
         "image.save(buffer, format='PNG'); buffer.seek(0); "
@@ -841,8 +841,43 @@ def verify_runtime_files(runtime: dict) -> None:
         )
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts = tuple(int(item) for item in re.findall(r"\d+", str(value)))
+    if not parts:
+        raise RuntimeError(f"Invalid version string: {value!r}")
+    return parts
+
+
+def _check_minimum_nvidia_driver(runtime: dict) -> None:
+    """Fail before installing CUDA wheels when the host driver is below the manifest floor."""
+    minimum = str((runtime.get("pytorch", {}) or {}).get("minimum_driver_version", "")).strip()
+    if not minimum:
+        raise RuntimeError("runtime_versions.yaml pytorch.minimum_driver_version is required.")
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            capture_output=True, text=True, check=True, timeout=15,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Unable to query the NVIDIA driver with nvidia-smi; refusing to install the CUDA 13.2 runtime."
+        ) from exc
+    versions = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not versions:
+        raise RuntimeError("nvidia-smi returned no GPU driver versions.")
+    required = _version_tuple(minimum)
+    too_old = [value for value in versions if _version_tuple(value) < required]
+    if too_old:
+        raise RuntimeError(
+            f"NVIDIA driver {too_old!r} is below the required {minimum} for the configured PyTorch CUDA wheel. "
+            "Upgrade/select a compatible Kaggle GPU image before installing PyTorch."
+        )
+    print(f"[NVIDIA DRIVER] minimum={minimum} observed={','.join(versions)}: PASS")
+
+
 def install_pytorch_runtime(runtime: dict) -> None:
     """Install the locked SM75 PyTorch stack and validate native extensions in a child process."""
+    _check_minimum_nvidia_driver(runtime)
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
     cuda = str(config.get("cuda", "") or "").strip().lower()
@@ -1226,15 +1261,16 @@ def install_director_runtime(
         )
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
-    loader_strategy = str(director.get("safetensors_load_strategy", "eager") or "eager").strip().lower()
+    loader_strategy = str(director.get("safetensors_load_strategy", "lazy") or "lazy").strip().lower()
     if vllm_version != "0.32.0":
         raise RuntimeError(f"Director vLLM must be pinned to 0.32.0, got {vllm_version!r}.")
     if not torch_version or cuda_tag != "cu130":
         raise RuntimeError("runtime_versions.yaml Director vLLM PyTorch/CUDA lock must specify torch 2.13.0 and cu130.")
-    if loader_strategy not in {"eager", "lazy", "prefetch", "torchao"}:
-        raise RuntimeError(f"Unsupported vLLM safetensors loader strategy: {loader_strategy!r}")
-    if loader_strategy != "eager":
-        raise RuntimeError("runtime_versions.yaml must default Director safetensors_load_strategy to eager.")
+    if loader_strategy != "lazy":
+        raise RuntimeError(
+            "runtime_versions.yaml must use native vLLM safetensors_load_strategy='lazy' "
+            "for the memory-constrained Director runtime."
+        )
     expected_director_torch = f"{torch_version}+{cuda_tag}"
     transformers_version = _exact_requirement_pin("transformers")
     tokenizers_version = _exact_requirement_pin("tokenizers")
@@ -1382,27 +1418,55 @@ def install_director_runtime(
 def install_storyboard_runtime(
     runtime: dict,
 ) -> None:
-    """Install storyboard UI dependencies from the project runtime lock.
-    Pillow is intentionally NOT verified here because later ComfyUI/custom-node
-    dependency installation may mutate the shared Kaggle Python environment.
-    Final Pillow enforcement/verification happens immediately before the final
-    runtime checks, after every package installer has completed.
+    """Install and verify the exact Gradio runtime before the Pillow override.
+
+    Refuse to continue when this live notebook already imported a different
+    Gradio version: replacing its package files cannot safely replace the
+    already-loaded Python modules. Pillow is verified separately at the final
+    dependency boundary, after every later installer has completed.
     """
-    storyboard = runtime["storyboard"]
-    gradio_version = str(
-        storyboard.get("gradio_version", "")
-    ).strip()
-    if gradio_version and _package_version_satisfied("gradio", gradio_version):
+    storyboard = runtime.get("storyboard", {}) or {}
+    gradio_version = str(storyboard.get("gradio_version", "") or "").strip()
+    if not gradio_version:
+        raise RuntimeError("runtime_versions.yaml storyboard.gradio_version is required.")
+
+    loaded_gradio = sys.modules.get("gradio")
+    if loaded_gradio is not None:
+        loaded_version = str(getattr(loaded_gradio, "__version__", "unknown"))
+        if loaded_version != gradio_version:
+            raise RuntimeError(
+                "Gradio was already imported into the live Kaggle kernel at "
+                f"version {loaded_version!r}; it cannot be safely hot-swapped to "
+                f"{gradio_version}. Start a fresh Kaggle kernel before bootstrap."
+            )
+
+    if _package_version_satisfied("gradio", gradio_version):
         print("[BOOTSTRAP WARM] Gradio already locked", gradio_version)
-    elif gradio_version:
+    else:
         run(
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "-q",
-            "--disable-pip-version-check",
-            f"gradio=={gradio_version}",
+            sys.executable, "-m", "pip", "install", "-q",
+            "--disable-pip-version-check", f"gradio=={gradio_version}",
+        )
+
+    verify = subprocess.run(
+        [sys.executable, "-c", (
+            "import importlib.metadata as md, gradio; "
+            f"assert md.version('gradio') == {gradio_version!r}; "
+            f"assert gradio.__version__ == {gradio_version!r}; "
+            "assert hasattr(gradio, 'Blocks') and hasattr(gradio, 'Image'); "
+            "print('Gradio:', gradio.__version__); "
+            "print('Gradio import/API smoke: PASS')"
+        )],
+        capture_output=True, text=True, check=False,
+    )
+    if verify.stdout:
+        print(verify.stdout, end="")
+    if verify.stderr:
+        print(verify.stderr, end="")
+    if verify.returncode != 0:
+        raise RuntimeError(
+            f"Fresh-process Gradio {gradio_version} verification failed. "
+            "The bootstrap will not continue with an unverified storyboard UI runtime."
         )
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
     """Install Pillow last, intentionally bypassing Gradio 6.x's stale <13 metadata cap."""
@@ -1414,7 +1478,7 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
     else:
         print(
             "[PILLOW] installing the runtime-pinned Pillow without dependency resolution; "
-            "Gradio 6.26 declares Pillow<13 but Pillow 13 is required for the current security fix."
+            "Gradio 6.31.0 still declares Pillow<13, so Pillow 13 is installed separately and smoke-tested."
         )
         run(
             sys.executable, "-m", "pip", "install", "-q",
@@ -1425,10 +1489,9 @@ def install_and_verify_pillow_runtime(runtime: dict) -> None:
     verify = subprocess.run(
         [sys.executable, "-c", (
             "import io, importlib.metadata as md, PIL, gradio; "
-            "from PIL import Image; from PIL._typing import _Ink; "
+            "from PIL import Image; "
             f"assert PIL.__version__ == {pillow_version!r}; "
             f"assert md.version('Pillow') == {pillow_version!r}; "
-            "assert Image.__version__ == PIL.__version__; assert _Ink is not None; "
             "b=io.BytesIO(); Image.new('RGB',(8,8)).save(b,format='PNG'); b.seek(0); "
             "im=Image.open(b); im.load(); assert im.size==(8,8); "
             "assert hasattr(gradio,'Image'); "
@@ -3076,50 +3139,58 @@ def main():
     bootstrap_started = time.perf_counter()
     bootstrap_status = "failed"
     _BOOTSTRAP_PHASES.clear()
-    _enforce_no_restart()
-    _warn_if_torch_already_imported()
-    runtime = load_yaml(RUNTIME_MANIFEST)
-    pytorch_cuda = str(runtime["pytorch"]["cuda"])
-    legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
-    if legacy_runtime.exists():
-        shutil.rmtree(legacy_runtime, ignore_errors=True)
-    _timed_call("ensure_kaggle_startup_wrapt", ensure_kaggle_startup_wrapt, runtime)
-    director_config = dict(runtime.get("director", {}) or {})
-    configured_model_path = str(director_config.get("model_path", "") or "").strip()
-    director_model_path = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip() or configured_model_path
-    if not director_model_path:
-        raise RuntimeError(
-            "runtime_versions.yaml director.model_path is required unless "
-            "H3_DIRECTOR_MODEL_PATH is set."
-        )
-    director_model = Path(director_model_path).expanduser().resolve()
-    print("[DIRECTOR MODEL]", director_model)
-
     director_executor = None
-    director_future = None
-    director_env = Path(
-        os.getenv(
-            "H3_DIRECTOR_VLLM_ENV_DIR",
-            str(runtime.get("director", {}).get("vllm_env_dir", "")),
-        )
-    ).expanduser().resolve()
-    director_ready = _probe_director_venv(runtime, director_env)
-    if director_ready:
-        _BOOTSTRAP_PHASES.append({"phase": "reuse_director_vllm_environment", "seconds": 0.0, "status": "reused"})
-        print(f"[BOOTSTRAP WARM] reusing Director vLLM environment={director_env}")
-    elif shutil.which("uv") is not None:
-        from concurrent.futures import ThreadPoolExecutor
-        director_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-qwen-bootstrap")
-        director_future = director_executor.submit(
-            _timed_call, "install_director_runtime", install_director_runtime, runtime
-        )
-        print("[BOOTSTRAP PARALLEL] Director vLLM install started")
-
     sage_executor = None
-    sage_future = None
-    sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "") or "")
-
     try:
+        _enforce_no_restart()
+        _warn_if_torch_already_imported()
+        runtime = load_yaml(RUNTIME_MANIFEST)
+        pytorch_cuda = str(runtime["pytorch"]["cuda"])
+        legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
+        if legacy_runtime.exists():
+            shutil.rmtree(legacy_runtime, ignore_errors=True)
+
+        _timed_call("ensure_kaggle_startup_wrapt", ensure_kaggle_startup_wrapt, runtime)
+        director_config = dict(runtime.get("director", {}) or {})
+        configured_model_path = str(director_config.get("model_path", "") or "").strip()
+        director_model_path = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip() or configured_model_path
+        if not director_model_path:
+            raise RuntimeError(
+                "runtime_versions.yaml director.model_path is required unless "
+                "H3_DIRECTOR_MODEL_PATH is set."
+            )
+        director_model = Path(director_model_path).expanduser().resolve()
+        print("[DIRECTOR MODEL]", director_model)
+
+        director_env = Path(
+            os.getenv(
+                "H3_DIRECTOR_VLLM_ENV_DIR",
+                str(runtime.get("director", {}).get("vllm_env_dir", "")),
+            )
+        ).expanduser().resolve()
+        director_future = None
+        director_ready = _probe_director_venv(runtime, director_env)
+        if director_ready:
+            _BOOTSTRAP_PHASES.append({
+                "phase": "reuse_director_vllm_environment",
+                "seconds": 0.0,
+                "status": "reused",
+            })
+            print(f"[BOOTSTRAP WARM] reusing Director vLLM environment={director_env}")
+        elif shutil.which("uv") is not None:
+            from concurrent.futures import ThreadPoolExecutor
+            director_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="h3-qwen-bootstrap"
+            )
+            director_future = director_executor.submit(
+                _timed_call, "install_director_runtime", install_director_runtime, runtime
+            )
+            print("[BOOTSTRAP PARALLEL] Director vLLM install started")
+        else:
+            director_future = None
+
+        sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "") or "")
+
         _timed_call("install_comfyui", install_comfyui, runtime)
         _timed_call("install_custom_nodes", install_nodes)
         _timed_call("remove_legacy_context_ir_node", remove_legacy_context_ir_node)
@@ -3129,11 +3200,18 @@ def main():
         _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
 
         if _sage_install_is_reusable(runtime, sage_dir):
-            _BOOTSTRAP_PHASES.append({"phase": "reuse_sageattention_sm75_build", "seconds": 0.0, "status": "reused"})
+            _BOOTSTRAP_PHASES.append({
+                "phase": "reuse_sageattention_sm75_build",
+                "seconds": 0.0,
+                "status": "reused",
+            })
             print(f"[BOOTSTRAP WARM] reusing SageAttention SM75 build={sage_dir}")
+            sage_future = None
         else:
             from concurrent.futures import ThreadPoolExecutor
-            sage_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-sage-bootstrap")
+            sage_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="h3-sage-bootstrap"
+            )
             sage_future = sage_executor.submit(
                 _timed_call, "install_sageattention_sm75", install_sageattention_sm75, runtime
             )
@@ -3162,11 +3240,16 @@ def main():
         print("MiniMax H3 Kaggle bootstrap PASSED.")
         bootstrap_status = "passed"
     finally:
-        if director_executor is not None:
-            director_executor.shutdown(wait=True, cancel_futures=False)
-        if sage_executor is not None:
-            sage_executor.shutdown(wait=True, cancel_futures=False)
-        _write_bootstrap_metrics(bootstrap_started, bootstrap_status)
+        try:
+            if director_executor is not None:
+                director_executor.shutdown(wait=True, cancel_futures=False)
+        finally:
+            try:
+                if sage_executor is not None:
+                    sage_executor.shutdown(wait=True, cancel_futures=False)
+            finally:
+                _write_bootstrap_metrics(bootstrap_started, bootstrap_status)
+
 
 if __name__ == "__main__":
     main()
