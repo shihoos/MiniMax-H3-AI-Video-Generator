@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import importlib.metadata as importlib_metadata
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 import yaml
 ROOT = (
@@ -183,22 +185,25 @@ def _probe_pillow(expected_version: str) -> bool:
     expected_version = str(expected_version or "").strip()
     if not expected_version:
         return False
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import PIL; from PIL import Image; from PIL._typing import _Ink; "
-                f"assert PIL.__version__ == {expected_version!r}; "
-                "assert Image.__version__ == PIL.__version__; "
-                "print(PIL.__version__)"
-            ),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    probe = (
+        "import io, importlib.metadata as md; import PIL; from PIL import Image; "
+        "from PIL._typing import _Ink; import gradio as gr; "
+        f"assert PIL.__version__ == {expected_version!r}; "
+        f"assert md.version('Pillow') == {expected_version!r}; "
+        "assert Image.__version__ == PIL.__version__; "
+        "assert _Ink is not None; "
+        "image = Image.new('RGB', (32, 24), (40, 80, 120)); "
+        "image = image.resize((16, 12)); buffer = io.BytesIO(); "
+        "image.save(buffer, format='PNG'); buffer.seek(0); "
+        "decoded = Image.open(buffer); decoded.load(); "
+        "assert decoded.size == (16, 12); "
+        "assert hasattr(gr, 'Image'); "
+        "print(PIL.__version__, gr.__version__, 'Pillow/Gradio image smoke: PASS')"
     )
-    return result.returncode == 0 and result.stdout.strip() == expected_version
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, check=False
+    )
+    return result.returncode == 0 and expected_version in result.stdout
 
 
 def _git_head(path: Path) -> str:
@@ -207,6 +212,41 @@ def _git_head(path: Path) -> str:
         text=True,
         stderr=subprocess.STDOUT,
     ).strip()
+
+
+def _git_has_revision(path: Path, revision: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(path), "cat-file", "-e", f"{revision}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _ensure_git_revision(path: Path, revision: str) -> None:
+    """Fetch only the pinned commit first; use a full fetch only as a fallback."""
+    if _git_has_revision(path, revision):
+        return
+    targeted = subprocess.run(
+        ["git", "-C", str(path), "fetch", "--no-tags", "origin", revision],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if targeted.returncode == 0 and _git_has_revision(path, revision):
+        print(f"[GIT] fetched missing pinned commit directly: {revision}")
+        return
+    print(
+        "[GIT] targeted SHA fetch unavailable; falling back to full remote fetch for pinned commit",
+        revision,
+    )
+    run("git", "-C", path, "fetch", "--all", "--tags", "--prune")
+    if not _git_has_revision(path, revision):
+        detail = (targeted.stderr or targeted.stdout or "").strip()
+        raise RuntimeError(
+            f"Pinned Git revision is still unavailable after fetch: {revision}. {detail}"
+        )
 
 
 def _git_exact_tag(path: Path) -> str:
@@ -250,64 +290,84 @@ def _normalize_torch_version(version: str, cuda: str) -> tuple[str, str]:
     return base, f"{base}+{cuda}"
 
 
-def _pytorch_runtime_is_locked(runtime: dict) -> bool:
+def _pytorch_runtime_probe_code(runtime: dict) -> str:
     config = dict(runtime.get("pytorch", {}) or {})
     _, expected_torch = _normalize_torch_version(
         str(config.get("version", "") or "").strip(),
         str(config.get("cuda", "") or "").strip().lower(),
     )
-    expected_cuda_tag = str(config.get("cuda", "") or "").strip().lower()
+    cuda_tag = str(config.get("cuda", "") or "").strip().lower()
+    cuda_digits = cuda_tag[2:]
+    expected_cuda = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
     expected_tv = str(config.get("torchvision_version", "") or "").strip()
     expected_ta = str(config.get("torchaudio_version", "") or "").strip()
-    if not expected_cuda_tag.startswith("cu") or not expected_cuda_tag[2:].isdigit():
-        return False
-    if not expected_tv or not expected_ta:
-        return False
-    cuda_digits = expected_cuda_tag[2:]
-    if len(cuda_digits) != 3:
-        return False
-    expected_cuda_runtime = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
+    return (
+        "import importlib.metadata as md; import torch, torchvision, torchaudio; "
+        f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
+        f"assert torch.version.cuda == {expected_cuda!r}, torch.version.cuda; "
+        f"assert md.version('torchvision') == {expected_tv!r}, md.version('torchvision'); "
+        f"assert md.version('torchaudio') == {expected_ta!r}, md.version('torchaudio'); "
+        "assert torchvision.__version__ == md.version('torchvision'); "
+        "assert torchaudio.__version__ == md.version('torchaudio'); "
+        "assert torch.cuda.is_available(), 'CUDA unavailable'; "
+        "assert torch.cuda.device_count() >= 1, 'no CUDA devices'; "
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())), 'non-SM75 GPU'; "
+        "from torchvision.ops import nms; "
+        "boxes = torch.tensor([[0.,0.,10.,10.],[1.,1.,9.,9.]], device='cuda'); "
+        "scores = torch.tensor([0.9,0.8], device='cuda'); "
+        "keep = nms(boxes, scores, 0.5); assert keep.numel() == 1; "
+        "audio = torch.zeros(64, dtype=torch.float32); "
+        "resampled = torchaudio.functional.resample(audio, 16000, 8000); "
+        "assert resampled.numel() > 0; "
+        "print('PyTorch:', torch.__version__); "
+        "print('CUDA:', torch.version.cuda); "
+        "print('torchvision:', torchvision.__version__); "
+        "print('torchaudio:', torchaudio.__version__); "
+        "print('GPU count:', torch.cuda.device_count()); "
+        "print('GPU capability:', [torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())]); "
+        "print('TorchVision CUDA NMS: PASS'); print('TorchAudio resample: PASS'); "
+        "print('PyTorch runtime lock: PASS')"
+    )
 
+
+def _pytorch_runtime_is_locked(runtime: dict) -> bool:
+    config = dict(runtime.get("pytorch", {}) or {})
+    cuda_tag = str(config.get("cuda", "") or "").strip().lower()
+    expected_tv = str(config.get("torchvision_version", "") or "").strip()
+    expected_ta = str(config.get("torchaudio_version", "") or "").strip()
+    try:
+        _, expected_torch = _normalize_torch_version(
+            str(config.get("version", "") or "").strip(), cuda_tag
+        )
+    except RuntimeError:
+        return False
+    if (
+        not cuda_tag.startswith("cu")
+        or not cuda_tag[2:].isdigit()
+        or len(cuda_tag[2:]) != 3
+        or not expected_tv
+        or not expected_ta
+    ):
+        return False
+
+    # A live, already-imported Torch module cannot be replaced by pip in-place.
+    # If this kernel still holds an older build, force the installer to repair
+    # disk state and rely on fresh-process validation for native extensions.
     if "torch" in sys.modules:
         try:
-            torch_module = sys.modules["torch"]
-            if str(getattr(torch_module, "__version__", "")) != expected_torch:
+            if str(getattr(sys.modules["torch"], "__version__", "")) != expected_torch:
                 return False
-            if str(getattr(getattr(torch_module, "version", None), "cuda", "")) != expected_cuda_runtime:
-                return False
-            if importlib_metadata.version("torchvision") != expected_tv:
-                return False
-            if importlib_metadata.version("torchaudio") != expected_ta:
-                return False
-            if not bool(torch_module.cuda.is_available()):
-                return False
-            device_count = int(torch_module.cuda.device_count())
-            if device_count < 1:
-                return False
-            return all(
-                torch_module.cuda.get_device_capability(i) == (7, 5)
-                for i in range(device_count)
-            )
         except Exception:
             return False
 
-    probe = (
-        "import importlib.metadata as md; import torch; "
-        f"assert torch.__version__ == {expected_torch!r}; "
-        f"assert torch.version.cuda == {expected_cuda_runtime!r}; "
-        f"assert md.version('torchvision') == {expected_tv!r}; "
-        f"assert md.version('torchaudio') == {expected_ta!r}; "
-        "assert torch.cuda.is_available(); "
-        "assert torch.cuda.device_count() >= 1; "
-        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
-        "print('PyTorch runtime lock: PASS')"
-    )
     result = subprocess.run(
-        [sys.executable, "-c", probe],
+        [sys.executable, "-c", _pytorch_runtime_probe_code(runtime)],
         capture_output=True,
         text=True,
         check=False,
     )
+    if result.returncode != 0 and os.getenv("H3_BOOTSTRAP_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        print("[PYTORCH PROBE]", result.stdout, result.stderr)
     return result.returncode == 0
 
 
@@ -356,16 +416,44 @@ def _sage_build_stamp_path(install_dir: Path) -> Path:
     return install_dir / ".h3_t4_build_stamp.json"
 
 
-def _sage_build_stamp(runtime: dict) -> dict:
+def _tool_version(command: str) -> str:
+    try:
+        result = subprocess.run(
+            [command, "--version"], capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    if result.returncode != 0:
+        return "unavailable"
+    lines = [line.strip() for line in (result.stdout or result.stderr).splitlines() if line.strip()]
+    return " | ".join(lines[-2:]) if lines else "unknown"
+
+
+def _sage_build_stamp(runtime: dict, install_dir: Path | None = None) -> dict:
     pytorch = dict(runtime.get("pytorch", {}) or {})
     sage = dict(runtime.get("sage_attention", {}) or {})
+    cuda_runtime = dict(runtime.get("cuda_runtime", {}) or {})
+    kernel = (install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h") if install_dir else None
+    kernel_sha256 = None
+    if kernel is not None and kernel.is_file():
+        kernel_sha256 = hashlib.sha256(kernel.read_bytes()).hexdigest()
     return {
-        "schema": 1,
+        "schema": 2,
         "sage_revision": str(sage.get("revision", "") or "").strip(),
         "sage_version": str(sage.get("version", "") or "").strip(),
-        "torch_version": str(pytorch.get("version", "") or "").split("+", 1)[0].strip(),
+        "torch_version": str(pytorch.get("version", "") or "").strip(),
+        "torchvision_version": str(pytorch.get("torchvision_version", "") or "").strip(),
+        "torchaudio_version": str(pytorch.get("torchaudio_version", "") or "").strip(),
         "torch_cuda": str(pytorch.get("cuda", "") or "").strip().lower(),
-        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "cuda_runtime": str(cuda_runtime.get("runtime_version", "") or "").strip(),
+        "cublas": str(cuda_runtime.get("cublas_version", "") or "").strip(),
+        "python": sys.version,
+        "platform": sys.platform,
+        "machine": __import__("platform").machine(),
+        "gpu_arch": "sm75",
+        "cxx_compiler": _tool_version("c++"),
+        "nvcc_compiler": _tool_version("nvcc"),
+        "patched_kernel_sha256": kernel_sha256,
     }
 
 
@@ -379,7 +467,7 @@ def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
         return False
     try:
         stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-        if stamp != _sage_build_stamp(runtime):
+        if stamp != _sage_build_stamp(runtime, install_dir):
             return False
         if _git_head(install_dir) != str(runtime.get("sage_attention", {}).get("revision", "")).strip():
             return False
@@ -596,7 +684,7 @@ def install_comfyui(runtime: dict) -> None:
     if _comfyui_checkout_is_locked(revision, expected_version):
         print("[BOOTSTRAP WARM] reusing locked ComfyUI checkout")
     else:
-        run("git", "-C", COMFY, "fetch", "--all", "--tags", "--prune")
+        _ensure_git_revision(COMFY, revision)
         run("git", "-C", COMFY, "checkout", "--detach", revision)
     comfy_requirements = COMFY / "requirements.txt"
     if _requirements_satisfied(comfy_requirements):
@@ -754,12 +842,7 @@ def verify_runtime_files(runtime: dict) -> None:
 
 
 def install_pytorch_runtime(runtime: dict) -> None:
-    """Install and verify the project-locked PyTorch CUDA build last.
-    ComfyUI and custom-node requirements are allowed to install their own
-    compatible dependencies first. PyTorch is re-asserted only after all of
-    those dependency installs so a transitive requirement cannot silently
-    leave the worker on a different CUDA build.
-    """
+    """Install the locked SM75 PyTorch stack and validate native extensions in a child process."""
     config = dict(runtime.get("pytorch", {}) or {})
     version = str(config.get("version", "") or "").strip()
     cuda = str(config.get("cuda", "") or "").strip().lower()
@@ -768,57 +851,81 @@ def install_pytorch_runtime(runtime: dict) -> None:
     torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
     if not all((version, cuda, index, torchvision_version, torchaudio_version)):
         raise RuntimeError("runtime_versions.yaml pytorch configuration is incomplete.")
-    if not cuda.startswith("cu") or not cuda[2:].isdigit():
+    if not cuda.startswith("cu") or not cuda[2:].isdigit() or len(cuda[2:]) != 3:
         raise RuntimeError(
             "runtime_versions.yaml pytorch.cuda must use a cuNNN wheel tag; "
             f"got {cuda!r}."
         )
     base_version, expected_torch = _normalize_torch_version(version, cuda)
     if _pytorch_runtime_is_locked(runtime):
-        print(f"[BOOTSTRAP WARM] reusing locked PyTorch={expected_torch}")
+        print(f"[BOOTSTRAP WARM] reusing verified PyTorch={expected_torch}")
         return
-    version = base_version
+
+    # The long-lived Kaggle notebook may still hold an older `torch` module in
+    # sys.modules even after a previous bootstrap upgraded files on disk. Check
+    # a clean interpreter before forcing another large wheel reinstall.
+    disk_probe = subprocess.run(
+        [sys.executable, "-c", _pytorch_runtime_probe_code(runtime)],
+        capture_output=True, text=True, check=False,
+    )
+    if disk_probe.returncode == 0:
+        live_torch = sys.modules.get("torch")
+        if live_torch is not None and str(getattr(live_torch, "__version__", "")) != expected_torch:
+            print(
+                "[PYTORCH CACHE WARNING] the installed disk runtime is correct, but this notebook "
+                f"still has torch {getattr(live_torch, '__version__', 'unknown')} loaded in memory. "
+                "Fresh subprocesses use the locked build; do not reload torch in-place."
+            )
+        else:
+            print(f"[BOOTSTRAP WARM] disk PyTorch runtime verified={expected_torch}")
+        if disk_probe.stdout:
+            print(disk_probe.stdout, end="")
+        return
+
+    expected_metadata = {
+        "torch": expected_torch,
+        "torchvision": torchvision_version,
+        "torchaudio": torchaudio_version,
+    }
+    metadata_matches = all(
+        _package_version_satisfied(package, expected)
+        for package, expected in expected_metadata.items()
+    )
+    if os.getenv("H3_BOOTSTRAP_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        print("[PYTORCH PROBE BEFORE INSTALL]", disk_probe.stdout, disk_probe.stderr)
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
-    run(
-        sys.executable,
-        "-m", "pip", "install", "-q",
-        "--disable-pip-version-check",
-        "--no-cache-dir",
-        "--force-reinstall",
-        "--index-url", index,
-        f"torch=={version}",
+    args = [
+        sys.executable, "-m", "pip", "install", "-q",
+        "--disable-pip-version-check", "--upgrade", "--index-url", index,
+        f"torch=={base_version}",
         f"torchvision=={torchvision_version}",
         f"torchaudio=={torchaudio_version}",
-    )
-    cuda_digits = cuda[2:]
-    if len(cuda_digits) != 3:
-        raise RuntimeError(f"Unsupported PyTorch CUDA wheel tag: {cuda!r}")
-    expected_torch = f"{version.split('+', 1)[0]}+{cuda}"
-    expected_cuda = f"{cuda_digits[:2]}.{cuda_digits[2:]}"
+    ]
+    # Only force-reinstall when metadata already matches but the clean native
+    # extension/CUDA probe failed. Normal version upgrades remain cacheable.
+    if metadata_matches:
+        args.insert(args.index("--upgrade"), "--force-reinstall")
+    run(*args)
+
     verify = subprocess.run(
-        [
-            sys.executable, "-c",
-            (
-                "import torch; "
-                f"assert torch.__version__ == {expected_torch!r}; "
-                f"assert torch.version.cuda == {expected_cuda!r}; "
-                "print(torch.__version__); "
-                "print(torch.version.cuda)"
-            ),
-        ],
+        [sys.executable, "-c", _pytorch_runtime_probe_code(runtime)],
         capture_output=True,
         text=True,
         check=False,
     )
+    if verify.stdout:
+        print(verify.stdout, end="")
+    if verify.stderr:
+        print(verify.stderr, end="")
     if verify.returncode != 0:
         raise RuntimeError(
-            "Locked PyTorch runtime verification failed.\n"
-            + (verify.stdout or "")
-            + (verify.stderr or "")
+            "Locked PyTorch/TorchVision/TorchAudio SM75 verification failed. "
+            "See the fresh-process probe output above; refusing to continue with an unverified GPU stack."
         )
-    print("[PYTORCH]", (verify.stdout or "").strip().replace("\n", " | "))
+    print("[PYTORCH] exact CUDA wheel trio + TorchVision CUDA op + TorchAudio import/resample: PASS")
+
 def _enforce_no_restart() -> None:
     """Require execution inside the live Kaggle IPython kernel."""
     try:
@@ -829,23 +936,29 @@ def _enforce_no_restart() -> None:
     if os.getenv("JPY_PARENT_PID") and not in_kernel:
         raise RuntimeError("NO-RESTART bootstrap must run in the current Kaggle kernel; use `%run kaggle/bootstrap.py`, not `!python kaggle/bootstrap.py`.")
 def _repair_loaded_pillow(expected_version: str) -> None:
-    """Repair Pillow modules already loaded before pip replaced the files."""
-    expected_ink = float | tuple[int, ...] | str
-    loaded_typing = sys.modules.get("PIL._typing")
+    """Report the live-module boundary; never spoof PIL.__version__ after a wheel replacement."""
     loaded_pkg = sys.modules.get("PIL")
-    if loaded_typing is not None:
-        loaded_typing._Ink = expected_ink
-        print("[PILLOW CACHE] repaired loaded PIL._typing._Ink")
     if loaded_pkg is not None:
-        loaded_pkg.__version__ = expected_version
-        print("[PILLOW CACHE] reconciled loaded PIL.__version__", expected_version)
+        loaded_version = str(getattr(loaded_pkg, "__version__", "unknown"))
+        if loaded_version != expected_version:
+            print(
+                "[PILLOW CACHE WARNING] this notebook kernel already imported Pillow "
+                f"{loaded_version}; disk installation is {expected_version}. "
+                "Python cannot safely replace the loaded native Pillow extension in-place. "
+                "Fresh subprocesses use the upgraded wheel; restart the Kaggle kernel "
+                "before using Pillow in this already-running process if the patched "
+                "security version must be active here."
+            )
+            return
     import importlib
     importlib.invalidate_caches()
     import PIL
-    from PIL._typing import _Ink
-    if str(PIL.__version__) != expected_version or _Ink != expected_ink:
-        raise RuntimeError(f"Live-process Pillow repair failed: version={PIL.__version__!r}, _Ink={_Ink!r}")
-    print("[PILLOW CACHE] live-process Pillow reconciliation: PASS")
+    if str(PIL.__version__) != expected_version:
+        raise RuntimeError(
+            f"Live Pillow version mismatch: expected={expected_version}, actual={PIL.__version__}."
+        )
+    print("[PILLOW CACHE] live Pillow module already matches disk version:", expected_version)
+
 def patch_h3_fp16_runtime(runtime: dict) -> None:
     """Enable the native ComfyUI 0.43.2 H3 FP16 model path on T4 without stale forward rewrites."""
     model = COMFY / "comfy/ldm/minimax/model.py"
@@ -1292,41 +1405,50 @@ def install_storyboard_runtime(
             f"gradio=={gradio_version}",
         )
 def install_and_verify_pillow_runtime(runtime: dict) -> None:
+    """Install Pillow last, intentionally bypassing Gradio 6.x's stale <13 metadata cap."""
     pillow_version = str(runtime.get("storyboard", {}).get("pillow_version", "")).strip()
     if not pillow_version:
         raise RuntimeError("runtime_versions.yaml storyboard.pillow_version is missing.")
     if _probe_pillow(pillow_version):
-        print("[BOOTSTRAP WARM] Pillow already locked", pillow_version)
+        print("[BOOTSTRAP WARM] Pillow + Gradio image smoke already verified", pillow_version)
     else:
+        print(
+            "[PILLOW] installing the runtime-pinned Pillow without dependency resolution; "
+            "Gradio 6.26 declares Pillow<13 but Pillow 13 is required for the current security fix."
+        )
         run(
-            sys.executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-cache-dir",
-            "--force-reinstall",
-            "-q",
-            "--disable-pip-version-check",
-            f"Pillow=={pillow_version}",
+            sys.executable, "-m", "pip", "install", "-q",
+            "--disable-pip-version-check", "--no-deps", "--only-binary=:all:",
+            "--upgrade", f"Pillow=={pillow_version}",
         )
     _repair_loaded_pillow(pillow_version)
     verify = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from PIL import Image; from PIL._typing import _Ink; print(Image.__version__); print(_Ink)",
-        ],
+        [sys.executable, "-c", (
+            "import io, importlib.metadata as md, PIL, gradio; "
+            "from PIL import Image; from PIL._typing import _Ink; "
+            f"assert PIL.__version__ == {pillow_version!r}; "
+            f"assert md.version('Pillow') == {pillow_version!r}; "
+            "assert Image.__version__ == PIL.__version__; assert _Ink is not None; "
+            "b=io.BytesIO(); Image.new('RGB',(8,8)).save(b,format='PNG'); b.seek(0); "
+            "im=Image.open(b); im.load(); assert im.size==(8,8); "
+            "assert hasattr(gradio,'Image'); "
+            "print('Pillow:', PIL.__version__); print('Gradio:', gradio.__version__); "
+            "print('Pillow/Gradio image compatibility: PASS')"
+        )],
         capture_output=True,
         text=True,
         check=False,
     )
-    if verify.returncode != 0 or pillow_version not in (verify.stdout or ""):
+    if verify.stdout:
+        print(verify.stdout, end="")
+    if verify.stderr:
+        print(verify.stderr, end="")
+    if verify.returncode != 0:
         raise RuntimeError(
-            "Fresh-process Pillow verification failed.\n"
-            + (verify.stdout or "")
-            + (verify.stderr or "")
+            "Fresh-process Pillow/Gradio compatibility verification failed. "
+            "The bootstrap will not continue with an unverified Pillow override."
         )
-    print("[PILLOW LIVE]", pillow_version, "_Ink=PASS")
+
 def remove_legacy_context_ir_node() -> None:
     """Remove the retired external Context-IR bridge from runtime custom_nodes."""
     destination = CUSTOM / "ComfyUI-MiniMax-H3-ContextIR"
@@ -1965,6 +2087,7 @@ def verify_h3_optimization_runtime(runtime: dict) -> None:
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 expected_torch = os.environ["H3_EXPECTED_TORCH"]
 expected_cuda = os.environ["H3_EXPECTED_CUDA"]
@@ -2237,15 +2360,7 @@ def install_nodes() -> None:
         if checkout_locked:
             print("[BOOTSTRAP WARM] reusing locked node", node["name"])
         else:
-            run(
-                "git",
-                "-C",
-                destination,
-                "fetch",
-                "--all",
-                "--tags",
-                "--prune",
-            )
+            _ensure_git_revision(destination, revision)
             if node["name"] == "H3-Optimizations":
                 run("git", "-C", destination, "reset", "--hard")
             run(
@@ -2530,7 +2645,7 @@ def install_sageattention_sm75(runtime: dict) -> None:
     if not install_dir.exists():
         run("git", "clone", repository, install_dir)
 
-    run("git", "-C", install_dir, "fetch", "--all", "--tags", "--prune")
+    _ensure_git_revision(install_dir, revision)
     run("git", "-C", install_dir, "reset", "--hard", revision)
     actual_revision = subprocess.check_output(
         ["git", "-C", str(install_dir), "rev-parse", "HEAD"],
@@ -2880,7 +2995,7 @@ print(
                 f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
             )
 
-    stamp = _sage_build_stamp(runtime)
+    stamp = _sage_build_stamp(runtime, install_dir)
     _sage_build_stamp_path(install_dir).write_text(
         json.dumps(stamp, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -2908,6 +3023,42 @@ def install_models() -> None:
         destination = MODELS / model["directory"] / filename
         link_model(source, destination)
         print("[MODEL]", filename)
+_BOOTSTRAP_PHASES: list[dict] = []
+
+
+def _timed_call(label: str, function, *args, **kwargs):
+    started = time.perf_counter()
+    print(f"[BOOTSTRAP TIMING] {label}: started")
+    status = "passed"
+    try:
+        return function(*args, **kwargs)
+    except Exception:
+        status = "failed"
+        raise
+    finally:
+        elapsed = round(time.perf_counter() - started, 3)
+        _BOOTSTRAP_PHASES.append({"phase": label, "seconds": elapsed, "status": status})
+        print(f"[BOOTSTRAP TIMING] {label}: {elapsed:.3f}s ({status})")
+
+
+def _write_bootstrap_metrics(started: float, status: str) -> None:
+    metrics = {
+        "schema": 1,
+        "status": status,
+        "wall_seconds": round(time.perf_counter() - started, 3),
+        "python": sys.version,
+        "phases": list(_BOOTSTRAP_PHASES),
+    }
+    destination = ROOT / "bootstrap_metrics.json"
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    try:
+        temporary.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temporary.replace(destination)
+        print(f"[BOOTSTRAP METRICS] {destination}")
+    except OSError as exc:
+        print(f"[BOOTSTRAP METRICS WARNING] unable to write metrics: {exc}")
+
+
 def _warn_if_torch_already_imported() -> None:
     """Warn when bootstrap is running in a process that already imported Torch."""
     if "torch" not in sys.modules:
@@ -2922,6 +3073,9 @@ def _warn_if_torch_already_imported() -> None:
 
 
 def main():
+    bootstrap_started = time.perf_counter()
+    bootstrap_status = "failed"
+    _BOOTSTRAP_PHASES.clear()
     _enforce_no_restart()
     _warn_if_torch_already_imported()
     runtime = load_yaml(RUNTIME_MANIFEST)
@@ -2929,7 +3083,7 @@ def main():
     legacy_runtime = ROOT / f".h3_runtime_{pytorch_cuda}"
     if legacy_runtime.exists():
         shutil.rmtree(legacy_runtime, ignore_errors=True)
-    ensure_kaggle_startup_wrapt(runtime)
+    _timed_call("ensure_kaggle_startup_wrapt", ensure_kaggle_startup_wrapt, runtime)
     director_config = dict(runtime.get("director", {}) or {})
     configured_model_path = str(director_config.get("model_path", "") or "").strip()
     director_model_path = os.getenv("H3_DIRECTOR_MODEL_PATH", "").strip() or configured_model_path
@@ -2951,11 +3105,14 @@ def main():
     ).expanduser().resolve()
     director_ready = _probe_director_venv(runtime, director_env)
     if director_ready:
+        _BOOTSTRAP_PHASES.append({"phase": "reuse_director_vllm_environment", "seconds": 0.0, "status": "reused"})
         print(f"[BOOTSTRAP WARM] reusing Director vLLM environment={director_env}")
     elif shutil.which("uv") is not None:
         from concurrent.futures import ThreadPoolExecutor
         director_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-qwen-bootstrap")
-        director_future = director_executor.submit(install_director_runtime, runtime)
+        director_future = director_executor.submit(
+            _timed_call, "install_director_runtime", install_director_runtime, runtime
+        )
         print("[BOOTSTRAP PARALLEL] Director vLLM install started")
 
     sage_executor = None
@@ -2963,28 +3120,31 @@ def main():
     sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "") or "")
 
     try:
-        install_comfyui(runtime)
-        install_nodes()
-        remove_legacy_context_ir_node()
-        install_base_requirements()
-        install_storyboard_runtime(runtime)
-        install_pytorch_runtime(runtime)
-        install_and_verify_pillow_runtime(runtime)
+        _timed_call("install_comfyui", install_comfyui, runtime)
+        _timed_call("install_custom_nodes", install_nodes)
+        _timed_call("remove_legacy_context_ir_node", remove_legacy_context_ir_node)
+        _timed_call("install_base_requirements", install_base_requirements)
+        _timed_call("install_storyboard_runtime", install_storyboard_runtime, runtime)
+        _timed_call("install_pytorch_runtime", install_pytorch_runtime, runtime)
+        _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
 
         if _sage_install_is_reusable(runtime, sage_dir):
+            _BOOTSTRAP_PHASES.append({"phase": "reuse_sageattention_sm75_build", "seconds": 0.0, "status": "reused"})
             print(f"[BOOTSTRAP WARM] reusing SageAttention SM75 build={sage_dir}")
         else:
             from concurrent.futures import ThreadPoolExecutor
             sage_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-sage-bootstrap")
-            sage_future = sage_executor.submit(install_sageattention_sm75, runtime)
+            sage_future = sage_executor.submit(
+                _timed_call, "install_sageattention_sm75", install_sageattention_sm75, runtime
+            )
             print("[BOOTSTRAP PARALLEL] SageAttention build started")
 
-        prepare_locked_h3_optimization_source(runtime)
-        patch_h3_bounded_qkv(runtime)
-        patch_h3_qkv_binding_lifetime(runtime)
-        patch_h3_sage_attention(runtime)
-        apply_embedded_h3_runtime_overlay()
-        patch_h3_embedding_memory_compatibility(runtime)
+        _timed_call("prepare_h3_optimization_source", prepare_locked_h3_optimization_source, runtime)
+        _timed_call("patch_h3_bounded_qkv", patch_h3_bounded_qkv, runtime)
+        _timed_call("patch_h3_qkv_binding_lifetime", patch_h3_qkv_binding_lifetime, runtime)
+        _timed_call("patch_h3_sage_attention", patch_h3_sage_attention, runtime)
+        _timed_call("apply_embedded_h3_runtime_overlay", apply_embedded_h3_runtime_overlay)
+        _timed_call("patch_h3_embedding_memory_compatibility", patch_h3_embedding_memory_compatibility, runtime)
 
         if sage_future is not None:
             sage_future.result()
@@ -2992,19 +3152,21 @@ def main():
         if director_future is not None:
             director_future.result()
         elif not director_ready:
-            install_director_runtime(runtime)
+            _timed_call("install_director_runtime", install_director_runtime, runtime)
 
-        verify_h3_optimization_runtime(runtime)
-        install_models()
-        verify_inventory()
-        verify_runtime_files(runtime)
+        _timed_call("verify_h3_optimization_runtime", verify_h3_optimization_runtime, runtime)
+        _timed_call("install_models", install_models)
+        _timed_call("verify_inventory", verify_inventory)
+        _timed_call("verify_runtime_files", verify_runtime_files, runtime)
         print("=" * 80)
         print("MiniMax H3 Kaggle bootstrap PASSED.")
+        bootstrap_status = "passed"
     finally:
         if director_executor is not None:
             director_executor.shutdown(wait=True, cancel_futures=False)
         if sage_executor is not None:
             sage_executor.shutdown(wait=True, cancel_futures=False)
+        _write_bootstrap_metrics(bootstrap_started, bootstrap_status)
 
 if __name__ == "__main__":
     main()
