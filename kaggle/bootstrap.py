@@ -442,6 +442,11 @@ def _sage_build_stamp(runtime: dict, install_dir: Path | None = None) -> dict:
     sage = dict(runtime.get("sage_attention", {}) or {})
     cuda_runtime = dict(runtime.get("cuda_runtime", {}) or {})
     kernel = (install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h") if install_dir else None
+    setup_file = (install_dir / "setup.py") if install_dir else None
+    setup_sha256 = (
+        hashlib.sha256(setup_file.read_bytes()).hexdigest()
+        if setup_file is not None and setup_file.is_file() else None
+    )
     kernel_sha256 = None
     if kernel is not None and kernel.is_file():
         kernel_sha256 = hashlib.sha256(kernel.read_bytes()).hexdigest()
@@ -462,6 +467,7 @@ def _sage_build_stamp(runtime: dict, install_dir: Path | None = None) -> dict:
         "cxx_compiler": _tool_version("c++"),
         "nvcc_compiler": _tool_version("nvcc"),
         "patched_kernel_sha256": kernel_sha256,
+        "patched_setup_sha256": setup_sha256,
     }
 
 
@@ -2696,6 +2702,28 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
     return source
 
+def _patch_sage_cxx_standard(install_dir: Path) -> None:
+    """Build the Sage extension with C++20.
+
+    PyTorch 2.14+ ATen/c10 headers need C++20, but the pinned SageAttention fork hard-codes
+    -std=c++17 for both the host compiler and nvcc, which fails inside torch/extension.h
+    (cascade of "no match for operator!=" errors). Replace the pinned flag, idempotently.
+    """
+    setup_py = install_dir / "setup.py"
+    source = setup_py.read_text(encoding="utf-8")
+    legacy = source.count('"-std=c++17"')
+    if legacy:
+        if legacy != 2:
+            raise RuntimeError(
+                f"SageAttention setup.py has {legacy} '-std=c++17' flags; expected exactly the cxx and nvcc lists."
+            )
+        source = source.replace('"-std=c++17"', '"-std=c++20"')
+        setup_py.write_text(source, encoding="utf-8")
+    if '"-std=c++17"' in source or source.count('"-std=c++20"') != 2:
+        raise RuntimeError("SageAttention setup.py C++20 patch verification failed.")
+    print("[SAGE BUILD PATCH] setup.py -std=c++17 -> -std=c++20 (cxx + nvcc): PASS")
+
+
 def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
     """Print the CUDA toolchain a native build will use, and warn on a toolkit/torch major mismatch."""
     cuda_home = env.get("CUDA_HOME") or env.get("CUDA_PATH") or ""
@@ -2805,6 +2833,7 @@ def install_sageattention_sm75(runtime: dict) -> None:
     if "constexpr int WARP_K_SM75 = 16;" in sage_source:
         raise RuntimeError("SageAttention SM75 patch application left a legacy WARP_K_SM75=16 declaration.")
     print("[SAGE SM75 PATCH] embedded bootstrap patch applied: PASS")
+    _patch_sage_cxx_standard(install_dir)
 
     for relative in ("build", "dist", "sageattention.egg-info"):
         path = install_dir / relative
