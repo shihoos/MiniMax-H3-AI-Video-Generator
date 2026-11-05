@@ -283,6 +283,14 @@ def _comfyui_checkout_is_locked(
     return True
 
 
+def _cuda_runtime_from_tag(tag: str) -> str:
+    """cu132 -> '13.2'. The CUDA runtime version is always derived from the manifest wheel tag."""
+    match = re.fullmatch(r"cu(\d{2})(\d)", str(tag).strip().lower())
+    if not match:
+        raise RuntimeError(f"CUDA wheel tag must look like cu132, got {tag!r}.")
+    return f"{match.group(1)}.{match.group(2)}"
+
+
 def _normalize_torch_version(version: str, cuda: str) -> tuple[str, str]:
     base = version.split("+", 1)[0].strip()
     if not base:
@@ -382,7 +390,7 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
     tp_size = int(director.get("tensor_parallel_size", 0) or 0)
     python = env_dir / "bin" / "python"
-    if not all((python.is_file(), vllm_version, wrapt_version, torch_version, cuda_tag == "cu130", tp_size > 0)):
+    if not all((python.is_file(), vllm_version, wrapt_version, torch_version, re.fullmatch(r"cu\d{3}", cuda_tag), tp_size > 0)):
         return False
     expected_torch = f"{torch_version}+{cuda_tag}"
     code = (
@@ -393,7 +401,7 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
         f"assert sys.version_info[:2] == (3, 12), sys.version; "
         f"assert vllm.__version__ == {vllm_version!r}; "
         f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
-        "assert torch.version.cuda == '13.0', torch.version.cuda; "
+        f"assert torch.version.cuda == {_cuda_runtime_from_tag(cuda_tag)!r}, torch.version.cuda; "
         f"assert wrapt.__version__ == {wrapt_version!r}; "
         f"assert transformers.__version__ == {transformers_version!r}; "
         f"assert tokenizers.__version__ == {tokenizers_version!r}; "
@@ -1262,14 +1270,15 @@ def install_director_runtime(
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
     loader_strategy = str(director.get("safetensors_load_strategy", "lazy") or "lazy").strip().lower()
-    if vllm_version != "0.32.0":
-        raise RuntimeError(f"Director vLLM must be pinned to 0.32.0, got {vllm_version!r}.")
-    if not torch_version or cuda_tag != "cu130":
-        raise RuntimeError("runtime_versions.yaml Director vLLM PyTorch/CUDA lock must specify torch 2.13.0 and cu130.")
-    if loader_strategy != "lazy":
+    if not vllm_version:
+        raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
+    if not torch_version:
+        raise RuntimeError("runtime_versions.yaml director.vllm_torch_version is required.")
+    expected_director_cuda = _cuda_runtime_from_tag(cuda_tag)
+    if loader_strategy not in {"eager", "lazy", "prefetch", "torchao"}:
         raise RuntimeError(
-            "runtime_versions.yaml must use native vLLM safetensors_load_strategy='lazy' "
-            "for the memory-constrained Director runtime."
+            "runtime_versions.yaml director.safetensors_load_strategy must be one of "
+            f"eager/lazy/prefetch/torchao, got {loader_strategy!r}."
         )
     expected_director_torch = f"{torch_version}+{cuda_tag}"
     transformers_version = _exact_requirement_pin("transformers")
@@ -1346,7 +1355,7 @@ def install_director_runtime(
                 "print('Qwen3 config import: PASS', Qwen3Config.__name__); "
                 "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
                 f"assert torch.__version__ == {expected_director_torch!r}; "
-                "assert torch.version.cuda == '13.0'; "
+                f"assert torch.version.cuda == {expected_director_cuda!r}; "
                 "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
                 f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel_size}; "
                 "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
@@ -2687,6 +2696,51 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
 
     return source
 
+def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
+    """Print the CUDA toolchain a native build will use, and warn on a toolkit/torch major mismatch."""
+    cuda_home = env.get("CUDA_HOME") or env.get("CUDA_PATH") or ""
+    nvcc = shutil.which("nvcc", path=env.get("PATH")) or (
+        str(Path(cuda_home) / "bin" / "nvcc") if cuda_home and (Path(cuda_home) / "bin" / "nvcc").is_file() else ""
+    )
+    if not nvcc and Path("/usr/local/cuda/bin/nvcc").is_file():
+        nvcc = "/usr/local/cuda/bin/nvcc"
+    nvcc_text = "not found"
+    if nvcc:
+        try:
+            out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, check=False, timeout=20)
+            match = re.search(r"release (\d+)\.(\d+)", out.stdout)
+            nvcc_text = f"{nvcc} release {match.group(1)}.{match.group(2)}" if match else f"{nvcc} (version unparsed)"
+            if match:
+                torch_cuda = _cuda_runtime_from_tag(str((runtime.get("pytorch", {}) or {}).get("cuda", "")))
+                if match.group(1) != torch_cuda.split(".", 1)[0]:
+                    print(
+                        f"[SAGE TOOLCHAIN WARNING] system nvcc {match.group(1)}.{match.group(2)} has a different "
+                        f"CUDA major than PyTorch's CUDA {torch_cuda}; the extension compile may fail."
+                    )
+        except Exception as exc:
+            nvcc_text = f"{nvcc} (query failed: {exc})"
+    print(f"[SAGE TOOLCHAIN] nvcc={nvcc_text} CUDA_HOME={cuda_home or '(unset; torch will search)'}", flush=True)
+
+
+def _run_logged_build(args: list, env: dict, log_path: Path, label: str, tail_lines: int = 120) -> None:
+    """Run a long native build, keep the full log on disk and print its tail when it fails."""
+    print("+", " ".join(str(value) for value in args), flush=True)
+    with open(log_path, "w", encoding="utf-8") as handle:
+        result = subprocess.run(
+            [str(value) for value in args], env=env, stdout=handle, stderr=subprocess.STDOUT, text=True, check=False,
+        )
+    if result.returncode == 0:
+        print(f"[{label}] PASS (full log: {log_path})", flush=True)
+        return
+    try:
+        tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail_lines:]
+    except OSError:
+        tail = []
+    print(f"[{label} FAILED] exit={result.returncode}; full log: {log_path}", flush=True)
+    print("\n".join(tail), flush=True)
+    raise RuntimeError(f"{label} failed with exit code {result.returncode}; see {log_path} (tail printed above).")
+
+
 def install_sageattention_sm75(runtime: dict) -> None:
     """Clone, apply the proven SM75 fragment-mapping fix, build, and verify the pinned fork."""
     cfg = dict(runtime.get("sage_attention", {}) or {})
@@ -2767,18 +2821,16 @@ def install_sageattention_sm75(runtime: dict) -> None:
     build_env["TORCH_CUDA_ARCH_LIST"] = "7.5"
     build_env["MAX_JOBS"] = "1"
     build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
-    run(
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "-q",
-        "--disable-pip-version-check",
-        "--no-deps",
-        "--no-build-isolation",
-        "-e",
-        install_dir,
+    _describe_cuda_toolchain(runtime, build_env)
+    _run_logged_build(
+        [
+            sys.executable, "-m", "pip", "install", "-v",
+            "--disable-pip-version-check", "--no-deps", "--no-build-isolation",
+            "-e", str(install_dir),
+        ],
         env=build_env,
+        log_path=ROOT / "sageattention_build.log",
+        label="SAGEATTENTION BUILD",
     )
 
     library_dirs = _cuda_library_dirs(runtime)
@@ -3224,12 +3276,27 @@ def main():
         _timed_call("apply_embedded_h3_runtime_overlay", apply_embedded_h3_runtime_overlay)
         _timed_call("patch_h3_embedding_memory_compatibility", patch_h3_embedding_memory_compatibility, runtime)
 
-        if sage_future is not None:
-            sage_future.result()
-
-        if director_future is not None:
-            director_future.result()
-        elif not director_ready:
+        background_failures = []
+        for background_label, background_future in (
+            ("SageAttention SM75 build", sage_future),
+            ("Director vLLM runtime install", director_future),
+        ):
+            if background_future is None:
+                continue
+            try:
+                background_future.result()
+            except Exception as background_exc:
+                background_failures.append((background_label, background_exc))
+                print(
+                    f"[BOOTSTRAP FAILURE] {background_label}: {type(background_exc).__name__}: {background_exc}",
+                    flush=True,
+                )
+        if background_failures:
+            raise RuntimeError(
+                "Bootstrap failed in "
+                + "; ".join(f"{label}: {exc}" for label, exc in background_failures)
+            ) from background_failures[0][1]
+        if director_future is None and not director_ready:
             _timed_call("install_director_runtime", install_director_runtime, runtime)
 
         _timed_call("verify_h3_optimization_runtime", verify_h3_optimization_runtime, runtime)
