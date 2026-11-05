@@ -34,7 +34,10 @@ director:
   vllm_version: 0.32.0
   vllm_torch_version: 2.13.0
   vllm_cuda: cu130
-  safetensors_load_strategy: eager
+  # Single source of truth for the Director weight loader (bootstrap, preflight, planner and validators
+  # all read this key). lazy = mmap from the staged local checkpoint copy; eager copies whole shards
+  # into RAM per TP worker and ran the 33 GB Kaggle host out of memory.
+  safetensors_load_strategy: lazy
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
   allow_transformers_vllm_constraint_override: false
