@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -259,7 +260,7 @@ DIRECTOR_VLLM_MAX_MODEL_LEN = int(RUNTIME["director"]["context"])
 # vLLM safetensors loader is an explicit runtime contract. The environment
 # override exists for controlled A/B testing (for example, prefetch vs eager).
 _director_loader_default = str(
-    RUNTIME["director"].get("safetensors_load_strategy", "eager")
+    RUNTIME["director"].get("safetensors_load_strategy", "lazy")
 ).strip().lower()
 DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY = os.getenv(
     "H3_DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
@@ -273,7 +274,7 @@ if DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY not in {"eager", "lazy", "prefetch", 
 DIRECTOR_VLLM_VERSION = str(RUNTIME["director"].get("vllm_version", "")).strip()
 DIRECTOR_VLLM_TORCH_VERSION = str(RUNTIME["director"].get("vllm_torch_version", "")).strip()
 DIRECTOR_VLLM_CUDA = str(RUNTIME["director"].get("vllm_cuda", "")).strip().lower()
-if not DIRECTOR_VLLM_VERSION or not DIRECTOR_VLLM_TORCH_VERSION or DIRECTOR_VLLM_CUDA != "cu130":
+if not DIRECTOR_VLLM_VERSION or not DIRECTOR_VLLM_TORCH_VERSION or not re.fullmatch(r"cu\d{3}", DIRECTOR_VLLM_CUDA):
     raise RuntimeError("Director vLLM version/PyTorch/CUDA runtime lock is incomplete.")
 
 DIRECTOR_VLLM_HOST = os.getenv(
@@ -712,5 +713,3 @@ WORKFLOW_UPSCALE = "upscale"
 PROFILE_BASE = "base"
 PROFILE_TURBO = "turbo"
 PROFILE_UPSCALE = "upscale"
-
-
