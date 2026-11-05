@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
-import runtime_lock  # noqa: E402  (single-source version checks)
+import validate_runtime_contract as _vrc  # noqa: E402  (shared manifest checks)
 
 from pipeline.context_ir import H3ContextIRCompiler
 from execution.h3_workflow_builder import H3WorkflowBuilder
@@ -265,8 +265,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     # Pillow is installed last by the bootstrap (Gradio can cap Pillow below the patched release), so
-    # its pin lives in runtime_versions.yaml; runtime_lock verifies it agrees with requirements.txt.
-    assert not runtime_lock.check_manifests(ROOT), runtime_lock.check_manifests(ROOT)
+    # its pin lives in runtime_versions.yaml; validate_runtime_contract verifies it agrees with requirements.txt.
+    assert not _vrc._lock_check_manifests(ROOT), _vrc._lock_check_manifests(ROOT)
     assert "websocket-client==" in requirements
     runtime = (ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")
     runtime_config = yaml.safe_load(runtime)
