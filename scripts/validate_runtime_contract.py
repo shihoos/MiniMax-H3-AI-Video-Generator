@@ -11,6 +11,8 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+import runtime_lock  # noqa: E402  (single-source version checks)
 
 
 def _validate_custom_node_contract(manifest: dict, model_inventory: dict) -> None:
@@ -104,12 +106,11 @@ def _validate_control_plane_requirements() -> None:
         if name and version:
             requirements[name.lower().replace("_", "-")] = version.split(";", 1)[0].strip()
 
-    expected_pins = {"transformers": "5.17.0", "tokenizers": "0.23.3", "psutil": "7.0.0"}
-    for name, expected in expected_pins.items():
-        if requirements.get(name) != expected:
-            raise RuntimeError(
-                f"requirements.txt must pin {name}=={expected}; got {requirements.get(name)!r}."
-            )
+    # requirements.txt owns these versions; they only have to be exact pins here.
+    # runtime_lock.require_consistent() checks them against runtime_versions.yaml.
+    for name in ("transformers", "tokenizers", "psutil"):
+        if not runtime_lock.SEMVER.fullmatch(requirements.get(name, "")):
+            raise RuntimeError(f"requirements.txt must contain one exact {name}==X.Y.Z pin; got {requirements.get(name)!r}.")
 
     # The warm probe must enforce the same package pins as the cold install.
     bootstrap_source = (ROOT / "kaggle/bootstrap.py").read_text(encoding="utf-8")
@@ -124,7 +125,7 @@ def _validate_control_plane_requirements() -> None:
         "from transformers import Qwen3Config",
         "sys.version_info[:2] == (3, 12)",
         "torch.__version__",
-        "torch.version.cuda == '13.0'",
+        "torch.version.cuda ==",
         "from vllm.config.load import LoadConfig",
         "safetensors_load_strategy",
     )
@@ -256,26 +257,14 @@ def _validate_runtime_configuration_contract(runtime: dict) -> None:
             + ", ".join(active_retired)
         )
     pytorch = dict(runtime.get("pytorch", {}) or {})
-    if comfy.get("expected_version") != "0.43.2":
-        raise RuntimeError("ComfyUI must be pinned to v0.43.2.")
-    if comfy.get("revision") != "423cbd20511becb1f16122ab518e92e58bfa03d9":
-        raise RuntimeError("ComfyUI must use the exact 0.43.2 release commit.")
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
         raise RuntimeError("The H3 VAE dtype guard must remain enabled.")
-    if director.get("vllm_version") != "0.32.0":
-        raise RuntimeError("vLLM must be pinned to 0.32.0.")
-    if director.get("vllm_torch_version") != "2.13.0" or director.get("vllm_cuda") != "cu130":
-        raise RuntimeError("Isolated vLLM environment must use Torch 2.13.0/cu130.")
-    if director.get("safetensors_load_strategy") != "eager":
-        raise RuntimeError("Eager safetensors loading must be the default strategy.")
-    if director.get("vllm_env_dir") != "/tmp/h3_qwen_vllm_032_tf517_tok0233":
-        raise RuntimeError("vLLM 0.32 must use a fresh, version-specific isolated environment.")
+    # Versions live ONLY in runtime_versions.yaml + requirements.txt. Check that those agree with each
+    # other (torch/torchvision/torchaudio CUDA build, index URL, gradio, Pillow, env-dir name, loader
+    # strategy) and that no source file re-pins them, instead of repeating literals in this validator.
+    runtime_lock.require_consistent(ROOT, runtime)
     if str(python.get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime Python must be 3.12.")
-    if pytorch.get("version") != "2.15.0" or pytorch.get("cuda") != "cu132":
-        raise RuntimeError("ComfyUI main process Torch must be 2.15.0/cu132.")
-    if pytorch.get("torchvision_version") != "0.29.2+cu132" or pytorch.get("torchaudio_version") != "2.11.1+cu132":
-        raise RuntimeError("ComfyUI torchvision/torchaudio must be 0.29.2+cu132 / 2.11.1+cu132 (the pair released with Torch 2.15.0).")
     if director.get("tensor_parallel_size") != 2 or director.get("gpu_memory_utilization") != 0.9 or director.get("max_num_seqs") != 1:
         raise RuntimeError("Director TP=2, GPU memory=0.9, max_num_seqs=1 must be preserved.")
     if director.get("speculative_method") != "eagle3" or director.get("speculative_tokens") != 2:
