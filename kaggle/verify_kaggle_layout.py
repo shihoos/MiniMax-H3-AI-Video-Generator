@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 COMFY = ROOT / "ComfyUI"
 sys.path.insert(0, str(ROOT / "scripts"))
-import runtime_lock  # noqa: E402  (single-source version checks)
+import validate_runtime_contract as _vrc  # noqa: E402  (shared manifest checks)
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
 CUSTOM = ROOT / "configs" / "custom_nodes.yaml"
@@ -195,7 +195,7 @@ def verify_runtime_config() -> None:
 
     # Versions are owned by runtime_versions.yaml + requirements.txt; verify they agree with each
     # other and that no code re-pins them, instead of repeating literals here.
-    runtime_lock.require_consistent(ROOT, config)
+    _vrc._lock_require_consistent(ROOT, config)
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
         fail("The H3 VAE decoder dtype guard must be enabled")
     if str(config.get("python", {}).get("kaggle", "")) != "3.12":
