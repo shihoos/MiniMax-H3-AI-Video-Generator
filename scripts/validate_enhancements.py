@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+import runtime_lock  # noqa: E402  (single-source version checks)
 
 from pipeline.context_ir import H3ContextIRCompiler
 from execution.h3_workflow_builder import H3WorkflowBuilder
@@ -262,10 +264,10 @@ def main() -> None:
     # Runtime/config contract.
     # ------------------------------------------------------------------
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
-    # Pillow is installed last by the bootstrap (Gradio 6.31 caps Pillow<13), pinned in runtime_versions.yaml.
-    assert "Pillow==" not in requirements
-    assert str(yaml.safe_load((ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8"))["storyboard"]["pillow_version"]) == "13.0.0"
-    assert "websocket-client==1.9.1" in requirements
+    # Pillow is installed last by the bootstrap (Gradio can cap Pillow below the patched release), so
+    # its pin lives in runtime_versions.yaml; runtime_lock verifies it agrees with requirements.txt.
+    assert not runtime_lock.check_manifests(ROOT), runtime_lock.check_manifests(ROOT)
+    assert "websocket-client==" in requirements
     runtime = (ROOT / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")
     runtime_config = yaml.safe_load(runtime)
     director_runtime = runtime_config["director"]
