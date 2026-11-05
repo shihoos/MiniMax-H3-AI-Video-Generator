@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata as importlib_metadata
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -147,8 +148,11 @@ def check_main_pytorch() -> None:
     config = runtime.get("pytorch", {}) or {}
     version = str(config.get("version", "") or "").strip()
     cuda_tag = str(config.get("cuda", "") or "").strip().lower()
-    if version != "2.15.0" or cuda_tag != "cu132":
-        raise RuntimeError("Main ComfyUI runtime must use PyTorch 2.15.0/cu132.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version) or not re.fullmatch(r"cu\d{3}", cuda_tag):
+        raise RuntimeError("runtime_versions.yaml pytorch.version must be X.Y.Z and pytorch.cuda a cuNNN tag.")
+    for key in ("torchvision_version", "torchaudio_version"):
+        if not str(config.get(key, "") or "").strip().endswith(f"+{cuda_tag}"):
+            raise RuntimeError(f"runtime_versions.yaml pytorch.{key} must use the same {cuda_tag} build as torch.")
     expected_torch = f"{version}+{cuda_tag}"
     try:
         import torch
@@ -314,11 +318,14 @@ def check_director() -> None:
     print("DIRECTOR SPECULATOR:", speculator)
     director = load_yaml(RUNTIME_MANIFEST).get("director", {}) or {}
     version = str(director.get("vllm_version", "") or "").strip()
-    if version != "0.32.0":
-        raise RuntimeError(f"Director vLLM must be exactly 0.32.0, got {version!r}.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise RuntimeError(f"runtime_versions.yaml director.vllm_version must be X.Y.Z, got {version!r}.")
     loader_strategy = str(director.get("safetensors_load_strategy", "") or "").strip().lower()
-    if loader_strategy != "eager":
-        raise RuntimeError("runtime_versions.yaml Director safetensors_load_strategy must default to eager.")
+    if loader_strategy not in {"eager", "lazy", "prefetch", "torchao"}:
+        raise RuntimeError(
+            "runtime_versions.yaml director.safetensors_load_strategy must be eager/lazy/prefetch/torchao, "
+            f"got {loader_strategy!r}."
+        )
     transformers_version = _exact_requirement_pin("transformers")
     tokenizers_version = _exact_requirement_pin("tokenizers")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
@@ -340,8 +347,10 @@ def check_director() -> None:
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
     expected_torch = f"{torch_version}+{cuda_tag}"
-    if cuda_tag != "cu130" or not torch_version:
-        raise RuntimeError("Director vLLM runtime must explicitly lock PyTorch 2.13.0/cu130.")
+    if not re.fullmatch(r"cu\d{3}", cuda_tag) or not torch_version:
+        raise RuntimeError("runtime_versions.yaml must lock director.vllm_torch_version and a cuNNN director.vllm_cuda tag.")
+    expected_cuda_runtime = f"{cuda_tag[2:4]}.{cuda_tag[4:]}"
+    tensor_parallel = int(director.get("tensor_parallel_size", 0) or 0)
     if str(load_yaml(RUNTIME_MANIFEST).get("python", {}).get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime must use Python 3.12 for the pinned vLLM environment.")
     probe = (
@@ -351,9 +360,9 @@ def check_director() -> None:
         "from vllm.config.load import LoadConfig; "
         "assert sys.version_info[:2] == (3, 12), sys.version; "
         f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
-        "assert torch.version.cuda == '13.0', torch.version.cuda; "
+        f"assert torch.version.cuda == {expected_cuda_runtime!r}, torch.version.cuda; "
         "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
-        "assert torch.cuda.is_available() and torch.cuda.device_count() == 2; "
+        f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel}; "
         "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
         "print('vLLM version:', vllm.__version__); "
         "print('Director Torch version:', torch.__version__); "
@@ -408,8 +417,8 @@ def check_comfyui() -> None:
         raise RuntimeError(f"ComfyUI is not installed: {main_py}")
     expected_version = str(config.get("expected_version", "") or "").strip()
     revision = str(config.get("revision", "") or "").strip()
-    if expected_version != "0.43.2" or revision != "423cbd20511becb1f16122ab518e92e58bfa03d9":
-        raise RuntimeError("Runtime manifest must lock ComfyUI v0.43.2 to its exact release commit.")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected_version) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise RuntimeError("Runtime manifest must lock a ComfyUI release version to its exact 40-character commit.")
     if not (COMFY / ".git").is_dir():
         raise RuntimeError(f"ComfyUI is not a git checkout: {COMFY}")
     head = subprocess.run(["git", "-C", str(COMFY), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
@@ -417,8 +426,8 @@ def check_comfyui() -> None:
     if head != expected_head:
         raise RuntimeError(f"ComfyUI revision mismatch: {head} != {expected_head}")
     tagged = subprocess.run(["git", "-C", str(COMFY), "describe", "--tags", "--exact-match", "HEAD"], capture_output=True, text=True, check=False).stdout.strip()
-    if tagged not in {"0.43.2", "v0.43.2"}:
-        raise RuntimeError(f"ComfyUI release tag mismatch: expected=v0.43.2, actual={tagged or 'untagged'}")
+    if tagged not in {expected_version, f"v{expected_version}"}:
+        raise RuntimeError(f"ComfyUI release tag mismatch: expected=v{expected_version}, actual={tagged or 'untagged'}")
 
     model_source = (COMFY / "comfy/ldm/minimax/model.py").read_text(encoding="utf-8")
     vae_source = (COMFY / "comfy/ldm/minimax/vae.py").read_text(encoding="utf-8")
