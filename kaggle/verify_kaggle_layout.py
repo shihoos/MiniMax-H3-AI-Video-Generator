@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 COMFY = ROOT / "ComfyUI"
+sys.path.insert(0, str(ROOT / "scripts"))
+import runtime_lock  # noqa: E402  (single-source version checks)
 
 RUNTIME = ROOT / "configs" / "runtime_versions.yaml"
 CUSTOM = ROOT / "configs" / "custom_nodes.yaml"
@@ -191,33 +193,13 @@ def verify_runtime_config() -> None:
     director = config.get("director", {}) or {}
     pytorch = config.get("pytorch", {}) or {}
 
-    if comfy.get("expected_version") != "0.43.2":
-        fail("ComfyUI version must be 0.43.2")
-    if comfy.get("revision") != "423cbd20511becb1f16122ab518e92e58bfa03d9":
-        fail("ComfyUI revision must be the exact v0.43.2 commit")
+    # Versions are owned by runtime_versions.yaml + requirements.txt; verify they agree with each
+    # other and that no code re-pins them, instead of repeating literals here.
+    runtime_lock.require_consistent(ROOT, config)
     if comfy.get("h3_vae_decoder_dtype_patch") is not True:
-        fail("The v0.43.2 H3 VAE decoder dtype guard must be enabled")
-
-    if pytorch.get("version") != "2.15.0" or pytorch.get("cuda") != "cu132":
-        fail("The main ComfyUI PyTorch runtime must be 2.15.0/cu132")
-    if pytorch.get("torchvision_version") != "0.29.2+cu132" or pytorch.get("torchaudio_version") != "2.11.1+cu132":
-        fail("The main ComfyUI torchvision/torchaudio lock must be 0.29.2+cu132 / 2.11.1+cu132")
-
-    if director.get("vllm_version") != "0.32.0":
-        fail("Director vLLM version must be 0.32.0")
-    if director.get("vllm_torch_version") != "2.13.0" or director.get("vllm_cuda") != "cu130":
-        fail("Isolated Director PyTorch must be 2.13.0/cu130")
-    if director.get("safetensors_load_strategy") != "eager":
-        fail("Director safetensors loader default must be eager")
-    if director.get("vllm_env_dir") != "/tmp/h3_qwen_vllm_032_tf517_tok0233":
-        fail("Director vLLM environment path must identify the isolated 0.32 runtime")
+        fail("The H3 VAE decoder dtype guard must be enabled")
     if str(config.get("python", {}).get("kaggle", "")) != "3.12":
         fail("Kaggle runtime Python must be 3.12")
-
-    if pytorch.get("version") != "2.15.0":
-        fail("PyTorch version must be 2.15.0")
-    if pytorch.get("cuda") != "cu132":
-        fail("PyTorch CUDA target must be cu132")
     if config["h3_optimization"]["chunk_rows"] != 2560:
         fail("H3 chunk_rows must be 2560")
     if config["h3_optimization"]["attention_memory_mode"] != "Lower VRAM (slower)":
@@ -500,8 +482,9 @@ def verify_comfy_runtime() -> None:
     expected_revision = str(runtime.get("comfyui", {}).get("revision", "")).strip()
     if head != expected_revision:
         fail(f"ComfyUI checkout SHA mismatch: expected={expected_revision}, actual={head}")
-    if tag not in {"0.43.2", "v0.43.2"}:
-        fail(f"ComfyUI release tag must be v0.43.2, got {tag!r}")
+    expected_comfy_version = str(runtime.get("comfyui", {}).get("expected_version", "")).strip()
+    if tag not in {expected_comfy_version, f"v{expected_comfy_version}"}:
+        fail(f"ComfyUI release tag must be v{expected_comfy_version}, got {tag!r}")
     print("[PASS] ComfyUI 0.43.2 native H3/T4 runtime patches")
 
 def verify_custom_nodes() -> None:
@@ -727,7 +710,25 @@ def verify_bootstrap() -> None:
         fail("Bootstrap is missing the safe SageAttention logging placeholders")
     print("[PASS] Bootstrap")
 
+def verify_bootstrap_completed() -> None:
+    """A failed bootstrap must never be followed by PASS banners from static checks."""
+    metrics_path = ROOT / "bootstrap_metrics.json"
+    if not metrics_path.is_file():
+        return
+    try:
+        status = str(json.loads(metrics_path.read_text(encoding="utf-8")).get("status", ""))
+    except Exception as exc:
+        fail(f"bootstrap_metrics.json is unreadable: {exc}")
+        return
+    if status != "passed":
+        fail(
+            f"The last bootstrap run did not pass (status={status!r}, see {metrics_path}). "
+            "Fix the bootstrap error and re-run bootstrap before validating the runtime."
+        )
+
+
 def main() -> None:
+    verify_bootstrap_completed()
     verify_bootstrap()
     verify_runtime_config()
     verify_director_runtime_source()
