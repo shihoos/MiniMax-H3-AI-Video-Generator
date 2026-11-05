@@ -559,6 +559,8 @@ def _validate_bootstrap_upgrade_source() -> None:
         raise RuntimeError("Bootstrap is missing the AST-level H3 VAE decoder postcondition.")
     for marker in (
         "--torch-backend",
+        "_patch_sage_cxx_standard(install_dir)",
+        '"-std=c++20"',
         "vllm=={vllm_version}",
         "from vllm.config.load import LoadConfig",
         "safetensors_load_strategy",
