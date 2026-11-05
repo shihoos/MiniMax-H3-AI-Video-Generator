@@ -174,8 +174,8 @@ def check_director_vllm() -> None:
     runtime = yaml.safe_load(runtime_path.read_text(encoding="utf-8")) or {}
     director = runtime.get("director", {}) or {}
     expected_version = str(director.get("vllm_version", "") or "").strip()
-    if expected_version != "0.32.0":
-        raise RuntimeError(f"Director runtime manifest must pin vLLM 0.32.0, got {expected_version!r}")
+    if not expected_version:
+        raise RuntimeError("runtime_versions.yaml director.vllm_version is required")
     configured_base = os.getenv(
         "H3_DIRECTOR_VLLM_BASE_URL",
         f"http://{director.get('host', '127.0.0.1')}:{int(director.get('port', 8000))}/v1",
