@@ -476,7 +476,7 @@ def _validate_director_runtime_source() -> None:
         "apply_chat_template(",
     ):
         if marker not in source:
-            raise RuntimeError(f"Director runtime source is missing required v0.32 contract: {marker}")
+            raise RuntimeError(f"Director runtime source is missing required vLLM Director contract: {marker}")
     if '"model_staging":' not in source:
         raise RuntimeError("Director startup telemetry must record model_staging.")
     # Staging is the fast path: /kaggle/input is GCSFUSE and direct loading took 6+ minutes per shard.
