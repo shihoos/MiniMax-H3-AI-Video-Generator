@@ -31,8 +31,8 @@ director:
   model_path: /kaggle/input/qwen3-14b-awq
   format: safetensors-awq
   backend: vllm
-  vllm_version: 0.32.0
-  vllm_torch_version: 2.13.0
+  vllm_version: 0.33.0
+  vllm_torch_version: 2.14.0
   vllm_cuda: cu130
   # Single source of truth for the Director weight loader (bootstrap, preflight, planner and validators
   # all read this key). lazy = mmap from the staged local checkpoint copy; eager copies whole shards
@@ -41,7 +41,7 @@ director:
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
   allow_transformers_vllm_constraint_override: false
-  vllm_env_dir: /tmp/h3_qwen_vllm_032_tf517_tok0233
+  vllm_env_dir: /tmp/h3_qwen_vllm_033_tf517_tok0233
   context: 10240
   max_tokens: 7000
   story_max_tokens: 6500
