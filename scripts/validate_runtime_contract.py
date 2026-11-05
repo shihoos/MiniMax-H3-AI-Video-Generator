@@ -11,8 +11,185 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "scripts"))
-import runtime_lock  # noqa: E402  (single-source version checks)
+
+# ---------------------------------------------------------------------------
+# Version consistency: configs/runtime_versions.yaml + requirements.txt own every
+# version. Code derives from them; these checks never repeat a version literal.
+# ---------------------------------------------------------------------------
+_LOCK_SEMVER = re.compile(r"\d+\.\d+\.\d+")
+_LOCK_CUDA_TAG = re.compile(r"cu(\d{2})(\d)")
+_LOCK_STRATEGIES = {"eager", "lazy", "prefetch", "torchao"}
+
+# Code that must read versions from the manifests instead of embedding them.
+_LOCK_DERIVED_SOURCES = (
+    "kaggle/bootstrap.py",
+    "kaggle/preflight_h3.py",
+    "kaggle/verify_kaggle_layout.py",
+    "kaggle/verify_live_runtime.py",
+    "planner/config.py",
+    "planner/qwen_director_runtime.py",
+    "scripts/validate_runtime_contract.py",
+    "scripts/validate_enhancements.py",
+)
+
+
+def _lock_load_runtime(root: Path) -> dict:
+    return yaml.safe_load((Path(root) / "configs" / "runtime_versions.yaml").read_text(encoding="utf-8")) or {}
+
+
+def _lock_cuda_runtime_from_tag(tag: str) -> str:
+    match = _LOCK_CUDA_TAG.fullmatch(str(tag).strip().lower())
+    if not match:
+        raise RuntimeError(f"CUDA wheel tag must look like cu132, got {tag!r}.")
+    return f"{match.group(1)}.{match.group(2)}"
+
+
+def _lock_requirement_pins(root: Path) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    text = (Path(root) / "requirements.txt").read_text(encoding="utf-8")
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if "==" not in line:
+            continue
+        name, version = [part.strip() for part in line.split("==", 1)]
+        if name and version:
+            pins[name.lower().replace("_", "-")] = version.split(";", 1)[0].strip()
+    return pins
+
+
+def _lock_compact(version: str, parts: int | None = None) -> str:
+    items = str(version).split(".")
+    return "".join(items[:parts] if parts else items)
+
+
+def _lock_expected_director_env_name(runtime: dict, pins: dict[str, str]) -> str:
+    director = runtime.get("director", {}) or {}
+    return (
+        f"h3_qwen_vllm_{_lock_compact(director.get('vllm_version', ''), 2)}"
+        f"_tf{_lock_compact(pins.get('transformers', ''), 2)}"
+        f"_tok{_lock_compact(pins.get('tokenizers', ''))}"
+    )
+
+
+def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
+    """Return a list of inconsistencies between runtime_versions.yaml and requirements.txt."""
+    root = Path(root)
+    runtime = runtime if runtime is not None else _lock_load_runtime(root)
+    pins = _lock_requirement_pins(root)
+    problems: list[str] = []
+
+    pytorch = runtime.get("pytorch", {}) or {}
+    cuda = str(pytorch.get("cuda", "")).strip().lower()
+    if not _LOCK_CUDA_TAG.fullmatch(cuda):
+        problems.append(f"pytorch.cuda must be a cuNNN wheel tag, got {cuda!r}")
+    if not _LOCK_SEMVER.fullmatch(str(pytorch.get("version", ""))):
+        problems.append(f"pytorch.version must be X.Y.Z, got {pytorch.get('version')!r}")
+    index = str(pytorch.get("index", "")).rstrip("/")
+    if not index.endswith(f"/{cuda}"):
+        problems.append(f"pytorch.index must end with /{cuda}, got {index!r}")
+    for key in ("torchvision_version", "torchaudio_version"):
+        value = str(pytorch.get(key, ""))
+        if not re.fullmatch(rf"\d+\.\d+\.\d+\+{re.escape(cuda)}", value):
+            problems.append(f"pytorch.{key} must be X.Y.Z+{cuda} (same CUDA build as torch), got {value!r}")
+    driver = str(pytorch.get("minimum_driver_version", ""))
+    if not re.fullmatch(r"\d+(\.\d+)*", driver):
+        problems.append(f"pytorch.minimum_driver_version must be numeric, got {driver!r}")
+
+    director = runtime.get("director", {}) or {}
+    for key in ("vllm_version", "vllm_torch_version"):
+        if not _LOCK_SEMVER.fullmatch(str(director.get(key, ""))):
+            problems.append(f"director.{key} must be X.Y.Z, got {director.get(key)!r}")
+    if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_cuda", "")).strip().lower()):
+        problems.append(f"director.vllm_cuda must be a cuNNN wheel tag, got {director.get('vllm_cuda')!r}")
+    strategy = str(director.get("safetensors_load_strategy", "")).strip().lower()
+    if strategy not in _LOCK_STRATEGIES:
+        problems.append(
+            f"director.safetensors_load_strategy must be one of {sorted(_LOCK_STRATEGIES)}, got {strategy!r}"
+        )
+
+    for name in ("transformers", "tokenizers", "psutil", "pyyaml", "gradio"):
+        if not _LOCK_SEMVER.fullmatch(pins.get(name, "")):
+            problems.append(f"requirements.txt must contain one exact {name}==X.Y.Z pin")
+    env_dir = str(director.get("vllm_env_dir", "")).strip()
+    if pins.get("transformers") and pins.get("tokenizers") and _LOCK_SEMVER.fullmatch(str(director.get("vllm_version", ""))):
+        expected_name = _lock_expected_director_env_name(runtime, pins)
+        if Path(env_dir).name != expected_name:
+            problems.append(
+                f"director.vllm_env_dir must be named {expected_name} (encodes vLLM/transformers/tokenizers "
+                f"versions so a version change always creates a fresh environment), got {Path(env_dir).name!r}"
+            )
+
+    storyboard = runtime.get("storyboard", {}) or {}
+    if str(storyboard.get("gradio_version", "")) != pins.get("gradio", ""):
+        problems.append(
+            f"storyboard.gradio_version={storyboard.get('gradio_version')!r} must equal "
+            f"requirements.txt gradio=={pins.get('gradio')!r}"
+        )
+    if not _LOCK_SEMVER.fullmatch(str(storyboard.get("pillow_version", ""))):
+        problems.append(f"storyboard.pillow_version must be X.Y.Z, got {storyboard.get('pillow_version')!r}")
+    if "pillow" in pins and pins["pillow"] != str(storyboard.get("pillow_version", "")):
+        problems.append("requirements.txt Pillow pin must equal storyboard.pillow_version (or be omitted)")
+
+    comfy = runtime.get("comfyui", {}) or {}
+    if not _LOCK_SEMVER.fullmatch(str(comfy.get("expected_version", ""))):
+        problems.append(f"comfyui.expected_version must be X.Y.Z, got {comfy.get('expected_version')!r}")
+    if not re.fullmatch(r"[0-9a-f]{40}", str(comfy.get("revision", ""))):
+        problems.append("comfyui.revision must be a full 40-character commit SHA")
+    return problems
+
+
+def _lock_manifest_literals(root: Path, runtime: dict | None = None) -> dict[str, str]:
+    """Every version string owned by the manifests, mapped to where it is defined."""
+    runtime = runtime if runtime is not None else _lock_load_runtime(root)
+    pins = _lock_requirement_pins(root)
+    pytorch = runtime.get("pytorch", {}) or {}
+    director = runtime.get("director", {}) or {}
+    storyboard = runtime.get("storyboard", {}) or {}
+    found = {
+        str(pytorch.get("version", "")): "pytorch.version",
+        str(pytorch.get("cuda", "")): "pytorch.cuda",
+        str(pytorch.get("torchvision_version", "")): "pytorch.torchvision_version",
+        str(pytorch.get("torchaudio_version", "")): "pytorch.torchaudio_version",
+        str(director.get("vllm_version", "")): "director.vllm_version",
+        str(director.get("vllm_torch_version", "")): "director.vllm_torch_version",
+        str(director.get("vllm_cuda", "")): "director.vllm_cuda",
+        str(storyboard.get("gradio_version", "")): "storyboard.gradio_version",
+        str(storyboard.get("pillow_version", "")): "storyboard.pillow_version",
+    }
+    for name in ("transformers", "tokenizers", "psutil"):
+        if pins.get(name):
+            found[pins[name]] = f"requirements.txt {name}"
+    return {value: origin for value, origin in found.items() if value}
+
+
+def _lock_check_no_repinned_versions(root: Path, runtime: dict | None = None) -> list[str]:
+    """Fail when code repeats a manifest version instead of reading it."""
+    root = Path(root)
+    literals = _lock_manifest_literals(root, runtime)
+    problems: list[str] = []
+    for relative in _LOCK_DERIVED_SOURCES:
+        path = root / relative
+        if not path.is_file():
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in literals:
+                problems.append(
+                    f"{relative}:{node.lineno} hard-codes {node.value!r}; read {literals[node.value]} instead"
+                )
+        for match in re.finditer(r"torch\.version\.cuda == '\d+\.\d+'", source):
+            line = source.count("\n", 0, match.start()) + 1
+            problems.append(f"{relative}:{line} hard-codes a CUDA runtime version; derive it from the cu tag")
+    return problems
+
+
+def _lock_require_consistent(root: Path, runtime: dict | None = None) -> None:
+    problems = _lock_check_manifests(root, runtime) + _lock_check_no_repinned_versions(root, runtime)
+    if problems:
+        raise RuntimeError("Runtime version lock is inconsistent:\n- " + "\n- ".join(problems))
+
+
 
 
 def _validate_custom_node_contract(manifest: dict, model_inventory: dict) -> None:
@@ -107,9 +284,9 @@ def _validate_control_plane_requirements() -> None:
             requirements[name.lower().replace("_", "-")] = version.split(";", 1)[0].strip()
 
     # requirements.txt owns these versions; they only have to be exact pins here.
-    # runtime_lock.require_consistent() checks them against runtime_versions.yaml.
+    # _lock_require_consistent() checks them against runtime_versions.yaml.
     for name in ("transformers", "tokenizers", "psutil"):
-        if not runtime_lock.SEMVER.fullmatch(requirements.get(name, "")):
+        if not _LOCK_SEMVER.fullmatch(requirements.get(name, "")):
             raise RuntimeError(f"requirements.txt must contain one exact {name}==X.Y.Z pin; got {requirements.get(name)!r}.")
 
     # The warm probe must enforce the same package pins as the cold install.
@@ -262,7 +439,7 @@ def _validate_runtime_configuration_contract(runtime: dict) -> None:
     # Versions live ONLY in runtime_versions.yaml + requirements.txt. Check that those agree with each
     # other (torch/torchvision/torchaudio CUDA build, index URL, gradio, Pillow, env-dir name, loader
     # strategy) and that no source file re-pins them, instead of repeating literals in this validator.
-    runtime_lock.require_consistent(ROOT, runtime)
+    _lock_require_consistent(ROOT, runtime)
     if str(python.get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime Python must be 3.12.")
     if director.get("tensor_parallel_size") != 2 or director.get("gpu_memory_utilization") != 0.9 or director.get("max_num_seqs") != 1:
