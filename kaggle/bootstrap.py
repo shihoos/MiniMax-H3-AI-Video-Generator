@@ -1313,7 +1313,7 @@ def install_director_runtime(
         uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to create the isolated Director environment.")
-    # A failed/partial 0.32 install must not be reused. The versioned env path
+    # A failed/partial Director install must not be reused. The versioned env path
     # is deliberately separate from the historical 0.31 path; only this venv
     # is removed, never either model checkpoint directory.
     if env_dir.is_symlink():
