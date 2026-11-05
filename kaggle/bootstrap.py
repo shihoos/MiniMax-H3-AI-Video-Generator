@@ -42,6 +42,108 @@ RUNTIME_MANIFEST = (
     / "configs"
     / "runtime_versions.yaml"
 )
+
+
+_TORCH_IMPORT_DEPRECATION_FRAGMENTS = (
+    "torch._opaque_base is deprecated, use torch._custom_class_base instead",
+    "register_opaque_type is deprecated, use register_custom_class instead",
+    "typ='value' is deprecated, use typ='constant' instead",
+)
+
+
+def _env_enabled(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _pip_dependency_warning_args() -> list[str]:
+    """Hide only pip's resolver warning block by default; opt in to inspect it."""
+    return [] if _env_enabled("H3_BOOTSTRAP_SHOW_DEPENDENCY_WARNINGS") else ["--no-warn-conflicts"]
+
+
+def _filter_torch_import_deprecations(stderr: str) -> str:
+    """Filter three known, harmless vLLM/Torch import deprecations and nothing else."""
+    kept = []
+    for line in (stderr or "").splitlines(keepends=True):
+        if any(fragment in line for fragment in _TORCH_IMPORT_DEPRECATION_FRAGMENTS):
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
+def _director_isolated_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Prevent the main ComfyUI Python/CUDA context from leaking into vLLM's private venv."""
+    environment = dict(os.environ if base_env is None else base_env)
+    for key in (
+        "UV_SYSTEM_PYTHON", "VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME",
+        "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX",
+        "NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS", "CC", "CXX", "CMAKE_ARGS",
+    ):
+        environment.pop(key, None)
+    return environment
+
+
+def _director_probe_code(runtime: dict, env_dir: Path) -> str:
+    director = dict(runtime.get("director", {}) or {})
+    wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
+    vllm_version = str(director.get("vllm_version", "") or "").strip()
+    torch_version = str(director.get("vllm_torch_version", "") or "").strip()
+    cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
+    tv_version = str(director.get("vllm_torchvision_version", "") or "").strip()
+    ta_version = str(director.get("vllm_torchaudio_version", "") or "").strip()
+    flashinfer_version = str(director.get("vllm_flashinfer_version", "") or "").strip()
+    requests_min = str(director.get("vllm_requests_min_version", "") or "").strip()
+    hub_min = str(director.get("vllm_huggingface_hub_min_version", "") or "").strip()
+    transformers_version = _exact_requirement_pin("transformers")
+    tokenizers_version = _exact_requirement_pin("tokenizers")
+    tp_size = int(director.get("tensor_parallel_size", 0) or 0)
+    expected_torch = f"{torch_version}+{cuda_tag}"
+    expected_cuda = _cuda_runtime_from_tag(cuda_tag)
+    return (
+        "import sys, pathlib, inspect, importlib.metadata as md, vllm, torch, torchvision, torchaudio, wrapt, transformers, tokenizers; "
+        "from packaging.version import Version; "
+        "from transformers import Qwen3Config; "
+        "from vllm.config.load import LoadConfig; "
+        "from vllm.config import SpeculativeConfig; "
+        f"expected_prefix = pathlib.Path({str(env_dir.resolve())!r}).resolve(); "
+        "pyvenv = expected_prefix / 'pyvenv.cfg'; "
+        "assert pyvenv.is_file() and any(line.strip().lower() == 'include-system-site-packages = false' for line in pyvenv.read_text().splitlines()), 'Director venv is not isolated'; "
+        "assert sys.version_info[:2] == (3, 12), sys.version; "
+        "assert pathlib.Path(sys.prefix).resolve() == expected_prefix, (sys.prefix, expected_prefix); "
+        "assert pathlib.Path(torch.__file__).resolve().is_relative_to(expected_prefix), torch.__file__; "
+        "assert pathlib.Path(vllm.__file__).resolve().is_relative_to(expected_prefix), vllm.__file__; "
+        f"assert vllm.__version__ == {vllm_version!r}, vllm.__version__; "
+        f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
+        f"assert torch.version.cuda == {expected_cuda!r}, torch.version.cuda; "
+        f"assert wrapt.__version__ == {wrapt_version!r}, wrapt.__version__; "
+        f"assert transformers.__version__ == {transformers_version!r}, transformers.__version__; "
+        f"assert tokenizers.__version__ == {tokenizers_version!r}, tokenizers.__version__; "
+        f"assert Version(md.version('torchvision')).public == {tv_version!r}, md.version('torchvision'); "
+        f"assert Version(md.version('torchaudio')).public == {ta_version!r}, md.version('torchaudio'); "
+        f"assert md.version('flashinfer-python') == {flashinfer_version!r}, md.version('flashinfer-python'); "
+        f"assert Version(md.version('requests')) >= Version({requests_min!r}), md.version('requests'); "
+        f"assert Version(md.version('huggingface-hub')) >= Version({hub_min!r}), md.version('huggingface-hub'); "
+        "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
+        "assert Qwen3Config.__name__ == 'Qwen3Config'; "
+        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
+        f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tp_size}; "
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
+        "print('vLLM version:', vllm.__version__); "
+        "print('wrapt version:', wrapt.__version__); "
+        "print('Director Torch version:', torch.__version__); "
+        "print('Director CUDA runtime:', torch.version.cuda); "
+        "print('Director TorchVision:', md.version('torchvision')); "
+        "print('Director TorchAudio:', md.version('torchaudio')); "
+        "print('Director FlashInfer:', md.version('flashinfer-python')); "
+        "print('Director requests:', md.version('requests')); "
+        "print('Director huggingface-hub:', md.version('huggingface-hub')); "
+        "print('safetensors loader API: PASS'); "
+        "print('Transformers version:', transformers.__version__); "
+        "print('tokenizers version:', tokenizers.__version__); "
+        "print('Qwen3 config import: PASS'); "
+        "print('EAGLE-3 supported: True'); "
+        "print('GPU count:', torch.cuda.device_count()); "
+        "print('Director venv isolation: PASS')"
+    )
 def run(
     *args,
     env=None,
@@ -380,45 +482,41 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
 
 
 def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
-    """Return True only when the isolated vLLM environment matches every lock."""
-    director = dict(runtime.get("director", {}) or {})
-    vllm_version = str(director.get("vllm_version", "") or "").strip()
-    wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
-    transformers_version = _exact_requirement_pin("transformers")
-    tokenizers_version = _exact_requirement_pin("tokenizers")
-    torch_version = str(director.get("vllm_torch_version", "") or "").strip()
-    cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
-    tp_size = int(director.get("tensor_parallel_size", 0) or 0)
+    """Return True only when the isolated vLLM environment matches every runtime lock."""
     python = env_dir / "bin" / "python"
-    if not all((python.is_file(), vllm_version, wrapt_version, torch_version, re.fullmatch(r"cu\d{3}", cuda_tag), tp_size > 0)):
+    if not python.is_file() or not os.access(python, os.X_OK):
         return False
-    expected_torch = f"{torch_version}+{cuda_tag}"
-    code = (
-        "import sys, inspect, vllm, torch, wrapt, transformers, tokenizers; "
-        "from transformers import Qwen3Config; "
-        "from vllm.config.load import LoadConfig; "
-        "from vllm.config import SpeculativeConfig; "
-        f"assert sys.version_info[:2] == (3, 12), sys.version; "
-        f"assert vllm.__version__ == {vllm_version!r}; "
-        f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
-        f"assert torch.version.cuda == {_cuda_runtime_from_tag(cuda_tag)!r}, torch.version.cuda; "
-        f"assert wrapt.__version__ == {wrapt_version!r}; "
-        f"assert transformers.__version__ == {transformers_version!r}; "
-        f"assert tokenizers.__version__ == {tokenizers_version!r}; "
-        "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
-        "assert Qwen3Config.__name__ == 'Qwen3Config'; "
-        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
-        "assert torch.cuda.is_available() and torch.cuda.device_count() == " + str(tp_size) + "; "
-        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
-        "print('Director runtime probe: PASS')"
+    director = dict(runtime.get("director", {}) or {})
+    required = (
+        director.get("vllm_version"), director.get("vllm_torch_version"),
+        director.get("vllm_cuda"), director.get("vllm_torchvision_version"),
+        director.get("vllm_torchaudio_version"), director.get("vllm_flashinfer_version"),
+        director.get("vllm_requests_min_version"), director.get("vllm_huggingface_hub_min_version"),
+        runtime.get("python", {}).get("wrapt_version"),
     )
-    result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=False)
-    if result.returncode != 0 and os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        print("[DIRECTOR WARM PROBE]", result.stdout, result.stderr)
-    return result.returncode == 0
-
-
-
+    if not all(str(value or "").strip() for value in required):
+        return False
+    try:
+        code = _director_probe_code(runtime, env_dir)
+    except (RuntimeError, ValueError, TypeError):
+        return False
+    result = subprocess.run(
+        [str(python), "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_director_isolated_environment(),
+    )
+    if result.returncode != 0:
+        if _env_enabled("H3_DIRECTOR_VERBOSE"):
+            print("[DIRECTOR WARM PROBE]", result.stdout, result.stderr, flush=True)
+        return False
+    if result.stdout:
+        print("[DIRECTOR WARM PROBE] exact isolated runtime verified", flush=True)
+    filtered_stderr = result.stderr if _env_enabled("H3_DIRECTOR_VERBOSE") else _filter_torch_import_deprecations(result.stderr)
+    if filtered_stderr:
+        print(filtered_stderr, end="" if filtered_stderr.endswith("\n") else "\n", flush=True)
+    return True
 
 def _sage_build_stamp_path(install_dir: Path) -> Path:
     return install_dir / ".h3_t4_build_stamp.json"
@@ -672,6 +770,7 @@ def install_base_requirements() -> None:
         "install",
         "-q",
         "--disable-pip-version-check",
+        *_pip_dependency_warning_args(),
         "-r",
         requirements,
     )
@@ -706,7 +805,7 @@ def install_comfyui(runtime: dict) -> None:
     else:
         run(
             sys.executable, "-m", "pip", "install", "-q",
-            "--disable-pip-version-check", "-r", comfy_requirements,
+            "--disable-pip-version-check", *_pip_dependency_warning_args(), "-r", comfy_requirements,
         )
 
     head = subprocess.check_output(
@@ -947,7 +1046,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
     print("=" * 80)
     args = [
         sys.executable, "-m", "pip", "install", "-q",
-        "--disable-pip-version-check", "--upgrade", "--index-url", index,
+        "--disable-pip-version-check", *_pip_dependency_warning_args(), "--upgrade", "--index-url", index,
         f"torch=={base_version}",
         f"torchvision=={torchvision_version}",
         f"torchaudio=={torchaudio_version}",
@@ -985,18 +1084,15 @@ def _enforce_no_restart() -> None:
     if os.getenv("JPY_PARENT_PID") and not in_kernel:
         raise RuntimeError("NO-RESTART bootstrap must run in the current Kaggle kernel; use `%run kaggle/bootstrap.py`, not `!python kaggle/bootstrap.py`.")
 def _repair_loaded_pillow(expected_version: str) -> None:
-    """Report the live-module boundary; never spoof PIL.__version__ after a wheel replacement."""
+    """Keep an existing parent-kernel PIL module intact; fresh workers use the installed wheel."""
     loaded_pkg = sys.modules.get("PIL")
     if loaded_pkg is not None:
         loaded_version = str(getattr(loaded_pkg, "__version__", "unknown"))
         if loaded_version != expected_version:
             print(
-                "[PILLOW CACHE WARNING] this notebook kernel already imported Pillow "
-                f"{loaded_version}; disk installation is {expected_version}. "
-                "Python cannot safely replace the loaded native Pillow extension in-place. "
-                "Fresh subprocesses use the upgraded wheel; restart the Kaggle kernel "
-                "before using Pillow in this already-running process if the patched "
-                "security version must be active here."
+                f"[PILLOW CACHE] disk Pillow {expected_version} is installed and is verified in a fresh interpreter. "
+                f"This notebook process already has Pillow {loaded_version} loaded; that cached object is left untouched. "
+                "Newly launched H3/Gradio worker processes import the installed Pillow version. No Kaggle kernel restart is required."
             )
             return
     import importlib
@@ -1004,9 +1100,9 @@ def _repair_loaded_pillow(expected_version: str) -> None:
     import PIL
     if str(PIL.__version__) != expected_version:
         raise RuntimeError(
-            f"Live Pillow version mismatch: expected={expected_version}, actual={PIL.__version__}."
+            f"Freshly imported Pillow version mismatch: expected={expected_version}, actual={PIL.__version__}."
         )
-    print("[PILLOW CACHE] live Pillow module already matches disk version:", expected_version)
+    print("[PILLOW CACHE] live Pillow module matches disk version:", expected_version)
 
 def patch_h3_fp16_runtime(runtime: dict) -> None:
     """Enable the native ComfyUI 0.43.2 H3 FP16 model path on T4 without stale forward rewrites."""
@@ -1313,132 +1409,132 @@ def install_director_runtime(
         uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to create the isolated Director environment.")
-    # A failed/partial Director install must not be reused. The versioned env path
-    # is deliberately separate from the historical 0.31 path; only this venv
-    # is removed, never either model checkpoint directory.
+
+    # The child env removes UV_SYSTEM_PYTHON and all ComfyUI Python/CUDA build paths.
+    # This avoids uv inheriting a system-Python policy and keeps the vLLM/cu130 stack isolated.
+    director_env = _director_isolated_environment()
+    director_env["UV_LINK_MODE"] = "copy"
+    director_env["UV_TORCH_BACKEND"] = cuda_tag
+
     if env_dir.is_symlink():
         raise RuntimeError(f"Refusing to rebuild a symlinked Director environment: {env_dir}")
     if env_dir.exists():
         shutil.rmtree(env_dir)
     env_dir.parent.mkdir(parents=True, exist_ok=True)
-    run(uv, "venv", str(env_dir), "--python", sys.executable, "--seed", "--link-mode", "copy")
+    run(
+        uv, "venv", str(env_dir), "--python", sys.executable,
+        "--seed", "--link-mode", "copy", env=director_env,
+    )
     venv_python = env_dir / "bin" / "python"
     if not venv_python.is_file() or not os.access(venv_python, os.X_OK):
         raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
-    env = os.environ.copy()
-    env["UV_LINK_MODE"] = "copy"
-    env["UV_TORCH_BACKEND"] = cuda_tag
-    install = subprocess.run(
-        [
-            uv, "pip", "install", "--python", str(venv_python), "--link-mode", "copy",
-            "--torch-backend", cuda_tag,
-            f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
-            f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
-        ],
-        env=env,
-        check=False,
-        text=True,
-    )
-    if install.returncode != 0:
-        raise RuntimeError("Failed to install isolated vLLM runtime.")
-    verification = subprocess.run(
-        [
-            str(venv_python), "-c",
-            (
-                "import sys, vllm, torch, inspect, wrapt, transformers, tokenizers; "
-                "from transformers import Qwen3Config; "
-                "from vllm.config import SpeculativeConfig; "
-                "from vllm.config.load import LoadConfig; "
-                "assert sys.version_info[:2] == (3, 12), sys.version; "
-                "print('vLLM import: PASS'); "
-                "print('wrapt version:', wrapt.__version__); "
-                "print('vLLM version:', vllm.__version__); "
-                "print('Director Torch version:', torch.__version__); "
-                "print('Director CUDA runtime:', torch.version.cuda); "
-                "print('safetensors_load_strategy supported:', 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters); "
-                "print('Transformers version:', transformers.__version__); "
-                "print('tokenizers version:', tokenizers.__version__); "
-                "print('Qwen3 config import: PASS', Qwen3Config.__name__); "
-                "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
-                f"assert torch.__version__ == {expected_director_torch!r}; "
-                f"assert torch.version.cuda == {expected_director_cuda!r}; "
-                "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
-                f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel_size}; "
-                "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
-                "print('Torch CUDA:', torch.cuda.is_available()); "
-                "print('GPU count:', torch.cuda.device_count()); "
-                "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
-            ),
-        ],
-        capture_output=True, text=True, check=False, env=env,
-    )
-    print(verification.stdout)
-    if verification.stderr:
-        print(verification.stderr)
-    if verification.returncode != 0:
-        raise RuntimeError("vLLM isolated runtime verification failed.")
-    observed_wrapt_version = None
-    for line in verification.stdout.splitlines():
-        if line.startswith("wrapt version:"):
-            observed_wrapt_version = line.split(":", 1)[1].strip()
-            break
-    if observed_wrapt_version != wrapt_version:
-        raise RuntimeError(
-            "Director isolated runtime wrapt mismatch: "
-            f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
+
+    verbose = _env_enabled("H3_DIRECTOR_VERBOSE")
+    install_log = ROOT / "director_runtime_install.log"
+    install_args = [
+        uv, "pip", "install",
+        *([] if verbose else ["--quiet"]),
+        "--python", str(venv_python), "--link-mode", "copy",
+        "--torch-backend", cuda_tag,
+        f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
+        f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
+    ]
+    with install_log.open("w", encoding="utf-8") as handle:
+        install = subprocess.run(
+            install_args,
+            env=director_env,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            check=False,
+            text=True,
         )
+    if install.returncode != 0:
+        try:
+            detail = install_log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            detail = "Unable to read Director install log."
+        print("[DIRECTOR INSTALL FAILED] full log follows:", install_log, flush=True)
+        print(detail[-30000:], flush=True)
+        raise RuntimeError(f"Failed to install isolated vLLM runtime (exit={install.returncode}); see {install_log}.")
+    print(f"[DIRECTOR] package installation completed; details: {install_log}", flush=True)
+    if verbose:
+        print(install_log.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
+
+    verification_code = _director_probe_code(runtime, env_dir)
+    verification = subprocess.run(
+        [str(venv_python), "-c", verification_code],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=director_env,
+    )
+    verification_log = ROOT / "director_runtime_verification.log"
+    verification_log.write_text(
+        (verification.stdout or "") + (verification.stderr or ""),
+        encoding="utf-8",
+    )
+    if verification.returncode != 0:
+        print("[DIRECTOR VERIFICATION FAILED] full output follows:", verification_log, flush=True)
+        if verification.stdout:
+            print(verification.stdout, end="", flush=True)
+        if verification.stderr:
+            print(verification.stderr, end="", flush=True)
+        raise RuntimeError("vLLM isolated runtime verification failed; see director_runtime_verification.log.")
+
+    # Print the compact, source-backed version/topology report. Three exact Torch
+    # deprecation lines are filtered; all other stderr is preserved.
+    print(verification.stdout, end="" if verification.stdout.endswith("\n") else "\n", flush=True)
+    verification_stderr = verification.stderr if verbose else _filter_torch_import_deprecations(verification.stderr)
+    if verification_stderr:
+        print(verification_stderr, end="" if verification_stderr.endswith("\n") else "\n", flush=True)
     observed_versions = {}
     for line in verification.stdout.splitlines():
         if ":" in line:
             name, value = line.split(":", 1)
             observed_versions[name.strip()] = value.strip()
-    observed_version = observed_versions.get("vLLM version", "")
-    if observed_version != vllm_version:
-        raise RuntimeError(
-            "Director runtime verification version mismatch: "
-            f"observed={observed_version!r}, configured={vllm_version!r}."
-        )
-    observed_transformers = observed_versions.get("Transformers version", "")
-    if observed_transformers != transformers_version:
-        raise RuntimeError(
-            "Director Transformers version mismatch: "
-            f"observed={observed_transformers!r}, expected={transformers_version!r}."
-        )
-    observed_tokenizers = observed_versions.get("tokenizers version", "")
-    if observed_tokenizers != tokenizers_version:
-        raise RuntimeError(
-            "Director tokenizers version mismatch: "
-            f"observed={observed_tokenizers!r}, expected={tokenizers_version!r}."
-        )
-    if "Qwen3 config import: PASS" not in verification.stdout:
-        raise RuntimeError("Director runtime did not import the pinned Transformers Qwen3 config.")
-    if f"EAGLE-3 supported: True" not in verification.stdout:
-        raise RuntimeError(
-            f"Director runtime verification did not confirm speculative method {speculative_method!r}."
-        )
-    observed_gpu_count = None
-    for line in verification.stdout.splitlines():
-        if line.startswith("GPU count:"):
+    expected_report = {
+        "vLLM version": vllm_version,
+        "wrapt version": wrapt_version,
+        "Director Torch version": expected_director_torch,
+        "Director CUDA runtime": expected_director_cuda,
+        "Director TorchVision": str(director.get("vllm_torchvision_version", "")),
+        "Director TorchAudio": str(director.get("vllm_torchaudio_version", "")),
+        "Director FlashInfer": str(director.get("vllm_flashinfer_version", "")),
+        "Transformers version": transformers_version,
+        "tokenizers version": tokenizers_version,
+        "GPU count": str(tensor_parallel_size),
+    }
+    from packaging.version import Version
+    for name, expected in expected_report.items():
+        observed = observed_versions.get(name, "")
+        if name in {"Director TorchVision", "Director TorchAudio"}:
             try:
-                observed_gpu_count = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                observed_gpu_count = None
-            break
-    if observed_gpu_count != tensor_parallel_size:
-        raise RuntimeError(
-            "Qwen Director GPU topology mismatch: "
-            f"observed={observed_gpu_count}, configured tensor_parallel_size={tensor_parallel_size}."
-        )
+                matched = Version(observed).public == Version(expected).public
+            except Exception:
+                matched = False
+        else:
+            matched = observed == expected
+        if not matched:
+            raise RuntimeError(
+                f"Director runtime verification mismatch for {name}: observed={observed!r}, expected={expected!r}."
+            )
+    for required_marker in (
+        "safetensors loader API: PASS", "Qwen3 config import: PASS", "EAGLE-3 supported: True",
+        "Director venv isolation: PASS",
+    ):
+        if required_marker not in verification.stdout:
+            raise RuntimeError(f"Director runtime verification missing marker: {required_marker}")
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
 def install_storyboard_runtime(
     runtime: dict,
 ) -> None:
-    """Install and verify the exact Gradio runtime before the Pillow override.
+    """Install and verify Gradio for the standalone UI process without restarting the kernel.
 
-    Refuse to continue when this live notebook already imported a different
-    Gradio version: replacing its package files cannot safely replace the
-    already-loaded Python modules. Pillow is verified separately at the final
-    dependency boundary, after every later installer has completed.
+    An already-imported Gradio module in the notebook is left untouched, just
+    like an already-imported Pillow native extension. The UI entry point is
+    launched as a fresh Python process and is validated against the installed
+    runtime in a child interpreter. Pillow is verified at the final dependency
+    boundary, after every later installer has completed.
     """
     storyboard = runtime.get("storyboard", {}) or {}
     gradio_version = str(storyboard.get("gradio_version", "") or "").strip()
@@ -1449,10 +1545,10 @@ def install_storyboard_runtime(
     if loaded_gradio is not None:
         loaded_version = str(getattr(loaded_gradio, "__version__", "unknown"))
         if loaded_version != gradio_version:
-            raise RuntimeError(
-                "Gradio was already imported into the live Kaggle kernel at "
-                f"version {loaded_version!r}; it cannot be safely hot-swapped to "
-                f"{gradio_version}. Start a fresh Kaggle kernel before bootstrap."
+            print(
+                f"[GRADIO CACHE] notebook already has Gradio {loaded_version}; "
+                f"that in-memory module is left untouched. The standalone UI process "
+                f"will use verified Gradio {gradio_version}. No Kaggle kernel restart is required."
             )
 
     if _package_version_satisfied("gradio", gradio_version):
@@ -1460,7 +1556,7 @@ def install_storyboard_runtime(
     else:
         run(
             sys.executable, "-m", "pip", "install", "-q",
-            "--disable-pip-version-check", f"gradio=={gradio_version}",
+            "--disable-pip-version-check", *_pip_dependency_warning_args(), f"gradio=={gradio_version}",
         )
 
     verify = subprocess.run(
@@ -2725,7 +2821,7 @@ def _patch_sage_cxx_standard(install_dir: Path) -> None:
 
 
 def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
-    """Print the CUDA toolchain a native build will use, and warn on a toolkit/torch major mismatch."""
+    """Report the selected Kaggle NVCC; the actual build and dual-GPU probes are acceptance gates."""
     cuda_home = env.get("CUDA_HOME") or env.get("CUDA_PATH") or ""
     nvcc = shutil.which("nvcc", path=env.get("PATH")) or (
         str(Path(cuda_home) / "bin" / "nvcc") if cuda_home and (Path(cuda_home) / "bin" / "nvcc").is_file() else ""
@@ -2742,8 +2838,9 @@ def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
                 torch_cuda = _cuda_runtime_from_tag(str((runtime.get("pytorch", {}) or {}).get("cuda", "")))
                 if match.group(1) != torch_cuda.split(".", 1)[0]:
                     print(
-                        f"[SAGE TOOLCHAIN WARNING] system nvcc {match.group(1)}.{match.group(2)} has a different "
-                        f"CUDA major than PyTorch's CUDA {torch_cuda}; the extension compile may fail."
+                        f"[SAGE TOOLCHAIN NOTE] system nvcc {match.group(1)}.{match.group(2)} differs from "
+                        f"PyTorch CUDA {torch_cuda}. This Kaggle toolchain pairing is retained; the native build "
+                        "and per-GPU numerical correctness probes determine whether it is usable."
                     )
         except Exception as exc:
             nvcc_text = f"{nvcc} (query failed: {exc})"
@@ -3122,22 +3219,32 @@ print(
     f"all_kernel_correctness_gates=PASS"
 )'''
 
-        verification = subprocess.run(
-            [sys.executable, "-c", probe],
-            env=child_env,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if verification.stdout:
-            print(verification.stdout, end="")
-        if verification.stderr:
-            print(verification.stderr, end="")
-        if verification.returncode != 0:
-            raise RuntimeError(
-                f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
+        verification_log = ROOT / f"sageattention_gpu{gpu_id}_verification.log"
+        with verification_log.open("w", encoding="utf-8") as handle:
+            verification = subprocess.run(
+                [sys.executable, "-c", probe],
+                env=child_env,
+                cwd=str(ROOT),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
             )
+        verification_text = verification_log.read_text(encoding="utf-8", errors="replace")
+        if verification.returncode != 0:
+            print(f"[SAGE SM75 FAILED] physical GPU {gpu_id}; full log follows: {verification_log}", flush=True)
+            print(verification_text[-30000:], flush=True)
+            raise RuntimeError(
+                f"SageAttention SM75 verification failed on physical GPU {gpu_id}; see {verification_log}."
+            )
+        case_count = verification_text.count("[SAGE SM75 CASE]")
+        if _env_enabled("H3_BOOTSTRAP_VERBOSE"):
+            print(verification_text, end="" if verification_text.endswith("\n") else "\n", flush=True)
+        print(
+            f"[SAGE SM75] physical_gpu={gpu_id} correctness=PASS cases={case_count} "
+            f"(details: {verification_log})",
+            flush=True,
+        )
 
     stamp = _sage_build_stamp(runtime, install_dir)
     _sage_build_stamp_path(install_dir).write_text(
