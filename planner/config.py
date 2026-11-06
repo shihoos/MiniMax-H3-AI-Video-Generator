@@ -283,6 +283,18 @@ else:
     if not isinstance(_enforce_eager_yaml, bool):
         raise RuntimeError("runtime_versions.yaml director.enforce_eager must be true or false.")
     DIRECTOR_VLLM_ENFORCE_EAGER = _enforce_eager_yaml
+# jit_warmup=false keeps torch.compile and CUDA graphs (fast generation) but skips vLLM's up-front Triton kernel
+# warmup (~50 s); the kernels compile lazily the first time a request needs them.
+_jit_warmup_env = os.getenv("H3_DIRECTOR_VLLM_JIT_WARMUP", "").strip().lower()
+if _jit_warmup_env:
+    if _jit_warmup_env not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+        raise RuntimeError("H3_DIRECTOR_VLLM_JIT_WARMUP must be a boolean value.")
+    DIRECTOR_VLLM_JIT_WARMUP = _jit_warmup_env in {"1", "true", "yes", "on"}
+else:
+    _jit_warmup_yaml = RUNTIME["director"].get("jit_warmup", True)
+    if not isinstance(_jit_warmup_yaml, bool):
+        raise RuntimeError("runtime_versions.yaml director.jit_warmup must be true or false.")
+    DIRECTOR_VLLM_JIT_WARMUP = _jit_warmup_yaml
 DIRECTOR_VLLM_VERSION = str(RUNTIME["director"].get("vllm_version", "")).strip()
 DIRECTOR_VLLM_TORCH_VERSION = str(RUNTIME["director"].get("vllm_torch_version", "")).strip()
 DIRECTOR_VLLM_CUDA = str(RUNTIME["director"].get("vllm_cuda", "")).strip().lower()
