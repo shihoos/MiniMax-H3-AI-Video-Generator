@@ -38,6 +38,11 @@ director:
   # all read this key). lazy = mmap from the staged local checkpoint copy; eager copies whole shards
   # into RAM per TP worker and ran the 33 GB Kaggle host out of memory.
   safetensors_load_strategy: lazy
+  # Startup vs generation speed. enforce_eager=true: no torch.compile, CUDA graphs or JIT warmup (shortest
+  # start, slowest generation). enforce_eager=false + jit_warmup=false: compile and graphs stay (fast
+  # generation), only the ~50 s up-front Triton kernel warmup is skipped (kernels compile on first use).
+  enforce_eager: false
+  jit_warmup: false
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
   allow_transformers_vllm_constraint_override: false
