@@ -95,6 +95,21 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
     if not re.fullmatch(r"\d+(\.\d+)*", driver):
         problems.append(f"pytorch.minimum_driver_version must be numeric, got {driver!r}")
 
+    cuda_cfg = runtime.get("cuda_runtime", {}) or {}
+    tag_match = _LOCK_CUDA_TAG.fullmatch(cuda)
+    if tag_match:
+        digits = cuda[2:]
+        tag_major, tag_minor = digits[:2], digits[2:]
+        runtime_version = str(cuda_cfg.get("runtime_version", ""))
+        if not re.fullmatch(rf"{tag_major}\.{int(tag_minor)}\.\d+", runtime_version):
+            problems.append(
+                f"cuda_runtime.runtime_version must be a {tag_major}.{int(tag_minor)}.x release "
+                f"(the CUDA library build PyTorch {cuda} depends on), got {runtime_version!r}"
+            )
+        cublas_version = str(cuda_cfg.get("cublas_version", ""))
+        if not re.fullmatch(rf"{tag_major}\.\d+(\.\d+)+", cublas_version):
+            problems.append(f"cuda_runtime.cublas_version must start with CUDA major {tag_major}, got {cublas_version!r}")
+
     director = runtime.get("director", {}) or {}
     for key in ("vllm_version", "vllm_torch_version"):
         if not _LOCK_SEMVER.fullmatch(str(director.get(key, ""))):
