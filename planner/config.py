@@ -271,6 +271,18 @@ if DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY not in {"eager", "lazy", "prefetch", 
         "Director safetensors_load_strategy must be one of eager/lazy/prefetch/torchao; "
         f"got {DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY!r}."
     )
+# enforce_eager skips torch.compile, CUDA-graph capture and vLLM's Triton JIT warmup: ~2 minutes shorter
+# Director start, at the cost of slower token generation. Environment override: H3_DIRECTOR_VLLM_ENFORCE_EAGER.
+_enforce_eager_env = os.getenv("H3_DIRECTOR_VLLM_ENFORCE_EAGER", "").strip().lower()
+if _enforce_eager_env:
+    if _enforce_eager_env not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+        raise RuntimeError("H3_DIRECTOR_VLLM_ENFORCE_EAGER must be a boolean value.")
+    DIRECTOR_VLLM_ENFORCE_EAGER = _enforce_eager_env in {"1", "true", "yes", "on"}
+else:
+    _enforce_eager_yaml = RUNTIME["director"].get("enforce_eager", False)
+    if not isinstance(_enforce_eager_yaml, bool):
+        raise RuntimeError("runtime_versions.yaml director.enforce_eager must be true or false.")
+    DIRECTOR_VLLM_ENFORCE_EAGER = _enforce_eager_yaml
 DIRECTOR_VLLM_VERSION = str(RUNTIME["director"].get("vllm_version", "")).strip()
 DIRECTOR_VLLM_TORCH_VERSION = str(RUNTIME["director"].get("vllm_torch_version", "")).strip()
 DIRECTOR_VLLM_CUDA = str(RUNTIME["director"].get("vllm_cuda", "")).strip().lower()
