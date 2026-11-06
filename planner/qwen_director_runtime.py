@@ -389,7 +389,8 @@ class QwenDirectorRuntimeMixin:
         if not source_path.is_dir():
             raise FileNotFoundError(f"{label} checkpoint directory is missing: {source_path}")
         if not _should_stage_local(source_path):
-            print(f"[QWEN] checkpoint_source label={label!r} path={source_path} staging=off", flush=True)
+            if _verbose():
+                print(f"[QWEN] checkpoint_source label={label!r} path={source_path} staging=off", flush=True)
             return source_path
         resolved = source_path.resolve()
         scratch = Path("/kaggle/tmp") if Path("/kaggle/tmp").is_dir() else Path("/tmp")
@@ -415,7 +416,8 @@ class QwenDirectorRuntimeMixin:
                 return False
 
         if target_dir.is_dir() and valid(target_dir):
-            print(f"[QWEN] staged_checkpoint=reused label={label!r} path={target_dir}", flush=True)
+            if _verbose():
+                print(f"[QWEN] staged_checkpoint=reused label={label!r} path={target_dir}", flush=True)
             return target_dir
 
         reservation = total + 2 * (1024 ** 3)
@@ -449,7 +451,7 @@ class QwenDirectorRuntimeMixin:
             with lock:
                 copied[0] += count
                 now = time.perf_counter()
-                if now - last_print[0] >= 10.0:
+                if _verbose() and now - last_print[0] >= 10.0:
                     last_print[0] = now
                     rate = copied[0] / max(now - started, 1e-6) / (1024 ** 2)
                     eta = (total - copied[0]) / max(rate * (1024 ** 2), 1.0)
@@ -459,11 +461,12 @@ class QwenDirectorRuntimeMixin:
                         flush=True,
                     )
 
-        print(
-            f"[QWEN] staging_start label={label!r} size={total / 2**30:.2f} GiB workers={workers} "
-            f"source={resolved} target={target_dir}",
-            flush=True,
-        )
+        if _verbose():
+            print(
+                f"[QWEN] staging_start label={label!r} size={total / 2**30:.2f} GiB workers={workers} "
+                f"source={resolved} target={target_dir}",
+                flush=True,
+            )
         try:
             if tmp_target.exists():
                 shutil.rmtree(tmp_target, ignore_errors=True)
@@ -493,11 +496,12 @@ class QwenDirectorRuntimeMixin:
         # background while vLLM boots, so loading never competes with them for memory.
         threading.Thread(target=os.sync, name="h3-stage-sync", daemon=True).start()
         elapsed = time.perf_counter() - started
-        print(
-            f"[QWEN] staging_done label={label!r} {total / 2**30:.2f} GiB in {elapsed:.0f}s "
-            f"({total / max(elapsed, 1e-6) / 2**20:.0f} MiB/s)",
-            flush=True,
-        )
+        if _verbose():
+            print(
+                f"[QWEN] staging_done label={label!r} {total / 2**30:.2f} GiB in {elapsed:.0f}s "
+                f"({total / max(elapsed, 1e-6) / 2**20:.0f} MiB/s)",
+                flush=True,
+            )
         return target_dir
 
     def _record_qwen_call(
@@ -1115,118 +1119,6 @@ class QwenDirectorRuntimeMixin:
             return "lazy"
         return "eager"
 
-    def _begin_startup_metrics(self, qwen_path: Path, eagle_path: Path) -> None:
-        try:
-            import psutil
-            memory = psutil.virtual_memory()
-            self._startup_metrics = {
-                "schema": 1,
-                "vllm_version_expected": DIRECTOR_VLLM_VERSION,
-                "safetensors_load_strategy": getattr(self, "_effective_safetensors_strategy", DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY),
-                "model_staging": str(qwen_path).startswith(("/tmp/staged_models", "/kaggle/tmp/staged_models")),
-                "qwen_checkpoint": self._checkpoint_shard_summary(qwen_path),
-                "eagle3_checkpoint": self._checkpoint_shard_summary(eagle_path),
-                "system_ram_total_bytes": int(memory.total),
-                "system_ram_available_before_bytes": int(memory.available),
-                "system_ram_available_min_bytes": int(memory.available),
-                "process_tree_rss_peak_bytes": 0,
-                "startup_started_unix": time.time(),
-                "startup_seconds_to_ready": None,
-                "weight_load_log_events_seconds": [],
-                "status": "starting",
-            }
-            shard_bytes = max(
-                self._startup_metrics["qwen_checkpoint"]["largest_shard_bytes"],
-                self._startup_metrics["eagle3_checkpoint"]["largest_shard_bytes"],
-            )
-            director = __import__("planner.config", fromlist=["RUNTIME"]).RUNTIME["director"]
-            factor = float(director.get("eager_ram_safety_factor", 1.25))
-            reserve = float(director.get("eager_ram_warning_reserve_gib", 4.0)) * (1024 ** 3)
-            required = int(shard_bytes * factor + reserve)
-            available = self._container_available_memory()
-            self._startup_metrics["eager_ram_headroom_required_bytes"] = required
-            self._startup_metrics["eager_ram_headroom_available_bytes"] = available
-            if getattr(self, "_effective_safetensors_strategy", "") == "eager" and available < required:
-                print(
-                    "[QWEN][RAM WARNING] eager loading headroom is below the configured "
-                    f"safety target: available={available / (1024 ** 3):.2f} GiB "
-                    f"required≈{required / (1024 ** 3):.2f} GiB",
-                    flush=True,
-                )
-        except Exception as exc:
-            raise RuntimeError(f"Unable to initialize Director startup diagnostics: {exc}") from exc
-
-    def _sample_startup_metrics(self, process: subprocess.Popen | None) -> None:
-        metrics = getattr(self, "_startup_metrics", None)
-        if not isinstance(metrics, dict):
-            return
-        try:
-            import psutil
-            memory = psutil.virtual_memory()
-            metrics["system_ram_available_min_bytes"] = min(
-                int(metrics.get("system_ram_available_min_bytes", memory.available)),
-                int(memory.available),
-            )
-            rss = 0
-            if process is not None and process.poll() is None:
-                try:
-                    root = psutil.Process(process.pid)
-                    rss += int(root.memory_info().rss)
-                    for child in root.children(recursive=True):
-                        try:
-                            rss += int(child.memory_info().rss)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            continue
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-            metrics["process_tree_rss_peak_bytes"] = max(
-                int(metrics.get("process_tree_rss_peak_bytes", 0)), rss
-            )
-        except Exception as exc:
-            metrics.setdefault("diagnostic_warnings", []).append(
-                f"memory sampling unavailable: {type(exc).__name__}: {exc}"
-            )
-
-    def _finish_startup_metrics(self, status: str, error: str = "") -> None:
-        metrics = getattr(self, "_startup_metrics", None)
-        if not isinstance(metrics, dict):
-            return
-        self._sample_startup_metrics(getattr(self, "_vllm_process", None))
-        metrics["status"] = str(status)
-        metrics["startup_seconds_to_ready"] = round(
-            max(0.0, time.time() - float(metrics.get("startup_started_unix", time.time()))), 3
-        )
-        if error:
-            metrics["error"] = str(error)[:2000]
-        log_path = Path(getattr(self, "_vllm_log_path", ""))
-        if log_path.is_file():
-            try:
-                log_text = log_path.read_text(encoding="utf-8", errors="replace")
-                metrics["weight_load_log_events_seconds"] = [
-                    float(value) for value in re.findall(
-                        r"Loading weights took\s+([0-9]+(?:\.[0-9]+)?)\s+seconds?", log_text, re.IGNORECASE
-                    )
-                ]
-            except Exception as exc:
-                metrics.setdefault("diagnostic_warnings", []).append(
-                    f"vLLM log parsing unavailable: {type(exc).__name__}: {exc}"
-                )
-        metrics_path = (
-            log_path.with_suffix(log_path.suffix + ".startup-metrics.json")
-            if log_path.name
-            else None
-        )
-        if metrics_path is not None:
-            try:
-                metrics_path.parent.mkdir(parents=True, exist_ok=True)
-                metrics_path.write_text(
-                    json.dumps(metrics, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8",
-                )
-                print(f"[QWEN] startup_metrics={metrics_path}", flush=True)
-            except Exception as exc:
-                print(f"[QWEN][WARN] unable to persist startup metrics: {exc}", flush=True)
-
     def _wait_for_vllm(self, session: requests.Session, process: subprocess.Popen | None) -> None:
         health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
         models_url = self._vllm_base_url() + "/models"
@@ -1243,7 +1135,6 @@ class QwenDirectorRuntimeMixin:
             health_ok = False
             model_ok = False
             version_ok = False
-            self._sample_startup_metrics(process)
             if process is not None and process.poll() is not None:
                 log_path = Path(getattr(self, "_vllm_log_path", ""))
                 log_tail = ""
@@ -1716,18 +1607,9 @@ class QwenDirectorRuntimeMixin:
                 raise
 
             process = None
-            # Record the log path before starting the process so even a Popen
-            # failure can persist a complete failed-startup diagnostics file.
+            # Record the log path before starting the process.
             self._vllm_log_path = log_path
             self._vllm_process = None
-            try:
-                self._begin_startup_metrics(self._model_path, speculator_model)
-            except Exception:
-                try:
-                    log_handle.close()
-                finally:
-                    session.close()
-                raise
             try:
                 process = subprocess.Popen(
                     command,
@@ -1745,15 +1627,10 @@ class QwenDirectorRuntimeMixin:
                 self._vllm_log_path = log_path
                 self._vllm_session = session
 
-                try:
-                    self._wait_for_vllm(
-                        session,
-                        process,
-                    )
-                except Exception as startup_exc:
-                    self._finish_startup_metrics("failed", str(startup_exc))
-                    raise
-                self._finish_startup_metrics("ready")
+                self._wait_for_vllm(
+                    session,
+                    process,
+                )
 
                 # H3_AUTOFIX_TWO_MODE_WARMUP_V1: exercise both sampler paths so
                 # _thinking_budget_kernel and _topp_sb_* JIT once at startup.
@@ -1831,17 +1708,6 @@ class QwenDirectorRuntimeMixin:
                             process.wait(timeout=5)
                         except Exception:
                             pass
-                # Persist diagnostics for failures that happen before the
-                # health/version checks (including subprocess creation errors).
-                metrics = getattr(self, "_startup_metrics", None)
-                if isinstance(metrics, dict) and metrics.get("status") == "starting":
-                    try:
-                        self._finish_startup_metrics("failed", str(exc))
-                    except Exception as metrics_exc:
-                        print(
-                            f"[QWEN][WARN] unable to finalize startup metrics: {metrics_exc}",
-                            flush=True,
-                        )
                 try:
                     log_handle.close()
                 except Exception:
@@ -2576,3 +2442,29 @@ class QwenDirectorRuntimeMixin:
             )
 
         return content
+
+
+def prestage_director_checkpoints() -> None:
+    """Copy both Director checkpoints off the network-backed /kaggle/input mount into local scratch.
+
+    kaggle/bootstrap.py runs this in the background while the install phases are busy, so the first
+    Director start finds the checkpoints already staged and skips the copy. Staging is the same
+    function the runtime uses (identical target and validation), so a missing or failed pre-stage
+    only means the runtime stages at startup as before.
+    """
+    try:
+        mixin = QwenDirectorRuntimeMixin
+        qwen_path = mixin._find_model(None)
+        speculator_path = mixin._find_speculator_model(None)
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="h3-prestage") as pool:
+            futures = [
+                pool.submit(mixin._stage_to_local_scratch, qwen_path, "Qwen3-14B-AWQ"),
+                pool.submit(mixin._stage_to_local_scratch, speculator_path, "Qwen3-14B EAGLE-3 speculator"),
+            ]
+            for future in futures:
+                future.result()
+        # Flush the freshly written pages now so the Director's weight loading never competes with writeback.
+        os.sync()
+    except Exception as exc:
+        print(f"[QWEN] checkpoint pre-staging skipped: {type(exc).__name__}: {exc}", flush=True)
+        raise SystemExit(1)
