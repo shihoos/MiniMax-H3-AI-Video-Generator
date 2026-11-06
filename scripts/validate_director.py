@@ -974,6 +974,9 @@ def test_story_blueprint_accepts_wrapped_cast_formats():
         "bold header with bullet entry": ["**CAST**:", "- " + entry] + rest,
         "entry wrapped inside parentheses": ["CAST: " + entry[:split_at] + ";", entry[split_at + 2:]] + rest,
         "heading marker and qualifier": ["## CAST (core people): " + entry] + rest,
+        "bare CAST header, entry per line with trailing pipe": ["CAST", entry + " |"] + rest,
+        "bare bold CAST header": ["**CAST**", "- " + entry] + rest,
+        "fate worded as survives in scene NN": ["CAST", re.sub(r"fate:\s*survives", "fate: survives in scene 12", entry) + " |"] + rest,
     }
     for label, text in variants.items():
         normalized = director._normalize_story_blueprint("\n".join(text), DIRECTOR_STORY_SCENES).splitlines()
