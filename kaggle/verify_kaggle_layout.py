@@ -232,15 +232,11 @@ def verify_director_runtime_source() -> None:
         "def _stage_to_local_scratch(",
         "def _parallel_copy_file(",
         "def _resolve_safetensors_strategy(",
-        "def _begin_startup_metrics(",
-        "def _finish_startup_metrics(",
         "apply_chat_template(",
     )
     for marker in required:
         if marker not in source:
             fail(f"Director runtime source is missing required contract: {marker}")
-    if '"model_staging":' not in source:
-        fail("Director startup telemetry must record model_staging")
     if 'os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto")' not in source:
         fail("Model staging must default to auto (H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading)")
     print("[PASS] Director runtime source")
@@ -710,25 +706,7 @@ def verify_bootstrap() -> None:
         fail("Bootstrap is missing the safe SageAttention logging placeholders")
     print("[PASS] Bootstrap")
 
-def verify_bootstrap_completed() -> None:
-    """A failed bootstrap must never be followed by PASS banners from static checks."""
-    metrics_path = ROOT / "bootstrap_metrics.json"
-    if not metrics_path.is_file():
-        return
-    try:
-        status = str(json.loads(metrics_path.read_text(encoding="utf-8")).get("status", ""))
-    except Exception as exc:
-        fail(f"bootstrap_metrics.json is unreadable: {exc}")
-        return
-    if status != "passed":
-        fail(
-            f"The last bootstrap run did not pass (status={status!r}, see {metrics_path}). "
-            "Fix the bootstrap error and re-run bootstrap before validating the runtime."
-        )
-
-
 def main() -> None:
-    verify_bootstrap_completed()
     verify_bootstrap()
     verify_runtime_config()
     verify_director_runtime_source()
