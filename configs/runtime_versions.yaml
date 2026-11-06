@@ -8,8 +8,8 @@ comfyui:
   revision: 423cbd20511becb1f16122ab518e92e58bfa03d9
   h3_vae_decoder_dtype_patch: true
 cuda_runtime:
-  runtime_version: 13.3.29
-  cublas_version: 13.6.1.10
+  runtime_version: 13.2.86
+  cublas_version: 13.4.1.3
 generation:
   width: 1344
   height: 768
