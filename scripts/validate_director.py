@@ -961,6 +961,34 @@ def test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota():
         raise AssertionError("an empty cast must fail because production cannot plan with no characters")
 
 
+def test_story_blueprint_accepts_wrapped_cast_formats():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture(DIRECTOR_STORY_SCENES).splitlines()
+    entry = lines[0].split(":", 1)[1].strip()
+    rest = lines[1:]
+    split_at = entry.index("; pressure")
+    variants = {
+        "header alone, entry on next line": ["CAST:", entry] + rest,
+        "bold header with bullet entry": ["**CAST**:", "- " + entry] + rest,
+        "entry wrapped inside parentheses": ["CAST: " + entry[:split_at] + ";", entry[split_at + 2:]] + rest,
+        "heading marker and qualifier": ["## CAST (core people): " + entry] + rest,
+    }
+    for label, text in variants.items():
+        normalized = director._normalize_story_blueprint("\n".join(text), DIRECTOR_STORY_SCENES).splitlines()
+        _assert(normalized[0].startswith("CAST: Ines Vale (") and normalized[0].count("(") == normalized[0].count(")"),
+                f"CAST variant not recovered: {label}: {normalized[0][:120]!r}")
+        _assert(len(normalized) == DIRECTOR_STORY_SCENES + 13, f"variant changed blueprint shape: {label}")
+    try:
+        director._normalize_story_blueprint("\n".join(rest), DIRECTOR_STORY_SCENES)
+    except RuntimeError as exc:
+        _assert("omitted the required cast line" in str(exc).lower() and "output started with" in str(exc).lower(),
+                f"a missing CAST must still fail closed and show the output head: {exc}")
+    else:
+        raise AssertionError("a blueprint with no CAST must fail closed")
+
+
 def test_story_blueprint_normalization_requires_ordered_scene_beats():
     from planner.qwen_director import QwenDirector
     from planner.config import DIRECTOR_STORY_SCENES
@@ -1401,6 +1429,7 @@ def main():
         test_story_prompt_values_and_dialogue_exchange_contract_are_consistent,
         test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
+        test_story_blueprint_accepts_wrapped_cast_formats,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
