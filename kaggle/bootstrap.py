@@ -918,6 +918,31 @@ def _pytorch_requirements(runtime: dict) -> tuple[str, list[str], dict[str, str]
     return index, requirements, expected
 
 
+def _prestage_director_checkpoints() -> bool:
+    """Best-effort: copy the Director checkpoints to local scratch while the installs run.
+
+    The runtime stages on demand if this is skipped or fails, so it can never fail the bootstrap.
+    """
+    started = time.time()
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from planner.qwen_director_runtime import prestage_director_checkpoints; "
+        "prestage_director_checkpoints()"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(ROOT)], cwd=str(ROOT), check=False, timeout=1800
+        )
+    except Exception as exc:
+        print(f"[DIRECTOR] checkpoint pre-staging skipped: {type(exc).__name__}: {exc}", flush=True)
+        return False
+    if result.returncode != 0:
+        print("[DIRECTOR] checkpoint pre-staging did not finish; the Director will stage at startup", flush=True)
+        return False
+    print(f"[DIRECTOR] checkpoints staged locally in {time.time() - started:.0f}s", flush=True)
+    return True
+
+
 def _prefetch_pytorch_wheels(runtime: dict) -> bool:
     """Best-effort: download the locked PyTorch wheels while ComfyUI/base installs run.
 
@@ -2862,23 +2887,21 @@ def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
     print(f"[SAGE TOOLCHAIN] nvcc={nvcc_text} CUDA_HOME={cuda_home or '(unset; torch will search)'}", flush=True)
 
 
-def _run_logged_build(args: list, env: dict, log_path: Path, label: str, tail_lines: int = 120) -> None:
-    """Run a long native build, keep the full log on disk and print its tail when it fails."""
+def _run_logged_build(args: list, env: dict, label: str, tail_lines: int = 200) -> None:
+    """Run a long native build quietly; nothing is written to the project, the tail is printed on failure."""
     print("+", " ".join(str(value) for value in args), flush=True)
-    with open(log_path, "w", encoding="utf-8") as handle:
+    with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as handle:
         result = subprocess.run(
             [str(value) for value in args], env=env, stdout=handle, stderr=subprocess.STDOUT, text=True, check=False,
         )
-    if result.returncode == 0:
-        print(f"[{label}] PASS (full log: {log_path})", flush=True)
-        return
-    try:
-        tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail_lines:]
-    except OSError:
-        tail = []
-    print(f"[{label} FAILED] exit={result.returncode}; full log: {log_path}", flush=True)
+        if result.returncode == 0:
+            print(f"[{label}] PASS", flush=True)
+            return
+        handle.seek(0)
+        tail = handle.read().splitlines()[-tail_lines:]
+    print(f"[{label} FAILED] exit={result.returncode}; last {len(tail)} build log lines:", flush=True)
     print("\n".join(tail), flush=True)
-    raise RuntimeError(f"{label} failed with exit code {result.returncode}; see {log_path} (tail printed above).")
+    raise RuntimeError(f"{label} failed with exit code {result.returncode} (build log tail printed above).")
 
 
 def install_sageattention_sm75(runtime: dict) -> None:
@@ -2970,7 +2993,6 @@ def install_sageattention_sm75(runtime: dict) -> None:
             "-e", str(install_dir),
         ],
         env=build_env,
-        log_path=ROOT / "sageattention_build.log",
         label="SAGEATTENTION BUILD",
     )
 
@@ -3297,22 +3319,8 @@ def _timed_call(label: str, function, *args, **kwargs):
         print(f"[BOOTSTRAP TIMING] {label}: {elapsed:.3f}s ({status})")
 
 
-def _write_bootstrap_metrics(started: float, status: str) -> None:
-    metrics = {
-        "schema": 1,
-        "status": status,
-        "wall_seconds": round(time.perf_counter() - started, 3),
-        "python": sys.version,
-        "phases": list(_BOOTSTRAP_PHASES),
-    }
-    destination = ROOT / "bootstrap_metrics.json"
-    temporary = destination.with_suffix(destination.suffix + ".tmp")
-    try:
-        temporary.write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(destination)
-        print(f"[BOOTSTRAP METRICS] {destination}")
-    except OSError as exc:
-        print(f"[BOOTSTRAP METRICS WARNING] unable to write metrics: {exc}")
+def _print_bootstrap_summary(started: float, status: str) -> None:
+    print(f"[BOOTSTRAP] {status} in {time.perf_counter() - started:.0f}s", flush=True)
 
 
 def _warn_if_torch_already_imported() -> None:
@@ -3383,6 +3391,14 @@ def main():
             director_future = None
 
         sage_dir = CUSTOM / str(runtime.get("sage_attention", {}).get("directory", "") or "")
+
+        stage_future = None
+        try:
+            from concurrent.futures import ThreadPoolExecutor
+            stage_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="h3-stage-bootstrap")
+            stage_future = stage_executor.submit(_prestage_director_checkpoints)
+        except Exception as exc:
+            print(f"[DIRECTOR] checkpoint pre-staging not started: {exc}")
 
         prefetch_future = None
         try:
@@ -3456,6 +3472,11 @@ def main():
         if director_future is None and not director_ready:
             _timed_call("install_director_runtime", install_director_runtime, runtime)
 
+        if stage_future is not None:
+            try:
+                stage_future.result()
+            except Exception as exc:
+                print(f"[DIRECTOR] checkpoint pre-staging failed: {exc}")
         _timed_call("verify_h3_optimization_runtime", verify_h3_optimization_runtime, runtime)
         _timed_call("install_models", install_models)
         _timed_call("verify_inventory", verify_inventory)
@@ -3472,7 +3493,7 @@ def main():
                 if sage_executor is not None:
                     sage_executor.shutdown(wait=True, cancel_futures=False)
             finally:
-                _write_bootstrap_metrics(bootstrap_started, bootstrap_status)
+                _print_bootstrap_summary(bootstrap_started, bootstrap_status)
 
 
 if __name__ == "__main__":
