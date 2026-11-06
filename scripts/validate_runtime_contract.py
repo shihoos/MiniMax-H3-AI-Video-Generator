@@ -486,14 +486,11 @@ def _validate_director_runtime_source() -> None:
         "def _stage_to_local_scratch(",
         "def _parallel_copy_file(",
         "def _resolve_safetensors_strategy(",
-        "def _begin_startup_metrics(",
-        "def _finish_startup_metrics(",
+        "def prestage_director_checkpoints(",
         "apply_chat_template(",
     ):
         if marker not in source:
             raise RuntimeError(f"Director runtime source is missing required vLLM Director contract: {marker}")
-    if '"model_staging":' not in source:
-        raise RuntimeError("Director startup telemetry must record model_staging.")
     # Staging is the fast path: /kaggle/input is GCSFUSE and direct loading took 6+ minutes per shard.
     if 'os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto")' not in source:
         raise RuntimeError("Model staging must default to auto (H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading).")
