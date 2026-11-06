@@ -46,6 +46,8 @@ from planner.config import (
     DIRECTOR_VLLM_SPECULATIVE_TOKENS,
     DIRECTOR_VLLM_GENERATION_CONFIG,
     DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY,
+    DIRECTOR_VLLM_ENFORCE_EAGER,
+    DIRECTOR_VLLM_JIT_WARMUP,
     DIRECTOR_VLLM_VERSION,
     DIRECTOR_VLLM_ALLOW_SPECULATIVE_MODEL_OVERRIDE,
     director_enabled,
@@ -1464,9 +1466,11 @@ class QwenDirectorRuntimeMixin:
                 "--disable-custom-all-reduce",
             ]
 
-            enforce_eager_base_val = os.getenv("H3_DIRECTOR_VLLM_ENFORCE_EAGER", "0").strip().lower()
+            enforce_eager_base_val = "1" if DIRECTOR_VLLM_ENFORCE_EAGER else "0"
             if enforce_eager_base_val in {"1", "true", "yes", "on"}:
                 command.append("--enforce-eager")
+            elif not DIRECTOR_VLLM_JIT_WARMUP:
+                command.extend(["--kernel-config", json.dumps({"enable_jit_warmup": False}, separators=(",", ":"))])
 
             safetensors_strategy = self._resolve_safetensors_strategy(self._model_path, speculator_model)
             self._effective_safetensors_strategy = safetensors_strategy
@@ -1476,7 +1480,7 @@ class QwenDirectorRuntimeMixin:
             ])
             print(
                 f"[QWEN] safetensors_load_strategy={safetensors_strategy} "
-                f"vllm={DIRECTOR_VLLM_VERSION}",
+                f"vllm={DIRECTOR_VLLM_VERSION} enforce_eager={DIRECTOR_VLLM_ENFORCE_EAGER} jit_warmup={DIRECTOR_VLLM_JIT_WARMUP}",
                 flush=True,
             )
 
