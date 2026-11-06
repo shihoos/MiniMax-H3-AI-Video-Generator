@@ -890,34 +890,6 @@ def _check_minimum_nvidia_driver(runtime: dict) -> None:
     print(f"[NVIDIA DRIVER] minimum={minimum} observed={','.join(versions)}: PASS")
 
 
-_PYTORCH_WHEELHOUSE = Path(tempfile.gettempdir()) / "h3_pytorch_wheelhouse"
-_PYTORCH_PREFETCH_STATE = {"ok": False}
-
-
-def _pytorch_requirements(runtime: dict) -> tuple[str, list[str], dict[str, str]]:
-    """Index URL, exact pip requirements and expected installed versions from the runtime yaml."""
-    config = dict(runtime.get("pytorch", {}) or {})
-    version = str(config.get("version", "") or "").strip()
-    cuda = str(config.get("cuda", "") or "").strip().lower()
-    index = str(config.get("index", "") or "").strip()
-    torchvision_version = str(config.get("torchvision_version", "") or "").strip()
-    torchaudio_version = str(config.get("torchaudio_version", "") or "").strip()
-    if not all((version, cuda, index, torchvision_version, torchaudio_version)):
-        raise RuntimeError("runtime_versions.yaml pytorch configuration is incomplete.")
-    base_version, expected_torch = _normalize_torch_version(version, cuda)
-    requirements = [
-        f"torch=={base_version}",
-        f"torchvision=={torchvision_version}",
-        f"torchaudio=={torchaudio_version}",
-    ]
-    expected = {
-        "torch": expected_torch,
-        "torchvision": torchvision_version,
-        "torchaudio": torchaudio_version,
-    }
-    return index, requirements, expected
-
-
 def _prestage_director_checkpoints() -> bool:
     """Best-effort: copy the Director checkpoints to local scratch while the installs run.
 
@@ -941,44 +913,6 @@ def _prestage_director_checkpoints() -> bool:
         return False
     print(f"[DIRECTOR] checkpoints staged locally in {time.time() - started:.0f}s", flush=True)
     return True
-
-
-def _prefetch_pytorch_wheels(runtime: dict) -> bool:
-    """Best-effort: download the locked PyTorch wheels while ComfyUI/base installs run.
-
-    Nothing is installed here (no site-packages writes). install_pytorch_runtime
-    installs from this wheelhouse when it is complete and otherwise falls back to
-    the normal index install, so a failed prefetch can never fail the bootstrap.
-    """
-    _PYTORCH_PREFETCH_STATE["ok"] = False
-    try:
-        index, requirements, expected = _pytorch_requirements(runtime)
-        if all(_package_version_satisfied(name, value) for name, value in expected.items()):
-            return False
-        shutil.rmtree(_PYTORCH_WHEELHOUSE, ignore_errors=True)
-        _PYTORCH_WHEELHOUSE.mkdir(parents=True, exist_ok=True)
-        started = time.time()
-        print("[BOOTSTRAP PARALLEL] PyTorch wheel prefetch started", flush=True)
-        result = subprocess.run(
-            [
-                sys.executable, "-m", "pip", "download", "-q",
-                "--disable-pip-version-check", "--index-url", index,
-                "-d", str(_PYTORCH_WHEELHOUSE), *requirements,
-            ],
-            check=False,
-            timeout=1800,
-        )
-        ok = result.returncode == 0 and any(_PYTORCH_WHEELHOUSE.glob("torch-*.whl"))
-        _PYTORCH_PREFETCH_STATE["ok"] = ok
-        print(
-            f"[BOOTSTRAP PARALLEL] PyTorch wheel prefetch {'ready' if ok else 'incomplete; normal install will be used'}"
-            f" ({time.time() - started:.1f}s)",
-            flush=True,
-        )
-        return ok
-    except Exception as exc:  # best effort only
-        print(f"[BOOTSTRAP PARALLEL] PyTorch wheel prefetch skipped: {type(exc).__name__}: {exc}", flush=True)
-        return False
 
 
 def verify_cuda_library_pins(runtime: dict) -> None:
@@ -1075,25 +1009,7 @@ def install_pytorch_runtime(runtime: dict) -> None:
     # extension/CUDA probe failed. Normal version upgrades remain cacheable.
     if metadata_matches:
         args.insert(args.index("--upgrade"), "--force-reinstall")
-    installed_from_wheelhouse = False
-    if _PYTORCH_PREFETCH_STATE["ok"] and any(_PYTORCH_WHEELHOUSE.glob("torch-*.whl")):
-        local_args = [
-            sys.executable, "-m", "pip", "install", "-q",
-            "--disable-pip-version-check", "--upgrade", "--no-index",
-            "--find-links", str(_PYTORCH_WHEELHOUSE),
-            f"torch=={base_version}",
-            f"torchvision=={torchvision_version}",
-            f"torchaudio=={torchaudio_version}",
-        ]
-        if metadata_matches:
-            local_args.insert(local_args.index("--upgrade"), "--force-reinstall")
-        print("+", " ".join(local_args))
-        installed_from_wheelhouse = subprocess.run(local_args, check=False).returncode == 0
-        if not installed_from_wheelhouse:
-            print("[PYTORCH] prefetched wheelhouse install failed; falling back to the package index")
-    if not installed_from_wheelhouse:
-        run(*args)
-    shutil.rmtree(_PYTORCH_WHEELHOUSE, ignore_errors=True)
+    run(*args)
 
     verify = subprocess.run(
         [sys.executable, "-c", _pytorch_runtime_probe_code(runtime)],
@@ -3400,26 +3316,11 @@ def main():
         except Exception as exc:
             print(f"[DIRECTOR] checkpoint pre-staging not started: {exc}")
 
-        prefetch_future = None
-        try:
-            from concurrent.futures import ThreadPoolExecutor
-            prefetch_executor = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="h3-torch-prefetch"
-            )
-            prefetch_future = prefetch_executor.submit(_prefetch_pytorch_wheels, runtime)
-        except Exception as exc:
-            print(f"[BOOTSTRAP PARALLEL] PyTorch wheel prefetch not started: {exc}")
-
         _timed_call("install_comfyui", install_comfyui, runtime)
         _timed_call("install_custom_nodes", install_nodes)
         _timed_call("remove_legacy_context_ir_node", remove_legacy_context_ir_node)
         _timed_call("install_base_requirements", install_base_requirements)
         _timed_call("install_storyboard_runtime", install_storyboard_runtime, runtime)
-        if prefetch_future is not None:
-            try:
-                prefetch_future.result()
-            except Exception as exc:
-                print(f"[BOOTSTRAP PARALLEL] PyTorch wheel prefetch failed: {exc}")
         _timed_call("install_pytorch_runtime", install_pytorch_runtime, runtime)
         _timed_call("verify_cuda_library_pins", verify_cuda_library_pins, runtime)
         _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
