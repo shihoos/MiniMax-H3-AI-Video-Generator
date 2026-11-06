@@ -505,6 +505,16 @@ class QwenDirectorPromptMixin:
         )
         fields: dict[str, str] = {}
         cast_line = ""
+        cast_parts: list[str] = []
+        in_cast = False
+        marker = r"[\s>#*\-\u2022]*"
+        cast_header = re.compile(
+            marker + r"CAST\b[^:\n]{0,40}?\**\s*:\s*\**\s*(.*?)\s*$", re.IGNORECASE
+        )
+        field_header = re.compile(
+            marker + r"(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|CONTINUITY_LEDGER)\s*\**\s*:\s*(.+?)\s*$",
+            re.IGNORECASE,
+        )
         header = re.compile(r"^\s*(?:SCENE\s*)?0*(\d{1,2})\s*[:.)\-–—]\s*(.*?)\s*$", re.IGNORECASE)
         beats: dict[int, list[str]] = {}
         current: int | None = None
@@ -512,27 +522,33 @@ class QwenDirectorPromptMixin:
             line = raw_line.strip().strip("`")
             if not line:
                 continue
-            cast_match = re.match(r"^\**\s*CAST\s*\**\s*:\s*(.+?)\s*$", line, re.IGNORECASE)
+            cast_match = cast_header.fullmatch(line)
             if cast_match:
-                if cast_line:
+                if cast_parts:
                     raise RuntimeError("Story Architect returned more than one CAST line.")
-                cast_line = "CAST: " + cast_match.group(1).strip()
+                in_cast = True
                 current = None
+                if cast_match.group(1).strip():
+                    cast_parts.append(cast_match.group(1).strip())
                 continue
-            field_match = re.match(
-                r"^\**\s*(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|CONTINUITY_LEDGER)\s*\**\s*:\s*(.+?)\s*$",
-                line,
-                re.IGNORECASE,
-            )
+            field_match = field_header.fullmatch(line)
             if field_match:
                 key = field_match.group(1).upper()
                 if key in fields:
                     raise RuntimeError(f"Story Architect repeated required field {key}.")
                 fields[key] = field_match.group(2).strip()
                 current = None
+                in_cast = False
+                continue
+            if in_cast and not re.match(r"^\s*SCENE\b", line, re.IGNORECASE) and "ENTRY_LOCATION" not in line:
+                # The CAST line may be wrapped or listed one person per line; keep collecting entries.
+                part = re.sub(r"^[\s>*\-\u2022]+|^\d{1,2}[.)]\s+", "", line).strip().strip("*").strip()
+                if part:
+                    cast_parts.append(part)
                 continue
             match = header.match(line)
             if match:
+                in_cast = False
                 number = int(match.group(1))
                 if 1 <= number <= count:
                     if number in beats:
@@ -550,8 +566,23 @@ class QwenDirectorPromptMixin:
         missing = [name for name in field_names if not fields.get(name)]
         if missing:
             raise RuntimeError("Story Architect omitted required plot fields: " + ", ".join(missing))
+        if cast_parts:
+            merged: list[str] = []
+            for part in cast_parts:
+                part = part.strip().strip("|").strip()
+                if not part:
+                    continue
+                if merged and merged[-1].count("(") > merged[-1].count(")"):
+                    merged[-1] = merged[-1] + " " + part  # an entry wrapped inside its parentheses
+                else:
+                    merged.append(part)
+            cast_line = "CAST: " + " | ".join(merged)
         if not cast_line:
-            raise RuntimeError("Story Architect omitted the required CAST line.")
+            preview = " / ".join(str(raw or "").strip().splitlines()[:3])[:360]
+            raise RuntimeError(
+                "Story Architect omitted the required CAST line. "
+                f"Output started with: {preview!r}"
+            )
         if set(beats) != set(range(1, count + 1)):
             missing_scenes = sorted(set(range(1, count + 1)) - set(beats))
             raise RuntimeError(f"Story Architect did not return all {count} numbered scene beats (missing {missing_scenes}).")
@@ -2392,4 +2423,3 @@ class QwenDirectorPromptMixin:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-
