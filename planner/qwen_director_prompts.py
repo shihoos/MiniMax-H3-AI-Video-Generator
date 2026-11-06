@@ -428,7 +428,7 @@ class QwenDirectorPromptMixin:
             CAST FORMAT: output one CAST line first. Include only core people whose choices matter to the plot. Cast size
             is fully plot-driven; do not target four people. Each entry must use this exact pattern:
             Full Name (role; wants [specific outcome]; pressure [fear, need, duty, mistake, or private conflict]; voice [distinctive speech style]; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
-            Separate entries with |. Use full names for newly invented people and preserve source names exactly.
+            Write it as ONE line starting with the literal label 'CAST:' followed by the entries. Separate entries with |. Use full names for newly invented people and preserve source names exactly.
             Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. A remote-only voice,
             recording, hologram, AI, organization, object, or location is not a physically present person and must not be
             listed as an on-screen person. List only scenes where the person is physically present. Include aliases only
@@ -509,7 +509,8 @@ class QwenDirectorPromptMixin:
         in_cast = False
         marker = r"[\s>#*\-\u2022]*"
         cast_header = re.compile(
-            marker + r"CAST\b[^:\n]{0,40}?\**\s*:\s*\**\s*(.*?)\s*$", re.IGNORECASE
+            marker + r"CAST\b(?:[^:\n]{0,40}?\**\s*:\s*\**\s*(.*?)|\s*\**\s*(?:\([^)\n]{0,60}\))?\s*\**)\s*$",
+            re.IGNORECASE,
         )
         field_header = re.compile(
             marker + r"(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|CONTINUITY_LEDGER)\s*\**\s*:\s*(.+?)\s*$",
@@ -528,7 +529,7 @@ class QwenDirectorPromptMixin:
                     raise RuntimeError("Story Architect returned more than one CAST line.")
                 in_cast = True
                 current = None
-                if cast_match.group(1).strip():
+                if (cast_match.group(1) or "").strip():
                     cast_parts.append(cast_match.group(1).strip())
                 continue
             field_match = field_header.fullmatch(line)
@@ -616,6 +617,7 @@ class QwenDirectorPromptMixin:
             if not fate_match:
                 raise RuntimeError(f"CAST entry {name!r} must explicitly declare fate: survives or dies in scene NN.")
             fate = fate_match.group(1).strip().casefold()
+            fate = re.sub(r"^(survives|alive)\s+(?:in|through|until)\s+(?:scene\s+\d{1,2}|the end)$", r"\1", fate)
             if fate not in {"survives", "alive", "dies", "dead"} and not re.fullmatch(r"dies in scene\s+\d{1,2}", fate):
                 raise RuntimeError(f"CAST entry {name!r} has unsupported fate metadata {fate!r}.")
             if fate.startswith("dies"):
