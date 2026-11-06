@@ -1416,9 +1416,23 @@ def main():
         test_story_context_compactor_keeps_causal_middle_action,
         test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
     ]
+    import contextlib
+    import io
+    import os
+    verbose = os.getenv("H3_VALIDATE_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}
     for test in tests:
-        test()
-        print(f"PASS {test.__name__}")
+        if verbose:
+            test()
+            print(f"PASS {test.__name__}")
+            continue
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                test()
+        except BaseException:
+            print(captured.getvalue(), end="")
+            print(f"FAIL {test.__name__}")
+            raise
     print(f"Director validation PASSED ({len(tests)} checks).")
 
 
