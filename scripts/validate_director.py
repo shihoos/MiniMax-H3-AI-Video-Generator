@@ -1557,6 +1557,25 @@ def test_blueprint_size_floors_are_shared_and_tolerant():
     director._validate_story_blueprint_contract("ai_story", normalized, "a harbor story", source_character_names=[])
 
 
+def test_optional_plot_fields_accept_every_way_of_saying_none():
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    base = _story_blueprint_fixture(N)
+    for wording in ("None.", "none", "N/A", "None (no material relationships)", "No named entities.", "**None**", "Nil", "No relationships"):
+        lines = [("RELATIONSHIPS: " + wording) if l.startswith("RELATIONSHIPS:") else l for l in base.splitlines()]
+        normalized = director._normalize_story_blueprint("\n".join(lines), N)
+        _assert("\nRELATIONSHIPS: none\n" in normalized, f"{wording!r} must normalize to 'none'")
+        director._validate_story_blueprint_contract("ai_story", normalized, "a harbor story", source_character_names=[])
+    lines = [("RELATIONSHIPS: Ines trusts nobody") if l.startswith("RELATIONSHIPS:") else l for l in base.splitlines()]
+    try:
+        director._normalize_story_blueprint("\n".join(lines), N)
+    except RuntimeError as exc:
+        _assert("RELATIONSHIPS" in str(exc), f"unexpected error {exc!r}")
+    else:
+        raise AssertionError("a thin but real relationships value must still be rejected")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1606,6 +1625,7 @@ def main():
         test_story_contract_regressions_found_by_audit,
         test_architect_beat_length_gate_is_tolerant_but_not_empty,
         test_blueprint_size_floors_are_shared_and_tolerant,
+        test_optional_plot_fields_accept_every_way_of_saying_none,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
