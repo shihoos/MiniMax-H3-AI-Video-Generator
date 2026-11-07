@@ -601,8 +601,23 @@ class QwenDirectorPromptMixin:
             if not parsed:
                 raise RuntimeError(f"Malformed CAST entry: {item[:100]}")
             name, metadata = parsed.group(1).strip(), parsed.group(2).strip()
-            if title_prefix.match(name):
-                raise RuntimeError(f"CAST name {name!r} contains a title; move the title into the role field.")
+            title_match = title_prefix.match(name)
+            if title_match:
+                # Deterministic repair of a formatting slip: the honorific moves from the name into the role.
+                honorific = title_match.group(0).strip()
+                name = name[title_match.end():].strip()
+                if len(name.split()) < 2:
+                    raise RuntimeError(f"CAST name {item[:60]!r} is only a title and one word; give a full name.")
+                head, sep, tail = metadata.partition(";")
+                head = head.strip()
+                if honorific.casefold().rstrip(".") not in head.casefold():
+                    head = f"{head}, addressed as {honorific}" if head else f"addressed as {honorific}"
+                metadata = head + (";" + tail if sep else "")
+                item = f"{name} ({metadata})"
+            if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
+                # Only the explicit declaration is missing; no aliases is the safe reading.
+                metadata = metadata.rstrip("; ") + "; aliases: none"
+                item = f"{name} ({metadata})"
             if not re.search(r"\bwants\s+.{3,}", metadata, re.IGNORECASE):
                 raise RuntimeError(f"CAST entry {name!r} is missing a specific 'wants' goal.")
             if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
