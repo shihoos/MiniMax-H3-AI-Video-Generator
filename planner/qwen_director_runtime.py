@@ -1190,6 +1190,14 @@ class QwenDirectorRuntimeMixin:
             f"Log: {getattr(self, '_vllm_log_path', 'unknown')}"
         )
 
+    def _vllm_server_log_path(self) -> Path:
+        return Path(
+            os.getenv(
+                "H3_DIRECTOR_VLLM_LOG",
+                str(self.project_root / "qwen3_vllm_server.log"),
+            )
+        )
+
     def load(
         self,
     ) -> None:
@@ -1223,6 +1231,12 @@ class QwenDirectorRuntimeMixin:
             external_server = os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "0").strip().lower() in {
                 "1", "true", "yes", "on"
             }
+            if not external_server and not self._vllm_server_log_path().exists() and _h3_find_vllm_pids():
+                # The project folder (and the server log inside it) was deleted and re-created while a server from
+                # the earlier run kept running. That server writes to a deleted file, so no log would ever appear.
+                # Restart it: a fresh server logs into the new project folder, exactly like a first run.
+                print("[QWEN] Director server from an earlier run has lost its log file; restarting it so the log is written", flush=True)
+                _h3_kill_stray_vllm("its log file was deleted with the previous project folder")
             shared_process_alive = (
                 _SHARED_VLLM_PROCESS is not None
                 and _SHARED_VLLM_PROCESS.poll() is None
@@ -1348,12 +1362,7 @@ class QwenDirectorRuntimeMixin:
 
             host = DIRECTOR_VLLM_HOST
             port = DIRECTOR_VLLM_PORT
-            log_path = Path(
-                os.getenv(
-                    "H3_DIRECTOR_VLLM_LOG",
-                    str(self.project_root / "qwen3_vllm_server.log"),
-                )
-            )
+            log_path = self._vllm_server_log_path()
             try:
                 log_path.parent.mkdir(parents=True, exist_ok=True)
             except Exception:
