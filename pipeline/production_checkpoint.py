@@ -116,6 +116,61 @@ class ProductionCheckpoint:
             normalized.pop(key, None)
         return cls.digest_object(normalized)
 
+    DIRECTOR_FINGERPRINT_FILES = (
+        "planner/qwen_director.py",
+        "planner/qwen_director_runtime.py",
+        "planner/qwen_director_prompts.py",
+        "planner/qwen_director_scene.py",
+        "planner/qwen_director_sanitize.py",
+        "planner/story_contracts.py",
+        "planner/cinematic_compiler.py",
+        "planner/production_planner.py",
+        "planner/entity_resolver.py",
+        "planner/config.py",
+        "configs/runtime_versions.yaml",
+        "pipeline/dialogue_timeline.py",
+        "execution/h3_workflow_builder.py",
+        "schemas/character.py",
+    )
+
+    @classmethod
+    def director_fingerprint(cls, project_root: Path) -> str:
+        """The single Director fingerprint: the Director and the Orchestrator must both call this.
+
+        It covers every split Director module, the story contracts, the compiler and the resolved
+        YAML-backed story/frame settings (never environment variables that cannot override them).
+        """
+        root = Path(project_root).resolve()
+        material = "".join(
+            f"{name}:{cls.digest_file(root / name)}\n" for name in cls.DIRECTOR_FINGERPRINT_FILES
+        )
+        from planner.config import (
+            DIRECTOR_STORY_SCENES,
+            DIRECTOR_SHOTS_PER_SCENE,
+            H3_FPS,
+            H3_FRAMES_PER_SHOT,
+            STORY_TARGET_WORDS,
+            STORY_MIN_WORDS,
+            DIRECTOR_STORY_MAX_TOKENS,
+            DIRECTOR_STORY_PLAN_MAX_TOKENS,
+            DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+            DIRECTOR_STORY_WRITER_MAX_TOKENS,
+        )
+        effective_settings = {
+            "story_scenes": DIRECTOR_STORY_SCENES,
+            "shots_per_scene": DIRECTOR_SHOTS_PER_SCENE,
+            "fps": H3_FPS,
+            "frames_per_shot": H3_FRAMES_PER_SHOT,
+            "story_target_words": STORY_TARGET_WORDS,
+            "story_minimum_words": STORY_MIN_WORDS,
+            "story_max_tokens": DIRECTOR_STORY_MAX_TOKENS,
+            "story_plan_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
+            "story_thinking_token_budget": DIRECTOR_STORY_PLAN_THINKING_BUDGET,
+            "story_writer_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
+        }
+        material += "runtime-settings:" + repr(sorted(effective_settings.items())) + "\n"
+        return cls.digest_text(material)
+
     @staticmethod
     def digest_file(path: Path) -> str:
         digest = hashlib.sha256()
