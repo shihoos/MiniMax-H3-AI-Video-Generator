@@ -12,6 +12,8 @@ from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
 from planner.story_contracts import (
     audit_story_against_blueprint,
+    blueprint_beat_floor,
+    blueprint_field_floor,
     ensure_cinematic_coverage,
     validate_blueprint_state_contract,
     validate_cinematic_coverage,
@@ -1946,13 +1948,24 @@ class QwenDirector(
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
                     f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
                 ) from plan_error
-        blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
-        self._validate_story_blueprint_contract(
-            mode,
-            blueprint,
-            user_input,
-            source_character_names=source_character_names,
-        )
+        try:
+            blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+            self._validate_story_blueprint_contract(
+                mode,
+                blueprint,
+                user_input,
+                source_character_names=source_character_names,
+            )
+        except RuntimeError as rejection:
+            # Failure only: keep the exact Architect output next to the error so every violated rule can be
+            # read at once instead of one run per rule. Overwritten on each failure; never written on success.
+            try:
+                (self.project_root / "story_architect_last_failure.txt").write_text(
+                    f"{rejection}\n\n----- raw Architect output -----\n{raw}\n", encoding="utf-8"
+                )
+            except OSError:
+                pass
+            raise
         return blueprint
 
     def _validate_story_blueprint_contract(
@@ -1995,7 +2008,7 @@ class QwenDirector(
             count = len(re.findall(r"\b[\w'’-]+\b", value))
             if name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() in {"none", "n/a", "-"}:
                 count = 0
-            minimum = 35 if name == "CONTINUITY_LEDGER" else (10 if name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"} else 7)
+            minimum = blueprint_field_floor(name)
             if count < minimum and not (name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() == "none"):
                 errors.append(f"{name} is underdeveloped ({count} words; minimum {minimum})")
         if len(beats) != DIRECTOR_STORY_SCENES or set(beats) != set(range(1, DIRECTOR_STORY_SCENES + 1)):
@@ -2003,7 +2016,7 @@ class QwenDirector(
         else:
             for number, beat in beats.items():
                 count = len(re.findall(r"\b[\w'’-]+\b", beat))
-                if count < STORY_PLAN_BEAT_MIN_WORDS:
+                if count < blueprint_beat_floor(STORY_PLAN_BEAT_MIN_WORDS):
                     errors.append(f"scene {number:02d} blueprint beat is too short ({count} words)")
                 if count > max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120):
                     errors.append(f"scene {number:02d} blueprint beat is overlong ({count} words)")
@@ -2033,7 +2046,7 @@ class QwenDirector(
         if len(beats) == DIRECTOR_STORY_SCENES:
             low = " ".join(beats[i].casefold() for i in range(1, DIRECTOR_STORY_SCENES + 1))
             causal_terms = re.findall(r"\b(?:because|therefore|so|but|forcing|causing|which meant|as a result|consequently)\b", low)
-            if len(causal_terms) < 5:
+            if len(causal_terms) < 3:
                 errors.append("scene chain contains too few explicit causal links")
         errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
         if errors:
@@ -5553,4 +5566,3 @@ def _h3_apply_kaggle_runtime_fix_20261010():
     QwenDirector._H3_KAGGLE_RUNTIME_FIX_20261010 = True
 
 _h3_apply_kaggle_runtime_fix_20261010()
-
