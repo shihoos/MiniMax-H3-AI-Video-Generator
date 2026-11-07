@@ -2472,3 +2472,23 @@ def prestage_director_checkpoints() -> None:
     except Exception as exc:
         print(f"[QWEN] checkpoint pre-staging skipped: {type(exc).__name__}: {exc}", flush=True)
         raise SystemExit(1)
+
+
+def prewarm_director_server(project_root: str) -> None:
+    """Start the Director vLLM server and leave it running (called from a detached bootstrap subprocess).
+
+    This is the planner's own load() (identical command, version and context checks); with
+    H3_DIRECTOR_VLLM_KEEP_ALIVE=1 the server outlives this process, and the planner later finds it
+    healthy and reuses it, or waits for it if it is still starting. If this fails nothing is lost: the
+    planner starts the server itself as before.
+    """
+    try:
+        from planner.qwen_director import QwenDirector
+
+        director = QwenDirector(Path(project_root))
+        if not director.available:
+            return
+        director.load()
+    except BaseException as exc:
+        print(f"[QWEN] early Director start skipped: {type(exc).__name__}: {exc}", flush=True)
+        raise SystemExit(1)
