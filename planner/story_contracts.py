@@ -43,15 +43,25 @@ SPEECH_VERBS = (
     "promised|admitted|confessed|cried|barked|interrupted|radioed|transmitted"
 )
 ACTION_VERBS = (
-    r"enter\w*|arriv\w*|appear\w*|stand|stood|walk\w*|run|ran|cross\w*|climb\w*|"
-    r"follow\w*|reach\w*|turn\w*|grab\w*|hold|held|carry\w*|open\w*|close\w*|"
-    r"lift\w*|pull\w*|push\w*|kneel\w*|sit|sat|wait\w*|watch\w*|face\w*|"
-    r"step\w*|mov\w*|emerge\w*|join\w*|leave|left|depart\w*|return\w*|look\w*|"
+    r"enter\w*|arriv\w*|appear\w*|stands?|standing|stood|walk\w*|runs?|running|ran|cross\w*|climb\w*|"
+    r"follow\w*|reach\w*|turn\w*|grab\w*|holds?|holding|held|carry\w*|open\w*|close\w*|"
+    r"lift\w*|pull\w*|push\w*|kneel\w*|sits?|sitting|sat|wait\w*|watch\w*|face\w*|"
+    r"step\w*|mov\w*|emerge\w*|join\w*|leaves?|leaving|left|depart\w*|return\w*|look\w*|"
     r"listen\w*|remain\w*|work\w*|lean\w*|crouch\w*|slide\w*|pause\w*|"
     r"inspect\w*|examin\w*|compare\w*|record\w*|write\w*|read\w*|"
     r"speak\w*|address\w*|signal\w*|meet\w*|introduc\w*|identify\w*|"
     r"recogniz\w*|gesture\w*|embrac\w*|point\w*|nod\w*|smil\w*|frown\w*"
 )
+
+# Capitalized only because they open a sentence: seasons, weather, light and abstract nouns are not people.
+COMMON_NOUN_STARTERS = {
+    "winter", "summer", "spring", "autumn", "fall", "morning", "evening", "night", "midnight", "dawn", "dusk",
+    "silence", "darkness", "light", "shadow", "shadows", "rain", "snow", "wind", "fog", "mist", "smoke", "dust",
+    "water", "ice", "fire", "steam", "thunder", "lightning", "storm", "tide", "sunlight", "moonlight", "daylight",
+    "cold", "heat", "time", "memory", "fear", "hope", "grief", "doubt", "panic", "dread", "relief", "anger",
+    "nothing", "everything", "something", "someone", "everyone", "anyone", "nobody", "somebody", "everybody",
+    "history", "paper", "metal", "glass", "stone", "salt", "rust", "echoes", "echo", "ash", "frost", "heat",
+}
 
 COMMON_SENTENCE_STARTERS = {
     "after", "although", "and", "as", "at", "before", "beneath", "but", "by",
@@ -82,6 +92,14 @@ TRAVEL_RE = re.compile(
     r"\b(arriv\w*|enter\w*|reach\w*|travel\w*|walk\w*|drive\w*|cross\w*|climb\w*|"
     r"descend\w*|return\w*|follow\w*|move\w*|head\w*|board\w*|sail\w*|ride\w*|"
     r"hours later|next morning|by dawn|after sunset|at daybreak|the following day)\b",
+    re.I,
+)
+# Arrival of a new person also covers meetings, introductions and rejoining, not just travel verbs.
+ARRIVAL_RE = re.compile(
+    TRAVEL_RE.pattern[:-3]
+    + r"|meet\w*|met|join\w*|rejoin\w*|introduc\w*|encounter\w*|greet\w*|reunit\w*|"
+    r"appear\w*|emerge\w*|come|comes|came|coming|show\w* up|turn\w* up|burst\w*|rush\w*|hurr\w*|"
+    r"bring\w*|brought|escort\w*|lead\w*|led|summon\w*|call\w* in|wait\w* for)\b",
     re.I,
 )
 KNOWLEDGE_RE = re.compile(
@@ -275,7 +293,7 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
             errors.append(f"CAST character {item['name']!r} repeats an on-screen scene")
         if item["fate"].casefold() != "unspecified":
             fate = item["fate"].casefold()
-            if fate not in {"survives", "alive", "dies", "dead"} and not re.fullmatch(r"dies in scene\s+\d{1,2}", fate):
+            if fate not in {"survives", "alive"} and not re.fullmatch(r"dies in scene\s+\d{1,2}", fate):
                 errors.append(f"CAST character {item['name']!r} has unsupported fate metadata {item['fate']!r}")
             if fate.startswith("dies"):
                 death_scene = int(re.search(r"\d+", fate).group(0)) if re.search(r"\d+", fate) else None
@@ -306,6 +324,10 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
             present = _name_is_present(state["ENTRY_PRESENT"], item) or _name_is_present(state["EXIT_PRESENT"], item)
             if number in item["scenes"] and not present:
                 errors.append(f"scene {number:02d} CAST appearance for {item['name']!r} is absent from entry/exit state")
+            if present and number not in item["scenes"]:
+                errors.append(
+                    f"scene {number:02d} state places {item['name']!r} physically present, but the CAST on-screen scene list omits it"
+                )
 
     # Explicit death facts in the planned event must agree with the scene's exit state.
     for number in range(1, expected_scenes + 1):
@@ -357,7 +379,7 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         old_present = _present_names(prior.get("EXIT_PRESENT", ""), cast)
         new_present = _present_names(current.get("ENTRY_PRESENT", ""), cast)
         arriving = new_present - old_present
-        if arriving and not TRAVEL_RE.search(current.get("EVENT", "")):
+        if arriving and not ARRIVAL_RE.search(current.get("EVENT", "")):
             errors.append(f"scene {number + 1:02d} introduces {', '.join(sorted(arriving))} without an arrival/meeting event")
         departing = old_present - new_present
         if departing and not re.search(r"\b(leave\w*|depart\w*|exit\w*|return\w*|separate\w*|stay\w*|remain\w*|fall\w*|die\w*|killed|drowned|captured|taken)\b", bridge, re.I):
@@ -383,6 +405,47 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
 
 def _entity_allowlist(fields: dict[str, str], source_story: str) -> str:
     return " ".join((str(source_story or ""), fields.get("NAMED_ENTITIES", ""), fields.get("RELATIONSHIPS", ""))).casefold()
+
+
+def _is_sentence_initial_common_word(story: str, match: re.Match, candidate: str, first: str, allowed_text: str) -> bool:
+    """A single capitalized word that only opens a sentence ("Winter followed...") is a word, not a person."""
+    if len(candidate.split()) != 1:
+        return False
+    before = story[:match.start()]
+    at_sentence_start = not before.strip() or bool(re.search(r"(?:[.!?]['\"”’)]*|\n)\s*['\"“‘(]*$", before))
+    if not at_sentence_start:
+        return False
+    if first in COMMON_NOUN_STARTERS:
+        return True
+    # The same word used in lower case elsewhere is an ordinary word; a person's name is never lower-cased.
+    # A word the source or the plan itself spells as a name is not excused.
+    if re.search(r"(?<![A-Za-z])" + re.escape(first) + r"(?![A-Za-z])", allowed_text):
+        return False
+    return bool(re.search(r"(?<![A-Za-z])" + re.escape(first) + r"(?![A-Za-z])", story))
+
+
+POSSESSIVE_BODY = (
+    r"hands?|fingers?|eyes?|voice|breath|arms?|shoulders?|face|lips?|feet|footsteps?|gaze|head|knees?|"
+    r"mouth|jaw|palms?|pulse|heartbeat|chest|legs?|thumbs?|knuckles?|wrists?|fists?"
+)
+POSSESSIVE_ACTION_EXTRA = (
+    r"tighten\w*|trembl\w*|clench\w*|curl\w*|twitch\w*|flutter\w*|shak\w*|grip\w*|grasp\w*|press\w*|"
+    r"trac\w*|brush\w*|rais\w*|wrap\w*|squeez\w*|rest\w*|slip\w*|drum\w*|steady\w*|steadied|fumbl\w*"
+)
+
+
+def _person_acts_in(paragraph: str, surfaces: list[str]) -> bool:
+    """True when the paragraph shows the person acting, speaking, or a body part acting for them."""
+    for surface in surfaces:
+        name = r"(?<!\w)" + re.escape(surface) + r"(?!\w)"
+        if re.search(name + r"\s+(?:" + SPEECH_VERBS + r"|" + ACTION_VERBS + r")\b", paragraph, re.I):
+            return True
+        if re.search(
+            name + r"(?:'s|’s)\s+(?:" + POSSESSIVE_BODY + r")\s+(?:" + ACTION_VERBS + r"|" + POSSESSIVE_ACTION_EXTRA + r")\b",
+            paragraph, re.I,
+        ):
+            return True
+    return False
 
 
 def audit_story_against_blueprint(
@@ -492,6 +555,8 @@ def audit_story_against_blueprint(
         first = candidate.split()[0].casefold()
         if first in COMMON_SENTENCE_STARTERS:
             continue
+        if _is_sentence_initial_common_word(str(story or ""), match, candidate, first, allowed_text):
+            continue
         candidate_key = candidate.casefold()
         role_words = {
             "clerk", "guard", "officer", "captain", "driver", "pilot", "doctor", "nurse", "engineer",
@@ -587,7 +652,7 @@ def audit_story_against_blueprint(
             prior_people = _present_names(prior.get("EXIT_PRESENT", ""), cast)
             entry_people = _present_names(state.get("ENTRY_PRESENT", ""), cast)
             newly_present = entry_people - prior_people
-            if newly_present and not TRAVEL_RE.search(" ".join(paragraph.split()[:90])):
+            if newly_present and not ARRIVAL_RE.search(" ".join(paragraph.split()[:90])):
                 errors.append(f"scene {number:02d} prose does not show arrival of {', '.join(sorted(newly_present))}")
             departed = prior_people - entry_people
             prior_paragraph = paragraphs[number - 2]
@@ -610,19 +675,24 @@ def audit_story_against_blueprint(
                 if not (object_delta & content_tokens(paragraph)):
                     errors.append(f"scene {number:02d} prose does not name the object involved in its state change")
 
-    # The text must not introduce a planned-dead character as a physical actor afterward.
+    # A person may act, speak or be physically described only in the scenes their CAST entry lists, and never
+    # after their planned death. Possessive forms ("Ines's fingers close...") count as physical activity.
     for item in cast:
         fate = item.get("fate", "unspecified").casefold()
-        death_scene = None
-        if fate.startswith("dies in scene"):
-            death_scene = int(re.search(r"\d+", fate).group(0))
-        if death_scene is None:
-            continue
-        for scene_number in range(death_scene + 1, expected_scenes + 1):
-            paragraph = paragraphs[scene_number - 1]
-            for surface in _name_surfaces(item["name"], item["aliases"]):
-                if re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)\s+(?:" + SPEECH_VERBS + r"|" + ACTION_VERBS + r")\b", paragraph, re.I):
+        death_scene = int(re.search(r"\d+", fate).group(0)) if fate.startswith("dies in scene") and re.search(r"\d+", fate) else None
+        listed = set(item["scenes"])
+        for scene_number in range(1, expected_scenes + 1):
+            after_death = death_scene is not None and scene_number > death_scene
+            unlisted = bool(listed) and scene_number not in listed
+            if not (after_death or unlisted):
+                continue
+            if _person_acts_in(paragraphs[scene_number - 1], _name_surfaces(item["name"], item["aliases"])):
+                if after_death:
                     errors.append(f"dead character {item['name']!r} physically acts/speaks after scene {death_scene:02d}")
+                else:
+                    errors.append(
+                        f"{item['name']!r} acts/speaks in scene {scene_number:02d}, which the CAST on-screen scene list omits"
+                    )
 
     return list(dict.fromkeys(errors))
 
