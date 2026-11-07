@@ -88,6 +88,7 @@ class ProductionOrchestrator:
             "non_diegetic_music",
         }
         shots = {str(s.get("shot_id", "")).strip(): s for s in plan.get("shots", []) or [] if isinstance(s, dict)}
+        original_framing = {sid: str(s.get("camera_shot", "") or "") for sid, s in shots.items()}
         changes = critique.get("shot_patches", []) or []
         applied = []
         if isinstance(changes, list):
@@ -105,8 +106,47 @@ class ProductionOrchestrator:
                             continue
                         shot[key] = normalized_value
                         applied.append({"shot_id": shot["shot_id"], "field": key})
+        applied = ProductionOrchestrator._revert_critic_framing_regressions(plan, applied, original_framing)
         plan["director_critique_applied"] = applied
         return plan
+
+    @staticmethod
+    def _framing_errors(plan: dict) -> list[str]:
+        """Framing-diversity errors per scene, using the Director's own contract."""
+        from planner.story_contracts import validate_cinematic_coverage
+        scenes: dict[str, list[dict]] = {}
+        for shot in plan.get("shots", []) or []:
+            if isinstance(shot, dict):
+                scenes.setdefault(str(shot.get("scene_id", "") or ""), []).append(shot)
+        errors: list[str] = []
+        for scene_id, group in scenes.items():
+            errors.extend(
+                e for e in validate_cinematic_coverage(group, scene_id) if "distinct framings" in e
+            )
+        return errors
+
+    @staticmethod
+    def _revert_critic_framing_regressions(plan: dict, applied: list, original_framing: dict) -> list:
+        """The Director guarantees three distinct framings per scene; a critic camera_shot patch may not undo that."""
+        if not any(item.get("field") == "camera_shot" for item in applied):
+            return applied
+        by_id = {str(s.get("shot_id", "")).strip(): s for s in plan.get("shots", []) or [] if isinstance(s, dict)}
+        patched_scenes = {
+            str(by_id[item["shot_id"]].get("scene_id", "") or "")
+            for item in applied
+            if item.get("field") == "camera_shot" and item.get("shot_id") in by_id
+        }
+        broken = {e.split(":", 1)[0] for e in ProductionOrchestrator._framing_errors(plan)}
+        reverted: set[str] = set()
+        for item in applied:
+            if item.get("field") != "camera_shot" or item.get("shot_id") not in by_id:
+                continue
+            shot = by_id[item["shot_id"]]
+            scene_id = str(shot.get("scene_id", "") or "")
+            if scene_id in patched_scenes and scene_id in broken:
+                shot["camera_shot"] = original_framing[item["shot_id"]]
+                reverted.add(item["shot_id"])
+        return [i for i in applied if not (i.get("field") == "camera_shot" and i.get("shot_id") in reverted)]
 
     def __init__(
         self,
@@ -1024,57 +1064,8 @@ class ProductionOrchestrator:
 
     @staticmethod
     def _director_fingerprint(project_root: Path, checkpoint: ProductionCheckpoint) -> str:
-        """Return a stable fingerprint covering the complete split Director."""
-        director_root = Path(project_root).resolve() / "planner"
-        project_root = Path(project_root).resolve()
-        tracked = (
-            (Path("planner") / "qwen_director.py"),
-            (Path("planner") / "qwen_director_runtime.py"),
-            (Path("planner") / "qwen_director_prompts.py"),
-            (Path("planner") / "qwen_director_scene.py"),
-            (Path("planner") / "qwen_director_sanitize.py"),
-            (Path("planner") / "cinematic_compiler.py"),
-            (Path("planner") / "production_planner.py"),
-            (Path("planner") / "entity_resolver.py"),
-            (Path("planner") / "config.py"),
-            (Path("configs") / "runtime_versions.yaml"),
-            (Path("pipeline") / "dialogue_timeline.py"),
-            (Path("execution") / "h3_workflow_builder.py"),
-            (Path("schemas") / "character.py"),
-        )
-        material = "".join(
-            f"{path.as_posix()}:{checkpoint.digest_file(project_root / path)}\n"
-            for path in tracked
-        )
-        # The runtime manifest is the only production source of truth for story
-        # topology and frame policy. Fingerprint the resolved YAML-backed values,
-        # never environment variables that are intentionally unable to override them.
-        from planner.config import (
-            DIRECTOR_STORY_SCENES,
-            DIRECTOR_SHOTS_PER_SCENE,
-            H3_FPS,
-            H3_FRAMES_PER_SHOT,
-            STORY_TARGET_WORDS,
-            STORY_MIN_WORDS,
-            DIRECTOR_STORY_MAX_TOKENS,
-            DIRECTOR_STORY_PLAN_MAX_TOKENS,
-            DIRECTOR_STORY_PLAN_THINKING_BUDGET,
-            DIRECTOR_STORY_WRITER_MAX_TOKENS,
-        )
-        effective_settings = {
-            "story_scenes": DIRECTOR_STORY_SCENES,
-            "shots_per_scene": DIRECTOR_SHOTS_PER_SCENE,
-            "fps": H3_FPS,
-            "frames_per_shot": H3_FRAMES_PER_SHOT,
-            "story_target_words": STORY_TARGET_WORDS,
-            "story_minimum_words": STORY_MIN_WORDS,
-            "story_max_tokens": DIRECTOR_STORY_MAX_TOKENS,
-            "story_plan_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
-            "story_thinking_token_budget": DIRECTOR_STORY_PLAN_THINKING_BUDGET,
-            "story_writer_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
-        }
-        material += "runtime-settings:" + repr(sorted(effective_settings.items())) + "\n"
-        return checkpoint.digest_text(material)
+        """Single shared fingerprint (also used by the Director's own in-progress checkpoints)."""
+        return checkpoint.director_fingerprint(project_root)
 
     def _save_checkpoint(
         self,
@@ -1637,6 +1628,7 @@ class ProductionOrchestrator:
                         )
                         if isinstance(critique, dict):
                             plan["director_critique"] = critique
+                            pre_critic_shots = deepcopy(plan.get("shots", []) or [])
                             plan = self._apply_director_critic_patches(plan, critique)
 
                             # Critique is read-only with respect to canonical
@@ -1657,6 +1649,15 @@ class ProductionOrchestrator:
                                         if isinstance(c, dict) and str(c.get("name", "")).strip()
                                     }
                                 ).compile_all(plan.get("scenes", []) or [], plan.get("shots", []) or [])
+                                # The compiler runs after the critic: the three-distinct-framings guarantee must still hold.
+                                framing_errors = self._framing_errors(plan)
+                                if framing_errors:
+                                    plan["shots"] = pre_critic_shots
+                                    plan["director_critique_applied"] = []
+                                    plan["director_critique_warning"] = (
+                                        "critic patches reverted; they broke the cinematic coverage contract: "
+                                        + "; ".join(framing_errors[:3])
+                                    )
                     except Exception as critique_error:
                         plan["director_critique_warning"] = str(critique_error)
                 else:
