@@ -43,6 +43,10 @@ director:
   # generation), only the ~50 s up-front Triton kernel warmup is skipped (kernels compile on first use).
   enforce_eager: false
   jit_warmup: false
+  # Start the Director server in the background at the end of the bootstrap install chain, so its ~4 minute
+  # start overlaps the SageAttention compile (CPU only) instead of running after the bootstrap. The server
+  # is the same one the planner starts (same command), kept alive and reused; H3_DIRECTOR_PREWARM overrides.
+  prewarm_during_bootstrap: true
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
   allow_transformers_vllm_constraint_override: false
