@@ -975,6 +975,7 @@ def test_story_blueprint_accepts_wrapped_cast_formats():
         "entry wrapped inside parentheses": ["CAST: " + entry[:split_at] + ";", entry[split_at + 2:]] + rest,
         "heading marker and qualifier": ["## CAST (core people): " + entry] + rest,
         "bare CAST header, entry per line with trailing pipe": ["CAST", entry + " |"] + rest,
+        "honorific in the name": ["CAST", entry.replace("Ines Vale (", "Dr. Ines Vale (", 1) + " |"] + rest,
         "bare bold CAST header": ["**CAST**", "- " + entry] + rest,
         "fate worded as survives in NN": ["CAST", re.sub(r"fate:\s*survives", "fate: survives in 12", entry) + " |"] + rest,
         "fate worded as survives to the end": ["CAST", re.sub(r"fate:\s*survives", "fate: survives to the end", entry) + " |"] + rest,
