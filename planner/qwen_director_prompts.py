@@ -34,6 +34,7 @@ from planner.config import (
     H3_FRAMES_PER_SHOT,
 )
 from planner.entity_resolver import EntityResolver
+from planner.story_contracts import blueprint_beat_floor, blueprint_field_floor
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
@@ -667,7 +668,7 @@ class QwenDirectorPromptMixin:
             words = len(re.findall(r"\b[\w'’-]+\b", value))
             if name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() in {"none", "n/a", "-"}:
                 words = 0
-            minimum = 35 if name == "CONTINUITY_LEDGER" else (10 if name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"} else 7)
+            minimum = blueprint_field_floor(name)
             if words < minimum and not (name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() == "none"):
                 raise RuntimeError(f"Story Architect field {name} is underdeveloped ({words} words; minimum {minimum}).")
             normalized_fields.append(f"{name}: {value}")
@@ -678,9 +679,12 @@ class QwenDirectorPromptMixin:
             text = re.sub(r"(?<!\w)(\*{1,2}|_{1,2})(?=\S)(.+?)(?<=\S)\1(?!\w)", r"\2", text)
             text = re.sub(r"\s+", " ", text).strip()
             words = len(re.findall(r"\b[\w'’-]+\b", text))
-            if words < STORY_PLAN_BEAT_MIN_WORDS or words > max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120):
+            # The prompt asks for beat_words_min-beat_words_max words; the gate only rejects beats too thin to carry
+            # the ten state fields. Their content is enforced by the state contract, not by an exact word count.
+            beat_floor = blueprint_beat_floor(STORY_PLAN_BEAT_MIN_WORDS)
+            if words < beat_floor or words > max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120):
                 raise RuntimeError(
-                    f"Story Architect scene {number:02d} beat has {words} words; expected at least {STORY_PLAN_BEAT_MIN_WORDS} and no more than {max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120)}."
+                    f"Story Architect scene {number:02d} beat has {words} words; expected at least {beat_floor} and no more than {max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120)}."
                 )
             normalized_beats.append(f"SCENE {number:02d}: {text}")
         return "\n".join([cast_line] + normalized_fields + normalized_beats)
