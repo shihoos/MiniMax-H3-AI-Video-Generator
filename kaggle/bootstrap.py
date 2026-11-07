@@ -915,6 +915,46 @@ def _prestage_director_checkpoints() -> bool:
     return True
 
 
+def _director_prewarm_enabled(runtime: dict) -> bool:
+    override = os.getenv("H3_DIRECTOR_PREWARM", "").strip().lower()
+    if override:
+        if override not in {"0", "1", "false", "true", "no", "yes", "off", "on"}:
+            raise RuntimeError("H3_DIRECTOR_PREWARM must be a boolean value.")
+        return override in {"1", "true", "yes", "on"}
+    value = dict(runtime.get("director", {}) or {}).get("prewarm_during_bootstrap", False)
+    if not isinstance(value, bool):
+        raise RuntimeError("runtime_versions.yaml director.prewarm_during_bootstrap must be true or false.")
+    return value
+
+
+def _start_director_server_early() -> None:
+    """Launch the Director vLLM server in a detached process; the planner reuses it when it is healthy.
+
+    Best-effort: any failure only means the planner starts the server itself later, as before.
+    """
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from planner.qwen_director_runtime import prewarm_director_server; "
+        "prewarm_director_server(sys.argv[1])"
+    )
+    env = os.environ.copy()
+    env["H3_DIRECTOR_VLLM_KEEP_ALIVE"] = "1"
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-c", code, str(ROOT)],
+            cwd=str(ROOT),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as exc:
+        print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
+        return
+    print(f"[DIRECTOR] server starting in the background (pid {process.pid}); it overlaps the SageAttention build", flush=True)
+
+
 def verify_cuda_library_pins(runtime: dict) -> None:
     """Check the installed NVIDIA runtime/cuBLAS wheels against cuda_runtime in the runtime yaml."""
     cuda_cfg = dict(runtime.get("cuda_runtime", {}) or {})
@@ -1384,7 +1424,7 @@ def install_director_runtime(
     install = subprocess.run(
         [
             uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
-            "--torch-backend", cuda_tag,
+            "--torch-backend", cuda_tag, "--compile-bytecode",
             f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
             f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
         ],
@@ -3324,6 +3364,18 @@ def main():
         _timed_call("install_pytorch_runtime", install_pytorch_runtime, runtime)
         _timed_call("verify_cuda_library_pins", verify_cuda_library_pins, runtime)
         _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
+
+        if director_future is not None or director_ready:
+            # The Director venv and the staged checkpoints are both needed before its server can start.
+            if _director_prewarm_enabled(runtime):
+                try:
+                    if director_future is not None:
+                        director_future.result()
+                    if stage_future is not None:
+                        stage_future.result()
+                    _start_director_server_early()
+                except Exception as exc:
+                    print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
 
         if _sage_install_is_reusable(runtime, sage_dir):
             _BOOTSTRAP_PHASES.append({
