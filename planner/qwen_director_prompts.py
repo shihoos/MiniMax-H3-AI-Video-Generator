@@ -34,7 +34,7 @@ from planner.config import (
     H3_FRAMES_PER_SHOT,
 )
 from planner.entity_resolver import EntityResolver
-from planner.story_contracts import blueprint_beat_floor, blueprint_field_floor
+from planner.story_contracts import blueprint_beat_floor, blueprint_field_floor, reconcile_cast_scenes
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
@@ -673,6 +673,8 @@ class QwenDirectorPromptMixin:
             role = metadata.split(";", 1)[0].strip()
             if non_person_role.search(role):
                 continue
+            if re.match(r"^(?:the|a|an)\s+\w", name, re.IGNORECASE):
+                continue  # "The Vault": an article-led label is a place or thing, not a named person
             key = re.sub(r"\s+", " ", name).casefold()
             if key in {n.casefold() for n in names}:
                 raise RuntimeError(f"Story Architect CAST line contains duplicate name {name!r}.")
@@ -714,7 +716,7 @@ class QwenDirectorPromptMixin:
                     f"Story Architect scene {number:02d} beat has {words} words; expected at least {beat_floor} and no more than {max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120)}."
                 )
             normalized_beats.append(f"SCENE {number:02d}: {text}")
-        return "\n".join([cast_line] + normalized_fields + normalized_beats)
+        return reconcile_cast_scenes("\n".join([cast_line] + normalized_fields + normalized_beats), count)
 
     @staticmethod
     def _scrub_unsourced_years(text: str, source: str) -> str:
