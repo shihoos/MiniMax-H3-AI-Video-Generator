@@ -1607,6 +1607,42 @@ def test_cast_entry_variants_are_repaired_not_rejected():
         "the honorific must move into the role")
 
 
+def test_cast_and_state_ledger_are_reconciled_like_the_real_failure():
+    """The real Architect output: 'Dr.' in the presence ledger, CAST scene lists that disagree with the ledger, and a place in CAST."""
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_cast, validate_blueprint_state_contract
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture(N).splitlines()
+    lines[0] = (
+        "CAST: Dr. Elara Voss (protagonist; wants to recover the original shipping ledger before the flood; pressure fears exposing "
+        "her signature; voice precise; aliases: none; on-screen scenes: 01, 03, 06; fate: survives)"
+        " | Renn Tolk (harbor clerk; wants to keep the duplicate accepted; pressure fears the audit; voice curt; aliases: none; "
+        "on-screen scenes: 02, 03; fate: survives)"
+        " | The Vault (location; wants to stay sealed; pressure none; voice none; aliases: none; on-screen scenes: 04; fate: survives)"
+    )
+    out = []
+    for line in lines:
+        if line.startswith("SCENE "):
+            number = int(line[6:8])
+            line = line.replace("Ines Vale", "Dr. Elara Voss").replace("Ines", "Elara")
+            if number >= 3:
+                line = line.replace("ENTRY_PRESENT=Dr. Elara Voss;", "ENTRY_PRESENT=Dr. Elara Voss, Renn Tolk;")
+                line = line.replace("EXIT_PRESENT=Dr. Elara Voss;", "EXIT_PRESENT=Dr. Elara Voss, Renn Tolk;")
+            if number == 3:
+                line = line.replace("EVENT=Elara examines", "EVENT=Renn Tolk meets Elara at the archive door while Elara examines")
+        else:
+            line = line.replace("Ines Vale", "Dr. Elara Voss").replace("Ines", "Elara") if not line.startswith("CAST:") else line
+        out.append(line)
+    normalized = director._normalize_story_blueprint("\n".join(out), N)
+    cast = {c["name"]: c for c in parse_cast(normalized)}
+    _assert(set(cast) == {"Elara Voss", "Renn Tolk"}, f"a place led by an article must not be a cast member: {sorted(cast)!r}")
+    _assert(cast["Elara Voss"]["scenes"] == list(range(1, N + 1)), f"CAST scenes must follow the ledger: {cast['Elara Voss']['scenes']!r}")
+    _assert(cast["Renn Tolk"]["scenes"] == list(range(3, N + 1)), f"CAST scenes must follow the ledger: {cast['Renn Tolk']['scenes']!r}")
+    issues = validate_blueprint_state_contract(normalized, N)
+    _assert(not issues, f"reconciled blueprint must pass the state contract: {issues!r}")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1658,6 +1694,7 @@ def main():
         test_blueprint_size_floors_are_shared_and_tolerant,
         test_optional_plot_fields_accept_every_way_of_saying_none,
         test_cast_entry_variants_are_repaired_not_rejected,
+        test_cast_and_state_ledger_are_reconciled_like_the_real_failure,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
