@@ -2079,34 +2079,14 @@ class QwenDirectorSanitizeMixin:
             self.project_root
         )
 
-        # Checkpoint validity depends on every split Director module, not
-        # just this mixin. Hash the canonical entry point plus its split
-        # implementation modules in a stable order.
-        director_module_files = [
-            Path(__file__).resolve().parent / name
-            for name in (
-                "qwen_director.py",
-                "qwen_director_runtime.py",
-                "qwen_director_prompts.py",
-                "qwen_director_scene.py",
-                "qwen_director_sanitize.py",
-            )
-        ]
-        director_hash_material = "".join(
-            f"{path.name}:{checkpoint.digest_file(path)}\n"
-            for path in director_module_files
-            if path.exists()
-        )
-
         return {
             "mode": mode,
             "user_input": str(user_input or ""),
             "user_input_sha256": checkpoint.digest_text(
                 user_input
             ),
-            "director_sha256": checkpoint.digest_text(
-                director_hash_material
-            ),
+            "director_sha256": checkpoint.director_fingerprint(self.project_root),
+            "plan_sha256": checkpoint.plan_digest(director_plan if isinstance(director_plan, dict) else {}),
             "status": status,
             "stage": stage,
             "completed_scene_ids": list(
