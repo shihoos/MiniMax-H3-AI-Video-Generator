@@ -1517,6 +1517,46 @@ def test_story_contract_regressions_found_by_audit():
         _assert(re.search(r"\b(?:" + ACTION_VERBS + r")\b", "Ines " + word + " there"), f"{word!r} must be an action verb")
 
 
+def test_architect_beat_length_gate_is_tolerant_but_not_empty():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES as N, STORY_PLAN_BEAT_MIN_WORDS
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture(N).splitlines()
+    short = "SCENE 01: ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; ENTRY_KNOWS=ledger was duplicated; " \
+            "ENTRY_OBJECTS=ledger; EVENT=Ines examines the pressure mark and records the discrepancy; EXIT_LOCATION=harbor archive; " \
+            "EXIT_PRESENT=Ines Vale; EXIT_KNOWS=route changed; EXIT_OBJECTS=ledger; " \
+            "NEXT_CAUSE=Because Ines records clue one, she must verify the next handoff before the tide closes the route"
+    words = len(re.findall(r"\b[\w'’-]+\b", short))
+    _assert(words < STORY_PLAN_BEAT_MIN_WORDS, "fixture beat must be below the prompted minimum to test tolerance")
+    lines = [short if l.startswith("SCENE 01:") else l for l in lines]
+    director._normalize_story_blueprint("\n".join(lines), N)
+    tiny = [("SCENE 01: ENTRY_LOCATION=archive; EVENT=Ines looks." if l.startswith("SCENE 01:") else l) for l in lines]
+    try:
+        director._normalize_story_blueprint("\n".join(tiny), N)
+    except RuntimeError as exc:
+        _assert("scene 01 beat has" in str(exc), f"unexpected error {exc!r}")
+    else:
+        raise AssertionError("a beat too thin to hold the state fields must still fail")
+
+
+def test_blueprint_size_floors_are_shared_and_tolerant():
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    blueprint = _story_blueprint_fixture(N)
+    lines = []
+    for line in blueprint.splitlines():
+        if line.startswith("CONTINUITY_LEDGER:"):
+            line = ("CONTINUITY_LEDGER: Ines remains in the harbor archive and knows the ledger was duplicated, then verifies "
+                    "the pressure mark. The original ledger and tide chart stay with her as the tide rises. Ines survives.")
+        lines.append(line)
+    text = "\n".join(lines)
+    words = len(re.findall(r"\b[\w'’-]+\b", text.split("CONTINUITY_LEDGER:")[1].splitlines()[0]))
+    _assert(24 <= words < 35, f"test ledger must sit between the floor and the prompted minimum, has {words}")
+    normalized = director._normalize_story_blueprint(text, N)
+    director._validate_story_blueprint_contract("ai_story", normalized, "a harbor story", source_character_names=[])
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1564,6 +1604,8 @@ def main():
         test_director_checkpoint_is_accepted_by_orchestrator_resume,
         test_critic_cannot_break_cinematic_coverage,
         test_story_contract_regressions_found_by_audit,
+        test_architect_beat_length_gate_is_tolerant_but_not_empty,
+        test_blueprint_size_floors_are_shared_and_tolerant,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
