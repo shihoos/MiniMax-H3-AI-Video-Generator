@@ -665,6 +665,13 @@ class QwenDirectorPromptMixin:
         normalized_fields: list[str] = []
         for name in field_names:
             value = re.sub(r"\s+", " ", fields[name]).strip()
+            if name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and re.match(
+                r"^[\s*_`\"'(\[]*(?:none|n/?a|nil|not applicable|"
+                r"no (?:material |significant |relevant |personal |family |named |key |physical |specific )*"
+                r"(?:relationships?|entities|entity|objects?|props?|evidence))\b",
+                value, re.IGNORECASE,
+            ):
+                value = "none"  # "None.", "None (no relatives)", "N/A", "No named entities" all mean none
             words = len(re.findall(r"\b[\w'’-]+\b", value))
             if name in {"RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS"} and value.casefold() in {"none", "n/a", "-"}:
                 words = 0
