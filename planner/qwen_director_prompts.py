@@ -633,14 +633,17 @@ class QwenDirectorPromptMixin:
                 raise RuntimeError(f"CAST entry {name!r} must explicitly declare fate: survives or dies in scene NN.")
             fate = fate_match.group(1).strip().casefold()
             fate = re.sub(r"[\s*_`.\[\]()]+$|^[\s*_`\[\]()]+", "", fate)
-            # Models write "survives in scene 12", "survives in 12", "survives to the end"; all mean survives.
-            fate = re.sub(r"^(survives|survive|survived|alive)\b.*$", "survives", fate)
-            # "dies in 07", "dies in scene 7", "dies scene 07", "dead in scene 7" all name the death scene.
-            _death = re.fullmatch(r"(?:dies|die|dead|killed)\s*(?:in|during|at)?\s*(?:scene\s*)?0*(\d{1,2})", fate)
-            if _death:
-                fate = f"dies in scene {int(_death.group(1))}"
-            if fate not in {"survives", "alive", "dies", "dead"} and not re.fullmatch(r"dies in scene\s+\d{1,2}", fate):
-                raise RuntimeError(f"CAST entry {name!r} has unsupported fate metadata {fate!r}.")
+            # The fate is rewritten into the one canonical form every later contract parses:
+            # "survives", or "dies in scene N". Models write "survives in 12", "remains active", "dead in 7"...
+            if re.match(r"(?:dies|die|dead|death|killed|murdered|slain|executed|perishes|perished)\b", fate):
+                _num = re.search(r"\b(?:scene\s*)?0*(\d{1,2})\b", fate)
+                # A death with no scene number can only be the last scene the person is physically present in.
+                death_number = int(_num.group(1)) if _num else max(scene_numbers)
+                fate = f"dies in scene {death_number}"
+            else:
+                fate = "survives"
+            metadata = re.sub(r"(\bfate\s*:\s*)[^;]+", lambda m: m.group(1) + fate, metadata, count=1, flags=re.IGNORECASE)
+            item = f"{name} ({metadata})"
             if fate.startswith("dies"):
                 death_match = re.search(r"\d+", fate)
                 death_scene = int(death_match.group(0)) if death_match else None
