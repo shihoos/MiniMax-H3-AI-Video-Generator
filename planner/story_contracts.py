@@ -201,6 +201,39 @@ def parse_cast(blueprint: str) -> list[dict[str, Any]]:
     return result
 
 
+def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
+    """Make each CAST on-screen scene list agree with the per-scene ENTRY/EXIT presence ledger.
+
+    The Architect writes both and they often drift apart. The ledger is the more detailed record the
+    prose is written from, so a person's CAST scene list becomes exactly the scenes the ledger shows
+    them in. Dropping an unsupported claim never adds an obligation; a person who never appears in the
+    ledger is left unchanged so the contract still reports them.
+    """
+    fields, beats, cast_line = _fields_and_beats(blueprint)
+    if not cast_line or set(beats) != set(range(1, expected_scenes + 1)):
+        return blueprint
+    states = {number: parse_scene_state(beats[number]) for number in beats}
+    rebuilt: list[str] = []
+    for raw in cast_line.partition(":")[2].split("|"):
+        raw = raw.strip()
+        parsed = parse_cast("CAST: " + raw)
+        if len(parsed) == 1:
+            item = parsed[0]
+            present = [
+                number for number in sorted(states)
+                if _name_is_present(states[number].get("ENTRY_PRESENT", ""), item)
+                or _name_is_present(states[number].get("EXIT_PRESENT", ""), item)
+            ]
+            if present and present != item["scenes"]:
+                raw = re.sub(
+                    r"on-screen scenes\s*:\s*[0-9, ]+",
+                    "on-screen scenes: " + ", ".join(f"{v:02d}" for v in present),
+                    raw, count=1, flags=re.IGNORECASE,
+                )
+        rebuilt.append(raw)
+    return blueprint.replace(cast_line, "CAST: " + " | ".join(rebuilt), 1)
+
+
 def _name_surfaces(name: str, aliases: list[str] | None = None) -> list[str]:
     values = [str(name or "").strip(), *(str(v).strip() for v in (aliases or []))]
     surfaces: list[str] = []
@@ -233,6 +266,11 @@ def _present_names(state: str, cast: list[dict[str, Any]]) -> set[str]:
 def _unknown_named_surfaces(value: str, cast: list[dict[str, Any]]) -> list[str]:
     """Find capitalized person-like surfaces in a presence list not in the canonical roster."""
     known = [surface.casefold() for item in cast for surface in _name_surfaces(item["name"], item["aliases"])]
+    # An honorific before a name is not a second person: "Dr. Elara Voss" is Elara Voss.
+    value = re.sub(
+        r"\b(?:Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Professor|Captain|Capt|Colonel|Col|Sir|Lady|Sergeant|Sgt|Officer|Detective|Inspector|Reverend|Rev)\.?\s+(?=[A-Z])",
+        "", str(value or ""),
+    )
     candidates = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", str(value or ""))
     out = []
     for candidate in candidates:
