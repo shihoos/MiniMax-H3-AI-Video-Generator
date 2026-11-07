@@ -1394,6 +1394,129 @@ def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
 
 # ── Runner ────────────────────────────────────────────────────────────────
 
+def test_director_checkpoint_is_accepted_by_orchestrator_resume():
+    import tempfile
+    from planner.qwen_director import QwenDirector
+    from pipeline.production_checkpoint import ProductionCheckpoint
+    from pipeline.production_orchestrator import ProductionOrchestrator
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ProductionCheckpoint(tmp)
+        director = QwenDirector.__new__(QwenDirector)
+        director.project_root = ROOT
+        plan = {"shots": [{"shot_id": "S01_01", "prompt": "a wide harbor"}]}
+        state = director._checkpoint_state(
+            "resume-test", "ai_story", "a short story", {"scenes": []}, plan,
+            "running", "shots", ["S01"], "S01", checkpoint_store=store,
+        )
+        _assert(state.get("plan_sha256") and state["plan_sha256"] == store.plan_digest(plan),
+                "Director checkpoints must carry the plan digest")
+        _assert(state["director_sha256"] == ProductionOrchestrator._director_fingerprint(ROOT, store),
+                "Director and Orchestrator must use the same director fingerprint")
+        _assert("planner/story_contracts.py" in ProductionCheckpoint.DIRECTOR_FINGERPRINT_FILES,
+                "the fingerprint must cover planner/story_contracts.py")
+        store.save("resume-test", state)
+        orchestrator = ProductionOrchestrator.__new__(ProductionOrchestrator)
+        orchestrator.project_root = ROOT
+        orchestrator._checkpoint_store = lambda: store
+        loaded = orchestrator._load_resume_state("resume-test", "ai_story", "a short story", "auto", "base")
+        _assert(loaded.get("completed_scene_ids") == ["S01"], "resume must return the Director checkpoint state")
+
+
+def test_critic_cannot_break_cinematic_coverage():
+    from pipeline.production_orchestrator import ProductionOrchestrator
+    plan = {"shots": [
+        {"shot_id": "S01_01", "scene_id": "S01", "camera_shot": "wide", "action": "a"},
+        {"shot_id": "S01_02", "scene_id": "S01", "camera_shot": "medium", "action": "b"},
+        {"shot_id": "S01_03", "scene_id": "S01", "camera_shot": "close-up", "action": "c"},
+        {"shot_id": "S02_01", "scene_id": "S02", "camera_shot": "wide", "action": "d"},
+        {"shot_id": "S02_02", "scene_id": "S02", "camera_shot": "medium", "action": "e"},
+        {"shot_id": "S02_03", "scene_id": "S02", "camera_shot": "close-up", "action": "f"},
+    ]}
+    critique = {"shot_patches": [
+        {"shot_id": "S01_03", "patch": {"camera_shot": "medium", "mood": "tense"}},
+        {"shot_id": "S02_03", "patch": {"camera_shot": "extreme close-up"}},
+    ]}
+    result = ProductionOrchestrator._apply_director_critic_patches(plan, critique)
+    by_id = {s["shot_id"]: s for s in result["shots"]}
+    _assert(by_id["S01_03"]["camera_shot"] == "close-up", "a critic patch that leaves a scene with two framings must be reverted")
+    _assert(by_id["S01_03"].get("mood") == "tense", "non-framing critic patches must still apply")
+    _assert(by_id["S02_03"]["camera_shot"] == "extreme close-up", "a framing patch that keeps three distinct framings is allowed")
+    applied = {(i["shot_id"], i["field"]) for i in result["director_critique_applied"]}
+    _assert(("S01_03", "camera_shot") not in applied and ("S02_03", "camera_shot") in applied, "applied-patch ledger must match what was kept")
+
+
+def _two_person_blueprint(mara_scenes="02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12", mara_fate="survives", arrival="meets"):
+    lines = _story_blueprint_fixture().splitlines()
+    lines[0] = lines[0] + (
+        " | Mara Quill (harbor clerk; wants to keep the duplicate ledger accepted; pressure fears the audit; "
+        f"voice curt; aliases: none; on-screen scenes: {mara_scenes}; fate: {mara_fate})"
+    )
+    out = []
+    for line in lines:
+        if line.startswith("SCENE "):
+            number = int(line[6:8])
+            if number >= 2:
+                line = line.replace("ENTRY_PRESENT=Ines Vale;", "ENTRY_PRESENT=Ines Vale, Mara Quill;")
+                line = line.replace("EXIT_PRESENT=Ines Vale;", "EXIT_PRESENT=Ines Vale, Mara Quill;")
+            if number == 2 and arrival:
+                line = line.replace("EVENT=Ines examines", f"EVENT=Mara Quill {arrival} Ines at the archive door while Ines examines")
+        out.append(line)
+    return "\n".join(out)
+
+
+def test_story_contract_regressions_found_by_audit():
+    from planner.story_contracts import ACTION_VERBS, audit_story_against_blueprint, validate_blueprint_state_contract
+
+    # Meetings and joining are valid arrivals; a person who appears with no arrival event is still rejected.
+    _assert(not validate_blueprint_state_contract(_two_person_blueprint()),
+            "a new character entering through 'meets' must not be rejected as a missing arrival")
+    for verb in ("joins", "is introduced to", "greets"):
+        text = _two_person_blueprint(arrival=verb)
+        issues = [i for i in validate_blueprint_state_contract(text) if "without an arrival" in i]
+        _assert(not issues, f"'{verb}' must count as an arrival/meeting: {issues!r}")
+    issues = validate_blueprint_state_contract(_two_person_blueprint(arrival=None))
+    _assert(any("without an arrival/meeting event" in i for i in issues),
+            f"an unexplained new person must still be rejected: {issues!r}")
+
+    # CAST presence is enforced in both directions (blueprint state ledger and prose).
+    issues = validate_blueprint_state_contract(_two_person_blueprint(mara_scenes="02"))
+    _assert(any("on-screen scene list omits it" in i for i in issues),
+            f"state ledger presence outside the CAST scene list must fail: {issues!r}")
+    paragraphs = _story_contract_fixture_prose().split("\n\n")
+    for index in (1, 3):
+        paragraphs[index] += " Mara Quill waits by the door."
+    issues = audit_story_against_blueprint("\n\n".join(paragraphs), _two_person_blueprint(mara_scenes="02"))
+    _assert(any("Mara Quill" in i and "scene 04" in i and "omits" in i for i in issues),
+            f"prose activity outside the CAST scene list must fail: {issues!r}")
+
+    # Possessive physical activity after death is caught; a mere possessive object is not.
+    dead = _two_person_blueprint(mara_scenes="02, 03, 04, 05, 06", mara_fate="dies in scene 06")
+    paragraphs = _story_contract_fixture_prose().split("\n\n")
+    for index in range(1, 6):
+        paragraphs[index] += " Mara Quill waits by the door."
+    paragraphs[7] += " Mara Quill's fingers close around the brass latch."
+    issues = audit_story_against_blueprint("\n\n".join(paragraphs), dead)
+    _assert(any("dead character 'Mara Quill'" in i for i in issues), f"possessive post-death activity missed: {issues!r}")
+    paragraphs[7] = paragraphs[7].replace("Mara Quill's fingers close around the brass latch.", "Mara Quill's ledger stays on the shelf.")
+    issues = audit_story_against_blueprint("\n\n".join(paragraphs), dead)
+    _assert(not any("dead character" in i for i in issues), f"a possessive object must not read as activity: {issues!r}")
+
+    # An ordinary capitalized word opening a sentence is not a person; an unrostered real name still is.
+    base = _story_contract_fixture_prose()
+    winter = base.replace("Ines examines transfer stage 1,", "Winter followed the surveyor through the harbor archive. Ines examines transfer stage 1,", 1)
+    _assert(not audit_story_against_blueprint(winter, _story_blueprint_fixture()),
+            "'Winter followed...' must not be read as an unseeded person")
+    stranger = base.replace("Ines examines transfer stage 1,", "Rourke followed the surveyor through the harbor archive. Ines examines transfer stage 1,", 1)
+    _assert(any("unseeded named person" in i for i in audit_story_against_blueprint(stranger, _story_blueprint_fixture())),
+            "an unrostered real name must still be rejected")
+
+    # Generic 'dead' is not a precise fate; common present-tense inflections count as actions.
+    issues = validate_blueprint_state_contract(_story_blueprint_fixture().replace("fate: survives", "fate: dead", 1))
+    _assert(any("unsupported fate" in i for i in issues), f"a fate without a death scene must fail: {issues!r}")
+    for word in ("stands", "runs", "holds", "sits", "leaves", "standing", "holding", "sitting", "running"):
+        _assert(re.search(r"\b(?:" + ACTION_VERBS + r")\b", "Ines " + word + " there"), f"{word!r} must be an action verb")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1438,6 +1561,9 @@ def main():
         test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_blueprint_accepts_wrapped_cast_formats,
+        test_director_checkpoint_is_accepted_by_orchestrator_resume,
+        test_critic_cannot_break_cinematic_coverage,
+        test_story_contract_regressions_found_by_audit,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
