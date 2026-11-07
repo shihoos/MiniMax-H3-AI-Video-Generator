@@ -948,6 +948,9 @@ def _start_director_server_early() -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            # Lower CPU priority (inherited by every vLLM worker): the SageAttention compile is the longest
+            # step of the bootstrap and was slowed 254s -> 333s by the server start; the server had ~70s of slack.
+            preexec_fn=lambda: os.nice(10),
         )
     except Exception as exc:
         print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
