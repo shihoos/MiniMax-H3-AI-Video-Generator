@@ -487,6 +487,7 @@ def _validate_director_runtime_source() -> None:
         "def _parallel_copy_file(",
         "def _resolve_safetensors_strategy(",
         "def prestage_director_checkpoints(",
+        "def prewarm_director_server(",
         "apply_chat_template(",
     ):
         if marker not in source:
