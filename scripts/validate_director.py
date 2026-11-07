@@ -976,6 +976,8 @@ def test_story_blueprint_accepts_wrapped_cast_formats():
         "heading marker and qualifier": ["## CAST (core people): " + entry] + rest,
         "bare CAST header, entry per line with trailing pipe": ["CAST", entry + " |"] + rest,
         "honorific in the name": ["CAST", entry.replace("Ines Vale (", "Dr. Ines Vale (", 1) + " |"] + rest,
+        "non-death fate wording (remains active)": ["CAST", re.sub(r"fate:\s*survives", "fate: remains active", entry) + " |"] + rest,
+        "generic dead fate infers the last on-screen scene": ["CAST", re.sub(r"fate:\s*survives", "fate: dead", entry) + " |"] + rest,
         "bare bold CAST header": ["**CAST**", "- " + entry] + rest,
         "fate worded as survives in NN": ["CAST", re.sub(r"fate:\s*survives", "fate: survives in 12", entry) + " |"] + rest,
         "fate worded as survives to the end": ["CAST", re.sub(r"fate:\s*survives", "fate: survives to the end", entry) + " |"] + rest,
