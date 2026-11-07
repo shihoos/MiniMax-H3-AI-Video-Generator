@@ -1576,6 +1576,37 @@ def test_optional_plot_fields_accept_every_way_of_saying_none():
         raise AssertionError("a thin but real relationships value must still be rejected")
 
 
+def test_cast_entry_variants_are_repaired_not_rejected():
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_cast, validate_blueprint_state_contract
+    director = QwenDirector.__new__(QwenDirector)
+    base = _story_blueprint_fixture(N)
+    entry = base.splitlines()[0].split(":", 1)[1].strip()
+    scenes_12 = ", ".join(f"{i:02d}" for i in range(1, N + 1))
+    variants = {
+        "titled one-word name": entry.replace("Ines Vale (", "Captain Renn (", 1),
+        "scene range": entry.replace(f"on-screen scenes: {scenes_12}", "on-screen scenes: 01-12", 1),
+        "scene range with en dash": entry.replace(f"on-screen scenes: {scenes_12}", "on-screen scenes: 1–12", 1),
+        "all scenes": entry.replace(f"on-screen scenes: {scenes_12}", "on-screen scenes: all", 1),
+        "duplicate scene numbers": entry.replace(f"on-screen scenes: {scenes_12}", f"on-screen scenes: {scenes_12}, 12", 1),
+        "needs instead of wants": entry.replace("wants to recover", "needs to recover", 1),
+    }
+    for label, changed in variants.items():
+        text = "\n".join(["CAST: " + changed] + base.splitlines()[1:])
+        if label == "titled one-word name":
+            text = text.replace("Ines Vale", "Renn").replace("Ines", "Renn")
+        normalized = director._normalize_story_blueprint(text, N)
+        cast = parse_cast(normalized)
+        _assert(len(cast) == 1 and cast[0]["scenes"] == list(range(1, N + 1)),
+                f"{label}: scenes must resolve to 1..{N}, got {cast[0]['scenes'] if cast else cast!r}")
+        issues = validate_blueprint_state_contract(normalized, N)
+        _assert(not issues, f"{label}: normalized blueprint must pass the state contract: {issues!r}")
+    _assert("addressed as Captain" in director._normalize_story_blueprint(
+        "\n".join(["CAST: " + variants["titled one-word name"]] + base.splitlines()[1:]).replace("Ines", "Renn"), N),
+        "the honorific must move into the role")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1626,6 +1657,7 @@ def main():
         test_architect_beat_length_gate_is_tolerant_but_not_empty,
         test_blueprint_size_floors_are_shared_and_tolerant,
         test_optional_plot_fields_accept_every_way_of_saying_none,
+        test_cast_entry_variants_are_repaired_not_rejected,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
