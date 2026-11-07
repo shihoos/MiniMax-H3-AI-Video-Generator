@@ -607,8 +607,8 @@ class QwenDirectorPromptMixin:
                 # Deterministic repair of a formatting slip: the honorific moves from the name into the role.
                 honorific = title_match.group(0).strip()
                 name = name[title_match.end():].strip()
-                if len(name.split()) < 2:
-                    raise RuntimeError(f"CAST name {item[:60]!r} is only a title and one word; give a full name.")
+                if not name:
+                    raise RuntimeError(f"CAST name {item[:60]!r} is only a title; give a name.")
                 head, sep, tail = metadata.partition(";")
                 head = head.strip()
                 if honorific.casefold().rstrip(".") not in head.casefold():
@@ -620,14 +620,27 @@ class QwenDirectorPromptMixin:
                 metadata = metadata.rstrip("; ") + "; aliases: none"
                 item = f"{name} ({metadata})"
             if not re.search(r"\bwants\s+.{3,}", metadata, re.IGNORECASE):
+                # "needs / seeks / hopes to / aims to / tries to ..." state the same goal.
+                metadata = re.sub(r"\b(?:needs|seeks|hopes to|aims to|tries to|is determined to|must)\s+(?=\S)", "wants ", metadata, count=1, flags=re.IGNORECASE)
+                item = f"{name} ({metadata})"
+            if not re.search(r"\bwants\s+.{3,}", metadata, re.IGNORECASE):
                 raise RuntimeError(f"CAST entry {name!r} is missing a specific 'wants' goal.")
             if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
                 raise RuntimeError(f"CAST entry {name!r} must explicitly declare aliases or none.")
-            scene_match = re.search(r"on-screen scenes\s*:\s*([0-9, ]+)", metadata, re.IGNORECASE)
+            scene_match = re.search(r"on[- ]screen scenes?\s*:\s*([^;)]*)", metadata, re.IGNORECASE)
             if not scene_match:
                 raise RuntimeError(f"CAST entry {name!r} is missing its physical on-screen scene list.")
-            scene_numbers = [int(v) for v in re.findall(r"\d+", scene_match.group(1))]
-            if not scene_numbers or len(scene_numbers) != len(set(scene_numbers)) or any(v < 1 or v > count for v in scene_numbers):
+            raw_scenes = scene_match.group(1)
+            if re.search(r"\ball\b", raw_scenes, re.IGNORECASE):
+                scene_numbers = list(range(1, count + 1))
+            else:
+                range_re = re.compile(r"(\d+)\s*(?:-|–|—|to|through)\s*(\d+)", re.IGNORECASE)
+                scene_numbers = []
+                for first_scene, last_scene in range_re.findall(raw_scenes):
+                    scene_numbers.extend(range(int(first_scene), int(last_scene) + 1))
+                scene_numbers.extend(int(v) for v in re.findall(r"\d+", range_re.sub(" ", raw_scenes)))
+            scene_numbers = sorted(set(scene_numbers))
+            if not scene_numbers or any(v < 1 or v > count for v in scene_numbers):
                 raise RuntimeError(f"CAST entry {name!r} has an invalid on-screen scene list.")
             fate_match = re.search(r"\bfate\s*:\s*([^;]+)", metadata, re.IGNORECASE)
             if not fate_match:
@@ -646,10 +659,17 @@ class QwenDirectorPromptMixin:
             metadata = re.sub(r"(\bfate\s*:\s*)[^;]+", lambda m: m.group(1) + fate, metadata, count=1, flags=re.IGNORECASE)
             item = f"{name} ({metadata})"
             if fate.startswith("dies"):
-                death_match = re.search(r"\d+", fate)
-                death_scene = int(death_match.group(0)) if death_match else None
-                if death_scene is None or death_scene not in scene_numbers or any(v > death_scene for v in scene_numbers):
-                    raise RuntimeError(f"CAST entry {name!r} has an inconsistent death/on-screen scene declaration.")
+                death_scene = int(re.search(r"\d+", fate).group(0))
+                if not 1 <= death_scene <= count:
+                    raise RuntimeError(f"CAST entry {name!r} has a death scene outside the {count} scenes.")
+                # Nobody is physically present after their death, and the death scene itself is on screen.
+                scene_numbers = sorted({v for v in scene_numbers if v <= death_scene} | {death_scene})
+            metadata = re.sub(
+                r"on[- ]screen scenes?\s*:\s*[^;)]*",
+                "on-screen scenes: " + ", ".join(f"{v:02d}" for v in scene_numbers),
+                metadata, count=1, flags=re.IGNORECASE,
+            )
+            item = f"{name} ({metadata})"
             role = metadata.split(";", 1)[0].strip()
             if non_person_role.search(role):
                 continue
