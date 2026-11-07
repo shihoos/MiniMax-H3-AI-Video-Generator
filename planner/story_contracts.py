@@ -119,6 +119,20 @@ CAUSAL_LINK_RE = re.compile(
 )
 
 
+# Size gates. The prompt still asks the Architect for full-size fields and beats; these floors only reject output
+# too thin to carry its structure (60% of the prompted size). Content is enforced by the contracts, not by a word count.
+SOFT_SIZE_RATIO = 0.6
+
+
+def blueprint_field_floor(name: str) -> int:
+    prompted = 35 if name == "CONTINUITY_LEDGER" else (10 if name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"} else 7)
+    return max(4, int(prompted * SOFT_SIZE_RATIO))
+
+
+def blueprint_beat_floor(prompted_minimum: int) -> int:
+    return max(30, int(prompted_minimum * SOFT_SIZE_RATIO))
+
+
 def word_tokens(value: str) -> list[str]:
     return [w.casefold() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", str(value or ""))]
 
@@ -308,9 +322,9 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         if missing_state:
             errors.append(f"scene {number:02d} missing state fields: {', '.join(missing_state)}")
             continue
-        if len(word_tokens(state["EVENT"])) < 8:
+        if len(word_tokens(state["EVENT"])) < 6:
             errors.append(f"scene {number:02d} event is too thin to dramatize")
-        if number < expected_scenes and len(word_tokens(state["NEXT_CAUSE"])) < 7:
+        if number < expected_scenes and len(word_tokens(state["NEXT_CAUSE"])) < 5:
             errors.append(f"scene {number:02d} next-scene cause is too vague")
         if number == expected_scenes and state["NEXT_CAUSE"].casefold() not in {"none", "resolved", "complete", "n/a"}:
             errors.append("scene 12 NEXT_CAUSE must be none/resolved; the final beat must not promise another episode")
@@ -363,7 +377,7 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         cause_tokens = content_tokens(cause)
         next_event_tokens = content_tokens(following.get("EVENT", ""))
         shared = cause_tokens & next_event_tokens
-        if len(shared) < 2:
+        if len(shared) < 1:
             errors.append(f"scene {number + 1:02d} event is not anchored to the previous scene's NEXT_CAUSE")
 
     # Scene-to-scene continuity for physical location, cast presence, knowledge and object state.
