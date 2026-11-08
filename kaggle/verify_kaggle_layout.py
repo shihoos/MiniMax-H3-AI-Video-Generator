@@ -686,6 +686,16 @@ def verify_bootstrap() -> None:
         "# H3-T4-VAE-DTYPE: decoder input matches decoder parameters",
         "decoder_parameter = next(self.decoder.parameters(), None)",
         "vllm=={vllm_version}",
+        "vllm_install_mode",
+        "vllm_wheel_build_cuda",
+        "_read_installed_vllm_requirements",
+        "metadata.requires(\"vllm\")",
+        "pip._vendor.packaging.requirements",
+        "--no-deps",
+        "--constraints",
+        "_director_isolated_environment",
+        "vllm._C_stable_libtorch",
+        "silu_and_mul",
         "torch.cuda.device_count() == {tensor_parallel_size}",
     )
     for contract in required_contracts:
