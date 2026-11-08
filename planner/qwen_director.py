@@ -1416,6 +1416,48 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
+    def _save_failed_story_draft(
+        self,
+        story: str,
+        *,
+        reason: str,
+        word_count: int | None = None,
+        raw_story: str | None = None,
+        processed_story: str | None = None,
+        stage: str = "story_validation",
+    ) -> None:
+        """Atomically preserve raw Qwen output and the latest deterministic candidate."""
+        try:
+            root = Path(getattr(self, "project_root", None) or Path.cwd())
+            root.mkdir(parents=True, exist_ok=True)
+            destination = root / "story_author_last_failed.txt"
+            temporary = destination.with_name(destination.name + ".tmp")
+            raw_text = str(story if raw_story is None else raw_story or "")
+            processed_text = str(story if processed_story is None else processed_story or "")
+            header = [
+                "MINIMAX H3 — LAST REJECTED AUTHOR DRAFT",
+                f"stage: {stage}",
+                f"reason: {reason}",
+                f"usable_words: {word_count if word_count is not None else 'not measured'}",
+                f"required_minimum: {getattr(self, '_story_min_words', STORY_ACCEPT_MIN_WORDS)}",
+                "generation_policy: one Author call; zero retries; zero repair calls; natural EOS",
+                "",
+                "----- BEGIN RAW QWEN COMPLETION -----",
+                raw_text,
+                "----- END RAW QWEN COMPLETION -----",
+                "",
+                "----- BEGIN PROCESSED STORY CANDIDATE -----",
+                processed_text,
+                "----- END PROCESSED STORY CANDIDATE -----",
+                "",
+            ]
+            temporary.write_text("\n".join(header), encoding="utf-8")
+            temporary.replace(destination)
+            print(f"[QWEN] rejected_story_saved={destination}", flush=True)
+        except Exception as exc:
+            # A diagnostic write must never replace the real story-contract exception.
+            print(f"[QWEN] rejected_story_save_warning={type(exc).__name__}: {exc}", flush=True)
+
     def _validate_story_output_contracts(
         self,
         mode: str,
@@ -2078,6 +2120,46 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
+        """Run exactly one Author pass and preserve any returned draft if validation rejects it."""
+        self._last_story_raw_output = ""
+        self._last_story_draft = ""
+        try:
+            return self._generate_story_once_impl(
+                mode,
+                user_input,
+                story_system,
+                story_user,
+                temperature=temperature,
+                top_p=top_p,
+                source_character_names=source_character_names,
+                story_blueprint=story_blueprint,
+            )
+        except Exception as exc:
+            raw_text = str(getattr(self, "_last_story_raw_output", "") or "")
+            processed_text = str(getattr(self, "_last_story_draft", "") or "")
+            if raw_text or processed_text:
+                self._save_failed_story_draft(
+                    raw_text,
+                    raw_story=raw_text,
+                    processed_story=processed_text,
+                    reason=f"{type(exc).__name__}: {exc}",
+                    word_count=len(re.findall(r"\b[\w'’-]+\b", processed_text or raw_text)),
+                    stage="author_post_generation_rejection",
+                )
+            raise
+
+    def _generate_story_once_impl(
+        self,
+        mode: str,
+        user_input: str,
+        story_system: str,
+        story_user: str,
+        *,
+        temperature: float,
+        top_p: float,
+        source_character_names: list[str],
+        story_blueprint: str | None = None,
+    ) -> tuple[str, bool]:
         """Write the story once in non-thinking mode from the bounded causal blueprint.
 
         Paragraph topology is normalized deterministically. Length and completion are
@@ -2130,15 +2212,19 @@ class QwenDirector(
                 creative=True,
             )
         except StoryTruncated as exc:
+            self._last_story_raw_output = str(exc.partial or "")
             raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
             if not raw:
                 raise RuntimeError(failure_prefix + str(exc)) from exc
+        else:
+            self._last_story_raw_output = str(raw or "")
 
         raw = self._strip_story_markdown_emphasis(raw)
         raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
         if cleanup_reason:
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
+        self._last_story_draft = str(raw or "")
         try:
             raw = self._coerce_story_to_scene_paragraphs(raw)
         except ValueError as exc:
@@ -2146,6 +2232,7 @@ class QwenDirector(
         if not str(raw or "").strip():
             raise RuntimeError(failure_prefix + "Qwen returned an empty story after non-prose cleanup.")
         initial_scene_count = len([part for part in re.split(r"\n\s*\n+", raw) if part.strip()])
+        self._last_story_draft = str(raw or "")
         if initial_scene_count != DIRECTOR_STORY_SCENES:
             raise RuntimeError(
                 failure_prefix
@@ -2168,13 +2255,17 @@ class QwenDirector(
         candidate = str(raw or "").strip()
 
         self._last_story_contract_warnings = []
-        candidate = self._validate_story_output_contracts(
-            mode,
-            user_input,
-            candidate,
-            source_character_names=source_character_names,
-            strict=True,
-        )
+        try:
+            candidate = self._validate_story_output_contracts(
+                mode,
+                user_input,
+                candidate,
+                source_character_names=source_character_names,
+                strict=True,
+            )
+            self._last_story_draft = str(candidate or "")
+        except RuntimeError:
+            raise
 
         # Never accept a dangling generation tail; retain only complete sentence boundaries.
         candidate, removed_duplicate_ending = self._trim_repeated_terminal_sentence(candidate)
@@ -2184,6 +2275,7 @@ class QwenDirector(
         candidate = self._normalize_story_quotes(candidate)
         candidate = self._scrub_stock_phrases(candidate)
         candidate = re.sub(r"\s*[:;]\s*(?=[.!?])", "", self._scrub_unsourced_years(candidate, user_input))
+        self._last_story_draft = str(candidate or "")
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
         print(f"[QWEN] story_length_after_cleanup words={word_count}", flush=True)
         if candidate and not self._ends_cleanly(candidate):
@@ -2194,13 +2286,14 @@ class QwenDirector(
                     "without a safe complete-sentence boundary. No retry was attempted."
                 )
             candidate = trimmed
+            self._last_story_draft = str(candidate or "")
             word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
         if word_count < self._story_min_words:
-            raise RuntimeError(
-                failure_prefix
-                + f"Final story has {word_count} words, below the configured minimum of "
-                  f"{self._story_min_words}. The single Author call was not retried or repaired."
+            reason = (
+                f"Final story has {word_count} words, below the configured minimum of "
+                f"{self._story_min_words}. The single Author call was not retried or repaired."
             )
+            raise RuntimeError(failure_prefix + reason)
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
         ])
