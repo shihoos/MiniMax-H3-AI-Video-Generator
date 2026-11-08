@@ -234,15 +234,6 @@ CALIBRATION_SCENE_EXAMPLE = (
 
 class QwenDirectorPromptMixin:
     @staticmethod
-    def _lift_late_scenes(text: str) -> str:
-        """The Writer's scenes shrink as it goes (about 190 words in scene 1 but 99 in scene 12), so later scenes ask for more."""
-        def _bump(m):
-            k = int(m.group(1))
-            extra = 0 if k < 5 else (10 if k < 9 else 20)
-            return f"SCENE {m.group(1)} (write {m.group(2)} sentences, {int(m.group(3)) + extra}+ words)"
-        return re.sub(r"SCENE (\d\d) \(write (\d+) sentences, (\d+)\+ words\)", _bump, text)
-
-    @staticmethod
     def _expand_longer(text: str) -> str:
         """Compatibility no-op; scene length is now flexible rather than sentence-count driven."""
         return str(text or "")
@@ -270,7 +261,6 @@ class QwenDirectorPromptMixin:
             .replace("__TOTAL__", str(STORY_TARGET_WORDS))
             .replace("__STRETCH__", str(stretch))
             .replace("__MINW__", str(STORY_MIN_WORDS))
-            .replace("__SCMIN__", str(int(STORY_MIN_WORDS * 1.25 / n) + 1))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
             .replace("__SHOT_SECONDS__", f"{shot_seconds:.1f}")
             .replace("__LINEW__", str(line_words))
@@ -282,10 +272,11 @@ class QwenDirectorPromptMixin:
         target = int(STORY_TARGET_WORDS)
         minimum = int(STORY_MIN_WORDS)
         stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
-        # Ask above the floor: the writer reliably delivers ~80% of what it is asked for, and there is no retry.
-        scene_low = int(minimum * 1.25 / n) + 1
-        scene_high = scene_low + 20
-        scene_low_total, scene_high_total = scene_low * n, scene_high * n
+        # Keep the average scene guidance mathematically aligned with the configured
+        # total target. The hard minimum is a story-wide acceptance gate, not a
+        # per-scene quota; scene lengths must vary with dramatic function.
+        target_per_scene = round(target / n)
+        stretch_per_scene = int(STORY_WRITER_WORDS_PER_SCENE)
 
         if mode == AI_STORY_MODE:
             source_rule = (
@@ -309,16 +300,26 @@ class QwenDirectorPromptMixin:
             You are an acclaimed screenwriter writing a cinematic, emotionally engaging short film in third-person past tense.
             Write finished scenes, not an outline or synopsis. {source_rule}
 
-            STORY LENGTH: produce exactly {n} scene blocks and at least {minimum} usable story words. Aim near {target} words;
-            the story may extend toward {stretch} only when the events genuinely need that room. The minimum is mandatory;
-            the target is guidance, not permission to pad. Give every scene enough space for a real action, resistance,
-            a consequential choice, and a changed situation. Vary scene lengths and sentence rhythm according to dramatic
-            importance. Do not use a fixed sentence count, identical paragraph shape, or the same action-obstacle-choice
-            cadence in every scene. The last third must be as fully dramatized as the opening, not compressed into a summary.
-            SCENE SIZE: write each of the {n} scene blocks at roughly {scene_low}-{scene_high} words, so the whole story lands
-            near {scene_low_total}-{scene_high_total} words. Models habitually write about a fifth less than they intend, so
-            a scene that feels complete at 110 words is too short here: let every scene run its full action, resistance,
-            choice and consequence. The {minimum}-word minimum is checked on the finished story and a shortfall is rejected.
+            STORY LENGTH: produce exactly {n} scene blocks and at least {minimum} usable story words. Aim near {target} words
+            overall (about {target_per_scene} words per scene on average); the story may extend toward {stretch} words
+            (about {stretch_per_scene} per scene on average) only when the events genuinely need that room. The hard minimum
+            is story-wide, but use this practical completeness guard while drafting: no scene should fall below 100 usable
+            words, and at least ten of the twelve scenes must reach 120 words. That distribution yields at least {minimum}
+            words across twelve scenes without forcing twelve identical scene lengths. Aim near {target_per_scene} words per
+            scene on average, but vary scene lengths with dramatic importance: a quiet decision may be shorter than
+            a reversal, confrontation, or climax. Keep the target as guidance, not permission to pad. Give every scene enough
+            room for its complete action, resistance, consequential choice, and changed situation. Do not use a fixed sentence
+            count, identical paragraph shape, or the same action-obstacle-choice cadence in every scene. The last third must
+            be as fully dramatized as the opening, not compressed into a summary. For every scene, physically introduce
+            a character who is absent from the opening boundary before they act; explicitly show a character's exit before
+            treating them as absent from the ending boundary. If a person enters and leaves within one scene, dramatize both
+            actions in that scene. Do not make a person appear or vanish solely because the outline's presence list says so.
+            Do not aim for a 1,750-word-plus draft by
+            default; the configured target is {target} and the stretch guidance is {stretch}. Before ending, silently check
+            that all {n} scenes are fully developed, the overall story is at least {minimum} words, and it is close to
+            {target} words. If it is materially short, deepen underdeveloped scenes with premise-specific action, resistance,
+            evidence, dialogue, decisions, and consequences—not filler, repeated description, or extra twists. The finished
+            story is checked against the {minimum}-word hard floor; a shortfall is rejected, so do not end early.
 
             DRAMATIC EXECUTION: make the protagonist's immediate objective and pressure understandable early. The opposition
             must have an intelligible goal and a credible method, not merely be evil or obstructive. Give major characters
@@ -356,10 +357,15 @@ class QwenDirectorPromptMixin:
             spoken lines per scene. Do not put signs, logs, labels, screens, or written text in quotation marks. Do not
             manufacture dialogue to fill a quota, especially in isolation or survival scenes.
 
-            ORIGINALITY: avoid convenient coincidence, arbitrary new helpers, arbitrary new technology, unseeded rules,
-            generic project codenames, repeated family-death twists, and unexplained late revelations. A twist must be fair:
-            plant the evidence before it changes meaning. Do not make every character hide a secret; ordinary conflicting
-            goals, fears, loyalties, mistakes, and needs are more credible. Do not repeat a stock phrase or a whole sentence.
+            ORIGINALITY AND PAYOFF: the premise-specific story engine must cause events, not merely decorate the setting.
+            If the same plot would work unchanged after replacing the profession, environment, or central constraint with
+            generic ones, the prose has lost the premise's identity. Avoid convenient coincidence, arbitrary new helpers,
+            arbitrary new technology, unseeded rules, generic project codenames, repeated family-death twists, and
+            unexplained late revelations. A fair reversal reinterprets concrete evidence already shown and forces a changed
+            plan. The climax must use an established rule, skill, relationship, object, or clue; do not solve it with a
+            newly invented ability or last-minute helper. Both alternatives in the central choice must carry a real cost,
+            and the ending must show the selected cost being paid. Do not make every character hide a secret; ordinary
+            conflicting goals, fears, loyalties, mistakes, and needs are more credible. Do not repeat stock phrases or sentences.
 
             OUTPUT CONTRACT: return only the {n} blocks, in numeric order, each beginning with its exact marker
             [[SCENE_01]] through [[SCENE_{n:02d}]], followed by one space and one developed scene paragraph. Use each marker
@@ -409,6 +415,20 @@ class QwenDirectorPromptMixin:
             twists and familiar stock setups. Prefer a distinctive human or physical mechanism that can be understood
             and visualized without exposition.
 
+            ORIGINALITY TEST (apply before fixing the outline): identify the specific constraint, process, skill,
+            geography, social rule, or relationship that makes THIS premise generate its events. It must do more than
+            decorate the setting: it should materially shape the protagonist's options, the opposition's method, and
+            at least one major reversal or climax action. Ask whether the same plot would work unchanged if the
+            profession, environment, and central constraint were replaced with generic ones. If yes, redesign the
+            story engine until the premise is causally indispensable. Do not manufacture eccentricity or random
+            complications merely to appear original.
+
+            FAIR REVERSAL AND PAYOFF: plant observable evidence, a rule, a capability, or an object before it matters.
+            The reversal must change the interpretation of something already shown and force a genuinely different
+            plan. The climax must use an established capability, rule, relationship, or piece of evidence; no new
+            ability, convenient helper, or last-minute rule may solve it. Make both sides of the climax choice costly,
+            and show the cost actually paid in the resolution.
+
             CAUSAL DESIGN RULES:
             1. The protagonist acts. Important turns are caused by decisions, not a chain of arrivals, accidents,
                arbitrary alarms, unexplained failures, or convenient helpers.
@@ -424,8 +444,12 @@ class QwenDirectorPromptMixin:
                reserve the real resolution for a future episode.
             7. Maintain a continuity ledger for locations, presence, knowledge, injuries, object ownership/state,
                access, timeline, and fates. A remote voice is not physically in a room. No person acts after death.
-            8. Make causal transitions explicit across the outline: in at least five scene beats, state the concrete
-               because/therefore/so/but/which-meant link between the prior scene's result and the next action.
+            8. Make the entire outline causal: for each of the eleven transitions, state how the prior scene's specific
+               result, decision, evidence, or loss makes the next scene's action necessary. Write NEXT_CAUSE as a concrete
+               hand-off, preferably in the form 'Because [specific result], [specific next action becomes necessary].'
+               Name the actual object, evidence, decision, person, or constraint that carries forward; repeat that same
+               meaningful anchor explicitly in the following EVENT. The next EVENT must act on it, not merely share a
+               vague topic or location. Do not rely on a connector word without a real causal relationship.
 
             SCENE ARCHITECTURE: create exactly {n} linked beats. Use the broad dramatic movement flexibly: opening
             pressure and commitment; complications and a meaningful change in understanding; consequences and a
@@ -460,18 +484,29 @@ class QwenDirectorPromptMixin:
 
             SCENE BEATS: output exactly {n} lines, SCENE 01 through SCENE {n:02d}, each containing {beat_min}-{beat_max} words.
             Every line must use these explicit state fields in this order, separated by semicolons; do not put semicolons inside values:
-            ENTRY_LOCATION=[one physical location]; ENTRY_PRESENT=[physically present canonical names or none];
+            ENTRY_LOCATION=[one physical location]; ENTRY_PRESENT=[people physically present at scene start];
+            ON_SCREEN_PRESENT=[every canonical cast member physically visible at any point during this scene];
             ENTRY_KNOWS=[what present people know at entry]; ENTRY_OBJECTS=[important objects and their owner/state or none];
             EVENT=[the specific action, resistance, decision, and changed situation];
-            EXIT_LOCATION=[location at scene end]; EXIT_PRESENT=[physically present canonical names or none];
+            EXIT_LOCATION=[location at scene end]; EXIT_PRESENT=[people physically present at scene end];
             EXIT_KNOWS=[what has changed in what people know]; EXIT_OBJECTS=[important objects and their owner/state or none];
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
+            ENTRY_PRESENT and EXIT_PRESENT describe only the boundaries. ON_SCREEN_PRESENT is the full-scene visibility
+            record and MUST include a character who enters during the scene or leaves before it ends. It must not include
+            a remote voice, recording, written mention, or person merely discussed. Every character's CAST on-screen scene
+            list must match ON_SCREEN_PRESENT exactly; boundary presence must be a subset of that list. For every person
+            in ON_SCREEN_PRESENT but not ENTRY_PRESENT, EVENT must name that person and state how they physically arrive,
+            enter, join, or meet someone in the scene. For every person in ON_SCREEN_PRESENT but not EXIT_PRESENT, EVENT
+            must name that person and state how they physically leave, depart, withdraw, are captured, or die. If both
+            conditions apply, describe both actions. A transition verb for one character does not explain another person's
+            entrance or exit.
             A beat is a compact causal event description, not finished prose or a checklist. The state fields are a continuity
             ledger, not a fixed dramatic-function template. Vary scene purpose and dramatic texture; use specific actions
             and consequences rather than mood-only summaries. Do not write camera instructions or exposition dumps.
 
             QUALITY REVIEW BEFORE OUTPUT: replay the complete 12-beat chain. Check that every EXIT becomes the next ENTRY
-            or that the next scene explicitly shows travel/time; newly present people have an arrival/meeting cause; knowledge
+            or that the next scene explicitly shows travel/time; every CAST on-screen scene is represented in ON_SCREEN_PRESENT;
+            newly present people have an arrival/meeting cause; knowledge
             changes have a disclosure/discovery event; and key-object custody/state changes have a physical cause. Check
             that every relationship and named project/institution is explicitly listed above, the reversal is prepared,
             the climax follows from earlier setup, and the ending resolves the central question. Remove any beat that only
@@ -836,10 +871,18 @@ class QwenDirectorPromptMixin:
             )
         result += (
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
-            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Aim near {STORY_TARGET_WORDS} usable words, with a hard minimum "
-            f"of {STORY_MIN_WORDS}; the target is guidance, not a padding quota. The story may extend toward "
-            f"{DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE} words only when events genuinely need the room. "
-            "Vary scene length and sentence rhythm; do not force equal paragraph sizes."
+            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Aim near {STORY_TARGET_WORDS} usable words overall "
+            f"(about {round(STORY_TARGET_WORDS / DIRECTOR_STORY_SCENES)} words per scene on average), with a hard "
+            f"story-wide minimum of {STORY_MIN_WORDS}. As a completeness guard, no scene should fall below 100 words, "
+            "and at least ten scenes must reach 120 words; that distribution supports the hard minimum while allowing "
+            "the remaining scenes to be shorter when the drama calls for it. "
+            f"The story may extend toward {DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE} words only when "
+            "events genuinely need the room. Complete all twelve scenes at full dramatic depth before ending, including "
+            "a fully dramatized final third and concrete aftermath. If the draft is below the 1,400-word floor or materially "
+            "below target, deepen underwritten scenes through consequential action, resistance, evidence, dialogue, decisions, "
+            "and outcomes; do not add filler, repeat description, or invent extra twists. Vary scene length and sentence "
+            "rhythm; do not force equal paragraph sizes. Silently verify the complete story against the minimum and target "
+            "before returning prose; do not stop merely because all twelve scene markers have been written."
         )
         return result
 
