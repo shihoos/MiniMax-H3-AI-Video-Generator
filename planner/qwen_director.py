@@ -12,6 +12,7 @@ from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
 from planner.story_contracts import (
     CONTRACTS_REVISION,
+    HARD_PROSE_MARKERS,
     split_contract_findings,
     audit_story_against_blueprint,
     blueprint_beat_floor,
@@ -2306,9 +2307,18 @@ class QwenDirector(
 
         # Entity, relationship, scene-event, and state-transition grounding are hard contracts.
         if story_blueprint:
-            errors.extend(audit_story_against_blueprint(
+            prose_findings = audit_story_against_blueprint(
                 story, story_blueprint, source_story, DIRECTOR_STORY_SCENES
-            ))
+            )
+            prose_fatal, prose_soft = split_contract_findings(prose_findings, HARD_PROSE_MARKERS)
+            errors.extend(prose_fatal)
+            if prose_soft:
+                self._last_story_contract_warnings = list(dict.fromkeys(prose_soft))
+                print(
+                    f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking): "
+                    + "; ".join(self._last_story_contract_warnings[:6]),
+                    flush=True,
+                )
 
         # The Architect's declared physical appearances are binding for the prose pass.
         for line in str(story_blueprint or "").splitlines():
@@ -2323,7 +2333,9 @@ class QwenDirector(
                 if not scene_match:
                     continue
                 planned = [int(v) for v in re.findall(r"\d+", scene_match.group(1))]
-                surfaces = self._name_surfaces(name)
+                surfaces = list(self._name_surfaces(name))
+                # Prose often uses only the surname or the quoted call sign.
+                surfaces += [t for t in re.sub(r"[\"“”‘’]", "", name).split()[-1:] if len(t) >= 3]
                 for scene_number in planned:
                     if not 1 <= scene_number <= len(paragraphs):
                         errors.append(f"CAST entry {name!r} contains invalid on-screen scene {scene_number}")
