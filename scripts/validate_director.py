@@ -1643,6 +1643,47 @@ def test_cast_and_state_ledger_are_reconciled_like_the_real_failure():
     _assert(not issues, f"reconciled blueprint must pass the state contract: {issues!r}")
 
 
+def test_second_real_failure_surnames_call_signs_final_cause_and_connectors():
+    """Real Architect output: people referred to by surname/call sign, a final NEXT_CAUSE that promises more, loose causal wording."""
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_cast, validate_blueprint_state_contract
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture(N).splitlines()
+    lines[0] = (
+        "CAST: Elara Voss (lead engineer; wants to recover the original shipping ledger before the flood; pressure fears exposing her own "
+        "signature; voice precise; aliases: none; on-screen scenes: 01, 03, 12; fate: survives)"
+        " | K-9 Unit \"Rook\" (search robot; wants to follow the scent of the ledger; pressure low battery; voice synthetic; aliases: none; "
+        "on-screen scenes: 02, 05, 08; fate: survives)"
+        " | Sergei Petrov (harbor clerk; wants to keep the duplicate accepted; pressure fears the audit; voice curt; aliases: none; "
+        "on-screen scenes: 04, 07, 10; fate: survives)"
+    )
+    out = []
+    for line in lines:
+        if line.startswith("SCENE "):
+            number = int(line[6:8])
+            line = line.replace("Ines Vale", "Voss").replace("Ines", "Voss")
+            if number >= 3:
+                line = line.replace("ENTRY_PRESENT=Voss;", "ENTRY_PRESENT=Voss, Rook, Petrov;").replace("EXIT_PRESENT=Voss;", "EXIT_PRESENT=Voss, Rook, Petrov;")
+            if number == 3:
+                line = line.replace("EVENT=Voss examines", "EVENT=Rook meets Petrov and Voss at the archive door while Voss examines")
+            line = re.sub(r"NEXT_CAUSE=Because [^;]*?clue (\d+), she must verify the next cargo handoff before the rising tide blocks the archive route\.",
+                          r"NEXT_CAUSE=Voss's record of transfer clue \1 reveals the next cargo handoff before the tide closes the archive route.", line)
+            if number == N:
+                line = line.replace("NEXT_CAUSE=none", "NEXT_CAUSE=Voss prepares the next expedition to the northern station")
+        else:
+            line = line.replace("Ines Vale", "Elara Voss").replace("Ines", "Voss") if not line.startswith("CAST:") else line
+        out.append(line)
+    normalized = director._normalize_story_blueprint("\n".join(out), N)
+    cast = {c["name"]: c["scenes"] for c in parse_cast(normalized)}
+    _assert(cast["Elara Voss"] == list(range(1, N + 1)), f"surname presence must match the ledger: {cast!r}")
+    _assert(cast['K-9 Unit "Rook"'] == list(range(3, N + 1)) and cast["Sergei Petrov"] == list(range(3, N + 1)),
+            f"call-sign and surname presence must match the ledger: {cast!r}")
+    _assert("SCENE 12:" in normalized and normalized.rstrip().endswith("NEXT_CAUSE=none"), "the final NEXT_CAUSE must become none")
+    issues = validate_blueprint_state_contract(normalized, N)
+    _assert(not issues, f"second real failure must now pass the state contract: {issues!r}")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1695,6 +1736,7 @@ def main():
         test_optional_plot_fields_accept_every_way_of_saying_none,
         test_cast_entry_variants_are_repaired_not_rejected,
         test_cast_and_state_ledger_are_reconciled_like_the_real_failure,
+        test_second_real_failure_surnames_call_signs_final_cause_and_connectors,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
