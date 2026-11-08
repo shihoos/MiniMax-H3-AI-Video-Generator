@@ -432,10 +432,9 @@ def _director_isolated_environment(base_env: dict[str, str] | None = None) -> di
 def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     """Return True only when the isolated vLLM environment matches every runtime lock.
 
-    Install the final Torch/TorchVision/TorchAudio stack and the published wheel's
-    non-Torch dependencies directly, then install vLLM 0.33.0 with --no-deps.
-    This bypasses stale exact companion pins in the wheel metadata without first
-    downloading a disposable Torch 2.14/cu130 stack. The Stable ABI module and a
+    Install the final Torch/TorchVision/TorchAudio stack once, install the
+    published Stable ABI wheel with --no-deps, and derive its active dependencies
+    from the installed wheel metadata. The Stable ABI module and a
     registered CUDA operator are executed before accepting or reusing this venv.
     """
     director = dict(runtime.get("director", {}) or {})
@@ -1401,6 +1400,75 @@ def _exact_requirement_pin(package_name: str) -> str:
     return matches[0]
 
 
+def _read_installed_vllm_requirements(venv_python: Path, env: dict[str, str]) -> list[str]:
+    """Read active non-Torch Requires-Dist entries from the installed vLLM wheel.
+
+    The wheel metadata is the source of truth. Evaluate PEP 508 markers in the
+    target Python environment and omit only the packages installed separately
+    by this bootstrap, so no second Torch/CUDA stack can enter resolution.
+    """
+    metadata_probe = r"""
+import importlib.metadata as metadata
+import json
+import re
+from pip._vendor.packaging.markers import default_environment
+from pip._vendor.packaging.requirements import Requirement
+
+raw_requirements = metadata.requires("vllm") or []
+if not raw_requirements:
+    raise SystemExit("Installed vLLM wheel has no Requires-Dist metadata.")
+environment = default_environment()
+environment["extra"] = ""
+blocked = {"vllm", "torch", "torchvision", "torchaudio"}
+resolved = set()
+for raw in raw_requirements:
+    try:
+        requirement = Requirement(raw)
+    except Exception as exc:
+        raise SystemExit(f"Invalid vLLM Requires-Dist entry {raw!r}: {exc}") from exc
+    if requirement.marker is not None and not requirement.marker.evaluate(environment):
+        continue
+    normalized_name = re.sub(r"[-_.]+", "-", requirement.name).lower()
+    if normalized_name in blocked:
+        continue
+    resolved.add(str(requirement))
+if not resolved:
+    raise SystemExit("No active non-Torch dependencies were found in vLLM wheel metadata.")
+print(json.dumps(sorted(resolved)))
+"""
+    metadata_probe_result = subprocess.run(
+        [str(venv_python), "-c", metadata_probe],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if metadata_probe_result.returncode != 0:
+        raise RuntimeError(
+            "Unable to read the installed vLLM wheel dependency metadata.\n"
+            + (metadata_probe_result.stdout or "")
+            + (metadata_probe_result.stderr or "")
+        )
+    try:
+        requirements = json.loads(metadata_probe_result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Installed vLLM wheel returned invalid dependency metadata JSON.\n"
+            + (metadata_probe_result.stdout or "")
+        ) from exc
+    if not isinstance(requirements, list) or not requirements or not all(
+        isinstance(item, str) and item.strip() for item in requirements
+    ):
+        raise RuntimeError("Installed vLLM wheel returned an empty or invalid non-Torch dependency list.")
+    blocked = {"vllm", "torch", "torchvision", "torchaudio"}
+    for item in requirements:
+        match = re.match(r"\s*([A-Za-z0-9_.-]+)", item)
+        if match and match.group(1).lower().replace("_", "-").replace(".", "-") in blocked:
+            raise RuntimeError(f"Refusing to resolve separately managed dependency from vLLM metadata: {item}")
+    print(f"[DIRECTOR] resolved {len(requirements)} non-Torch dependencies from vLLM wheel metadata", flush=True)
+    return requirements
+
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -1535,25 +1603,6 @@ def install_director_runtime(
         raise RuntimeError("Director install requires exact Transformers/tokenizers/wrapt and main PyTorch/TorchVision/TorchAudio/index pins.")
     if not torchvision_version.endswith(f"+{cuda_tag}") or not torchaudio_version.endswith(f"+{cuda_tag}"):
         raise RuntimeError("Main TorchVision and TorchAudio builds must match the Director target CUDA tag.")
-    dependency_manifest = ROOT / "configs" / "vllm_director_requirements.txt"
-    if not dependency_manifest.is_file():
-        raise RuntimeError(f"Director vLLM dependency manifest is missing: {dependency_manifest}")
-    dependency_lines = [line.split("#", 1)[0].strip() for line in dependency_manifest.read_text(encoding="utf-8").splitlines()]
-    dependency_lines = [line for line in dependency_lines if line]
-    dependency_names = {
-        re.match(r"[A-Za-z0-9_.-]+", line).group(0).lower().replace("_", "-")
-        for line in dependency_lines
-        if re.match(r"[A-Za-z0-9_.-]+", line)
-    }
-    forbidden_dependencies = {"torch", "torchvision", "torchaudio", "vllm"}
-    if dependency_names.intersection(forbidden_dependencies):
-        raise RuntimeError(
-            "vllm_director_requirements.txt must omit vLLM and the three PyTorch stack packages; "
-            "bootstrap installs those separately with the final target versions."
-        )
-    for package, version in (("transformers", transformers_version), ("tokenizers", tokenizers_version), ("wrapt", wrapt_version)):
-        if f"{package}=={version}" not in dependency_lines:
-            raise RuntimeError(f"vllm_director_requirements.txt must pin {package}=={version}.")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
     if not env_dir_value:
@@ -1594,33 +1643,67 @@ def install_director_runtime(
     if not re.search(r"(?m)^\s*include-system-site-packages\s*=\s*false\s*$", pyvenv_text):
         raise RuntimeError("Director venv must have include-system-site-packages=false; refusing mixed Python packages.")
 
-    # Resolve the final cu132 Torch stack and the published wheel's non-Torch
-    # dependencies in a single transaction. The companion manifest excludes the
-    # wheel's stale Torch 2.14/cu130 pins, avoiding a redundant large CUDA download.
-    print("[DIRECTOR] installing final Torch/CUDA stack and non-Torch vLLM dependencies", flush=True)
-    dependency_install = subprocess.run(
+    # Install the final PyTorch stack once. The published vLLM wheel is installed
+    # separately with --no-deps so its older Torch pins are never resolved.
+    print("[DIRECTOR] installing final Torch/CUDA stack", flush=True)
+    torch_stack_install = subprocess.run(
         [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
          "--index-url", "https://pypi.org/simple", "--extra-index-url", target_index,
-         "--index-strategy", "unsafe-best-match", "-r", str(dependency_manifest),
+         "--index-strategy", "unsafe-best-match",
          f"torch=={expected_director_torch}", f"torchvision=={torchvision_version}",
          f"torchaudio=={torchaudio_version}"],
         env=install_env, check=False, text=True,
     )
-    if dependency_install.returncode != 0:
-        raise RuntimeError("Failed to install the final Director Torch/cu132 stack and vLLM's non-Torch dependencies.")
+    if torch_stack_install.returncode != 0:
+        raise RuntimeError("Failed to install the final Director Torch/cu132 stack.")
 
-    # vLLM 0.33.0's published wheel is CUDA 13.0-built and uses LibTorch Stable
-    # ABI. --no-deps is intentional: the exact Torch 2.14/cu130 companion pins in
-    # wheel metadata are not this project's selected runtime stack. The direct
-    # cu132 stack above is verified by the live Stable ABI probe below.
-    print("[DIRECTOR] installing published vLLM wheel with --no-deps", vllm_version, flush=True)
+    # Install the published CUDA 13.0-built Stable ABI wheel without resolving
+    # its companion Torch pins, then inspect the installed wheel's own metadata.
+    print("[DIRECTOR] installing published vLLM Stable ABI wheel with --no-deps", vllm_version, flush=True)
     vllm_install = subprocess.run(
         [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
          "--no-deps", f"vllm=={vllm_version}"],
         env=install_env, check=False, text=True,
     )
     if vllm_install.returncode != 0:
-        raise RuntimeError("Failed to install the published vLLM wheel with its explicit dependency manifest.")
+        raise RuntimeError("Failed to install the published vLLM Stable ABI wheel with --no-deps.")
+
+    vllm_dependency_requirements = _read_installed_vllm_requirements(venv_python, install_env)
+    # Retain the project's existing pins for packages shared with its control
+    # plane; these are additions/overrides, not a duplicate vLLM dependency list.
+    project_dependency_overrides = [
+        f"{package}=={_exact_requirement_pin(package)}"
+        for package in ("psutil", "pyyaml", "requests", "jsonschema", "transformers", "tokenizers")
+    ]
+    project_dependency_overrides.append(f"wrapt=={wrapt_version}")
+    dependency_lines = sorted(set(vllm_dependency_requirements + project_dependency_overrides))
+
+    # Constraints protect the already-installed CUDA 13.2 stack even if a
+    # transitive wheel declares a broader or older Torch requirement.
+    with tempfile.TemporaryDirectory(prefix="h3-director-torch-constraints-") as constraint_dir:
+        torch_constraints = Path(constraint_dir) / "torch-stack.txt"
+        torch_constraints.write_text(
+            f"torch=={expected_director_torch}\n"
+            f"torchvision=={torchvision_version}\n"
+            f"torchaudio=={torchaudio_version}\n",
+            encoding="utf-8",
+        )
+        print(
+            f"[DIRECTOR] installing {len(vllm_dependency_requirements)} wheel-metadata dependencies "
+            "with the final Torch stack constrained",
+            flush=True,
+        )
+        dependency_install = subprocess.run(
+            [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
+             "--index-url", "https://pypi.org/simple", "--extra-index-url", target_index,
+             "--index-strategy", "unsafe-best-match", "--constraints", str(torch_constraints),
+             *dependency_lines],
+            env=install_env, check=False, text=True,
+        )
+        if dependency_install.returncode != 0:
+            raise RuntimeError(
+                "Failed to install vLLM wheel metadata dependencies without changing the final Torch/cu132 stack."
+            )
 
     if not _probe_director_venv(runtime, env_dir):
         raise RuntimeError("Final Director Torch 2.15/cu132 Stable ABI runtime probe failed.")
