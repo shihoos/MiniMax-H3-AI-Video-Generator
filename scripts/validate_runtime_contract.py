@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import os
 import json
 import re
 from pathlib import Path
 import sys
+import tempfile
 
 import yaml
 
@@ -152,40 +154,11 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
     for name in ("transformers", "tokenizers", "psutil", "pyyaml", "gradio"):
         if not _LOCK_SEMVER.fullmatch(pins.get(name, "")):
             problems.append(f"requirements.txt must contain one exact {name}==X.Y.Z pin")
-    dependency_manifest = root / "configs" / "vllm_director_requirements.txt"
-    if not dependency_manifest.is_file():
-        problems.append("configs/vllm_director_requirements.txt is required for the one-stack Director install")
-    else:
-        dependency_lines = [line.split("#", 1)[0].strip() for line in dependency_manifest.read_text(encoding="utf-8").splitlines()]
-        dependency_lines = [line for line in dependency_lines if line]
-        dependency_names = {
-            re.match(r"[A-Za-z0-9_.-]+", line).group(0).lower().replace("_", "-")
-            for line in dependency_lines
-            if re.match(r"[A-Za-z0-9_.-]+", line)
-        }
-        forbidden = {"torch", "torchvision", "torchaudio", "vllm"}
-        if dependency_names.intersection(forbidden):
-            problems.append("Director dependency manifest must exclude vllm, torch, torchvision and torchaudio")
-        required_non_torch = set("""
-            aiohttp anthropic apache-tvm-ffi blake3 cachetools cbor2 certifi cloudpickle
-            compressed-tensors depyf einops fastapi fastsafetensors filelock flashinfer-python
-            huggingface-hub humming-kernels ijson instanttensor jsonschema lark llguidance
-            lm-format-enforcer mcp mistral-common model-hosting-container-standards msgspec
-            multidict ninja numba numpy nvidia-cudnn-frontend nvidia-cutlass-dsl nvtx openai
-            opencv-python-headless opentelemetry-api opentelemetry-exporter-otlp opentelemetry-sdk
-            opentelemetry-semantic-conventions-ai orjson oss-harmony outlines-core partial-json-parser
-            pillow prometheus-client prometheus-fastapi-instrumentator protobuf psutil py-cpuinfo
-            pybase64 pydantic pynvvideocodec python-json-logger pyyaml pyzmq quack-kernels regex
-            requests safetensors sentencepiece setproctitle setuptools six starlette tiktoken tilelang
-            tokenizers tokenspeed-mla torchcodec tqdm transformers typing-extensions watchfiles xgrammar
-        """.split())
-        missing_non_torch = sorted(required_non_torch - dependency_names)
-        if missing_non_torch:
-            problems.append("Director dependency manifest is missing vLLM 0.33.0 requirements: " + ", ".join(missing_non_torch))
-        for name in ("transformers", "tokenizers", "wrapt"):
-            expected = pins.get(name, "") if name != "wrapt" else str((runtime.get("python", {}) or {}).get("wrapt_version", ""))
-            if expected and f"{name}=={expected}" not in dependency_lines:
-                problems.append(f"Director dependency manifest must pin {name}=={expected}")
+    if "vllm_non_torch_requirements" in director:
+        problems.append(
+            "director.vllm_non_torch_requirements must not duplicate wheel metadata; "
+            "the bootstrap must read Requires-Dist from the installed vLLM wheel"
+        )
     env_dir = str(director.get("vllm_env_dir", "")).strip()
     if pins.get("transformers") and pins.get("tokenizers") and _LOCK_SEMVER.fullmatch(str(director.get("vllm_version", ""))):
         expected_name = _lock_expected_director_env_name(runtime, pins)
@@ -838,6 +811,39 @@ def _validate_sage_toolchain_probe_behavior() -> None:
         raise RuntimeError("Sage toolkit probe accepted a CUDA build tag that differs from main Torch.")
 
 
+def _validate_vllm_wheel_metadata_reader(bootstrap_module) -> None:
+    """Exercise wheel Requires-Dist parsing and the no-Torch/no-extra filter."""
+    metadata_text = """Metadata-Version: 2.1
+Name: vllm
+Version: 0.33.0
+Requires-Dist: torch ==2.14.0
+Requires-Dist: torchvision ==0.29.0
+Requires-Dist: torchaudio ==2.11.0
+Requires-Dist: requests >=2.28
+Requires-Dist: fastapi[standard] >=0.133; python_version >= \"3.10\"
+Requires-Dist: win-only-dependency; sys_platform == \"win32\"
+Requires-Dist: extra-only-dependency; extra == \"testing\"
+"""
+    with tempfile.TemporaryDirectory(prefix="h3-vllm-metadata-test-") as temporary:
+        site = Path(temporary)
+        dist_info = site / "vllm-0.33.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(metadata_text, encoding="utf-8")
+        test_env = dict(os.environ)
+        inherited = test_env.get("PYTHONPATH", "")
+        test_env["PYTHONPATH"] = str(site) + (os.pathsep + inherited if inherited else "")
+        requirements = bootstrap_module._read_installed_vllm_requirements(Path(sys.executable), test_env)
+    normalized = [item.lower().replace("_", "-") for item in requirements]
+    if not any(item.startswith("requests") for item in normalized):
+        raise RuntimeError("vLLM metadata parser dropped a base Requires-Dist dependency.")
+    if not any(item.startswith("fastapi[standard]") for item in normalized):
+        raise RuntimeError("vLLM metadata parser dropped an active PEP 508 dependency.")
+    forbidden_fragments = ("torch", "torchvision", "torchaudio", "vllm", "win-only-dependency", "extra-only-dependency")
+    if any(any(fragment in item for fragment in forbidden_fragments) for item in normalized):
+        raise RuntimeError("vLLM metadata parser retained a separately managed or inactive dependency.")
+    print("[PASS] vLLM wheel metadata dependency filtering")
+
+
 def _validate_bootstrap_upgrade_source() -> None:
     path = ROOT / "kaggle/bootstrap.py"
     source = path.read_text(encoding="utf-8")
@@ -856,8 +862,15 @@ def _validate_bootstrap_upgrade_source() -> None:
     for marker in (
         "vllm_install_mode",
         "vllm_wheel_build_cuda",
-        "vllm_director_requirements.txt",
+        "_read_installed_vllm_requirements",
+        "importlib.metadata as metadata",
+        "pip._vendor.packaging.requirements",
+        "pip._vendor.packaging.markers",
+        "metadata.requires(\"vllm\")",
+        'environment["extra"] = ""',
+        'blocked = {"vllm", "torch", "torchvision", "torchaudio"}',
         "--no-deps",
+        "--constraints",
         "--index-url",
         "--extra-index-url",
         "--index-strategy",
@@ -910,14 +923,17 @@ def _validate_bootstrap_upgrade_source() -> None:
     installer_end = source.index("def install_storyboard_runtime(", installer_start)
     installer = source[installer_start:installer_end]
     ordered_steps = (
-        "dependency_install = subprocess.run(",
+        "torch_stack_install = subprocess.run(",
         "vllm_install = subprocess.run(",
+        "vllm_dependency_requirements = _read_installed_vllm_requirements(",
+        "TemporaryDirectory(prefix=\"h3-director-torch-constraints-\")",
+        "dependency_install = subprocess.run(",
         "if not _probe_director_venv(runtime, env_dir):",
     )
     offsets = [installer.find(step) for step in ordered_steps]
     if any(offset < 0 for offset in offsets) or offsets != sorted(offsets):
-        raise RuntimeError("Director install must install the final Torch stack and explicit non-Torch dependencies, install vLLM with --no-deps, then validate Stable ABI.")
-    for obsolete in ("--torch-backend", "wheel_torch_version", "wheel_cuda_tag", "Stage 1:", "Stage 2:", "torch_upgrade = subprocess.run("):
+        raise RuntimeError("Director install must install the final Torch stack once, install the vLLM wheel with --no-deps, read its dependency metadata, install dependencies under Torch constraints, then validate Stable ABI.")
+    for obsolete in ("--torch-backend", "wheel_torch_version", "wheel_cuda_tag", "Stage 1:", "Stage 2:", "torch_upgrade = subprocess.run(", "vllm_non_torch_requirements"):
         if obsolete in installer:
             raise RuntimeError(f"Director installer still contains the redundant two-stage Torch installation: {obsolete}")
 
@@ -969,6 +985,8 @@ def main() -> int:
     _validate_single_pass_story_writer(runtime)
     _validate_director_runtime_source()
     _validate_bootstrap_upgrade_source()
+    from kaggle import bootstrap as bootstrap_module
+    _validate_vllm_wheel_metadata_reader(bootstrap_module)
     _validate_requirements_diagnostics_behavior()
     director = dict(runtime.get("director", {}) or {})
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
