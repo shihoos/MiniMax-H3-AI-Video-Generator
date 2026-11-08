@@ -32,10 +32,8 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.33.0
-  # Install one final Director Torch/CUDA stack directly. The published vLLM
-  # 0.33.0 cu130 wheel uses LibTorch Stable ABI and is installed with --no-deps;
-  # its non-Torch requirements are pinned in configs/vllm_director_requirements.txt.
-  # This avoids downloading Torch 2.14/cu130 only to replace it with Torch 2.15/cu132.
+  # Published cu130 vLLM wheel uses LibTorch Stable ABI. Install without deps,
+  # then resolve its wheel metadata while retaining the final Torch 2.15/cu132 stack.
   vllm_torch_version: 2.15.0
   vllm_cuda: cu132
   vllm_wheel_build_cuda: cu130
