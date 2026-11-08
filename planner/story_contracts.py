@@ -113,10 +113,16 @@ OBJECT_CHANGE_RE = re.compile(
 )
 DEATH_RE = re.compile(r"\b(die[sd]?|dead|killed|murdered|executed|perished|drowned|shot dead|succumbed)\b", re.I)
 CAUSAL_LINK_RE = re.compile(
-    r"\b(because|therefore|so that|so|forces?|forcing|leads? to|which means|"
-    r"as a result|consequently|prompting|requiring|making|leaving|causing|"
-    r"compels?|compelling|drives?|driving)\b", re.I
+    r"\b(because|therefore|so that|so|thus|hence|forces?|forcing|forced|leads? to|leading to|led to|which means|"
+    r"which (?:reveals?|forces?|exposes?|triggers?|requires?|demands?|leaves?|puts?|sends?|pushes?)|"
+    r"as a result|consequently|prompting|prompts?|requiring|requires?|making|leaving|causing|"
+    r"compels?|compelling|drives?|driving|triggers?|triggering|sets? off|results? in|resulting in|"
+    r"means|demands?|pushes?|pushing|sends?|sending|exposes?|exposing|reveals?|revealing|"
+    r"now that|once|since|after|unless|before|in order to|must|needs? to|has to|have to)\b", re.I
 )
+
+# Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
+CONTRACTS_REVISION = "2026-11-08.1"
 
 
 # Size gates. The prompt still asks the Architect for full-size fields and beats; these floors only reject output
@@ -245,6 +251,15 @@ def _name_surfaces(name: str, aliases: list[str] | None = None) -> list[str]:
         first = titleless.split()[0] if titleless.split() else ""
         if len(first) >= 3:
             surfaces.append(first)
+        # People are also referred to by surname ("Petrov") and by a quoted call sign ('K-9 Unit "Rook"' -> Rook).
+        unquoted = re.sub(r"[\"“”‘’]", "", titleless).strip()
+        tokens = unquoted.split()
+        if len(tokens) >= 2 and len(tokens[-1]) >= 3 and re.search(r"[A-Za-z]", tokens[-1]):
+            surfaces.append(tokens[-1])
+        if unquoted != titleless:
+            surfaces.append(unquoted)
+        for quoted in re.findall(r"[\"“‘]([^\"”’]{2,30})[\"”’]", titleless):
+            surfaces.append(quoted.strip())
     return list(dict.fromkeys(v for v in surfaces if v))
 
 
