@@ -282,6 +282,10 @@ class QwenDirectorPromptMixin:
         target = int(STORY_TARGET_WORDS)
         minimum = int(STORY_MIN_WORDS)
         stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
+        # Ask above the floor: the writer reliably delivers ~80% of what it is asked for, and there is no retry.
+        scene_low = int(minimum * 1.25 / n) + 1
+        scene_high = scene_low + 20
+        scene_low_total, scene_high_total = scene_low * n, scene_high * n
 
         if mode == AI_STORY_MODE:
             source_rule = (
@@ -311,6 +315,10 @@ class QwenDirectorPromptMixin:
             a consequential choice, and a changed situation. Vary scene lengths and sentence rhythm according to dramatic
             importance. Do not use a fixed sentence count, identical paragraph shape, or the same action-obstacle-choice
             cadence in every scene. The last third must be as fully dramatized as the opening, not compressed into a summary.
+            SCENE SIZE: write each of the {n} scene blocks at roughly {scene_low}-{scene_high} words, so the whole story lands
+            near {scene_low_total}-{scene_high_total} words. Models habitually write about a fifth less than they intend, so
+            a scene that feels complete at 110 words is too short here: let every scene run its full action, resistance,
+            choice and consequence. The {minimum}-word minimum is checked on the finished story and a shortfall is rejected.
 
             DRAMATIC EXECUTION: make the protagonist's immediate objective and pressure understandable early. The opposition
             must have an intelligible goal and a credible method, not merely be evil or obstructive. Give major characters
