@@ -122,7 +122,30 @@ CAUSAL_LINK_RE = re.compile(
 )
 
 # Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-08.1"
+CONTRACTS_REVISION = "2026-11-08.2"
+
+# Wording-quality heuristics. They judge how the Architect phrased a beat, not whether the plan can be
+# written, so they are reported as warnings and never block prose generation. Structural findings
+# (missing fields/beats, unknown or absent cast, fate/death contradictions) stay fatal.
+SOFT_FINDING_MARKERS = (
+    "too thin to dramatize",
+    "next-scene cause is too vague",
+    "lacks an explicit causal connector",
+    "is not anchored to the previous scene's NEXT_CAUSE",
+    "too few explicit causal links",
+    "changes location without a route/time transition",
+    "without an arrival/meeting event",
+    "does not anchor the declared key objects",
+)
+
+
+def split_contract_findings(findings: list[str]) -> tuple[list[str], list[str]]:
+    """Return (fatal, warnings) from a list of blueprint contract findings."""
+    fatal: list[str] = []
+    soft: list[str] = []
+    for item in findings:
+        (soft if any(marker in item for marker in SOFT_FINDING_MARKERS) else fatal).append(item)
+    return fatal, soft
 
 
 # Size gates. The prompt still asks the Architect for full-size fields and beats; these floors only reject output
@@ -230,6 +253,9 @@ def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
                 if _name_is_present(states[number].get("ENTRY_PRESENT", ""), item)
                 or _name_is_present(states[number].get("EXIT_PRESENT", ""), item)
             ]
+            if present and item["fate"].casefold().startswith("dies"):
+                death = int(re.search(r"\d+", item["fate"]).group(0))
+                present = sorted({v for v in present if v <= death} | {death})
             if present and present != item["scenes"]:
                 raw = re.sub(
                     r"on-screen scenes\s*:\s*[0-9, ]+",
