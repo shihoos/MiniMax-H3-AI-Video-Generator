@@ -130,46 +130,64 @@ def find_kaggle_files(
     return resolved
 
 
-def _requirements_satisfied(requirements: Path) -> bool:
-    """Return True when every normal requirement is already satisfied.
-
-    Exact pins, unpinned packages, and standard version specifiers are checked
-    against the live environment. Direct URLs/editable/path requirements are
-    treated conservatively and force the normal pip install path.
-    """
+def _requirements_diagnostics(requirements: Path) -> list[str]:
+    """Explain which manifest entries prevent a warm dependency-cache hit."""
     if not requirements.is_file():
-        return False
+        return [f"requirements file missing: {requirements}"]
     try:
         from packaging.requirements import Requirement
-    except Exception:
-        return False
+    except Exception as exc:
+        return [f"packaging.Requirement unavailable: {type(exc).__name__}: {exc}"]
 
-    for raw_line in requirements.read_text(encoding="utf-8").splitlines():
+    misses: list[str] = []
+    for line_number, raw_line in enumerate(requirements.read_text(encoding="utf-8").splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if line.startswith("-"):
-            return False
+            misses.append(f"line {line_number}: pip option/directive requires conservative install ({line[:100]})")
+            continue
         try:
             requirement = Requirement(line)
-        except Exception:
-            return False
+        except Exception as exc:
+            misses.append(f"line {line_number}: cannot parse requirement {line[:100]!r} ({type(exc).__name__})")
+            continue
         if requirement.marker is not None:
             try:
                 if not requirement.marker.evaluate():
                     continue
-            except Exception:
-                return False
+            except Exception as exc:
+                misses.append(f"line {line_number}: environment marker failed ({type(exc).__name__}: {exc})")
+                continue
         if requirement.url:
-            return False
-        name = requirement.name
+            misses.append(f"line {line_number}: direct URL requirement forces conservative install ({requirement.name})")
+            continue
         try:
-            installed = importlib_metadata.version(name)
+            installed = importlib_metadata.version(requirement.name)
         except importlib_metadata.PackageNotFoundError:
-            return False
+            misses.append(f"{requirement.name}: not installed (required {requirement.specifier or 'any version'})")
+            continue
+        except Exception as exc:
+            misses.append(f"{requirement.name}: metadata lookup failed ({type(exc).__name__}: {exc})")
+            continue
         if requirement.specifier and installed not in requirement.specifier:
-            return False
-    return True
+            misses.append(f"{requirement.name}: installed {installed}, required {requirement.specifier}")
+    return misses
+
+
+def _requirements_satisfied(requirements: Path) -> bool:
+    """Return True when every normal requirement is already satisfied."""
+    return not _requirements_diagnostics(requirements)
+
+
+def _print_probe_failure(label: str, result: subprocess.CompletedProcess, *, limit: int = 2400) -> None:
+    """Print concise cache-miss diagnostics even when verbose tracing is disabled."""
+    stdout = str(getattr(result, "stdout", "") or "").strip()
+    stderr = str(getattr(result, "stderr", "") or "").strip()
+    print(f"[{label}] exit={getattr(result, 'returncode', 'unknown')}", flush=True)
+    for stream_name, value in (("stdout", stdout), ("stderr", stderr)):
+        if value:
+            print(f"[{label}] {stream_name}: {value[-limit:]}", flush=True)
 
 
 def _package_version_satisfied(package: str, expected: str) -> bool:
@@ -348,7 +366,8 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
         _, expected_torch = _normalize_torch_version(
             str(config.get("version", "") or "").strip(), cuda_tag
         )
-    except RuntimeError:
+    except RuntimeError as exc:
+        print(f"[PYTORCH CACHE MISS] invalid runtime lock: {exc}", flush=True)
         return False
     if (
         not cuda_tag.startswith("cu")
@@ -357,6 +376,7 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
         or not expected_tv
         or not expected_ta
     ):
+        print("[PYTORCH CACHE MISS] incomplete CUDA/TorchVision/TorchAudio runtime lock", flush=True)
         return False
 
     # A live, already-imported Torch module cannot be replaced by pip in-place.
@@ -364,9 +384,16 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
     # disk state and rely on fresh-process validation for native extensions.
     if "torch" in sys.modules:
         try:
-            if str(getattr(sys.modules["torch"], "__version__", "")) != expected_torch:
+            live_version = str(getattr(sys.modules["torch"], "__version__", ""))
+            if live_version != expected_torch:
+                print(
+                    f"[PYTORCH CACHE MISS] notebook has torch {live_version}; expected {expected_torch}. "
+                    "A fresh-process disk probe will distinguish stale in-memory state from a disk mismatch.",
+                    flush=True,
+                )
                 return False
-        except Exception:
+        except Exception as exc:
+            print(f"[PYTORCH CACHE MISS] unable to inspect imported torch: {type(exc).__name__}: {exc}", flush=True)
             return False
 
     result = subprocess.run(
@@ -375,8 +402,8 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
         text=True,
         check=False,
     )
-    if result.returncode != 0 and os.getenv("H3_BOOTSTRAP_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        print("[PYTORCH PROBE]", result.stdout, result.stderr)
+    if result.returncode != 0:
+        _print_probe_failure("PYTORCH CACHE MISS — fresh-process runtime probe", result)
     return result.returncode == 0
 
 
@@ -391,7 +418,19 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
     tp_size = int(director.get("tensor_parallel_size", 0) or 0)
     python = env_dir / "bin" / "python"
-    if not all((python.is_file(), vllm_version, wrapt_version, torch_version, re.fullmatch(r"cu\d{3}", cuda_tag), tp_size > 0)):
+    missing = []
+    if not python.is_file():
+        missing.append(f"venv Python missing: {python}")
+    for label, value in (("vLLM version", vllm_version), ("wrapt version", wrapt_version),
+                         ("Director Torch version", torch_version), ("CUDA wheel tag", cuda_tag)):
+        if not value:
+            missing.append(f"{label} missing from runtime lock")
+    if cuda_tag and not re.fullmatch(r"cu\d{3}", cuda_tag):
+        missing.append(f"invalid CUDA wheel tag: {cuda_tag!r}")
+    if tp_size <= 0:
+        missing.append(f"invalid tensor_parallel_size: {tp_size}")
+    if missing:
+        print("[DIRECTOR CACHE MISS] " + "; ".join(missing), flush=True)
         return False
     expected_torch = f"{torch_version}+{cuda_tag}"
     code = (
@@ -414,8 +453,8 @@ def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
         "print('Director runtime probe: PASS')"
     )
     result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=False)
-    if result.returncode != 0 and os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        print("[DIRECTOR WARM PROBE]", result.stdout, result.stderr)
+    if result.returncode != 0:
+        _print_probe_failure("DIRECTOR CACHE MISS — isolated vLLM runtime probe", result)
     return result.returncode == 0
 
 
@@ -473,38 +512,59 @@ def _sage_build_stamp(runtime: dict, install_dir: Path | None = None) -> dict:
 
 
 def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
-    if not install_dir.is_dir() or not (install_dir / ".git").is_dir():
+    def miss(reason: str) -> bool:
+        print(f"[SAGE CACHE MISS] {reason}", flush=True)
         return False
+
+    if not install_dir.is_dir():
+        return miss(f"install directory missing: {install_dir}")
+    if not (install_dir / ".git").is_dir():
+        return miss("install directory is not a Git checkout")
     stamp_path = _sage_build_stamp_path(install_dir)
     kernel = install_dir / "csrc" / "qattn" / "attn_cuda_sm75.h"
     package_dir = install_dir / "sageattention"
-    if not stamp_path.is_file() or not kernel.is_file() or not package_dir.is_dir():
-        return False
+    if not stamp_path.is_file():
+        return miss(f"build stamp missing: {stamp_path}")
+    if not kernel.is_file():
+        return miss(f"SM75 kernel source missing: {kernel}")
+    if not package_dir.is_dir():
+        return miss(f"Python package directory missing: {package_dir}")
     try:
         stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-        if stamp != _sage_build_stamp(runtime, install_dir):
-            return False
-        if _git_head(install_dir) != str(runtime.get("sage_attention", {}).get("revision", "")).strip():
-            return False
+        if not isinstance(stamp, dict):
+            return miss("build stamp is not a JSON object")
+        expected_stamp = _sage_build_stamp(runtime, install_dir)
+        if stamp != expected_stamp:
+            keys = sorted(key for key in set(stamp) | set(expected_stamp) if stamp.get(key) != expected_stamp.get(key))
+            details = ", ".join(
+                f"{key}: cached={stamp.get(key)!r}, current={expected_stamp.get(key)!r}"
+                for key in keys[:8]
+            )
+            return miss("build-stamp mismatch" + (f" ({details})" if details else ""))
+        expected_revision = str(runtime.get("sage_attention", {}).get("revision", "")).strip()
+        actual_revision = _git_head(install_dir)
+        if actual_revision != expected_revision:
+            return miss(f"Git revision mismatch: cached checkout={actual_revision}, expected={expected_revision}")
         source = kernel.read_text(encoding="utf-8")
-    except (OSError, ValueError, subprocess.CalledProcessError):
-        return False
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        return miss(f"unable to verify build metadata/source: {type(exc).__name__}: {exc}")
     required = (
         "H3-T4-SM75-KERNEL-FIX",
         "H3-T4-SM75-PV-FRAGMENT-FIX",
         "constexpr int WARP_K_SM75 = 64;",
         "uint32_t thread_row1 = thread_row0 + 8;",
     )
-    if any(needle not in source for needle in required):
-        return False
+    missing = [needle for needle in required if needle not in source]
+    if missing:
+        return miss("patched kernel markers missing: " + ", ".join(missing))
     if "constexpr int WARP_K_SM75 = 16;" in source:
-        return False
+        return miss("obsolete WARP_K_SM75=16 declaration remains")
     if not any(package_dir.rglob("*.so")):
-        return False
+        return miss("compiled SageAttention shared object is missing")
     expected_version = str(runtime.get("sage_attention", {}).get("version", "") or "").strip()
     library_dirs = _cuda_library_dirs(runtime)
     if not library_dirs:
-        return False
+        return miss("locked CUDA runtime/cublas library directories were not found")
     env = _configure_cuda_environment(library_dirs)
     env["CUDA_VISIBLE_DEVICES"] = "0"
     probe = subprocess.run(
@@ -519,7 +579,10 @@ def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
         text=True,
         check=False,
     )
-    return probe.returncode == 0
+    if probe.returncode != 0:
+        _print_probe_failure("SAGE CACHE MISS — import/version probe", probe)
+        return False
+    return True
 
 def _site_packages() -> list[Path]:
     result = subprocess.run(
@@ -663,9 +726,11 @@ def install_base_requirements() -> None:
         raise RuntimeError(
             f"Repository dependency manifest is missing: {requirements}"
         )
-    if _requirements_satisfied(requirements):
+    requirement_misses = _requirements_diagnostics(requirements)
+    if not requirement_misses:
         print("[BOOTSTRAP WARM] project requirements already satisfy requirements.txt")
         return
+    print("[BOOTSTRAP CACHE MISS] requirements.txt: " + " | ".join(requirement_misses[:16]), flush=True)
     run(
         sys.executable,
         "-m",
@@ -702,9 +767,11 @@ def install_comfyui(runtime: dict) -> None:
         _ensure_git_revision(COMFY, revision)
         run("git", "-C", COMFY, "checkout", "--detach", revision)
     comfy_requirements = COMFY / "requirements.txt"
-    if _requirements_satisfied(comfy_requirements):
+    requirement_misses = _requirements_diagnostics(comfy_requirements)
+    if not requirement_misses:
         print("[BOOTSTRAP WARM] ComfyUI requirements already satisfied")
     else:
+        print("[BOOTSTRAP CACHE MISS] ComfyUI requirements: " + " | ".join(requirement_misses[:16]), flush=True)
         run(
             sys.executable, "-m", "pip", "install", "-q",
             "--disable-pip-version-check", "-r", comfy_requirements,
@@ -1036,8 +1103,8 @@ def install_pytorch_runtime(runtime: dict) -> None:
         _package_version_satisfied(package, expected)
         for package, expected in expected_metadata.items()
     )
-    if os.getenv("H3_BOOTSTRAP_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        print("[PYTORCH PROBE BEFORE INSTALL]", disk_probe.stdout, disk_probe.stderr)
+    _print_probe_failure("PYTORCH CACHE MISS — disk runtime rejected before reinstall", disk_probe)
+    print(f"[PYTORCH CACHE MISS] installed package metadata matches lock={metadata_matches}", flush=True)
     print("=" * 80)
     print("INSTALLING LOCKED PYTORCH RUNTIME")
     print("=" * 80)
