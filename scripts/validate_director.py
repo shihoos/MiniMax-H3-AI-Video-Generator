@@ -39,7 +39,7 @@ def _story_blueprint_fixture(scene_count=12):
     for i in range(1, scene_count + 1):
         cause = "none" if i == scene_count else f"Because Ines records transfer clue {i}, she must verify the next cargo handoff before the rising tide blocks the archive route."
         beats.append(
-            f"SCENE {i:02d}: ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; "
+            f"SCENE {i:02d}: ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; ON_SCREEN_PRESENT=Ines Vale; "
             "ENTRY_KNOWS=Ines knows the duplicate ledger conceals the missing relief cargo route; "
             "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control; "
             f"EVENT=Ines examines transfer stage {i}, compares the physical pressure mark with the approved cargo seal, "
@@ -877,7 +877,7 @@ def test_story_prompt_is_open_cast_and_fully_filled():
     q = QwenDirector.__new__(QwenDirector)
     for mode in (AI_STORY_MODE, EXPAND_USER_STORY_MODE):
         text = q._story_text_system(mode)
-        low = text.lower()
+        low = " ".join(text.lower().split())
         _assert("__" not in text, f"{mode}: unfilled length placeholder in prompt")
         _assert(f"return only the {DIRECTOR_STORY_SCENES} blocks" in low and "[[scene_01]]" in low and "[[scene_12]]" in low,
                 f"{mode}: explicit 12-scene boundary contract missing")
@@ -908,10 +908,10 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert("create exactly 12 linked beats" in blueprint and "do not assign the same fixed function" in blueprint,
                 f"{mode}: Architect must avoid fixed scene-function and sentence templates")
         _assert("relationships" in blueprint and "named_entities" in blueprint and "entry_present" in blueprint
-                and "fate: survives or dies in scene nn" in blueprint,
-                f"{mode}: Architect must declare relationship/entity/fate/state contracts")
-        _assert("at least five scene beats" in blueprint,
-                f"{mode}: Architect must explicitly link beat causality")
+                and "on_screen_present" in blueprint and "fate: survives or dies in scene nn" in blueprint,
+                f"{mode}: Architect must declare relationship/entity/fate/full-scene visibility contracts")
+        _assert("each of the eleven transitions" in blueprint,
+                f"{mode}: Architect must explicitly link every scene transition")
 
 def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
     from planner.qwen_director import QwenDirector
@@ -929,15 +929,29 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
             "system and user prompts must agree on the configured word target")
     _assert(str(stretch) in system and str(stretch) in writer,
             "system and user prompts must agree on stretch guidance")
-    _assert("target is guidance, not permission to pad" in system.lower(),
+    system_flat = " ".join(system.lower().split())
+    _assert("target as guidance, not permission to pad" in system_flat,
             "target length must be guidance, not padding quota")
-    _assert("do not use a fixed sentence count" in system.lower()
-            and "action-obstacle-choice" in system.lower(),
+    _assert("do not use a fixed sentence count" in system_flat
+            and "action-obstacle-choice" in system_flat,
             "writer must be free of rigid nine-sentence scene shape")
     _assert("no more than two" in system.lower() and "spoken lines per scene" in system.lower(),
             "writer must respect the two-line dialogue maximum")
-    _assert("at least five scene beats" in blueprint and "each scene changes" in blueprint,
-            "Architect must define causal scene progression")
+    _assert("each of the eleven transitions" in blueprint and "each scene changes" in blueprint,
+            "Architect must define causal progression across all eleven transitions")
+    _assert("about 130 words per scene on average" in system_flat,
+            "Author scene-length guidance must align with the 1,560-word total target")
+    _assert("no scene should fall below 100 usable words" in system_flat
+            and "at least ten of the twelve scenes must reach 120 words" in system_flat,
+            "Author must receive a mathematical scene-length completeness guard for the 1,400-word floor")
+    _assert("1,750-word-plus draft by default" in system_flat,
+            "Author prompt must not retain the contradictory 1,752+ word scene quota")
+    _assert("silently check" in system_flat and "do not end early" in system_flat,
+            "Author must check the complete 12-scene draft against the story-wide target")
+    _assert("premise-specific mechanism" in blueprint and "same plot would work unchanged" in blueprint,
+            "Architect must anchor the plot's causal engine to the supplied premise")
+    _assert("reinterpret earlier evidence" in system_flat and "climax" in system_flat,
+            "Author must preserve a fair reversal and a seeded climax")
 
 def test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota():
     from planner.qwen_director import QwenDirector
@@ -1290,10 +1304,79 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
     expected=min(DIRECTOR_STORY_MAX_TOKENS,DIRECTOR_STORY_WRITER_MAX_TOKENS)
     _assert(calls[0].get("max_completion")==expected and expected==3000,
             f"Writer must use the configured 3,000-token completion ceiling: {calls[0]}")
-    _assert(calls[0].get("minimum_output_tokens")==DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-            f"Writer min-output setting changed: {calls[0]}")
+    _assert(DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS == 0,
+            "Author must retain natural EOS; do not force a minimum output-token floor")
+    _assert(calls[0].get("minimum_output_tokens")==0,
+            f"Writer min-output must remain 0 for natural EOS: {calls[0]}")
     _assert(STORY_MIN_WORDS==1400,"minimum accepted story length must be 1,400 words")
     _assert(count==DIRECTOR_STORY_SCENES,"story must preserve twelve scene paragraphs")
+
+def test_rejected_author_draft_is_saved_for_diagnosis():
+    from tempfile import TemporaryDirectory
+    from planner.qwen_director import QwenDirector
+
+    with TemporaryDirectory() as tmp:
+        director = QwenDirector.__new__(QwenDirector)
+        director.project_root = Path(tmp)
+        director._story_min_words = 1400
+        draft = "Scene 01: A complete but short generated scene."
+        raw_draft = "<think>hidden reasoning must not be invented</think>\n" + draft
+        processed = "Cleaned candidate: " + draft
+        director._save_failed_story_draft(
+            raw_draft,
+            raw_story=raw_draft,
+            processed_story=processed,
+            stage="unit_test_rejection",
+            reason="Final story has 1251 words, below the configured minimum of 1400.",
+            word_count=1251,
+        )
+        saved = Path(tmp) / "story_author_last_failed.txt"
+        _assert(saved.is_file(), "a rejected single-pass Author draft must be preserved")
+        contents = saved.read_text(encoding="utf-8")
+        _assert("usable_words: 1251" in contents and raw_draft in contents and processed in contents,
+                "the diagnostic artifact must preserve both raw output and the processed candidate")
+        _assert("stage: unit_test_rejection" in contents,
+                "the diagnostic artifact must identify the rejection stage")
+        _assert("zero retries" in contents and "zero repair calls" in contents,
+                "draft preservation must not imply a retry or repair call")
+
+
+def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
+    from tempfile import TemporaryDirectory
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from planner.qwen_director import QwenDirector
+
+    with TemporaryDirectory() as tmp:
+        director = QwenDirector.__new__(QwenDirector)
+        director.project_root = Path(tmp)
+        director._story_min_words = 1400
+        raw = "Raw Qwen completion with an unfinished tail"
+
+        def reject(*args, **kwargs):
+            director._last_story_raw_output = raw
+            director._last_story_draft = "Processed candidate with complete sentences."
+            raise RuntimeError("post-generation quality gate rejected the draft")
+
+        director._generate_story_once_impl = reject
+        with redirect_stdout(StringIO()):
+            try:
+                director._generate_story_once(
+                    "ai_story", "premise", "system", "user",
+                    temperature=0.7, top_p=0.8, source_character_names=[],
+                )
+            except RuntimeError as exc:
+                _assert("quality gate rejected" in str(exc), "wrapper must re-raise the original rejection")
+            else:
+                raise AssertionError("author wrapper must not swallow a post-generation rejection")
+        saved = Path(tmp) / "story_author_last_failed.txt"
+        _assert(saved.is_file(), "outer Author wrapper must preserve rejected output")
+        contents = saved.read_text(encoding="utf-8")
+        _assert(raw in contents and "Processed candidate with complete sentences." in contents,
+                "outer wrapper must preserve raw and processed drafts separately")
+        _assert("zero retries" in contents and "zero repair calls" in contents,
+                "draft preservation must never add another Author or repair call")
+
 
 def test_scene_markers_preserve_one_to_one_scene_boundaries():
     from planner.qwen_director import QwenDirector
@@ -1457,6 +1540,7 @@ def _two_person_blueprint(mara_scenes="02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 1
             number = int(line[6:8])
             if number >= 2:
                 line = line.replace("ENTRY_PRESENT=Ines Vale;", "ENTRY_PRESENT=Ines Vale, Mara Quill;")
+                line = line.replace("ON_SCREEN_PRESENT=Ines Vale;", "ON_SCREEN_PRESENT=Ines Vale, Mara Quill;")
                 line = line.replace("EXIT_PRESENT=Ines Vale;", "EXIT_PRESENT=Ines Vale, Mara Quill;")
             if number == 2 and arrival:
                 line = line.replace("EVENT=Ines examines", f"EVENT=Mara Quill {arrival} Ines at the archive door while Ines examines")
@@ -1475,13 +1559,68 @@ def test_story_contract_regressions_found_by_audit():
         issues = [i for i in validate_blueprint_state_contract(text) if "without an arrival" in i]
         _assert(not issues, f"'{verb}' must count as an arrival/meeting: {issues!r}")
     issues = validate_blueprint_state_contract(_two_person_blueprint(arrival=None))
-    _assert(any("without an arrival/meeting event" in i for i in issues),
+    _assert(any("without a character-specific arrival/meeting event" in i for i in issues),
             f"an unexplained new person must still be rejected: {issues!r}")
+    unrelated_arrival = _two_person_blueprint(arrival=None).replace(
+        "EVENT=Ines examines transfer stage 2, compares the physical pressure mark with the approved cargo seal, "
+        "and records the discrepancy before the clerk can remove the evidence;",
+        "EVENT=Ines arrives at the archive while Mara Quill waits beside the ledger table and records the discrepancy;",
+        1,
+    )
+    issues = validate_blueprint_state_contract(unrelated_arrival)
+    _assert(any("introduces 'Mara Quill' without a character-specific arrival" in i for i in issues),
+            f"one character's arrival must not satisfy another character's arrival: {issues!r}")
+    from planner.story_contracts import split_contract_findings
+    fatal, _warnings = split_contract_findings(issues)
+    _assert(any("Mara Quill" in i for i in fatal),
+            f"a missing character-specific transition must be a blocking plan-contract finding: {fatal!r}")
 
     # CAST presence is enforced in both directions (blueprint state ledger and prose).
     issues = validate_blueprint_state_contract(_two_person_blueprint(mara_scenes="02"))
     _assert(any("on-screen scene list omits it" in i for i in issues),
             f"state ledger presence outside the CAST scene list must fail: {issues!r}")
+    # A character can enter mid-scene and leave before the end: both physical
+    # transitions must be attributed to that same person in the scene EVENT.
+    def _mid_scene_blueprint(event: str) -> str:
+        lines = _story_blueprint_fixture().splitlines()
+        lines[0] += (
+            " | Mara Quill (harbor clerk; wants to preserve the duplicate ledger; pressure fears the audit; "
+            "voice curt; aliases: none; on-screen scenes: 02; fate: survives)"
+        )
+        scene_two = next(i for i, line in enumerate(lines) if line.startswith("SCENE 02:"))
+        lines[scene_two] = lines[scene_two].replace(
+            "ON_SCREEN_PRESENT=Ines Vale;", "ON_SCREEN_PRESENT=Ines Vale, Mara Quill;"
+        ).replace(
+            "EVENT=Ines examines transfer stage 2, compares the physical pressure mark with the approved cargo seal, "
+            "and records the discrepancy before the clerk can remove the evidence;",
+            f"EVENT={event};",
+        )
+        return "\n".join(lines)
+
+    valid_mid = _mid_scene_blueprint(
+        "Mara Quill enters through the archive door and meets Ines at the ledger table; later Mara Quill leaves through the side passage"
+    )
+    issues = validate_blueprint_state_contract(valid_mid)
+    _assert(not any("mid-scene entry" in i or "mid-scene exit" in i for i in issues),
+            f"a properly described mid-scene entrance and departure should pass: {issues!r}")
+    unexplained_entry = _mid_scene_blueprint(
+        "Ines examines the transfer stage and records the discrepancy before the clerk can remove the evidence"
+    )
+    issues = validate_blueprint_state_contract(unexplained_entry)
+    _assert(any("mid-scene entry for 'Mara Quill'" in i for i in issues),
+            f"an unexplained mid-scene entrant must fail: {issues!r}")
+    wrong_person_entry = _mid_scene_blueprint(
+        "Ines enters through the archive door while Mara Quill waits beside the ledger table"
+    )
+    issues = validate_blueprint_state_contract(wrong_person_entry)
+    _assert(any("mid-scene entry for 'Mara Quill'" in i for i in issues),
+            f"another character's arrival verb must not explain Mara's entrance: {issues!r}")
+    missing_exit = _mid_scene_blueprint(
+        "Mara Quill enters through the archive door and meets Ines at the ledger table"
+    )
+    issues = validate_blueprint_state_contract(missing_exit)
+    _assert(any("mid-scene exit for 'Mara Quill'" in i for i in issues),
+            f"a mid-scene character who vanishes without a departure must fail: {issues!r}")
     paragraphs = _story_contract_fixture_prose().split("\n\n")
     for index in (1, 3):
         paragraphs[index] += " Mara Quill waits by the door."
@@ -1522,9 +1661,9 @@ def test_architect_beat_length_gate_is_tolerant_but_not_empty():
     from planner.config import DIRECTOR_STORY_SCENES as N, STORY_PLAN_BEAT_MIN_WORDS
     director = QwenDirector.__new__(QwenDirector)
     lines = _story_blueprint_fixture(N).splitlines()
-    short = "SCENE 01: ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; ENTRY_KNOWS=ledger was duplicated; " \
-            "ENTRY_OBJECTS=ledger; EVENT=Ines examines the pressure mark and records the discrepancy; EXIT_LOCATION=harbor archive; " \
-            "EXIT_PRESENT=Ines Vale; EXIT_KNOWS=route changed; EXIT_OBJECTS=ledger; " \
+    short = "SCENE 01: ENTRY_LOCATION=archive; ENTRY_PRESENT=Ines; ON_SCREEN_PRESENT=Ines; ENTRY_KNOWS=ledger duplicated; " \
+            "ENTRY_OBJECTS=ledger; EVENT=Ines checks the pressure mark and records a discrepancy; EXIT_LOCATION=archive; " \
+            "EXIT_PRESENT=Ines; EXIT_KNOWS=route changed; EXIT_OBJECTS=ledger; " \
             "NEXT_CAUSE=Because Ines records clue one, she must verify the next handoff before the tide closes the route"
     words = len(re.findall(r"\b[\w'’-]+\b", short))
     _assert(words < STORY_PLAN_BEAT_MIN_WORDS, "fixture beat must be below the prompted minimum to test tolerance")
@@ -1628,6 +1767,7 @@ def test_cast_and_state_ledger_are_reconciled_like_the_real_failure():
             line = line.replace("Ines Vale", "Dr. Elara Voss").replace("Ines", "Elara")
             if number >= 3:
                 line = line.replace("ENTRY_PRESENT=Dr. Elara Voss;", "ENTRY_PRESENT=Dr. Elara Voss, Renn Tolk;")
+                line = line.replace("ON_SCREEN_PRESENT=Dr. Elara Voss;", "ON_SCREEN_PRESENT=Dr. Elara Voss, Renn Tolk;")
                 line = line.replace("EXIT_PRESENT=Dr. Elara Voss;", "EXIT_PRESENT=Dr. Elara Voss, Renn Tolk;")
             if number == 3:
                 line = line.replace("EVENT=Elara examines", "EVENT=Renn Tolk meets Elara at the archive door while Elara examines")
@@ -1664,7 +1804,9 @@ def test_second_real_failure_surnames_call_signs_final_cause_and_connectors():
             number = int(line[6:8])
             line = line.replace("Ines Vale", "Voss").replace("Ines", "Voss")
             if number >= 3:
-                line = line.replace("ENTRY_PRESENT=Voss;", "ENTRY_PRESENT=Voss, Rook, Petrov;").replace("EXIT_PRESENT=Voss;", "EXIT_PRESENT=Voss, Rook, Petrov;")
+                line = line.replace("ENTRY_PRESENT=Voss;", "ENTRY_PRESENT=Voss, Rook, Petrov;")
+                line = line.replace("ON_SCREEN_PRESENT=Voss;", "ON_SCREEN_PRESENT=Voss, Rook, Petrov;")
+                line = line.replace("EXIT_PRESENT=Voss;", "EXIT_PRESENT=Voss, Rook, Petrov;")
             if number == 3:
                 line = line.replace("EVENT=Voss examines", "EVENT=Rook meets Petrov and Voss at the archive door while Voss examines")
             line = re.sub(r"NEXT_CAUSE=Because [^;]*?clue (\d+), she must verify the next cargo handoff before the rising tide blocks the archive route\.",
@@ -1702,7 +1844,9 @@ def test_third_real_failure_wording_heuristics_warn_and_death_scene_is_kept():
         if line.startswith("SCENE "):
             number = int(line[6:8])
             if number in (2, 3):
-                line = line.replace("ENTRY_PRESENT=Ines;", "ENTRY_PRESENT=Ines, Rian;").replace("EXIT_PRESENT=Ines;", "EXIT_PRESENT=Ines, Rian;")
+                line = line.replace("ENTRY_PRESENT=Ines;", "ENTRY_PRESENT=Ines, Rian;")
+                line = line.replace("ON_SCREEN_PRESENT=Ines;", "ON_SCREEN_PRESENT=Ines, Rian;")
+                line = line.replace("EXIT_PRESENT=Ines;", "EXIT_PRESENT=Ines, Rian;")
             line = re.sub(r"NEXT_CAUSE=[^;]*?(?=;|$)", "NEXT_CAUSE=Ines hides the key", line) if number < N else line
         out.append(line)
     normalized = director._normalize_story_blueprint("\n".join(out), N)
@@ -1779,6 +1923,8 @@ def main():
         test_story_completion_contract_rejects_unresolved_final_hook,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
+        test_rejected_author_draft_is_saved_for_diagnosis,
+        test_author_wrapper_preserves_draft_when_pipeline_rejects_it,
         test_scene_markers_preserve_one_to_one_scene_boundaries,
         # Context compaction + camera contract
         test_context_compaction_never_loses_closing_quote_or_splits_attribution,
