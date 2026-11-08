@@ -56,6 +56,19 @@ from planner.config import (
 NO_THINK_SUFFIX = "\n/no_think"
 
 
+def _h3_director_child_environment() -> dict[str, str]:
+    """Launch the Director from its own venv without inheriting notebook Python paths.
+
+    CUDA/compiler variables stay unchanged to match the tested server environment;
+    Director and ComfyUI now share the same configured CUDA target.
+    """
+    child_env = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
+        child_env.pop(key, None)
+    child_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    return child_env
+
+
 def _verbose() -> bool:
     return os.getenv("H3_DIRECTOR_VERBOSE", "0").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1546,9 +1559,8 @@ class QwenDirectorRuntimeMixin:
                     ),
                 ])
 
-            child_env = os.environ.copy()
-            # Disable FlashInfer sampler probe on SM75 (T4) to silence warnings and use native paths cleanly
-            child_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+            child_env = _h3_director_child_environment()
+            # Disable FlashInfer sampler probe on SM75 (T4) to use native paths cleanly.
             # H3_AUTOFIX_FORCE_AOT_LOAD_OFF_V1
             child_env["VLLM_FORCE_AOT_LOAD"] = "0"
 
