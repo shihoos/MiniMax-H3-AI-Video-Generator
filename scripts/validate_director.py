@@ -1684,6 +1684,38 @@ def test_second_real_failure_surnames_call_signs_final_cause_and_connectors():
     _assert(not issues, f"second real failure must now pass the state contract: {issues!r}")
 
 
+def test_third_real_failure_wording_heuristics_warn_and_death_scene_is_kept():
+    """Real Architect output: terse events/NEXT_CAUSE wording must not block the story; a death scene must stay on screen."""
+    from planner.config import DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_cast, split_contract_findings, validate_blueprint_state_contract
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture(N).splitlines()
+    lines[0] = (
+        "CAST: Ines Vale (lead engineer; wants to recover the original shipping ledger before the flood; pressure fears exposing her own "
+        "signature; voice precise; aliases: none; on-screen scenes: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12; fate: survives)"
+        " | Rian Kael (harbor guard; wants to protect the archive keys; pressure old debts; voice gruff; aliases: none; "
+        "on-screen scenes: 02, 03; fate: dies in scene 06)"
+    )
+    out = []
+    for line in lines:
+        if line.startswith("SCENE "):
+            number = int(line[6:8])
+            if number in (2, 3):
+                line = line.replace("ENTRY_PRESENT=Ines;", "ENTRY_PRESENT=Ines, Rian;").replace("EXIT_PRESENT=Ines;", "EXIT_PRESENT=Ines, Rian;")
+            line = re.sub(r"NEXT_CAUSE=[^;]*?(?=;|$)", "NEXT_CAUSE=Ines hides the key", line) if number < N else line
+        out.append(line)
+    normalized = director._normalize_story_blueprint("\n".join(out), N)
+    cast = {c["name"]: c for c in parse_cast(normalized)}
+    _assert(6 in cast["Rian Kael"]["scenes"] and max(cast["Rian Kael"]["scenes"]) == 6,
+            f"death scene must stay on screen and nothing follows it: {cast['Rian Kael']!r}")
+    fatal, soft = split_contract_findings(validate_blueprint_state_contract(normalized, N))
+    _assert(not any("death scene" in item for item in fatal), f"death-scene error must not return: {fatal!r}")
+    _assert(not any("NEXT_CAUSE" in item or "too vague" in item for item in fatal),
+            f"wording heuristics must be warnings, not fatal: {fatal!r}")
+    _assert(any("NEXT_CAUSE" in item for item in soft), f"the heuristic must still be reported as a warning: {soft!r}")
+
+
 def main():
     tests = [
         # Schema contracts
@@ -1737,6 +1769,7 @@ def main():
         test_cast_entry_variants_are_repaired_not_rejected,
         test_cast_and_state_ledger_are_reconciled_like_the_real_failure,
         test_second_real_failure_surnames_call_signs_final_cause_and_connectors,
+        test_third_real_failure_wording_heuristics_warn_and_death_scene_is_kept,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
