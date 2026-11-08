@@ -11,6 +11,7 @@ import re
 from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
 from planner.story_contracts import (
+    CONTRACTS_REVISION,
     audit_story_against_blueprint,
     blueprint_beat_floor,
     blueprint_field_floor,
@@ -2051,7 +2052,7 @@ class QwenDirector(
         errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
         if errors:
             raise RuntimeError(
-                "Story Architect rejected before prose generation: " + "; ".join(list(dict.fromkeys(errors))[:16])
+                f"Story Architect rejected before prose generation [contracts {CONTRACTS_REVISION}]: " + "; ".join(list(dict.fromkeys(errors))[:16])
                 + ". No retry or repair call was attempted."
             )
 
