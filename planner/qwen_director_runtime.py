@@ -519,6 +519,7 @@ class QwenDirectorRuntimeMixin:
         top_p: float | None = None,
         response_format=None,
         finish_reason: str = "",
+        stop_reason: str | int | None = None,
         cache_hit: bool = False,
         error: str = "",
         thinking_enabled: bool = False,
@@ -564,6 +565,7 @@ class QwenDirectorRuntimeMixin:
                 )
             ),
             "finish_reason": str(finish_reason or ""),
+            "stop_reason": (str(stop_reason) if stop_reason is not None else ""),
             "cache_hit": bool(cache_hit),
             "error": str(error or ""),
         }
@@ -592,6 +594,7 @@ class QwenDirectorRuntimeMixin:
             f"max_tokens={int(max_tokens or 0)}",
             f"min_tokens={int(min_tokens or 0)}" if int(min_tokens or 0) > 0 else "",
             (f"finish_reason={record['finish_reason']}" if record["finish_reason"] else ""),
+            (f"stop_reason={record['stop_reason']}" if record["stop_reason"] else ""),
             (f"cache_hit={cache_hit}" if cache_hit else ""),
             (f"error={error}" if error else ""),
             flush=True,
@@ -2019,7 +2022,7 @@ class QwenDirectorRuntimeMixin:
         timeout = float(os.getenv("H3_DIRECTOR_VLLM_REQUEST_TIMEOUT", "1800"))
         response = self._vllm_session.post(url, json=payload, timeout=timeout)
         # Deliberately do not retry a rejected completion with weakened sampling.
-        # The pinned vLLM 0.32 API supports top_k, min_p and presence_penalty;
+        # The pinned vLLM 0.33 API supports top_k, min_p and presence_penalty;
         # a compatibility retry would silently change the author's sampling
         # contract and make a supposedly single-pass story issue two requests.
         if response.status_code >= 400:
@@ -2179,14 +2182,15 @@ class QwenDirectorRuntimeMixin:
                 usage.get("completion_tokens", 0) or 0
             )
             finish_reason = ""
+            stop_reason = None
             if isinstance(response, dict):
                 try:
-                    finish_reason = str(
-                        response["choices"][0].get("finish_reason", "")
-                        or ""
-                    )
+                    choice = response["choices"][0]
+                    finish_reason = str(choice.get("finish_reason", "") or "")
+                    stop_reason = choice.get("stop_reason")
                 except (KeyError, IndexError, TypeError, AttributeError):
                     finish_reason = ""
+                    stop_reason = None
 
             self._record_qwen_call(
                 call_name=call_name,
@@ -2198,6 +2202,7 @@ class QwenDirectorRuntimeMixin:
                 top_p=top_p,
                 response_format=kwargs.get("response_format"),
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 error=error_text,
             )
 
@@ -2375,14 +2380,15 @@ class QwenDirectorRuntimeMixin:
                 or 0
             )
             finish_reason = ""
+            stop_reason = None
             if isinstance(response, dict):
                 try:
-                    finish_reason = str(
-                        response["choices"][0].get("finish_reason", "")
-                        or ""
-                    )
+                    choice = response["choices"][0]
+                    finish_reason = str(choice.get("finish_reason", "") or "")
+                    stop_reason = choice.get("stop_reason")
                 except (KeyError, IndexError, TypeError, AttributeError):
                     finish_reason = ""
+                    stop_reason = None
             self._record_qwen_call(
                 call_name=call_name,
                 elapsed=elapsed,
@@ -2394,6 +2400,7 @@ class QwenDirectorRuntimeMixin:
                 top_p=top_p,
                 response_format=None,
                 finish_reason=finish_reason,
+                stop_reason=stop_reason,
                 thinking_enabled=not disable_thinking,
                 thinking_token_budget=thinking_token_budget,
                 reasoning_tokens=reasoning_tokens,
