@@ -342,37 +342,68 @@ def check_director() -> None:
         raise RuntimeError("runtime_versions.yaml director.speculative_tokens must be positive.")
     env_dir = Path(env_dir_value).expanduser()
     venv_python = env_dir / "bin" / "python"
-    if not version or not venv_python.is_file():
-        raise RuntimeError("Pinned vLLM environment is missing; run bootstrap first.")
+    pyvenv_cfg = env_dir / "pyvenv.cfg"
+    if not version or not venv_python.is_file() or not pyvenv_cfg.is_file():
+        raise RuntimeError("Pinned isolated vLLM environment is missing; run bootstrap first.")
+    pyvenv_text = pyvenv_cfg.read_text(encoding="utf-8", errors="replace").lower()
+    if not re.search(r"(?m)^\s*include-system-site-packages\s*=\s*false\s*$", pyvenv_text):
+        raise RuntimeError("Director venv must set include-system-site-packages=false.")
+    pytorch = runtime.get("pytorch", {}) or {}
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
+    wheel_build_cuda = str(director.get("vllm_wheel_build_cuda", "") or "").strip().lower()
+    install_mode = str(director.get("vllm_install_mode", "") or "").strip().lower()
+    if torch_version != str(pytorch.get("version", "") or "").strip() or cuda_tag != str(pytorch.get("cuda", "") or "").strip().lower():
+        raise RuntimeError("Director final Torch/CUDA pins must match the main pytorch.version/pytorch.cuda pins.")
+    if not re.fullmatch(r"cu\d{3}", wheel_build_cuda):
+        raise RuntimeError("Director vLLM wheel-build CUDA tag is missing or invalid.")
+    if install_mode != "stable_abi_no_deps":
+        raise RuntimeError("Director vLLM install mode must be stable_abi_no_deps (no temporary Torch 2.14 stack).")
     expected_torch = f"{torch_version}+{cuda_tag}"
+    expected_cuda_runtime = f"{cuda_tag[2:4]}.{cuda_tag[4:]}"
+    expected_torchvision = str(pytorch.get("torchvision_version", "") or "").strip()
+    expected_torchaudio = str(pytorch.get("torchaudio_version", "") or "").strip()
+    tensor_parallel = int(director.get("tensor_parallel_size", 0) or 0)
     if not re.fullmatch(r"cu\d{3}", cuda_tag) or not torch_version:
         raise RuntimeError("runtime_versions.yaml must lock director.vllm_torch_version and a cuNNN director.vllm_cuda tag.")
-    expected_cuda_runtime = f"{cuda_tag[2:4]}.{cuda_tag[4:]}"
-    tensor_parallel = int(director.get("tensor_parallel_size", 0) or 0)
+    if not expected_torchvision.endswith(f"+{cuda_tag}") or not expected_torchaudio.endswith(f"+{cuda_tag}"):
+        raise RuntimeError("Director TorchVision/TorchAudio locks must match the configured main CUDA stack.")
     if str(load_yaml(RUNTIME_MANIFEST).get("python", {}).get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime must use Python 3.12 for the pinned vLLM environment.")
     probe = (
-        "import sys, inspect, vllm, torch, transformers, tokenizers; "
+        "import importlib, importlib.metadata as md, inspect, pathlib, sys, vllm, torch, transformers, tokenizers; "
         "from transformers import Qwen3Config; "
         "from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM; "
         "from vllm.config.load import LoadConfig; "
-        "assert sys.version_info[:2] == (3, 12), sys.version; "
+        "from vllm.config import SpeculativeConfig; "
         f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
         f"assert torch.version.cuda == {expected_cuda_runtime!r}, torch.version.cuda; "
+        f"assert md.version('torchvision') == {expected_torchvision!r}; "
+        f"assert md.version('torchaudio') == {expected_torchaudio!r}; "
         "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
+        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
         f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel}; "
         "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
+        "importlib.import_module('vllm._C_stable_libtorch'); "
+        "x=torch.randn(4,256,device='cuda:0',dtype=torch.float16); y=torch.empty(4,128,device='cuda:0',dtype=torch.float16); "
+        "torch.ops._C.silu_and_mul(y,x); torch.cuda.synchronize(0); "
+        "ref=torch.nn.functional.silu(x[:,:128])*x[:,128:]; "
+        "assert torch.allclose(y,ref,atol=1e-2,rtol=1e-2), 'Stable ABI CUDA op mismatch'; "
         "print('vLLM version:', vllm.__version__); "
         "print('Director Torch version:', torch.__version__); "
         "print('Director CUDA runtime:', torch.version.cuda); "
+        "print('TorchVision:', md.version('torchvision')); print('TorchAudio:', md.version('torchaudio')); "
+        "print('vLLM Stable ABI compiled CUDA op: PASS'); "
         "print('safetensors loader API: PASS'); "
         "print('Transformers version:', transformers.__version__); "
         "print('tokenizers version:', tokenizers.__version__); "
         "print('Qwen3 imports: PASS')"
     )
-    result = subprocess.run([str(venv_python), "-c", probe], capture_output=True, text=True, check=False)
+    probe_env = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
+        probe_env.pop(key, None)
+    result = subprocess.run([str(venv_python), "-c", probe], capture_output=True, text=True,
+                            check=False, env=probe_env)
     if result.returncode != 0:
         raise RuntimeError("vLLM Director runtime is unavailable.\n" + (result.stderr or result.stdout))
     print(result.stdout.strip())
