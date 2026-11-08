@@ -12,6 +12,7 @@ from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
 from planner.story_contracts import (
     CONTRACTS_REVISION,
+    split_contract_findings,
     audit_story_against_blueprint,
     blueprint_beat_floor,
     blueprint_field_floor,
@@ -2050,6 +2051,14 @@ class QwenDirector(
             if len(causal_terms) < 3:
                 errors.append("scene chain contains too few explicit causal links")
         errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
+        errors, soft_findings = split_contract_findings(errors)
+        if soft_findings:
+            self._last_story_blueprint_warnings = list(dict.fromkeys(soft_findings))
+            print(
+                f"[QWEN] story_blueprint_warnings={len(self._last_story_blueprint_warnings)} (wording heuristics, not blocking): "
+                + "; ".join(self._last_story_blueprint_warnings[:6]),
+                flush=True,
+            )
         if errors:
             raise RuntimeError(
                 f"Story Architect rejected before prose generation [contracts {CONTRACTS_REVISION}]: " + "; ".join(list(dict.fromkeys(errors))[:16])
