@@ -162,6 +162,15 @@ def _requirements_diagnostics(requirements: Path) -> list[str]:
         if requirement.url:
             misses.append(f"line {line_number}: direct URL requirement forces conservative install ({requirement.name})")
             continue
+        if requirement.extras:
+            # importlib.metadata.version() verifies only the base distribution; it
+            # cannot prove that every dependency declared by requested extras is
+            # installed. Never turn that uncertainty into a false warm-cache hit.
+            extras = ",".join(sorted(requirement.extras))
+            misses.append(
+                f"line {line_number}: optional extras [{extras}] require dependency-aware verification ({requirement.name})"
+            )
+            continue
         try:
             installed = importlib_metadata.version(requirement.name)
         except importlib_metadata.PackageNotFoundError:
