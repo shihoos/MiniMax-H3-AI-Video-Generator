@@ -715,6 +715,12 @@ class QwenDirectorPromptMixin:
                 raise RuntimeError(
                     f"Story Architect scene {number:02d} beat has {words} words; expected at least {beat_floor} and no more than {max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120)}."
                 )
+            if number == count:
+                # The last scene has no next scene: whatever the model wrote there, its cause is none.
+                if re.search(r"\bNEXT_CAUSE\s*=", text):
+                    text = re.sub(r"(\bNEXT_CAUSE\s*=)\s*[^;]*", r"\1none", text, count=1)
+                else:
+                    text = text.rstrip("; ") + "; NEXT_CAUSE=none"
             normalized_beats.append(f"SCENE {number:02d}: {text}")
         return reconcile_cast_scenes("\n".join([cast_line] + normalized_fields + normalized_beats), count)
 
