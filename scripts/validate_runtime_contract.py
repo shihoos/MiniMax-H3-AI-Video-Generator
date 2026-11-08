@@ -323,6 +323,49 @@ def _validate_control_plane_requirements() -> None:
     )
     if any(item not in warm_probe for item in required):
         raise RuntimeError("Bootstrap warm vLLM reuse must verify Python 3.12, vLLM load API, Torch/CUDA, Transformers/tokenizers and Qwen3 imports.")
+    for diagnostic in (
+        "def _requirements_diagnostics(",
+        "def _print_probe_failure(",
+        "[DIRECTOR CACHE MISS]",
+        "[PYTORCH CACHE MISS]",
+        "[SAGE CACHE MISS]",
+    ):
+        if diagnostic not in bootstrap_source:
+            raise RuntimeError(f"Bootstrap cache-reuse diagnostics are missing: {diagnostic}")
+
+def _validate_requirements_diagnostics_behavior() -> None:
+    """Exercise the bootstrap dependency checker, including extras and markers."""
+    import tempfile
+    from pathlib import Path
+    from kaggle.bootstrap import _requirements_diagnostics
+
+    with tempfile.TemporaryDirectory() as tmp:
+        manifest = Path(tmp) / "requirements.txt"
+        manifest.write_text("requests[socks]==2.32.5\n", encoding="utf-8")
+        issues = _requirements_diagnostics(manifest)
+        if not any("optional extras [socks]" in item for item in issues):
+            raise RuntimeError(
+                "Requirements diagnostics must conservatively reject an unverified optional extra."
+            )
+
+        manifest.write_text("package-that-does-not-exist-h3-audit==1.0.0\n", encoding="utf-8")
+        issues = _requirements_diagnostics(manifest)
+        if not any("not installed" in item for item in issues):
+            raise RuntimeError("Requirements diagnostics must detect a missing distribution.")
+
+        manifest.write_text(
+            "package-that-does-not-exist-h3-audit==1.0.0; python_version < '0'\n",
+            encoding="utf-8",
+        )
+        issues = _requirements_diagnostics(manifest)
+        if issues:
+            raise RuntimeError(f"An inactive environment marker must not force a cache miss: {issues!r}")
+
+        manifest.write_text("-r nested-requirements.txt\n", encoding="utf-8")
+        issues = _requirements_diagnostics(manifest)
+        if not any("pip option/directive" in item for item in issues):
+            raise RuntimeError("Included requirement files must conservatively force a cache miss.")
+
 
 def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
     """Return recognized main() call targets in lexical source order.
@@ -489,9 +532,31 @@ def _validate_director_runtime_source() -> None:
         "def prestage_director_checkpoints(",
         "def prewarm_director_server(",
         "apply_chat_template(",
+        '"stop_reason": (str(stop_reason) if stop_reason is not None else "")',
+        'stop_reason = choice.get("stop_reason")',
+        "vLLM 0.33 API supports top_k",
     ):
         if marker not in source:
             raise RuntimeError(f"Director runtime source is missing required vLLM Director contract: {marker}")
+    # Exercise telemetry serialization: vendor-specific stop_reason must survive
+    # into the per-call record instead of being discarded after finish_reason.
+    from contextlib import redirect_stdout
+    from io import StringIO
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+    probe = object.__new__(QwenDirectorRuntimeMixin)
+    probe._qwen_telemetry = {
+        "calls": [], "total_elapsed_seconds": 0.0, "prompt_tokens": 0,
+        "completion_tokens": 0, "retries": 0, "cache_hits": 0,
+        "deterministic_recoveries": 0,
+    }
+    with redirect_stdout(StringIO()):
+        probe._record_qwen_call(
+            call_name="telemetry_probe", elapsed=0.1, finish_reason="stop", stop_reason=123,
+        )
+    record = probe._qwen_telemetry["calls"][0]
+    if record.get("finish_reason") != "stop" or record.get("stop_reason") != "123":
+        raise RuntimeError(f"Qwen stop reason was not preserved in telemetry: {record!r}")
+
     # Staging is the fast path: /kaggle/input is GCSFUSE and direct loading took 6+ minutes per shard.
     if 'os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto")' not in source:
         raise RuntimeError("Model staging must default to auto (H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading).")
@@ -507,9 +572,11 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     if int(director.get("story_max_tokens", 0) or 0) != 6500:
         raise RuntimeError("Global Director story ceiling must remain 6,500 tokens.")
     if int(architecture.get("max_tokens", 0) or 0) != 5400:
-        raise RuntimeError("Story Architect ceiling must remain 3,600 tokens.")
+        raise RuntimeError("Story Architect ceiling must remain 5,400 tokens.")
     if int(writing.get("max_tokens", 0) or 0) != 3000:
         raise RuntimeError("Single-pass Story Author ceiling must be 3,000 tokens.")
+    if int(writing.get("minimum_output_tokens", 0) or 0) != 0:
+        raise RuntimeError("Story Author minimum_output_tokens must remain 0 so EOS is not artificially delayed.")
     if int(contract.get("minimum_words", 0) or 0) < 1400 or int(contract.get("accept_min_words", 0) or 0) != int(contract.get("minimum_words", 0) or 0):
         raise RuntimeError("Story acceptance must enforce the 1,400-word minimum with no lower secondary floor.")
     if int(contract.get("scene_count", 0) or 0) != 12 or int(contract.get("shots_per_scene", 0) or 0) != 3:
@@ -520,9 +587,13 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     director_path = ROOT / "planner/qwen_director.py"
     director_source = director_path.read_text(encoding="utf-8")
     tree = ast.parse(director_source, filename=str(director_path))
-    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
-    if author is None:
-        raise RuntimeError("Single-pass story author method is missing.")
+    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once_impl"), None)
+    wrapper = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
+    if author is None or wrapper is None:
+        raise RuntimeError("Single-pass story author implementation or rejection wrapper is missing.")
+    if not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "_generate_story_once_impl" for node in ast.walk(wrapper)):
+        raise RuntimeError("Author wrapper must call exactly one single-pass implementation.")
     author_calls = [
         node for node in ast.walk(author)
         if isinstance(node, ast.Call)
@@ -615,6 +686,7 @@ def main() -> int:
     _validate_single_pass_story_writer(runtime)
     _validate_director_runtime_source()
     _validate_bootstrap_upgrade_source()
+    _validate_requirements_diagnostics_behavior()
     director = dict(runtime.get("director", {}) or {})
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("Director backend must be vllm.")
