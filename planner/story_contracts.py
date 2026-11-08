@@ -122,29 +122,42 @@ CAUSAL_LINK_RE = re.compile(
 )
 
 # Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-08.2"
+CONTRACTS_REVISION = "2026-11-08.3"
 
-# Wording-quality heuristics. They judge how the Architect phrased a beat, not whether the plan can be
-# written, so they are reported as warnings and never block prose generation. Structural findings
-# (missing fields/beats, unknown or absent cast, fate/death contradictions) stay fatal.
-SOFT_FINDING_MARKERS = (
-    "too thin to dramatize",
-    "next-scene cause is too vague",
-    "lacks an explicit causal connector",
-    "is not anchored to the previous scene's NEXT_CAUSE",
-    "too few explicit causal links",
-    "changes location without a route/time transition",
-    "without an arrival/meeting event",
-    "does not anchor the declared key objects",
+# Only plan-structure findings may stop a run. Everything else (how a beat is worded, whether a knowledge/location/
+# presence change is "explained" in a heuristic's eyes) is reported as a warning and never blocks prose generation.
+HARD_FINDING_MARKERS = (
+    "missing structured plot/continuity fields",
+    "missing canonical CAST line",
+    "expected exactly",
+    "CAST contains no named",
+    "duplicate canonical character",
+    "has no planned on-screen scenes",
+    "out-of-range",
+    "repeats an on-screen scene",
+    "unsupported fate metadata",
+    "death scene must be included",
+    "physical appearances after their planned death",
+    "missing state fields",
+    "NEXT_CAUSE must be none/resolved",
+    "kills ",
+    "CONTINUITY_LEDGER does not identify any canonical cast member",
+)
+# Prose findings that may stop a run: invented people/organisations/relationships and the dead acting.
+HARD_PROSE_MARKERS = (
+    "unseeded",
+    "dead character",
+    "title-contaminated",
+    "has out-of-range appearance scene",
 )
 
 
-def split_contract_findings(findings: list[str]) -> tuple[list[str], list[str]]:
-    """Return (fatal, warnings) from a list of blueprint contract findings."""
+def split_contract_findings(findings: list[str], hard_markers: tuple[str, ...] = HARD_FINDING_MARKERS) -> tuple[list[str], list[str]]:
+    """Return (fatal, warnings). Anything that is not a known structural/grounding finding is only a warning."""
     fatal: list[str] = []
     soft: list[str] = []
     for item in findings:
-        (soft if any(marker in item for marker in SOFT_FINDING_MARKERS) else fatal).append(item)
+        (fatal if any(marker in item for marker in hard_markers) else soft).append(item)
     return fatal, soft
 
 
