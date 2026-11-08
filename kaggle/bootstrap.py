@@ -416,57 +416,117 @@ def _pytorch_runtime_is_locked(runtime: dict) -> bool:
     return result.returncode == 0
 
 
+def _director_isolated_environment(base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Prevent inherited Python paths/active venv markers from overriding the Director venv.
+
+    CUDA and compiler variables are preserved so the server retains the same host
+    runtime environment as the successful compatibility run; the final Director
+    CUDA target is aligned with the main cu132 runtime.
+    """
+    env = dict(os.environ if base_env is None else base_env)
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
+        env.pop(key, None)
+    return env
+
+
 def _probe_director_venv(runtime: dict, env_dir: Path) -> bool:
-    """Return True only when the isolated vLLM environment matches every lock."""
+    """Return True only when the isolated vLLM environment matches every runtime lock.
+
+    Install the final Torch/TorchVision/TorchAudio stack and the published wheel's
+    non-Torch dependencies directly, then install vLLM 0.33.0 with --no-deps.
+    This bypasses stale exact companion pins in the wheel metadata without first
+    downloading a disposable Torch 2.14/cu130 stack. The Stable ABI module and a
+    registered CUDA operator are executed before accepting or reusing this venv.
+    """
     director = dict(runtime.get("director", {}) or {})
+    pytorch = dict(runtime.get("pytorch", {}) or {})
     vllm_version = str(director.get("vllm_version", "") or "").strip()
     wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
     transformers_version = _exact_requirement_pin("transformers")
     tokenizers_version = _exact_requirement_pin("tokenizers")
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
+    torchvision_version = str(pytorch.get("torchvision_version", "") or "").strip()
+    torchaudio_version = str(pytorch.get("torchaudio_version", "") or "").strip()
     tp_size = int(director.get("tensor_parallel_size", 0) or 0)
     python = env_dir / "bin" / "python"
+    pyvenv_cfg = env_dir / "pyvenv.cfg"
     missing = []
     if not python.is_file():
         missing.append(f"venv Python missing: {python}")
+    if not pyvenv_cfg.is_file():
+        missing.append(f"venv configuration missing: {pyvenv_cfg}")
     for label, value in (("vLLM version", vllm_version), ("wrapt version", wrapt_version),
-                         ("Director Torch version", torch_version), ("CUDA wheel tag", cuda_tag)):
+                         ("Director Torch version", torch_version), ("CUDA wheel tag", cuda_tag),
+                         ("TorchVision version", torchvision_version), ("TorchAudio version", torchaudio_version),
+                         ("Transformers version", transformers_version), ("tokenizers version", tokenizers_version)):
         if not value:
             missing.append(f"{label} missing from runtime lock")
     if cuda_tag and not re.fullmatch(r"cu\d{3}", cuda_tag):
         missing.append(f"invalid CUDA wheel tag: {cuda_tag!r}")
+    if torch_version != str(pytorch.get("version", "") or "").strip() or cuda_tag != str(pytorch.get("cuda", "") or "").strip().lower():
+        missing.append("Director target Torch/CUDA must match the main PyTorch runtime lock")
     if tp_size <= 0:
         missing.append(f"invalid tensor_parallel_size: {tp_size}")
     if missing:
         print("[DIRECTOR CACHE MISS] " + "; ".join(missing), flush=True)
         return False
+    try:
+        cfg_text = pyvenv_cfg.read_text(encoding="utf-8", errors="replace").lower()
+    except OSError as exc:
+        print(f"[DIRECTOR CACHE MISS] unable to read venv config: {exc}", flush=True)
+        return False
+    if not re.search(r"(?m)^\s*include-system-site-packages\s*=\s*false\s*$", cfg_text):
+        print("[DIRECTOR CACHE MISS] Director venv must set include-system-site-packages=false", flush=True)
+        return False
+
     expected_torch = f"{torch_version}+{cuda_tag}"
-    code = (
-        "import sys, inspect, vllm, torch, wrapt, transformers, tokenizers; "
-        "from transformers import Qwen3Config; "
-        "from vllm.config.load import LoadConfig; "
-        "from vllm.config import SpeculativeConfig; "
-        f"assert sys.version_info[:2] == (3, 12), sys.version; "
-        f"assert vllm.__version__ == {vllm_version!r}; "
-        f"assert torch.__version__ == {expected_torch!r}, torch.__version__; "
-        f"assert torch.version.cuda == {_cuda_runtime_from_tag(cuda_tag)!r}, torch.version.cuda; "
-        f"assert wrapt.__version__ == {wrapt_version!r}; "
-        f"assert transformers.__version__ == {transformers_version!r}; "
-        f"assert tokenizers.__version__ == {tokenizers_version!r}; "
-        "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
-        "assert Qwen3Config.__name__ == 'Qwen3Config'; "
-        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); "
-        "assert torch.cuda.is_available() and torch.cuda.device_count() == " + str(tp_size) + "; "
-        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
-        "print('Director runtime probe: PASS')"
-    )
-    result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=False)
+    expected_cuda_runtime = _cuda_runtime_from_tag(cuda_tag)
+    code = "\n".join((
+        "import importlib, importlib.metadata as md, inspect, pathlib, sys",
+        "import torch, vllm, wrapt, transformers, tokenizers",
+        "from transformers import Qwen3Config",
+        "from vllm.config.load import LoadConfig",
+        "from vllm.config import SpeculativeConfig",
+        f"expected_prefix = pathlib.Path({str(env_dir.resolve())!r}).resolve()",
+        "assert sys.version_info[:2] == (3, 12), sys.version",
+        "assert pathlib.Path(sys.prefix).resolve() == expected_prefix, (sys.prefix, expected_prefix)",
+        "assert pathlib.Path(torch.__file__).resolve().is_relative_to(expected_prefix), torch.__file__",
+        "assert pathlib.Path(vllm.__file__).resolve().is_relative_to(expected_prefix), vllm.__file__",
+        "assert pathlib.Path(transformers.__file__).resolve().is_relative_to(expected_prefix), transformers.__file__",
+        "assert pathlib.Path(tokenizers.__file__).resolve().is_relative_to(expected_prefix), tokenizers.__file__",
+        "assert pathlib.Path(wrapt.__file__).resolve().is_relative_to(expected_prefix), wrapt.__file__",
+        f"assert vllm.__version__ == {vllm_version!r}, vllm.__version__",
+        f"assert torch.__version__ == {expected_torch!r}, torch.__version__",
+        f"assert torch.version.cuda == {expected_cuda_runtime!r}, torch.version.cuda",
+        f"assert md.version('torchvision') == {torchvision_version!r}, md.version('torchvision')",
+        f"assert md.version('torchaudio') == {torchaudio_version!r}, md.version('torchaudio')",
+        f"assert wrapt.__version__ == {wrapt_version!r}, wrapt.__version__",
+        f"assert transformers.__version__ == {transformers_version!r}, transformers.__version__",
+        f"assert tokenizers.__version__ == {tokenizers_version!r}, tokenizers.__version__",
+        "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters",
+        "assert Qwen3Config.__name__ == 'Qwen3Config'",
+        "assert 'eagle3' in str(inspect.signature(SpeculativeConfig))",
+        f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tp_size}",
+        "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count()))",
+        "importlib.import_module('vllm._C_stable_libtorch')",
+        "x = torch.randn(4, 256, device='cuda:0', dtype=torch.float16)",
+        "y = torch.empty(4, 128, device='cuda:0', dtype=torch.float16)",
+        "torch.ops._C.silu_and_mul(y, x)",
+        "torch.cuda.synchronize(0)",
+        "ref = torch.nn.functional.silu(x[:, :128]) * x[:, 128:]",
+        "assert torch.allclose(y, ref, atol=1e-2, rtol=1e-2), 'vLLM Stable ABI silu_and_mul mismatch'",
+        "print('Director venv isolation: PASS')",
+        "print('vLLM Stable ABI compiled CUDA op: PASS')",
+        "print('Director runtime probe: PASS')",
+    ))
+    env = _director_isolated_environment()
+    result = subprocess.run([str(python), "-c", code], capture_output=True, text=True, check=False, env=env)
     if result.returncode != 0:
-        _print_probe_failure("DIRECTOR CACHE MISS — isolated vLLM runtime probe", result)
+        _print_probe_failure("DIRECTOR CACHE MISS — isolated vLLM Stable ABI runtime probe", result)
+    else:
+        print(result.stdout.strip(), flush=True)
     return result.returncode == 0
-
-
 
 
 def _sage_build_stamp_path(install_dir: Path) -> Path:
@@ -1443,39 +1503,73 @@ def install_director_runtime(
             "The isolated vLLM Director environment must be created from Python 3.12; "
             f"configured={director_python}, current={sys.version_info[:2]}."
         )
+    pytorch = dict(runtime.get("pytorch", {}) or {})
     torch_version = str(director.get("vllm_torch_version", "") or "").strip()
     cuda_tag = str(director.get("vllm_cuda", "") or "").strip().lower()
+    wheel_build_cuda = str(director.get("vllm_wheel_build_cuda", "") or "").strip().lower()
+    install_mode = str(director.get("vllm_install_mode", "") or "").strip().lower()
     loader_strategy = str(director.get("safetensors_load_strategy", "lazy") or "lazy").strip().lower()
     if not vllm_version:
         raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
-    if not torch_version:
-        raise RuntimeError("runtime_versions.yaml director.vllm_torch_version is required.")
-    expected_director_cuda = _cuda_runtime_from_tag(cuda_tag)
+    if not torch_version or not re.fullmatch(r"cu\d{3}", cuda_tag):
+        raise RuntimeError("runtime_versions.yaml director.vllm_torch_version/vllm_cuda must be locked.")
+    if not re.fullmatch(r"cu\d{3}", wheel_build_cuda):
+        raise RuntimeError("runtime_versions.yaml director.vllm_wheel_build_cuda must be a cuNNN build tag.")
+    if install_mode != "stable_abi_no_deps":
+        raise RuntimeError("runtime_versions.yaml director.vllm_install_mode must be stable_abi_no_deps.")
+    if torch_version != str(pytorch.get("version", "") or "").strip() or cuda_tag != str(pytorch.get("cuda", "") or "").strip().lower():
+        raise RuntimeError("Director final Torch/CUDA target must match runtime_versions.yaml pytorch.version/pytorch.cuda.")
+    expected_director_torch = f"{torch_version}+{cuda_tag}"
     if loader_strategy not in {"eager", "lazy", "prefetch", "torchao"}:
         raise RuntimeError(
             "runtime_versions.yaml director.safetensors_load_strategy must be one of "
             f"eager/lazy/prefetch/torchao, got {loader_strategy!r}."
         )
-    expected_director_torch = f"{torch_version}+{cuda_tag}"
     transformers_version = _exact_requirement_pin("transformers")
     tokenizers_version = _exact_requirement_pin("tokenizers")
+    wrapt_version = str(runtime.get("python", {}).get("wrapt_version", "") or "").strip()
+    torchvision_version = str(pytorch.get("torchvision_version", "") or "").strip()
+    torchaudio_version = str(pytorch.get("torchaudio_version", "") or "").strip()
+    target_index = str(pytorch.get("index", "") or "").strip()
+    if not all((transformers_version, tokenizers_version, wrapt_version, torchvision_version, torchaudio_version, target_index)):
+        raise RuntimeError("Director install requires exact Transformers/tokenizers/wrapt and main PyTorch/TorchVision/TorchAudio/index pins.")
+    if not torchvision_version.endswith(f"+{cuda_tag}") or not torchaudio_version.endswith(f"+{cuda_tag}"):
+        raise RuntimeError("Main TorchVision and TorchAudio builds must match the Director target CUDA tag.")
+    dependency_manifest = ROOT / "configs" / "vllm_director_requirements.txt"
+    if not dependency_manifest.is_file():
+        raise RuntimeError(f"Director vLLM dependency manifest is missing: {dependency_manifest}")
+    dependency_lines = [line.split("#", 1)[0].strip() for line in dependency_manifest.read_text(encoding="utf-8").splitlines()]
+    dependency_lines = [line for line in dependency_lines if line]
+    dependency_names = {
+        re.match(r"[A-Za-z0-9_.-]+", line).group(0).lower().replace("_", "-")
+        for line in dependency_lines
+        if re.match(r"[A-Za-z0-9_.-]+", line)
+    }
+    forbidden_dependencies = {"torch", "torchvision", "torchaudio", "vllm"}
+    if dependency_names.intersection(forbidden_dependencies):
+        raise RuntimeError(
+            "vllm_director_requirements.txt must omit vLLM and the three PyTorch stack packages; "
+            "bootstrap installs those separately with the final target versions."
+        )
+    for package, version in (("transformers", transformers_version), ("tokenizers", tokenizers_version), ("wrapt", wrapt_version)):
+        if f"{package}=={version}" not in dependency_lines:
+            raise RuntimeError(f"vllm_director_requirements.txt must pin {package}=={version}.")
     env_dir_value = str(director.get("vllm_env_dir", "") or "").strip()
     tensor_parallel_size = int(director.get("tensor_parallel_size", 0) or 0)
-    if not vllm_version:
-        raise RuntimeError("runtime_versions.yaml director.vllm_version is required.")
     if not env_dir_value:
         raise RuntimeError("runtime_versions.yaml director.vllm_env_dir is required.")
     if tensor_parallel_size <= 0:
         raise RuntimeError("runtime_versions.yaml director.tensor_parallel_size must be positive.")
-    env_dir = Path(
-        os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)
-    ).expanduser().resolve()
+    env_dir = Path(os.getenv("H3_DIRECTOR_VLLM_ENV_DIR", env_dir_value)).expanduser().resolve()
     print("=" * 80)
     print("INSTALLING QWEN DIRECTOR RUNTIME")
     print("=" * 80)
     print("[DIRECTOR]", f"model={model_path}")
     print("[DIRECTOR]", f"speculator={spec_path}")
     print("[DIRECTOR]", f"backend=vllm version={vllm_version}")
+    print("[DIRECTOR]", f"wheel_build_cuda={wheel_build_cuda}")
+    print("[DIRECTOR]", f"install_mode={install_mode}")
+    print("[DIRECTOR]", f"final_runtime={expected_director_torch}")
     print("[DIRECTOR]", f"isolated_env={env_dir}")
     uv = shutil.which("uv")
     if uv is None:
@@ -1483,125 +1577,56 @@ def install_director_runtime(
         uv = shutil.which("uv")
     if uv is None:
         raise RuntimeError("uv is required to create the isolated Director environment.")
-    # A failed/partial Director install must not be reused. The versioned env path
-    # is deliberately separate from the historical 0.31 path; only this venv
-    # is removed, never either model checkpoint directory.
     if env_dir.is_symlink():
         raise RuntimeError(f"Refusing to rebuild a symlinked Director environment: {env_dir}")
     if env_dir.exists():
         shutil.rmtree(env_dir)
     env_dir.parent.mkdir(parents=True, exist_ok=True)
-    venv_env = os.environ.copy()
-    venv_env.pop("UV_SYSTEM_PYTHON", None)
-    run(uv, "venv", str(env_dir), "--python", sys.executable, "--seed", "--link-mode", "copy", env=venv_env)
+    install_env = _director_isolated_environment()
+    install_env.pop("UV_SYSTEM_PYTHON", None)
+    install_env["UV_LINK_MODE"] = "copy"
+    run(uv, "venv", str(env_dir), "--python", sys.executable, "--seed", "--link-mode", "copy", env=install_env)
     venv_python = env_dir / "bin" / "python"
+    pyvenv_cfg = env_dir / "pyvenv.cfg"
     if not venv_python.is_file() or not os.access(venv_python, os.X_OK):
         raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
-    env = os.environ.copy()
-    env["UV_LINK_MODE"] = "copy"
-    env["UV_TORCH_BACKEND"] = cuda_tag
-    install = subprocess.run(
-        [
-            uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
-            "--torch-backend", cuda_tag, "--compile-bytecode",
-            f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
-            f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
-        ],
-        env=env,
-        check=False,
-        text=True,
+    pyvenv_text = pyvenv_cfg.read_text(encoding="utf-8", errors="replace").lower() if pyvenv_cfg.is_file() else ""
+    if not re.search(r"(?m)^\s*include-system-site-packages\s*=\s*false\s*$", pyvenv_text):
+        raise RuntimeError("Director venv must have include-system-site-packages=false; refusing mixed Python packages.")
+
+    # Resolve the final cu132 Torch stack and the published wheel's non-Torch
+    # dependencies in a single transaction. The companion manifest excludes the
+    # wheel's stale Torch 2.14/cu130 pins, avoiding a redundant large CUDA download.
+    print("[DIRECTOR] installing final Torch/CUDA stack and non-Torch vLLM dependencies", flush=True)
+    dependency_install = subprocess.run(
+        [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
+         "--index-url", "https://pypi.org/simple", "--extra-index-url", target_index,
+         "--index-strategy", "unsafe-best-match", "-r", str(dependency_manifest),
+         f"torch=={expected_director_torch}", f"torchvision=={torchvision_version}",
+         f"torchaudio=={torchaudio_version}"],
+        env=install_env, check=False, text=True,
     )
-    if install.returncode != 0:
-        raise RuntimeError("Failed to install isolated vLLM runtime.")
-    verification = subprocess.run(
-        [
-            str(venv_python), "-c",
-            (
-                "import sys, vllm, torch, inspect, wrapt, transformers, tokenizers; "
-                "from transformers import Qwen3Config; "
-                "from vllm.config import SpeculativeConfig; "
-                "from vllm.config.load import LoadConfig; "
-                "assert sys.version_info[:2] == (3, 12), sys.version; "
-                "print('vLLM import: PASS'); "
-                "print('wrapt version:', wrapt.__version__); "
-                "print('vLLM version:', vllm.__version__); "
-                "print('Director Torch version:', torch.__version__); "
-                "print('Director CUDA runtime:', torch.version.cuda); "
-                "print('safetensors_load_strategy supported:', 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters); "
-                "print('Transformers version:', transformers.__version__); "
-                "print('tokenizers version:', tokenizers.__version__); "
-                "print('Qwen3 config import: PASS', Qwen3Config.__name__); "
-                "print('EAGLE-3 supported:', 'eagle3' in str(inspect.signature(SpeculativeConfig))); "
-                f"assert torch.__version__ == {expected_director_torch!r}; "
-                f"assert torch.version.cuda == {expected_director_cuda!r}; "
-                "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
-                f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel_size}; "
-                "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
-                "print('Torch CUDA:', torch.cuda.is_available()); "
-                "print('GPU count:', torch.cuda.device_count()); "
-                "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
-            ),
-        ],
-        capture_output=True, text=True, check=False, env=env,
+    if dependency_install.returncode != 0:
+        raise RuntimeError("Failed to install the final Director Torch/cu132 stack and vLLM's non-Torch dependencies.")
+
+    # vLLM 0.33.0's published wheel is CUDA 13.0-built and uses LibTorch Stable
+    # ABI. --no-deps is intentional: the exact Torch 2.14/cu130 companion pins in
+    # wheel metadata are not this project's selected runtime stack. The direct
+    # cu132 stack above is verified by the live Stable ABI probe below.
+    print("[DIRECTOR] installing published vLLM wheel with --no-deps", vllm_version, flush=True)
+    vllm_install = subprocess.run(
+        [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
+         "--no-deps", f"vllm=={vllm_version}"],
+        env=install_env, check=False, text=True,
     )
-    print(verification.stdout)
-    if verification.stderr:
-        print(verification.stderr)
-    if verification.returncode != 0:
-        raise RuntimeError("vLLM isolated runtime verification failed.")
-    observed_wrapt_version = None
-    for line in verification.stdout.splitlines():
-        if line.startswith("wrapt version:"):
-            observed_wrapt_version = line.split(":", 1)[1].strip()
-            break
-    if observed_wrapt_version != wrapt_version:
-        raise RuntimeError(
-            "Director isolated runtime wrapt mismatch: "
-            f"observed={observed_wrapt_version!r}, expected={wrapt_version!r}."
-        )
-    observed_versions = {}
-    for line in verification.stdout.splitlines():
-        if ":" in line:
-            name, value = line.split(":", 1)
-            observed_versions[name.strip()] = value.strip()
-    observed_version = observed_versions.get("vLLM version", "")
-    if observed_version != vllm_version:
-        raise RuntimeError(
-            "Director runtime verification version mismatch: "
-            f"observed={observed_version!r}, configured={vllm_version!r}."
-        )
-    observed_transformers = observed_versions.get("Transformers version", "")
-    if observed_transformers != transformers_version:
-        raise RuntimeError(
-            "Director Transformers version mismatch: "
-            f"observed={observed_transformers!r}, expected={transformers_version!r}."
-        )
-    observed_tokenizers = observed_versions.get("tokenizers version", "")
-    if observed_tokenizers != tokenizers_version:
-        raise RuntimeError(
-            "Director tokenizers version mismatch: "
-            f"observed={observed_tokenizers!r}, expected={tokenizers_version!r}."
-        )
-    if "Qwen3 config import: PASS" not in verification.stdout:
-        raise RuntimeError("Director runtime did not import the pinned Transformers Qwen3 config.")
-    if f"EAGLE-3 supported: True" not in verification.stdout:
-        raise RuntimeError(
-            f"Director runtime verification did not confirm speculative method {speculative_method!r}."
-        )
-    observed_gpu_count = None
-    for line in verification.stdout.splitlines():
-        if line.startswith("GPU count:"):
-            try:
-                observed_gpu_count = int(line.split(":", 1)[1].strip())
-            except ValueError:
-                observed_gpu_count = None
-            break
-    if observed_gpu_count != tensor_parallel_size:
-        raise RuntimeError(
-            "Qwen Director GPU topology mismatch: "
-            f"observed={observed_gpu_count}, configured tensor_parallel_size={tensor_parallel_size}."
-        )
+    if vllm_install.returncode != 0:
+        raise RuntimeError("Failed to install the published vLLM wheel with its explicit dependency manifest.")
+
+    if not _probe_director_venv(runtime, env_dir):
+        raise RuntimeError("Final Director Torch 2.15/cu132 Stable ABI runtime probe failed.")
+    print("[DIRECTOR] one-stack published vLLM Stable ABI runtime validated on target Torch/CUDA stack.", flush=True)
     print("[DIRECTOR] EAGLE-3 speculator ready:", spec_path)
+
 def install_storyboard_runtime(
     runtime: dict,
 ) -> None:
@@ -2875,14 +2900,28 @@ def _apply_sage_sm75_source_corrections(source: str) -> str:
     return source
 
 def _patch_sage_cxx_standard(install_dir: Path) -> None:
-    """Build the Sage extension with C++20.
+    """Patch the pinned SM75 fork for the selected PyTorch/CUDA build.
 
-    PyTorch 2.14+ ATen/c10 headers need C++20, but the pinned SageAttention fork hard-codes
-    -std=c++17 for both the host compiler and nvcc, which fails inside torch/extension.h
-    (cascade of "no match for operator!=" errors). Replace the pinned flag, idempotently.
+    The fork disables PyTorch's CUDA-version check because it historically built
+    against a different system NVCC. We now supply the matching CUDA 13.2 toolkit,
+    so retaining that bypass would hide a real mismatch. Remove it, and use C++20
+    for PyTorch 2.15+ ATen/c10 headers.
     """
     setup_py = install_dir / "setup.py"
     source = setup_py.read_text(encoding="utf-8")
+
+    bypass = "torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None"
+    bypass_count = source.count(bypass)
+    if bypass_count > 1:
+        raise RuntimeError(
+            "SageAttention setup.py contains multiple CUDA version-check bypasses; refusing an ambiguous patch."
+        )
+    if bypass_count == 1:
+        source = source.replace(bypass + "\n", "")
+        print("[SAGE BUILD PATCH] removed fork CUDA-version-check bypass: PASS")
+    elif bypass in source:
+        raise RuntimeError("SageAttention CUDA-version-check bypass removal failed.")
+
     legacy = source.count('"-std=c++17"')
     if legacy:
         if legacy != 2:
@@ -2890,37 +2929,192 @@ def _patch_sage_cxx_standard(install_dir: Path) -> None:
                 f"SageAttention setup.py has {legacy} '-std=c++17' flags; expected exactly the cxx and nvcc lists."
             )
         source = source.replace('"-std=c++17"', '"-std=c++20"')
-        setup_py.write_text(source, encoding="utf-8")
+    if bypass in source:
+        raise RuntimeError("SageAttention setup.py still bypasses PyTorch's CUDA version check.")
     if '"-std=c++17"' in source or source.count('"-std=c++20"') != 2:
         raise RuntimeError("SageAttention setup.py C++20 patch verification failed.")
-    print("[SAGE BUILD PATCH] setup.py -std=c++17 -> -std=c++20 (cxx + nvcc): PASS")
+    setup_py.write_text(source, encoding="utf-8")
+    print("[SAGE BUILD PATCH] setup.py CUDA check restored + C++20 flags verified: PASS")
+
+
+def _prepare_sage_cuda_build_toolchain(runtime: dict, env: dict) -> Path:
+    """Install and select an isolated-to-the-build CUDA 13.2 pip toolchain.
+
+    The CUDA 13 pip wheels share site-packages/nvidia/cu13. This installs only
+    compiler/header components missing from the already locked cu132 runtime;
+    it does not replace PyTorch, cuBLAS or the system CUDA installation.
+    """
+    cfg = dict(runtime.get("sage_attention", {}) or {})
+    pytorch = dict(runtime.get("pytorch", {}) or {})
+    expected_cuda = _cuda_runtime_from_tag(str(pytorch.get("cuda", "")))
+    build_cuda_tag = str(cfg.get("build_cuda", "")).strip().lower()
+    if build_cuda_tag != str(pytorch.get("cuda", "")).strip().lower():
+        raise RuntimeError(
+            f"SageAttention build CUDA {build_cuda_tag!r} must match main PyTorch CUDA {pytorch.get('cuda')!r}."
+        )
+
+    toolkit_package_version = str(cfg.get("build_toolkit_package_version", "")).strip()
+    component_version = str(cfg.get("build_toolkit_component_version", "")).strip()
+    if not toolkit_package_version or not component_version:
+        raise RuntimeError(
+            "runtime_versions.yaml must pin SageAttention build_toolkit_package_version and build_toolkit_component_version."
+        )
+    if not component_version.startswith(expected_cuda + "."):
+        raise RuntimeError(
+            f"SageAttention CUDA components {component_version} do not match PyTorch CUDA {expected_cuda}."
+        )
+
+    required_components = {
+        "nvidia-cuda-nvcc": component_version,
+        "nvidia-cuda-crt": component_version,
+        "nvidia-cuda-cccl": component_version,
+        "nvidia-cuda-runtime": component_version,
+        "nvidia-nvvm": component_version,
+    }
+    missing = []
+    for package, expected_version in required_components.items():
+        try:
+            actual = importlib_metadata.version(package)
+        except importlib_metadata.PackageNotFoundError:
+            actual = None
+        if actual != expected_version:
+            missing.append(f"{package}={actual or 'not installed'} (need {expected_version})")
+
+    if missing:
+        requirement = (
+            f"cuda-toolkit[nvcc,crt,cccl,cudart,nvvm]=={toolkit_package_version}"
+        )
+        print(
+            "[SAGE CUDA TOOLKIT CACHE MISS] " + " | ".join(missing),
+            flush=True,
+        )
+        run(
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-q",
+            "--disable-pip-version-check",
+            requirement,
+        )
+    else:
+        print(
+            f"[SAGE CUDA TOOLKIT WARM] CUDA {expected_cuda} compiler components already match {component_version}",
+            flush=True,
+        )
+
+    component_failures = []
+    for package, expected_version in required_components.items():
+        try:
+            actual = importlib_metadata.version(package)
+        except importlib_metadata.PackageNotFoundError:
+            actual = "not installed"
+        if actual != expected_version:
+            component_failures.append(f"{package}: expected {expected_version}, found {actual}")
+    if component_failures:
+        raise RuntimeError(
+            "CUDA build-toolkit installation did not satisfy the locked components:\n- "
+            + "\n- ".join(component_failures)
+        )
+
+    try:
+        import nvidia
+        nvidia_roots = [Path(value).resolve() for value in nvidia.__path__]
+    except Exception as exc:
+        raise RuntimeError(f"NVIDIA CUDA pip namespace package is unavailable: {exc}") from exc
+
+    cuda_home = next(
+        (
+            candidate / "cu13"
+            for candidate in nvidia_roots
+            if (candidate / "cu13" / "bin" / "nvcc").is_file()
+        ),
+        None,
+    )
+    if cuda_home is None:
+        raise RuntimeError(
+            "CUDA 13 pip toolkit components are installed, but nvidia/cu13/bin/nvcc was not found. "
+            "Refusing to fall back to the system CUDA compiler."
+        )
+
+    include_dir = cuda_home / "include"
+    lib_dir = cuda_home / "lib"
+    nvcc = cuda_home / "bin" / "nvcc"
+    for required in (include_dir / "cuda.h", include_dir / "cuda_runtime.h", nvcc):
+        if not required.is_file():
+            raise RuntimeError(f"CUDA 13.2 toolkit is missing a required build file: {required}")
+    if not lib_dir.is_dir():
+        raise RuntimeError(f"CUDA 13.2 toolkit library directory is missing: {lib_dir}")
+
+    # PyTorch's CUDAExtension links with -lcudart. CUDA 13 pip wheels may ship
+    # only the SONAME file, so supply the conventional linker name if necessary.
+    cudart_link = lib_dir / "libcudart.so"
+    if not cudart_link.exists():
+        candidates = sorted(lib_dir.glob("libcudart.so.*"))
+        if not candidates:
+            raise RuntimeError(f"CUDA 13.2 toolkit does not contain libcudart: {lib_dir}")
+        cudart_link.symlink_to(candidates[0].name)
+
+    nvcc_result = subprocess.run(
+        [str(nvcc), "--version"], capture_output=True, text=True, check=False, timeout=30
+    )
+    if nvcc_result.returncode != 0:
+        raise RuntimeError(
+            "CUDA 13.2 nvcc could not execute:\n"
+            + (nvcc_result.stdout or "")
+            + (nvcc_result.stderr or "")
+        )
+    match = re.search(r"release (\d+)\.(\d+)", nvcc_result.stdout)
+    actual_cuda = f"{match.group(1)}.{match.group(2)}" if match else ""
+    if actual_cuda != expected_cuda:
+        raise RuntimeError(
+            f"CUDA build compiler mismatch: expected nvcc {expected_cuda}, found {actual_cuda or 'unparsed'}."
+        )
+
+    env["CUDA_HOME"] = str(cuda_home)
+    env["CUDA_PATH"] = str(cuda_home)
+    env["CUDACXX"] = str(nvcc)
+    env["PATH"] = str(cuda_home / "bin") + os.pathsep + env.get("PATH", "")
+    env["CPATH"] = str(include_dir) + os.pathsep + env.get("CPATH", "")
+    env["LIBRARY_PATH"] = str(lib_dir) + os.pathsep + env.get("LIBRARY_PATH", "")
+    env["LD_LIBRARY_PATH"] = str(lib_dir) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+    env.pop("CMAKE_CUDA_COMPILER", None)
+    env.pop("CUDAHOSTCXX", None)
+    print(
+        f"[SAGE CUDA TOOLKIT] nvcc={nvcc} release {actual_cuda}; "
+        f"CUDA_HOME={cuda_home}; components={component_version}: PASS",
+        flush=True,
+    )
+    return cuda_home
 
 
 def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
-    """Print the CUDA toolchain a native build will use, and warn on a toolkit/torch major mismatch."""
+    """Fail closed unless Sage uses the exact CUDA toolkit selected for main Torch."""
+    cfg = dict(runtime.get("sage_attention", {}) or {})
+    pytorch = dict(runtime.get("pytorch", {}) or {})
+    expected_cuda = _cuda_runtime_from_tag(str(pytorch.get("cuda", "")))
     cuda_home = env.get("CUDA_HOME") or env.get("CUDA_PATH") or ""
-    nvcc = shutil.which("nvcc", path=env.get("PATH")) or (
-        str(Path(cuda_home) / "bin" / "nvcc") if cuda_home and (Path(cuda_home) / "bin" / "nvcc").is_file() else ""
+    nvcc = Path(cuda_home) / "bin" / "nvcc" if cuda_home else None
+    if nvcc is None or not nvcc.is_file():
+        raise RuntimeError(
+            "SageAttention build requires the pinned CUDA 13.2 nvcc; refusing to use an unverified system compiler."
+        )
+    out = subprocess.run(
+        [str(nvcc), "--version"], capture_output=True, text=True, check=False, timeout=30
     )
-    if not nvcc and Path("/usr/local/cuda/bin/nvcc").is_file():
-        nvcc = "/usr/local/cuda/bin/nvcc"
-    nvcc_text = "not found"
-    if nvcc:
-        try:
-            out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, check=False, timeout=20)
-            match = re.search(r"release (\d+)\.(\d+)", out.stdout)
-            nvcc_text = f"{nvcc} release {match.group(1)}.{match.group(2)}" if match else f"{nvcc} (version unparsed)"
-            if match:
-                torch_cuda = _cuda_runtime_from_tag(str((runtime.get("pytorch", {}) or {}).get("cuda", "")))
-                if match.group(1) != torch_cuda.split(".", 1)[0]:
-                    print(
-                        f"[SAGE TOOLCHAIN] system nvcc {match.group(1)}.{match.group(2)} differs from PyTorch's "
-                        f"CUDA {torch_cuda}; the SM75 build is checked by the compile and by the GPU correctness gates below."
-                    )
-        except Exception as exc:
-            nvcc_text = f"{nvcc} (query failed: {exc})"
-    print(f"[SAGE TOOLCHAIN] nvcc={nvcc_text} CUDA_HOME={cuda_home or '(unset; torch will search)'}", flush=True)
-
+    if out.returncode != 0:
+        raise RuntimeError("Could not execute the selected SageAttention nvcc:\n" + (out.stderr or out.stdout or ""))
+    match = re.search(r"release (\d+)\.(\d+)", out.stdout)
+    actual_cuda = f"{match.group(1)}.{match.group(2)}" if match else ""
+    if actual_cuda != expected_cuda:
+        raise RuntimeError(
+            f"SageAttention nvcc {actual_cuda or 'unparsed'} does not match main PyTorch CUDA {expected_cuda}."
+        )
+    print(
+        f"[SAGE TOOLCHAIN] nvcc={nvcc} release {actual_cuda}; "
+        f"PyTorch CUDA={expected_cuda}; CUDA_HOME={cuda_home}: PASS",
+        flush=True,
+    )
 
 def _run_logged_build(args: list, env: dict, label: str, tail_lines: int = 200) -> None:
     """Run a long native build quietly; nothing is written to the project, the tail is printed on failure."""
@@ -3020,6 +3214,7 @@ def install_sageattention_sm75(runtime: dict) -> None:
     build_env["TORCH_CUDA_ARCH_LIST"] = "7.5"
     build_env["MAX_JOBS"] = "1"
     build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
+    _prepare_sage_cuda_build_toolchain(runtime, build_env)
     _describe_cuda_toolchain(runtime, build_env)
     _run_logged_build(
         [
