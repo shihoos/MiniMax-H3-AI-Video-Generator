@@ -32,12 +32,14 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.33.0
-  # Published cu130 vLLM wheel uses LibTorch Stable ABI. Install without deps,
-  # then resolve its wheel metadata while retaining the final Torch 2.15/cu132 stack.
+  # One torch for the whole project: the Director venv runs the same torch/CUDA build as ComfyUI (pytorch.* below).
+  # The vLLM 0.33.0 wheel is a LibTorch Stable-ABI build, so it is installed first and torch is then replaced by the
+  # pytorch.* build without rebuilding vLLM (verified on Kaggle 2xT4: kernels, Qwen3-14B-AWQ + EAGLE-3 TP=2, same speed).
   vllm_torch_version: 2.15.0
   vllm_cuda: cu132
-  vllm_wheel_build_cuda: cu130
-  vllm_install_mode: stable_abi_no_deps
+  # Only the first install step: vLLM's own metadata pins an older torch, which uv installs for a moment from this
+  # wheel backend and the next step replaces with vllm_torch_version/vllm_cuda. Nothing of it remains in the venv.
+  vllm_install_torch_backend: cu130
   # Single source of truth for the Director weight loader (bootstrap, preflight, planner and validators
   # all read this key). lazy = mmap from the staged local checkpoint copy; eager copies whole shards
   # into RAM per TP worker and ran the 33 GB Kaggle host out of memory.
@@ -54,14 +56,15 @@ director:
   eager_ram_safety_factor: 1.25
   eager_ram_warning_reserve_gib: 4.0
   allow_transformers_vllm_constraint_override: false
-  vllm_env_dir: /tmp/h3_qwen_vllm_033_t215cu132_tf517_tok0233
+  vllm_env_dir: /tmp/h3_qwen_vllm_033_torch215_tf517_tok0233
   context: 10240
   max_tokens: 7000
   story_max_tokens: 6500
   temperature: 0.2
   top_p: 0.85
   tensor_parallel_size: 2
-  # Validated Qwen3-14B-AWQ + EAGLE-3 TP=2 operating point on 2xT4 with Torch 2.15/cu132.
+  # 0.82, not 0.9: on torch 2.15/cu132 each worker already holds ~1.8 GiB of CUDA context when vLLM checks free memory,
+  # so 0.9 (13.11 GiB) is refused at startup. 0.82 leaves ~4.2 GiB KV cache/GPU (53,920 tokens for a 10,240 context).
   gpu_memory_utilization: 0.82
   host: 127.0.0.1
   port: 8000
@@ -167,9 +170,6 @@ pytorch:
   torchaudio_version: 2.11.1+cu132
   minimum_driver_version: '580.00'
 sage_attention:
-  # This is deliberately the H3/T4 SM75 fork, not upstream SageAttention 2.2.0.
-  # Upstream 2.2.0 does not build an SM75 kernel. Keep the pinned fork and its
-  # source-level SM75 correctness fixes, but compile it against the main Torch CUDA.
   repository: https://github.com/THE-ANGEL-AI/SageAttention-SM75-path.git
   revision: 9f1c9a29be73abc3e92a56649bb24ce4278aea47
   version: 2.1.1-sm75.4
@@ -177,9 +177,6 @@ sage_attention:
   required: true
   smooth_k: true
   qk_quant_gran: per_warp
-  build_cuda: cu132
-  build_toolkit_package_version: 13.2.2
-  build_toolkit_component_version: 13.2.86
 h3_optimization:
   repository: https://github.com/Zironic/H3-Optimizations.git
   revision: 379f9c7922b3d7831dd93ae069ba0cb82cb4cf36
