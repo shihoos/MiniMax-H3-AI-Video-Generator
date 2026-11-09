@@ -1267,6 +1267,45 @@ def _exact_requirement_pin(package_name: str) -> str:
     return matches[0]
 
 
+def _director_isolated_environment() -> dict[str, str]:
+    """Environment for building/running the Director venv: no notebook Python paths, no implicit uv torch backend."""
+    isolated = os.environ.copy()
+    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX", "UV_SYSTEM_PYTHON", "UV_TORCH_BACKEND"):
+        isolated.pop(key, None)
+    isolated["UV_LINK_MODE"] = "copy"
+    return isolated
+
+
+def _read_installed_vllm_requirements(venv_python: Path, env: dict[str, str]) -> list[str]:
+    """vLLM's own requirements for this platform, read from the installed metadata, without the torch family.
+
+    The vLLM wheel pins its build torch; the project torch is installed separately and held by constraints.
+    """
+    code = r'''
+import json
+from importlib import metadata
+from pip._vendor.packaging.requirements import Requirement
+skip = {"torch", "torchvision", "torchaudio"}
+out = []
+for raw in metadata.requires("vllm") or []:
+    req = Requirement(raw)
+    if req.marker is not None and not req.marker.evaluate({"extra": ""}):
+        continue
+    if req.name.lower().replace("_", "-") in skip:
+        continue
+    out.append(str(req))
+print("H3_VLLM_REQUIREMENTS=" + json.dumps(out))
+'''
+    result = subprocess.run([str(venv_python), "-c", code], capture_output=True, text=True, check=False, env=env)
+    line = next((ln for ln in result.stdout.splitlines() if ln.startswith("H3_VLLM_REQUIREMENTS=")), "")
+    if result.returncode != 0 or not line:
+        raise RuntimeError("Could not read the installed vLLM requirements: " + (result.stderr or result.stdout)[-600:])
+    requirements = json.loads(line.split("=", 1)[1])
+    if not requirements:
+        raise RuntimeError("The installed vLLM wheel reported no requirements; refusing a dependency-less Director.")
+    return [str(item) for item in requirements]
+
+
 def install_director_runtime(
     runtime: dict,
 ) -> None:
@@ -1423,9 +1462,12 @@ def install_director_runtime(
     venv_python = env_dir / "bin" / "python"
     if not venv_python.is_file() or not os.access(venv_python, os.X_OK):
         raise RuntimeError(f"Invalid executable Director Python: {venv_python}")
-    install_backend = str(director.get("vllm_install_torch_backend", "") or "").strip().lower()
-    if not re.fullmatch(r"cu\d{3}", install_backend):
-        raise RuntimeError("runtime_versions.yaml director.vllm_install_torch_backend must be a cuNNN wheel tag.")
+    wheel_build_cuda = str(director.get("vllm_wheel_build_cuda", "") or "").strip().lower()
+    install_mode = str(director.get("vllm_install_mode", "") or "").strip().lower()
+    if not re.fullmatch(r"cu\d{3}", wheel_build_cuda):
+        raise RuntimeError("runtime_versions.yaml director.vllm_wheel_build_cuda must be a cuNNN tag.")
+    if install_mode != "stable_abi_no_deps":
+        raise RuntimeError("runtime_versions.yaml director.vllm_install_mode must be stable_abi_no_deps.")
     pytorch_cfg = dict(runtime.get("pytorch", {}) or {})
     pytorch_index = str(pytorch_cfg.get("index", "") or "").strip()
     if (
@@ -1440,45 +1482,62 @@ def install_director_runtime(
     torchaudio_pin = str(pytorch_cfg.get("torchaudio_version", "") or "").strip()
     if not (pytorch_index and torchvision_pin and torchaudio_pin):
         raise RuntimeError("runtime_versions.yaml pytorch.index/torchvision_version/torchaudio_version are required.")
-    # Step 1: the published vLLM wheel (LibTorch Stable ABI) with its transitive dependencies.
-    env = os.environ.copy()
-    env["UV_LINK_MODE"] = "copy"
-    env["UV_TORCH_BACKEND"] = install_backend
-    install = subprocess.run(
-        [
-            uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
-            "--torch-backend", install_backend, "--compile-bytecode",
-            f"vllm=={vllm_version}", f"wrapt=={wrapt_version}",
-            f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
-        ],
-        env=env,
-        check=False,
-        text=True,
+    print("[DIRECTOR]", f"install_mode={install_mode} torch={expected_director_torch} (vLLM wheel built for {wheel_build_cuda})")
+    env = _director_isolated_environment()
+    # One clean install, no older torch at any point: (1) the project torch from the PyTorch index (explicit +cuNNN local
+    # versions exist only there, so uv may search both indexes); (2) the vLLM wheel (LibTorch Stable ABI) WITHOUT its
+    # dependency resolution, because its metadata pins an older torch; (3) vLLM's remaining requirements read from the
+    # installed metadata, torch family excluded and held by constraints so nothing can replace the project torch.
+    index_args = (
+        "--index-url", pytorch_index, "--extra-index-url", "https://pypi.org/simple",
+        "--index-strategy", "unsafe-best-match",
     )
-    if install.returncode != 0:
-        raise RuntimeError("Failed to install isolated vLLM runtime.")
-    # Step 2: replace torch with the project torch (same build as ComfyUI) without rebuilding vLLM. The explicit
-    # +cuNNN local versions exist only on the PyTorch index, so uv must be allowed to search both indexes.
-    swap_env = os.environ.copy()
-    swap_env["UV_LINK_MODE"] = "copy"
-    swap_env.pop("UV_TORCH_BACKEND", None)
     for requirement, extra in (
         (f"torch=={torch_version}+{cuda_tag}", ()),
         (f"torchvision=={torchvision_pin}", ("--no-deps",)),
         (f"torchaudio=={torchaudio_pin}", ("--no-deps",)),
     ):
-        swap = subprocess.run(
-            [
-                uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy",
-                "--index-url", pytorch_index, "--extra-index-url", "https://pypi.org/simple",
-                "--index-strategy", "unsafe-best-match", *extra, requirement,
-            ],
-            env=swap_env,
-            check=False,
-            text=True,
+        step = subprocess.run(
+            [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy", *index_args, *extra, requirement],
+            env=env, check=False, text=True,
         )
-        if swap.returncode != 0:
+        if step.returncode != 0:
             raise RuntimeError(f"Failed to install {requirement} into the Director environment.")
+    step = subprocess.run(
+        [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy", "--no-deps", f"vllm=={vllm_version}"],
+        env=env, check=False, text=True,
+    )
+    if step.returncode != 0:
+        raise RuntimeError(f"Failed to install vllm=={vllm_version} into the Director environment.")
+    vllm_requirements = _read_installed_vllm_requirements(venv_python, env)
+    with tempfile.TemporaryDirectory(prefix="h3_director_requirements_") as requirements_dir:
+        requirements_path = Path(requirements_dir) / "vllm-requirements.txt"
+        constraints_path = Path(requirements_dir) / "constraints.txt"
+        requirements_path.write_text("\n".join(vllm_requirements) + "\n", encoding="utf-8")
+        constraints_path.write_text(
+            "\n".join(
+                (
+                    f"torch=={torch_version}+{cuda_tag}",
+                    f"torchvision=={torchvision_pin}",
+                    f"torchaudio=={torchaudio_pin}",
+                    f"wrapt=={wrapt_version}",
+                    f"transformers=={transformers_version}",
+                    f"tokenizers=={tokenizers_version}",
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        step = subprocess.run(
+            [
+                uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy", "--compile-bytecode",
+                *index_args, "--constraints", str(constraints_path), "-r", str(requirements_path),
+                f"wrapt=={wrapt_version}", f"transformers=={transformers_version}", f"tokenizers=={tokenizers_version}",
+            ],
+            env=env, check=False, text=True,
+        )
+    if step.returncode != 0:
+        raise RuntimeError("Failed to install the vLLM runtime dependencies into the Director environment.")
     verification = subprocess.run(
         [
             str(venv_python), "-c",
@@ -1505,6 +1564,12 @@ def install_director_runtime(
                 "assert 'safetensors_load_strategy' in inspect.signature(LoadConfig).parameters; "
                 f"assert torch.cuda.is_available() and torch.cuda.device_count() == {tensor_parallel_size}; "
                 "assert all(torch.cuda.get_device_capability(i) == (7, 5) for i in range(torch.cuda.device_count())); "
+                "import importlib; importlib.import_module('vllm._C_stable_libtorch'); "
+                "x = torch.randn(4, 256, device='cuda:0', dtype=torch.float16); "
+                "y = torch.empty(4, 128, device='cuda:0', dtype=torch.float16); "
+                "torch.ops._C.silu_and_mul(y, x); torch.cuda.synchronize(0); "
+                "assert torch.allclose(y, torch.nn.functional.silu(x[:, :128]) * x[:, 128:], atol=1e-2, rtol=1e-2), 'Stable ABI CUDA op mismatch'; "
+                "print('vLLM Stable ABI compiled CUDA op: PASS'); "
                 "print('Torch CUDA:', torch.cuda.is_available()); "
                 "print('GPU count:', torch.cuda.device_count()); "
                 "print('GPU capability:', torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None)"
@@ -1552,6 +1617,8 @@ def install_director_runtime(
         )
     if "Qwen3 config import: PASS" not in verification.stdout:
         raise RuntimeError("Director runtime did not import the pinned Transformers Qwen3 config.")
+    if "vLLM Stable ABI compiled CUDA op: PASS" not in verification.stdout:
+        raise RuntimeError("Director runtime did not run a vLLM Stable ABI CUDA kernel on the project torch.")
     if f"EAGLE-3 supported: True" not in verification.stdout:
         raise RuntimeError(
             f"Director runtime verification did not confirm speculative method {speculative_method!r}."
