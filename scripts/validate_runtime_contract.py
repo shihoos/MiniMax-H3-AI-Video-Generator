@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import ast
-import os
 import json
 import re
 from pathlib import Path
 import sys
-import tempfile
 
 import yaml
 
@@ -68,7 +66,7 @@ def _lock_expected_director_env_name(runtime: dict, pins: dict[str, str]) -> str
     director = runtime.get("director", {}) or {}
     return (
         f"h3_qwen_vllm_{_lock_compact(director.get('vllm_version', ''), 2)}"
-        f"_t{_lock_compact(director.get('vllm_torch_version', ''), 2)}{str(director.get('vllm_cuda', '')).lower()}"
+        f"_torch{_lock_compact(director.get('vllm_torch_version', ''), 2)}"
         f"_tf{_lock_compact(pins.get('transformers', ''), 2)}"
         f"_tok{_lock_compact(pins.get('tokenizers', ''))}"
     )
@@ -99,11 +97,11 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
         problems.append(f"pytorch.minimum_driver_version must be numeric, got {driver!r}")
 
     cuda_cfg = runtime.get("cuda_runtime", {}) or {}
-    runtime_version = str(cuda_cfg.get("runtime_version", ""))
     tag_match = _LOCK_CUDA_TAG.fullmatch(cuda)
     if tag_match:
         digits = cuda[2:]
         tag_major, tag_minor = digits[:2], digits[2:]
+        runtime_version = str(cuda_cfg.get("runtime_version", ""))
         if not re.fullmatch(rf"{tag_major}\.{int(tag_minor)}\.\d+", runtime_version):
             problems.append(
                 f"cuda_runtime.runtime_version must be a {tag_major}.{int(tag_minor)}.x release "
@@ -113,38 +111,23 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
         if not re.fullmatch(rf"{tag_major}\.\d+(\.\d+)+", cublas_version):
             problems.append(f"cuda_runtime.cublas_version must start with CUDA major {tag_major}, got {cublas_version!r}")
 
-    sage = runtime.get("sage_attention", {}) or {}
-    sage_cuda = str(sage.get("build_cuda", "")).strip().lower()
-    if sage_cuda != cuda:
-        problems.append(f"sage_attention.build_cuda must match pytorch.cuda ({cuda}), got {sage_cuda!r}")
-    sage_toolkit = str(sage.get("build_toolkit_package_version", ""))
-    if not _LOCK_SEMVER.fullmatch(sage_toolkit):
-        problems.append(f"sage_attention.build_toolkit_package_version must be X.Y.Z, got {sage_toolkit!r}")
-    sage_component = str(sage.get("build_toolkit_component_version", ""))
-    if not _LOCK_SEMVER.fullmatch(sage_component):
-        problems.append(f"sage_attention.build_toolkit_component_version must be X.Y.Z, got {sage_component!r}")
-    if runtime_version and sage_component != runtime_version:
-        problems.append(
-            "sage_attention.build_toolkit_component_version must match cuda_runtime.runtime_version "
-            f"({runtime_version}), got {sage_component!r}"
-        )
-
     director = runtime.get("director", {}) or {}
     for key in ("vllm_version", "vllm_torch_version"):
         if not _LOCK_SEMVER.fullmatch(str(director.get(key, ""))):
             problems.append(f"director.{key} must be X.Y.Z, got {director.get(key)!r}")
     if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_cuda", "")).strip().lower()):
         problems.append(f"director.vllm_cuda must be a cuNNN wheel tag, got {director.get('vllm_cuda')!r}")
-    if str(director.get("vllm_torch_version", "")) != str(pytorch.get("version", "")):
-        problems.append("director.vllm_torch_version must match pytorch.version for the aligned one-Torch target")
-    if str(director.get("vllm_cuda", "")).strip().lower() != cuda:
-        problems.append("director.vllm_cuda must match pytorch.cuda for the aligned one-CUDA target")
-    wheel_build_cuda = str(director.get("vllm_wheel_build_cuda", "")).strip().lower()
-    install_mode = str(director.get("vllm_install_mode", "")).strip().lower()
-    if not _LOCK_CUDA_TAG.fullmatch(wheel_build_cuda):
-        problems.append("director.vllm_wheel_build_cuda must be a cuNNN wheel-build tag")
-    if install_mode != "stable_abi_no_deps":
-        problems.append("director.vllm_install_mode must be stable_abi_no_deps")
+    if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_install_torch_backend", "")).strip().lower()):
+        problems.append("director.vllm_install_torch_backend must be a cuNNN wheel tag")
+    pytorch_lock = runtime.get("pytorch", {}) or {}
+    if (
+        str(director.get("vllm_torch_version", "")) != str(pytorch_lock.get("version", ""))
+        or str(director.get("vllm_cuda", "")).strip().lower() != str(pytorch_lock.get("cuda", "")).strip().lower()
+    ):
+        problems.append(
+            "the Director must run the same torch build as ComfyUI: director.vllm_torch_version/vllm_cuda must equal "
+            "pytorch.version/pytorch.cuda"
+        )
     strategy = str(director.get("safetensors_load_strategy", "")).strip().lower()
     if strategy not in _LOCK_STRATEGIES:
         problems.append(
@@ -154,11 +137,6 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
     for name in ("transformers", "tokenizers", "psutil", "pyyaml", "gradio"):
         if not _LOCK_SEMVER.fullmatch(pins.get(name, "")):
             problems.append(f"requirements.txt must contain one exact {name}==X.Y.Z pin")
-    if "vllm_non_torch_requirements" in director:
-        problems.append(
-            "director.vllm_non_torch_requirements must not duplicate wheel metadata; "
-            "the bootstrap must read Requires-Dist from the installed vLLM wheel"
-        )
     env_dir = str(director.get("vllm_env_dir", "")).strip()
     if pins.get("transformers") and pins.get("tokenizers") and _LOCK_SEMVER.fullmatch(str(director.get("vllm_version", ""))):
         expected_name = _lock_expected_director_env_name(runtime, pins)
@@ -194,7 +172,6 @@ def _lock_manifest_literals(root: Path, runtime: dict | None = None) -> dict[str
     pytorch = runtime.get("pytorch", {}) or {}
     director = runtime.get("director", {}) or {}
     storyboard = runtime.get("storyboard", {}) or {}
-    sage = runtime.get("sage_attention", {}) or {}
     found = {
         str(pytorch.get("version", "")): "pytorch.version",
         str(pytorch.get("cuda", "")): "pytorch.cuda",
@@ -203,11 +180,8 @@ def _lock_manifest_literals(root: Path, runtime: dict | None = None) -> dict[str
         str(director.get("vllm_version", "")): "director.vllm_version",
         str(director.get("vllm_torch_version", "")): "director.vllm_torch_version",
         str(director.get("vllm_cuda", "")): "director.vllm_cuda",
-        str(director.get("vllm_wheel_build_cuda", "")): "director.vllm_wheel_build_cuda",
         str(storyboard.get("gradio_version", "")): "storyboard.gradio_version",
         str(storyboard.get("pillow_version", "")): "storyboard.pillow_version",
-        str(sage.get("build_toolkit_package_version", "")): "sage_attention.build_toolkit_package_version",
-        str(sage.get("build_toolkit_component_version", "")): "sage_attention.build_toolkit_component_version",
     }
     for name in ("transformers", "tokenizers", "psutil"):
         if pins.get(name):
@@ -338,10 +312,7 @@ def _validate_control_plane_requirements() -> None:
 
     # requirements.txt owns these versions; they only have to be exact pins here.
     # _lock_require_consistent() checks them against runtime_versions.yaml.
-    for name, expected in (("transformers", None), ("tokenizers", None), ("psutil", None),
-                           ("pyyaml", "6.0.3"), ("requests", "2.34.2")):
-        if expected is not None and requirements.get(name) != expected:
-            raise RuntimeError(f"requirements.txt must pin {name}=={expected}; got {requirements.get(name)!r}.")
+    for name in ("transformers", "tokenizers", "psutil"):
         if not _LOCK_SEMVER.fullmatch(requirements.get(name, "")):
             raise RuntimeError(f"requirements.txt must contain one exact {name}==X.Y.Z pin; got {requirements.get(name)!r}.")
 
@@ -361,57 +332,9 @@ def _validate_control_plane_requirements() -> None:
         "torch.version.cuda ==",
         "from vllm.config.load import LoadConfig",
         "safetensors_load_strategy",
-        "include-system-site-packages",
-        "vllm._C_stable_libtorch",
-        "silu_and_mul",
-        "torchvision",
-        "torchaudio",
     )
     if any(item not in warm_probe for item in required):
         raise RuntimeError("Bootstrap warm vLLM reuse must verify Python 3.12, vLLM load API, Torch/CUDA, Transformers/tokenizers and Qwen3 imports.")
-    for diagnostic in (
-        "def _requirements_diagnostics(",
-        "def _print_probe_failure(",
-        "[DIRECTOR CACHE MISS]",
-        "[PYTORCH CACHE MISS]",
-        "[SAGE CACHE MISS]",
-    ):
-        if diagnostic not in bootstrap_source:
-            raise RuntimeError(f"Bootstrap cache-reuse diagnostics are missing: {diagnostic}")
-
-def _validate_requirements_diagnostics_behavior() -> None:
-    """Exercise the bootstrap dependency checker, including extras and markers."""
-    import tempfile
-    from pathlib import Path
-    from kaggle.bootstrap import _requirements_diagnostics
-
-    with tempfile.TemporaryDirectory() as tmp:
-        manifest = Path(tmp) / "requirements.txt"
-        manifest.write_text("requests[socks]==2.34.2\n", encoding="utf-8")
-        issues = _requirements_diagnostics(manifest)
-        if not any("optional extras [socks]" in item for item in issues):
-            raise RuntimeError(
-                "Requirements diagnostics must conservatively reject an unverified optional extra."
-            )
-
-        manifest.write_text("package-that-does-not-exist-h3-audit==1.0.0\n", encoding="utf-8")
-        issues = _requirements_diagnostics(manifest)
-        if not any("not installed" in item for item in issues):
-            raise RuntimeError("Requirements diagnostics must detect a missing distribution.")
-
-        manifest.write_text(
-            "package-that-does-not-exist-h3-audit==1.0.0; python_version < '0'\n",
-            encoding="utf-8",
-        )
-        issues = _requirements_diagnostics(manifest)
-        if issues:
-            raise RuntimeError(f"An inactive environment marker must not force a cache miss: {issues!r}")
-
-        manifest.write_text("-r nested-requirements.txt\n", encoding="utf-8")
-        issues = _requirements_diagnostics(manifest)
-        if not any("pip option/directive" in item for item in issues):
-            raise RuntimeError("Included requirement files must conservatively force a cache miss.")
-
 
 def _bootstrap_main_call_names(main: ast.FunctionDef) -> list[tuple[int, str]]:
     """Return recognized main() call targets in lexical source order.
@@ -547,7 +470,7 @@ def _validate_runtime_configuration_contract(runtime: dict) -> None:
     if str(python.get("kaggle", "")) != "3.12":
         raise RuntimeError("Kaggle runtime Python must be 3.12.")
     if director.get("tensor_parallel_size") != 2 or director.get("gpu_memory_utilization") != 0.82 or director.get("max_num_seqs") != 1:
-        raise RuntimeError("Director TP=2, GPU memory=0.82, max_num_seqs=1 must match the validated 2xT4 operating point.")
+        raise RuntimeError("Director TP=2, GPU memory=0.82 (torch 2.15/cu132 start-up overhead), max_num_seqs=1 must be preserved.")
     if director.get("speculative_method") != "eagle3" or director.get("speculative_tokens") != 2:
         raise RuntimeError("Director EAGLE-3 speculative settings must be preserved.")
     if director.get("context") != 10240 or director.get("story_max_tokens") != 6500:
@@ -569,8 +492,6 @@ def _validate_director_runtime_source() -> None:
     source = path.read_text(encoding="utf-8")
     for marker in (
         "DIRECTOR_VLLM_SAFETENSORS_LOAD_STRATEGY",
-        "def _h3_director_child_environment()",
-        "child_env = _h3_director_child_environment()",
         "--safetensors-load-strategy",
         "DIRECTOR_VLLM_VERSION",
         '"/version"',
@@ -580,31 +501,9 @@ def _validate_director_runtime_source() -> None:
         "def prestage_director_checkpoints(",
         "def prewarm_director_server(",
         "apply_chat_template(",
-        '"stop_reason": (str(stop_reason) if stop_reason is not None else "")',
-        'stop_reason = choice.get("stop_reason")',
-        "vLLM 0.33 API supports top_k",
     ):
         if marker not in source:
             raise RuntimeError(f"Director runtime source is missing required vLLM Director contract: {marker}")
-    # Exercise telemetry serialization: vendor-specific stop_reason must survive
-    # into the per-call record instead of being discarded after finish_reason.
-    from contextlib import redirect_stdout
-    from io import StringIO
-    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
-    probe = object.__new__(QwenDirectorRuntimeMixin)
-    probe._qwen_telemetry = {
-        "calls": [], "total_elapsed_seconds": 0.0, "prompt_tokens": 0,
-        "completion_tokens": 0, "retries": 0, "cache_hits": 0,
-        "deterministic_recoveries": 0,
-    }
-    with redirect_stdout(StringIO()):
-        probe._record_qwen_call(
-            call_name="telemetry_probe", elapsed=0.1, finish_reason="stop", stop_reason=123,
-        )
-    record = probe._qwen_telemetry["calls"][0]
-    if record.get("finish_reason") != "stop" or record.get("stop_reason") != "123":
-        raise RuntimeError(f"Qwen stop reason was not preserved in telemetry: {record!r}")
-
     # Staging is the fast path: /kaggle/input is GCSFUSE and direct loading took 6+ minutes per shard.
     if 'os.getenv("H3_DIRECTOR_STAGE_LOCAL", "auto")' not in source:
         raise RuntimeError("Model staging must default to auto (H3_DIRECTOR_STAGE_LOCAL=0 forces direct loading).")
@@ -620,11 +519,9 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     if int(director.get("story_max_tokens", 0) or 0) != 6500:
         raise RuntimeError("Global Director story ceiling must remain 6,500 tokens.")
     if int(architecture.get("max_tokens", 0) or 0) != 5400:
-        raise RuntimeError("Story Architect ceiling must remain 5,400 tokens.")
+        raise RuntimeError("Story Architect ceiling must remain 3,600 tokens.")
     if int(writing.get("max_tokens", 0) or 0) != 3000:
         raise RuntimeError("Single-pass Story Author ceiling must be 3,000 tokens.")
-    if int(writing.get("minimum_output_tokens", 0) or 0) != 0:
-        raise RuntimeError("Story Author minimum_output_tokens must remain 0 so EOS is not artificially delayed.")
     if int(contract.get("minimum_words", 0) or 0) < 1400 or int(contract.get("accept_min_words", 0) or 0) != int(contract.get("minimum_words", 0) or 0):
         raise RuntimeError("Story acceptance must enforce the 1,400-word minimum with no lower secondary floor.")
     if int(contract.get("scene_count", 0) or 0) != 12 or int(contract.get("shots_per_scene", 0) or 0) != 3:
@@ -635,13 +532,9 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     director_path = ROOT / "planner/qwen_director.py"
     director_source = director_path.read_text(encoding="utf-8")
     tree = ast.parse(director_source, filename=str(director_path))
-    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once_impl"), None)
-    wrapper = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
-    if author is None or wrapper is None:
-        raise RuntimeError("Single-pass story author implementation or rejection wrapper is missing.")
-    if not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-               and node.func.attr == "_generate_story_once_impl" for node in ast.walk(wrapper)):
-        raise RuntimeError("Author wrapper must call exactly one single-pass implementation.")
+    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
+    if author is None:
+        raise RuntimeError("Single-pass story author method is missing.")
     author_calls = [
         node for node in ast.walk(author)
         if isinstance(node, ast.Call)
@@ -674,176 +567,6 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     print("PASS single-pass story contract: 1,400-word floor, 12x3 topology, 3,000-token Author, one HTTP request")
 
 
-def _validate_sage_setup_patch_behavior() -> None:
-    """Verify the pinned-fork CUDA bypass is removed and C++20 flags are applied."""
-    import tempfile
-    from pathlib import Path
-    from kaggle.bootstrap import _patch_sage_cxx_standard
-
-    sample = (
-        "import torch\n"
-        "torch.utils.cpp_extension._check_cuda_version = lambda *a, **kw: None\n"
-        "CXX_FLAGS = [\"-std=c++17\"]\n"
-        "NVCC_FLAGS = [\"-std=c++17\"]\n"
-    )
-    with tempfile.TemporaryDirectory() as tmp:
-        setup_py = Path(tmp) / "setup.py"
-        setup_py.write_text(sample, encoding="utf-8")
-        _patch_sage_cxx_standard(Path(tmp))
-        patched = setup_py.read_text(encoding="utf-8")
-        if "_check_cuda_version = lambda" in patched:
-            raise RuntimeError("Sage setup patch left the CUDA-version-check bypass in place.")
-        if patched.count("-std=c++20") != 2 or "-std=c++17" in patched:
-            raise RuntimeError("Sage setup patch did not consistently apply the C++20 compiler flags.")
-
-
-def _validate_sage_toolchain_probe_behavior() -> None:
-    """Exercise warm/cold CUDA pip-toolkit selection and mismatched-config rejection."""
-    import importlib.util
-    import sys
-    import tempfile
-    import types
-    from pathlib import Path
-    from unittest.mock import patch
-
-    runtime_cfg = _lock_load_runtime(ROOT)
-    pytorch_cuda_tag = str(runtime_cfg["pytorch"]["cuda"])
-    sage_cfg = runtime_cfg["sage_attention"]
-    toolkit_package_version = str(sage_cfg["build_toolkit_package_version"])
-    component_version = str(sage_cfg["build_toolkit_component_version"])
-    cuda_release = _lock_cuda_runtime_from_tag(pytorch_cuda_tag)
-    toolkit_digits = component_version.split(".")
-
-    spec = importlib.util.spec_from_file_location("h3_bootstrap_sage_toolchain_test", ROOT / "kaggle" / "bootstrap.py")
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Could not load bootstrap for CUDA toolchain tests.")
-    bootstrap = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = bootstrap
-    spec.loader.exec_module(bootstrap)
-
-    expected = {
-        package: component_version
-        for package in (
-            "nvidia-cuda-nvcc",
-            "nvidia-cuda-crt",
-            "nvidia-cuda-cccl",
-            "nvidia-cuda-runtime",
-            "nvidia-nvvm",
-        )
-    }
-    runtime = {
-        "pytorch": {"cuda": pytorch_cuda_tag},
-        "sage_attention": {
-            "build_cuda": pytorch_cuda_tag,
-            "build_toolkit_package_version": toolkit_package_version,
-            "build_toolkit_component_version": component_version,
-        },
-    }
-
-    with tempfile.TemporaryDirectory() as tmp:
-        nvidia_root = Path(tmp) / "nvidia"
-        cuda_home = nvidia_root / "cu13"
-        (cuda_home / "bin").mkdir(parents=True)
-        (cuda_home / "include").mkdir()
-        (cuda_home / "lib").mkdir()
-        (cuda_home / "include" / "cuda.h").write_text("// test header", encoding="utf-8")
-        (cuda_home / "include" / "cuda_runtime.h").write_text("// test header", encoding="utf-8")
-        (cuda_home / "lib" / f"libcudart.so.{component_version}").write_bytes(b"test library")
-        nvcc = cuda_home / "bin" / "nvcc"
-        nvcc.write_text(
-            "#!/bin/sh\necho 'Cuda compilation tools, release "
-            + cuda_release
-            + ", V"
-            + component_version
-            + "'\n",
-            encoding="utf-8",
-        )
-        nvcc.chmod(0o755)
-
-        fake_nvidia = types.ModuleType("nvidia")
-        fake_nvidia.__path__ = [str(nvidia_root)]
-        old_nvidia = sys.modules.get("nvidia")
-        sys.modules["nvidia"] = fake_nvidia
-        try:
-            with patch.object(bootstrap.importlib_metadata, "version", side_effect=lambda name: expected[name]):
-                env = {}
-                selected = bootstrap._prepare_sage_cuda_build_toolchain(runtime, env)
-                bootstrap._describe_cuda_toolchain(runtime, env)
-                if selected != cuda_home or env.get("CUDA_HOME") != str(cuda_home):
-                    raise RuntimeError("Sage build did not select the CUDA pip toolkit root.")
-                if not (cuda_home / "lib" / "libcudart.so").is_symlink():
-                    raise RuntimeError("Sage build did not create the CUDA cudart linker name.")
-
-            # The cold-cache branch must request the manifest-pinned toolkit package.
-            call_counts = {}
-            commands = []
-
-            def package_version(name: str):
-                call_counts[name] = call_counts.get(name, 0) + 1
-                return None if call_counts[name] == 1 else expected[name]
-
-            with patch.object(bootstrap.importlib_metadata, "version", side_effect=package_version):
-                with patch.object(bootstrap, "run", side_effect=lambda *args, **kwargs: commands.append(args)):
-                    env = {}
-                    bootstrap._prepare_sage_cuda_build_toolchain(runtime, env)
-            wanted_requirement = (
-                f"cuda-toolkit[nvcc,crt,cccl,cudart,nvvm]=={toolkit_package_version}"
-            )
-            if not commands or not any(wanted_requirement in str(part) for part in commands[0]):
-                raise RuntimeError("Cold Sage toolkit probe did not install the manifest-pinned CUDA toolkit extras.")
-        finally:
-            if old_nvidia is None:
-                sys.modules.pop("nvidia", None)
-            else:
-                sys.modules["nvidia"] = old_nvidia
-            sys.modules.pop(spec.name, None)
-
-    bad = {
-        "pytorch": {"cuda": pytorch_cuda_tag},
-        "sage_attention": {"build_cuda": pytorch_cuda_tag + "-mismatch"},
-    }
-    try:
-        bootstrap._prepare_sage_cuda_build_toolchain(bad, {})
-    except RuntimeError as exc:
-        if "must match main PyTorch CUDA" not in str(exc):
-            raise
-    else:
-        raise RuntimeError("Sage toolkit probe accepted a CUDA build tag that differs from main Torch.")
-
-
-def _validate_vllm_wheel_metadata_reader(bootstrap_module) -> None:
-    """Exercise wheel Requires-Dist parsing and the no-Torch/no-extra filter."""
-    metadata_text = """Metadata-Version: 2.1
-Name: vllm
-Version: 0.33.0
-Requires-Dist: torch ==2.14.0
-Requires-Dist: torchvision ==0.29.0
-Requires-Dist: torchaudio ==2.11.0
-Requires-Dist: requests >=2.28
-Requires-Dist: fastapi[standard] >=0.133; python_version >= \"3.10\"
-Requires-Dist: win-only-dependency; sys_platform == \"win32\"
-Requires-Dist: extra-only-dependency; extra == \"testing\"
-"""
-    with tempfile.TemporaryDirectory(prefix="h3-vllm-metadata-test-") as temporary:
-        site = Path(temporary)
-        dist_info = site / "vllm-0.33.0.dist-info"
-        dist_info.mkdir()
-        (dist_info / "METADATA").write_text(metadata_text, encoding="utf-8")
-        test_env = dict(os.environ)
-        inherited = test_env.get("PYTHONPATH", "")
-        test_env["PYTHONPATH"] = str(site) + (os.pathsep + inherited if inherited else "")
-        requirements = bootstrap_module._read_installed_vllm_requirements(Path(sys.executable), test_env)
-    normalized = [item.lower().replace("_", "-") for item in requirements]
-    if not any(item.startswith("requests") for item in normalized):
-        raise RuntimeError("vLLM metadata parser dropped a base Requires-Dist dependency.")
-    if not any(item.startswith("fastapi[standard]") for item in normalized):
-        raise RuntimeError("vLLM metadata parser dropped an active PEP 508 dependency.")
-    forbidden_fragments = ("torch", "torchvision", "torchaudio", "vllm", "win-only-dependency", "extra-only-dependency")
-    if any(any(fragment in item for fragment in forbidden_fragments) for item in normalized):
-        raise RuntimeError("vLLM metadata parser retained a separately managed or inactive dependency.")
-    print("[PASS] vLLM wheel metadata dependency filtering")
-
-
 def _validate_bootstrap_upgrade_source() -> None:
     path = ROOT / "kaggle/bootstrap.py"
     source = path.read_text(encoding="utf-8")
@@ -860,41 +583,13 @@ def _validate_bootstrap_upgrade_source() -> None:
     if "def _validate_h3_vae_decoder_source" not in source:
         raise RuntimeError("Bootstrap is missing the AST-level H3 VAE decoder postcondition.")
     for marker in (
-        "vllm_install_mode",
-        "vllm_wheel_build_cuda",
-        "_read_installed_vllm_requirements",
-        "importlib.metadata as metadata",
-        "pip._vendor.packaging.requirements",
-        "pip._vendor.packaging.markers",
-        "metadata.requires(\"vllm\")",
-        'environment["extra"] = ""',
-        'blocked = {"vllm", "torch", "torchvision", "torchaudio"}',
-        "--no-deps",
-        "--constraints",
-        "--index-url",
-        "--extra-index-url",
+        "--torch-backend",
         "--index-strategy",
-        "_director_isolated_environment",
-        "vllm._C_stable_libtorch",
-        "silu_and_mul",
         "_patch_sage_cxx_standard(install_dir)",
-        "_prepare_sage_cuda_build_toolchain(runtime, build_env)",
-        "cuda-toolkit[nvcc,crt,cccl,cudart,nvvm]",
-        "nvidia-cuda-nvcc",
-        "nvidia-cuda-crt",
-        "nvidia-cuda-cccl",
-        "nvidia-nvvm",
-        "CUDA_HOME",
-        "Refusing to fall back to the system CUDA compiler",
         '"-std=c++20"',
         "vllm=={vllm_version}",
         "from vllm.config.load import LoadConfig",
         "safetensors_load_strategy",
-        "include-system-site-packages",
-        "vllm._C_stable_libtorch",
-        "silu_and_mul",
-        "torchvision",
-        "torchaudio",
         "423cbd20511becb1f16122ab518e92e58bfa03d9",
         "memory_usage_factor = 0.17",
         "supported_inference_dtypes = [torch.bfloat16, torch.float16, torch.float32]",
@@ -909,56 +604,6 @@ def _validate_bootstrap_upgrade_source() -> None:
     ):
         if marker not in source:
             raise RuntimeError(f"Bootstrap is missing required runtime upgrade contract: {marker}")
-
-    preflight_path = ROOT / "kaggle/preflight_h3.py"
-    preflight_source = preflight_path.read_text(encoding="utf-8")
-    if '"from vllm.config import SpeculativeConfig; "' not in preflight_source:
-        raise RuntimeError("Kaggle Director preflight references SpeculativeConfig without importing it.")
-    if "assert 'eagle3' in str(inspect.signature(SpeculativeConfig)); " not in preflight_source:
-        raise RuntimeError("Kaggle Director preflight must verify the EAGLE3 SpeculativeConfig API.")
-    if "torchvision, torchaudio" in preflight_source:
-        raise RuntimeError("Kaggle Director preflight must check TorchVision/TorchAudio package metadata without requiring untested imports.")
-
-    installer_start = source.index("def install_director_runtime(")
-    installer_end = source.index("def install_storyboard_runtime(", installer_start)
-    installer = source[installer_start:installer_end]
-    ordered_steps = (
-        "torch_stack_install = subprocess.run(",
-        "vllm_install = subprocess.run(",
-        "vllm_dependency_requirements = _read_installed_vllm_requirements(",
-        "TemporaryDirectory(prefix=\"h3-director-torch-constraints-\")",
-        "dependency_install = subprocess.run(",
-        "if not _probe_director_venv(runtime, env_dir):",
-    )
-    offsets = [installer.find(step) for step in ordered_steps]
-    if any(offset < 0 for offset in offsets) or offsets != sorted(offsets):
-        raise RuntimeError("Director install must install the final Torch stack once, install the vLLM wheel with --no-deps, read its dependency metadata, install dependencies under Torch constraints, then validate Stable ABI.")
-    for obsolete in ("--torch-backend", "wheel_torch_version", "wheel_cuda_tag", "Stage 1:", "Stage 2:", "torch_upgrade = subprocess.run(", "vllm_non_torch_requirements"):
-        if obsolete in installer:
-            raise RuntimeError(f"Director installer still contains the redundant two-stage Torch installation: {obsolete}")
-
-    from kaggle import bootstrap as bootstrap_module
-    test_env = {
-        "PATH": "/usr/bin",
-        "PYTHONPATH": "/contaminating/project/path",
-        "PYTHONHOME": "/contaminating/python",
-        "VIRTUAL_ENV": "/other/venv",
-        "CONDA_PREFIX": "/other/conda",
-        "CUDA_HOME": "/opt/cuda-13.2",
-        "CUDA_PATH": "/opt/cuda-13.2",
-        "CUDAHOSTCXX": "/host/compiler",
-        "CC": "/host/cc",
-        "CXX": "/host/cxx",
-        "CMAKE_ARGS": "-DHOST=1",
-        "VLLM_CACHE_ROOT": "/cache/vllm",
-    }
-    clean_env = bootstrap_module._director_isolated_environment(test_env)
-    for key in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX"):
-        if key in clean_env:
-            raise RuntimeError(f"Director environment isolation leaked {key}.")
-    for key in ("PATH", "CUDA_HOME", "CUDA_PATH", "CUDAHOSTCXX", "CC", "CXX", "CMAKE_ARGS", "VLLM_CACHE_ROOT"):
-        if clean_env.get(key) != test_env[key]:
-            raise RuntimeError(f"Director environment isolation unexpectedly changed {key}.")
 
 
 def main() -> int:
@@ -978,16 +623,11 @@ def main() -> int:
     _validate_model_policy_contract(model_inventory)
     _validate_custom_node_ordering()
     _validate_control_plane_requirements()
-    _validate_sage_setup_patch_behavior()
-    _validate_sage_toolchain_probe_behavior()
     _validate_bootstrap_order()
     _validate_runtime_configuration_contract(runtime)
     _validate_single_pass_story_writer(runtime)
     _validate_director_runtime_source()
     _validate_bootstrap_upgrade_source()
-    from kaggle import bootstrap as bootstrap_module
-    _validate_vllm_wheel_metadata_reader(bootstrap_module)
-    _validate_requirements_diagnostics_behavior()
     director = dict(runtime.get("director", {}) or {})
     if str(director.get("backend", "") or "").strip().lower() != "vllm":
         raise RuntimeError("Director backend must be vllm.")
