@@ -32,14 +32,15 @@ director:
   format: safetensors-awq
   backend: vllm
   vllm_version: 0.33.0
-  # One torch for the whole project: the Director venv runs the same torch/CUDA build as ComfyUI (pytorch.* below).
-  # The vLLM 0.33.0 wheel is a LibTorch Stable-ABI build, so it is installed first and torch is then replaced by the
-  # pytorch.* build without rebuilding vLLM (verified on Kaggle 2xT4: kernels, Qwen3-14B-AWQ + EAGLE-3 TP=2, same speed).
+  # One torch for the whole project: the Director venv runs the same torch/CUDA build as ComfyUI (pytorch.* below),
+  # installed once and never replaced. The vLLM 0.33.0 wheel is a LibTorch Stable-ABI build, so it is installed with
+  # --no-deps on top of the project torch and its other requirements are installed with torch held by constraints.
+  # Verified on Kaggle 2xT4 with torch 2.15.0+cu132: vLLM kernels, Qwen3-14B-AWQ + EAGLE-3 TP=2 at the same speed.
   vllm_torch_version: 2.15.0
   vllm_cuda: cu132
-  # Only the first install step: vLLM's own metadata pins an older torch, which uv installs for a moment from this
-  # wheel backend and the next step replaces with vllm_torch_version/vllm_cuda. Nothing of it remains in the venv.
-  vllm_install_torch_backend: cu130
+  # CUDA toolkit the published vLLM wheel was built against (informational; no torch of that build is installed).
+  vllm_wheel_build_cuda: cu130
+  vllm_install_mode: stable_abi_no_deps
   # Single source of truth for the Director weight loader (bootstrap, preflight, planner and validators
   # all read this key). lazy = mmap from the staged local checkpoint copy; eager copies whole shards
   # into RAM per TP worker and ran the 33 GB Kaggle host out of memory.
