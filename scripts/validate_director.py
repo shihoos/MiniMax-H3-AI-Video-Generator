@@ -42,9 +42,10 @@ def _story_blueprint_fixture(scene_count=12):
             f"SCENE {i:02d}: ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; ON_SCREEN_PRESENT=Ines Vale; "
             "ENTRY_KNOWS=Ines knows the duplicate ledger conceals the missing relief cargo route; "
             "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control; "
+            "MID_SCENE_ENTRIES=none; "
             f"EVENT=Ines examines transfer stage {i}, compares the physical pressure mark with the approved cargo seal, "
             "and records the discrepancy before the clerk can remove the evidence; "
-            "EXIT_LOCATION=harbor archive; EXIT_PRESENT=Ines Vale; "
+            "MID_SCENE_EXITS=none; EXIT_LOCATION=harbor archive; EXIT_PRESENT=Ines Vale; "
             "EXIT_KNOWS=Ines knows the duplicate ledger conceals the missing relief cargo route; "
             "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control; "
             f"NEXT_CAUSE={cause}"
@@ -1549,7 +1550,27 @@ def _two_person_blueprint(mara_scenes="02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 1
 
 
 def test_story_contract_regressions_found_by_audit():
-    from planner.story_contracts import ACTION_VERBS, audit_story_against_blueprint, validate_blueprint_state_contract
+    from planner.story_contracts import ACTION_VERBS, audit_story_against_blueprint, validate_blueprint_state_contract, parse_cast, reconcile_cast_scenes
+
+    ranked = _story_blueprint_fixture().replace(
+        "CAST: Ines Vale (", "CAST: Lieutenant Ines Vale (", 1
+    )
+    _assert(parse_cast(ranked)[0]["name"] == "Ines Vale",
+            "military ranks must normalize out of canonical character names")
+    stale_cast = _story_blueprint_fixture().replace(
+        "on-screen scenes: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12",
+        "on-screen scenes: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12", 1
+    )
+    no_presence = stale_cast.replace(
+        "ON_SCREEN_PRESENT=Ines Vale", "ON_SCREEN_PRESENT=none"
+    ).replace(
+        "ENTRY_PRESENT=Ines Vale", "ENTRY_PRESENT=none"
+    ).replace(
+        "EXIT_PRESENT=Ines Vale", "EXIT_PRESENT=none"
+    )
+    reconciled_cast = parse_cast(reconcile_cast_scenes(no_presence))[0]
+    _assert(not reconciled_cast["scenes"],
+            "CAST reconciliation must clear stale scene lists when the visibility ledger has no appearances")
 
     # Meetings and joining are valid arrivals; a person who appears with no arrival event is still rejected.
     _assert(not validate_blueprint_state_contract(_two_person_blueprint()),
@@ -1581,7 +1602,7 @@ def test_story_contract_regressions_found_by_audit():
             f"state ledger presence outside the CAST scene list must fail: {issues!r}")
     # A character can enter mid-scene and leave before the end: both physical
     # transitions must be attributed to that same person in the scene EVENT.
-    def _mid_scene_blueprint(event: str) -> str:
+    def _mid_scene_blueprint(event: str, entries: str = "none", exits: str = "none") -> str:
         lines = _story_blueprint_fixture().splitlines()
         lines[0] += (
             " | Mara Quill (harbor clerk; wants to preserve the duplicate ledger; pressure fears the audit; "
@@ -1591,6 +1612,10 @@ def test_story_contract_regressions_found_by_audit():
         lines[scene_two] = lines[scene_two].replace(
             "ON_SCREEN_PRESENT=Ines Vale;", "ON_SCREEN_PRESENT=Ines Vale, Mara Quill;"
         ).replace(
+            "MID_SCENE_ENTRIES=none;", f"MID_SCENE_ENTRIES={entries};"
+        ).replace(
+            "MID_SCENE_EXITS=none;", f"MID_SCENE_EXITS={exits};"
+        ).replace(
             "EVENT=Ines examines transfer stage 2, compares the physical pressure mark with the approved cargo seal, "
             "and records the discrepancy before the clerk can remove the evidence;",
             f"EVENT={event};",
@@ -1598,7 +1623,8 @@ def test_story_contract_regressions_found_by_audit():
         return "\n".join(lines)
 
     valid_mid = _mid_scene_blueprint(
-        "Mara Quill enters through the archive door and meets Ines at the ledger table; later Mara Quill leaves through the side passage"
+        "Mara Quill checks the corridor and then slips through the side passage after joining Ines at the ledger table",
+        entries="Mara Quill", exits="Mara Quill",
     )
     issues = validate_blueprint_state_contract(valid_mid)
     _assert(not any("mid-scene entry" in i or "mid-scene exit" in i for i in issues),
@@ -1616,7 +1642,7 @@ def test_story_contract_regressions_found_by_audit():
     _assert(any("mid-scene entry for 'Mara Quill'" in i for i in issues),
             f"another character's arrival verb must not explain Mara's entrance: {issues!r}")
     missing_exit = _mid_scene_blueprint(
-        "Mara Quill enters through the archive door and meets Ines at the ledger table"
+        "Mara Quill arrives through the archive door and joins Ines at the ledger table", entries="Mara Quill"
     )
     issues = validate_blueprint_state_contract(missing_exit)
     _assert(any("mid-scene exit for 'Mara Quill'" in i for i in issues),
