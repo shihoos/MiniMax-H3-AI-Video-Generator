@@ -251,7 +251,7 @@ DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE = int(
 DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION = float(
     os.getenv(
         "H3_DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION",
-        str(RUNTIME["director"].get("gpu_memory_utilization", 0.90)),
+        str(RUNTIME["director"].get("gpu_memory_utilization", 0.82)),
     )
 )
 
