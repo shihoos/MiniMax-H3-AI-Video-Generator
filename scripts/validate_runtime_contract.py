@@ -117,8 +117,10 @@ def _lock_check_manifests(root: Path, runtime: dict | None = None) -> list[str]:
             problems.append(f"director.{key} must be X.Y.Z, got {director.get(key)!r}")
     if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_cuda", "")).strip().lower()):
         problems.append(f"director.vllm_cuda must be a cuNNN wheel tag, got {director.get('vllm_cuda')!r}")
-    if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_install_torch_backend", "")).strip().lower()):
-        problems.append("director.vllm_install_torch_backend must be a cuNNN wheel tag")
+    if not _LOCK_CUDA_TAG.fullmatch(str(director.get("vllm_wheel_build_cuda", "")).strip().lower()):
+        problems.append("director.vllm_wheel_build_cuda must be a cuNNN tag")
+    if str(director.get("vllm_install_mode", "")).strip().lower() != "stable_abi_no_deps":
+        problems.append("director.vllm_install_mode must be stable_abi_no_deps (one clean install, no older torch)")
     pytorch_lock = runtime.get("pytorch", {}) or {}
     if (
         str(director.get("vllm_torch_version", "")) != str(pytorch_lock.get("version", ""))
@@ -532,7 +534,9 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     director_path = ROOT / "planner/qwen_director.py"
     director_source = director_path.read_text(encoding="utf-8")
     tree = ast.parse(director_source, filename=str(director_path))
-    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
+    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once_impl"), None)
+    if author is None:
+        author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
     if author is None:
         raise RuntimeError("Single-pass story author method is missing.")
     author_calls = [
@@ -582,9 +586,17 @@ def _validate_bootstrap_upgrade_source() -> None:
         raise RuntimeError("Bootstrap uses regular expressions and must import re explicitly.")
     if "def _validate_h3_vae_decoder_source" not in source:
         raise RuntimeError("Bootstrap is missing the AST-level H3 VAE decoder postcondition.")
+    # One clean Director install: project torch first, vLLM with --no-deps, its other requirements under constraints.
+    # The old two-install route (vLLM with an older torch backend, then a torch swap) must not come back.
+    if "--torch-backend" in source:
+        raise RuntimeError("Bootstrap must not install an older torch backend for vLLM and swap it afterwards.")
     for marker in (
-        "--torch-backend",
+        "stable_abi_no_deps",
+        "_read_installed_vllm_requirements",
+        '"--constraints"',
+        '"--no-deps"',
         "--index-strategy",
+        "vLLM Stable ABI compiled CUDA op: PASS",
         "_patch_sage_cxx_standard(install_dir)",
         '"-std=c++20"',
         "vllm=={vllm_version}",
