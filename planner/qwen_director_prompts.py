@@ -487,7 +487,9 @@ class QwenDirectorPromptMixin:
             ENTRY_LOCATION=[one physical location]; ENTRY_PRESENT=[people physically present at scene start];
             ON_SCREEN_PRESENT=[every canonical cast member physically visible at any point during this scene];
             ENTRY_KNOWS=[what present people know at entry]; ENTRY_OBJECTS=[important objects and their owner/state or none];
-            EVENT=[the specific action, resistance, decision, and changed situation];
+            MID_SCENE_ENTRIES=[canonical cast names who physically enter after scene start, or none];
+            EVENT=[the specific action, resistance, decision, changed situation, and explicit physical transitions];
+            MID_SCENE_EXITS=[canonical cast names who physically leave before scene end, or none];
             EXIT_LOCATION=[location at scene end]; EXIT_PRESENT=[people physically present at scene end];
             EXIT_KNOWS=[what has changed in what people know]; EXIT_OBJECTS=[important objects and their owner/state or none];
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
