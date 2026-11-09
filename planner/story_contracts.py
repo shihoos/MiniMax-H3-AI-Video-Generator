@@ -12,6 +12,7 @@ from typing import Any
 
 TITLE_RE = re.compile(
     r"^(?:dr|doctor|mr|mrs|ms|miss|prof|professor|captain|capt|colonel|col|"
+    r"lieutenant|lt|major|maj|commander|cmdr|admiral|adm|general|gen|"
     r"sir|lady|sergeant|sgt|officer|detective|inspector|reverend|rev)\.?\s+",
     re.IGNORECASE,
 )
@@ -84,7 +85,8 @@ STOP_WORDS = {
 }
 
 SCENE_STATE_KEYS = (
-    "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS", "EVENT",
+    "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS",
+    "MID_SCENE_ENTRIES", "EVENT", "MID_SCENE_EXITS",
     "EXIT_LOCATION", "EXIT_PRESENT", "EXIT_KNOWS", "EXIT_OBJECTS", "NEXT_CAUSE",
 )
 
@@ -210,8 +212,8 @@ def parse_scene_state(beat: str) -> dict[str, str]:
     result: dict[str, str] = {}
     text = str(beat or "")
     pattern = re.compile(
-        r"(?:^|;\s*)(ENTRY_LOCATION|ENTRY_PRESENT|ON_SCREEN_PRESENT|ENTRY_KNOWS|ENTRY_OBJECTS|EVENT|"
-        r"EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=\s*", re.I
+        r"(?:^|;\s*)(ENTRY_LOCATION|ENTRY_PRESENT|ON_SCREEN_PRESENT|ENTRY_KNOWS|ENTRY_OBJECTS|"
+        r"MID_SCENE_ENTRIES|EVENT|MID_SCENE_EXITS|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=\s*", re.I
     )
     matches = list(pattern.finditer(text))
     for i, match in enumerate(matches):
@@ -275,10 +277,10 @@ def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
                     )
                 )
             ]
-            if present and item["fate"].casefold().startswith("dies"):
+            if item["fate"].casefold().startswith("dies"):
                 death = int(re.search(r"\d+", item["fate"]).group(0))
                 present = sorted({v for v in present if v <= death} | {death})
-            if present and present != item["scenes"]:
+            if present != item["scenes"]:
                 raw = re.sub(
                     r"on-screen scenes\s*:\s*[0-9, ]+",
                     "on-screen scenes: " + ", ".join(f"{v:02d}" for v in present),
@@ -405,7 +407,7 @@ def _unknown_named_surfaces(value: str, cast: list[dict[str, Any]]) -> list[str]
     known = [surface.casefold() for item in cast for surface in _name_surfaces(item["name"], item["aliases"])]
     # An honorific before a name is not a second person: "Dr. Elara Voss" is Elara Voss.
     value = re.sub(
-        r"\b(?:Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Professor|Captain|Capt|Colonel|Col|Sir|Lady|Sergeant|Sgt|Officer|Detective|Inspector|Reverend|Rev)\.?\s+(?=[A-Z])",
+        r"\b(?:Dr|Doctor|Mr|Mrs|Ms|Miss|Prof|Professor|Captain|Capt|Colonel|Col|Lieutenant|Lt|Major|Maj|Commander|Cmdr|Admiral|Adm|General|Gen|Sir|Lady|Sergeant|Sgt|Officer|Detective|Inspector|Reverend|Rev)\.?\s+(?=[A-Z])",
         "", str(value or ""),
     )
     candidates = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b", str(value or ""))
@@ -523,20 +525,31 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
                 errors.append(
                     f"scene {number:02d} ON_SCREEN_PRESENT includes {item['name']!r}, but the CAST on-screen scene list omits it"
                 )
-            # ON_SCREEN_PRESENT may contain someone who is absent at one or both
-            # boundaries. The EVENT must identify that same person and describe the
-            # physical transition; a verb belonging to another character is not enough.
-            if on_screen and not at_entry and not _has_named_transition(
-                state["EVENT"], item, MID_SCENE_ARRIVAL_RE, MID_SCENE_ARRIVAL_OBJECT_RE
-            ):
+            # Explicit typed transition fields are the machine-readable contract.
+            # This avoids fragile, ever-growing English verb lists and handles coordinated
+            # clauses, paraphrases, passive voice, and story-specific departure wording.
+            mid_entry = _name_is_present(state["MID_SCENE_ENTRIES"], item)
+            mid_exit = _name_is_present(state["MID_SCENE_EXITS"], item)
+            event_mentions_person = _name_is_present(state["EVENT"], item)
+            if on_screen and not at_entry and not mid_entry:
                 errors.append(
-                    f"scene {number:02d} mid-scene entry for {item['name']!r} has no character-specific arrival in EVENT"
+                    f"scene {number:02d} mid-scene entry for {item['name']!r} is missing from MID_SCENE_ENTRIES"
                 )
-            if on_screen and not at_exit and not _has_named_transition(
-                state["EVENT"], item, MID_SCENE_DEPARTURE_RE, MID_SCENE_DEPARTURE_OBJECT_RE
-            ):
+            if mid_entry and (not on_screen or at_entry):
                 errors.append(
-                    f"scene {number:02d} mid-scene exit for {item['name']!r} has no character-specific departure in EVENT"
+                    f"scene {number:02d} MID_SCENE_ENTRIES incorrectly lists {item['name']!r}"
+                )
+            if on_screen and not at_exit and not mid_exit:
+                errors.append(
+                    f"scene {number:02d} mid-scene exit for {item['name']!r} is missing from MID_SCENE_EXITS"
+                )
+            if mid_exit and (not on_screen or at_exit):
+                errors.append(
+                    f"scene {number:02d} MID_SCENE_EXITS incorrectly lists {item['name']!r}"
+                )
+            if (mid_entry or mid_exit) and not event_mentions_person:
+                errors.append(
+                    f"scene {number:02d} transition for {item['name']!r} is not grounded by naming them in EVENT"
                 )
 
     # Explicit death facts in the planned event must agree with the scene's exit state.
