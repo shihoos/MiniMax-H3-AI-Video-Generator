@@ -683,6 +683,11 @@ def install_locked_cuda_toolkit(runtime: dict) -> Path | None:
         run(*update, env=apt_env)
         packages = [name.format(mm=mm.replace(".", "-")) for name in _LOCKED_CUDA_TOOLKIT_PACKAGES]
         run(*sudo, "apt-get", "install", "-y", "-qq", "--no-install-recommends", *packages, env=apt_env)
+        # Free the ~1 GB of downloaded .deb files; the installed toolkit is unaffected.
+        try:
+            subprocess.run([*sudo, "apt-get", "clean"], env=apt_env, check=False, timeout=120)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         release_found = _nvcc_release(root / "bin" / "nvcc")
         if release_found != mm:
             raise RuntimeError(f"{root}/bin/nvcc reports release {release_found or 'unknown'}, expected {mm}")
