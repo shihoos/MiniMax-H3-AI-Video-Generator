@@ -86,8 +86,7 @@ STOP_WORDS = {
 
 SCENE_STATE_KEYS = (
     "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS",
-    "MID_SCENE_ENTRIES", "EVENT", "MID_SCENE_EXITS",
-    "EXIT_LOCATION", "EXIT_PRESENT", "EXIT_KNOWS", "EXIT_OBJECTS", "NEXT_CAUSE",
+    "EVENT", "EXIT_LOCATION", "EXIT_PRESENT", "EXIT_KNOWS", "EXIT_OBJECTS", "NEXT_CAUSE",
 )
 
 TRAVEL_RE = re.compile(
@@ -113,7 +112,6 @@ OBJECT_CHANGE_RE = re.compile(
     r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|remove\w*|place\w*|"
     r"return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*)\b", re.I
 )
-DEATH_RE = re.compile(r"\b(die[sd]?|dead|killed|murdered|executed|perished|drowned|shot dead|succumbed)\b", re.I)
 CAUSAL_LINK_RE = re.compile(
     r"\b(because|therefore|so that|so|thus|hence|forces?|forcing|forced|leads? to|leading to|led to|which means|"
     r"which (?:reveals?|forces?|exposes?|triggers?|requires?|demands?|leaves?|puts?|sends?|pushes?)|"
@@ -123,8 +121,16 @@ CAUSAL_LINK_RE = re.compile(
     r"now that|once|since|after|unless|before|in order to|must|needs? to|has to|have to)\b", re.I
 )
 
+# Only used as a soft-warning trigger for "CAST says survives but EVENT uses a death cue".
+# Deliberately NOT used to infer a character's death: CAST fate is authoritative for that
+# determination, because a death verb in EVENT may belong to the killer, the victim, or a
+# third party discussing a death elsewhere in the beat.
+_DEATH_CUE_RE = re.compile(
+    r"\b(die[sd]?|dead|killed|murdered|executed|perished|drowned|shot dead|succumbed)\b", re.I
+)
+
 # Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-08.5"
+CONTRACTS_REVISION = "2026-11-10.3"
 
 # Only plan-structure findings may stop a run. Everything else (how a beat is worded, whether a knowledge/location/
 # presence change is "explained" in a heuristic's eyes) is reported as a warning and never blocks prose generation.
@@ -148,6 +154,7 @@ HARD_FINDING_MARKERS = (
     "without a character-specific departure",
     "has no character-specific arrival",
     "has no character-specific departure",
+    "has no character-specific EVENT anchor",
 )
 # Prose findings that may stop a run: invented people/organisations/relationships and the dead acting.
 HARD_PROSE_MARKERS = (
@@ -208,12 +215,19 @@ def _fields_and_beats(blueprint: str) -> tuple[dict[str, str], dict[int, str], s
 
 
 def parse_scene_state(beat: str) -> dict[str, str]:
-    """Parse boundary state plus full-scene physical visibility and causal hand-off."""
+    """Parse boundary state plus full-scene physical visibility and causal hand-off.
+
+    Mid-scene transitions are derived from presence deltas between ON_SCREEN_PRESENT
+    and the ENTRY/EXIT boundary fields (entry = ON_SCREEN_PRESENT - ENTRY_PRESENT;
+    exit = ON_SCREEN_PRESENT - EXIT_PRESENT). The Architect is not asked to emit a
+    redundant second list, so a stale duplicate cannot drift out of sync with the
+    ledger.
+    """
     result: dict[str, str] = {}
     text = str(beat or "")
     pattern = re.compile(
         r"(?:^|;\s*)(ENTRY_LOCATION|ENTRY_PRESENT|ON_SCREEN_PRESENT|ENTRY_KNOWS|ENTRY_OBJECTS|"
-        r"MID_SCENE_ENTRIES|EVENT|MID_SCENE_EXITS|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=\s*", re.I
+        r"EVENT|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=\s*", re.I
     )
     matches = list(pattern.finditer(text))
     for i, match in enumerate(matches):
@@ -280,7 +294,11 @@ def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
             if item["fate"].casefold().startswith("dies"):
                 death = int(re.search(r"\d+", item["fate"]).group(0))
                 present = sorted({v for v in present if v <= death} | {death})
-            if present != item["scenes"]:
+            # Only rewrite when the ledger actually says the character appears. If the
+            # character is absent from every scene, leave the CAST declaration intact
+            # so the mismatch surfaces on the ON_SCREEN_PRESENT side, not as a silently
+            # erased appearance list that then trips "has no planned on-screen scenes".
+            if present and present != item["scenes"]:
                 raw = re.sub(
                     r"on-screen scenes\s*:\s*[0-9, ]+",
                     "on-screen scenes: " + ", ".join(f"{v:02d}" for v in present),
@@ -326,80 +344,6 @@ def _present_names(state: str, cast: list[dict[str, Any]]) -> set[str]:
     if value.strip() in {"none", "nobody", "no one", "empty"}:
         return set()
     return {item["name"].casefold() for item in cast if _name_is_present(value, item)}
-
-
-# Keep transition verbs explicit and character-attributed. A generic "arrives" somewhere
-# in an EVENT must not satisfy the continuity obligation for a different character.
-MID_SCENE_ARRIVAL_RE = re.compile(
-    r"\b(?:arriv\w*|enter\w*|join\w*|rejoin\w*|meet\w*|met|"
-    r"introduc\w*|encounter\w*|greet\w*|reunit\w*|appear\w*|emerge\w*|"
-    r"come|comes|came|coming|show\w* up|turn\w* up|burst\w*|rush\w*|"
-    r"hurr\w*|bring\w*|brought|escort\w*|lead|led|summon\w*|call\w* in)\b",
-    re.I,
-)
-MID_SCENE_DEPARTURE_RE = re.compile(
-    r"\b(?:leave\w*|depart\w*|exit\w*|return\w*|separat\w*|"
-    r"stay\s+behind|remain\s+behind|walk\w* away|step\w* out|withdraw\w*|"
-    r"fall\w*|die[sd]?|dead|kill\w*|drown\w*|captur\w*|taken|escort\w* away|"
-    r"drag\w* away|carry\w* away|board\w*|disappear\w*)\b",
-    re.I,
-)
-
-
-MID_SCENE_ARRIVAL_OBJECT_RE = re.compile(
-    r"\b(?:meet\w*|met|introduc\w*|greet\w*|reunit\w*|bring\w*|brought|"
-    r"escort\w*|lead|led|summon\w*|call\w* in)\b",
-    re.I,
-)
-MID_SCENE_DEPARTURE_OBJECT_RE = re.compile(
-    r"\b(?:captur\w*|kill\w*|murder\w*|drown\w*|take|takes|took|taken|"
-    r"escort\w*|drag\w*|carry\w*|send|sends|sent|remove\w*|seize\w*)\b",
-    re.I,
-)
-
-
-def _has_named_transition(
-    text: str,
-    item: dict[str, Any],
-    action_re: re.Pattern[str],
-    object_action_re: re.Pattern[str] | None = None,
-) -> bool:
-    """Require a transition verb to be syntactically attached to this person.
-
-    Subject-form transitions ("Mara enters", "Mara leaves") are accepted. A
-    conservative list of transitive verbs also permits object form ("Ines greets
-    Mara", "guards capture Mara"). Splitting at clause boundaries prevents an
-    unrelated verb in "Ines enters while Mara waits" from explaining Mara.
-    """
-    value = str(text or "")
-    clauses = [
-        part.strip()
-        for part in re.split(
-            r"[;,.!?]|\b(?:while|whereas|but|and then|and|then|as|when|before|after|"
-            r"although|because|so)\b",
-            value,
-            flags=re.I,
-        )
-        if part.strip()
-    ]
-    for surface in _name_surfaces(item.get("name", ""), item.get("aliases", [])):
-        if not surface:
-            continue
-        name_re = re.compile(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", re.I)
-        for clause in clauses:
-            # Character is the grammatical subject of the transition.
-            if any(name.end() <= action.start() and action.start() - name.end() <= 80
-                   for name in name_re.finditer(clause)
-                   for action in action_re.finditer(clause)):
-                return True
-            # Character is the recipient/object of an explicit transitive action.
-            if object_action_re is not None and any(
-                action.end() <= name.start() and name.start() - action.end() <= 60
-                for action in object_action_re.finditer(clause)
-                for name in name_re.finditer(clause)
-            ):
-                return True
-    return False
 
 
 def _unknown_named_surfaces(value: str, cast: list[dict[str, Any]]) -> list[str]:
@@ -453,7 +397,12 @@ def _has_plot_anchor(field_value: str, prose: str, minimum: int = 2) -> bool:
 
 
 def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12) -> list[str]:
-    """Hard-check explicit scene entry/exit states and high-confidence transitions."""
+    """Hard-check scene-state continuity using presence deltas, without lexical transition vocabularies.
+
+    Returns a single ordered list of findings. Structural defects are classified as
+    fatal by split_contract_findings(); findings such as a possible fate contradiction
+    that are not structural defects are routed to warnings by the same function.
+    """
     fields, beats, cast_line = _fields_and_beats(blueprint)
     required_fields = {
         "LOGLINE", "PROTAGONIST_GOAL", "OPPOSITION", "PRESSURE", "STORY_ENGINE", "REVERSAL",
@@ -525,45 +474,44 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
                 errors.append(
                     f"scene {number:02d} ON_SCREEN_PRESENT includes {item['name']!r}, but the CAST on-screen scene list omits it"
                 )
-            # Explicit typed transition fields are the machine-readable contract.
-            # This avoids fragile, ever-growing English verb lists and handles coordinated
-            # clauses, paraphrases, passive voice, and story-specific departure wording.
-            mid_entry = _name_is_present(state["MID_SCENE_ENTRIES"], item)
-            mid_exit = _name_is_present(state["MID_SCENE_EXITS"], item)
+            # Mid-scene transitions are derived, not requested as duplicate model-authored fields:
+            #   entry = ON_SCREEN_PRESENT - ENTRY_PRESENT
+            #   exit  = ON_SCREEN_PRESENT - EXIT_PRESENT
+            # This makes the ledger deterministic and prevents a second redundant list from drifting.
             event_mentions_person = _name_is_present(state["EVENT"], item)
-            if on_screen and not at_entry and not mid_entry:
+            if on_screen and not at_entry and not event_mentions_person:
                 errors.append(
-                    f"scene {number:02d} mid-scene entry for {item['name']!r} is missing from MID_SCENE_ENTRIES"
+                    f"scene {number:02d} mid-scene entry for {item['name']!r} has no character-specific EVENT anchor"
                 )
-            if mid_entry and (not on_screen or at_entry):
+            if on_screen and not at_exit and not event_mentions_person:
                 errors.append(
-                    f"scene {number:02d} MID_SCENE_ENTRIES incorrectly lists {item['name']!r}"
-                )
-            if on_screen and not at_exit and not mid_exit:
-                errors.append(
-                    f"scene {number:02d} mid-scene exit for {item['name']!r} is missing from MID_SCENE_EXITS"
-                )
-            if mid_exit and (not on_screen or at_exit):
-                errors.append(
-                    f"scene {number:02d} MID_SCENE_EXITS incorrectly lists {item['name']!r}"
-                )
-            if (mid_entry or mid_exit) and not event_mentions_person:
-                errors.append(
-                    f"scene {number:02d} transition for {item['name']!r} is not grounded by naming them in EVENT"
+                    f"scene {number:02d} mid-scene exit for {item['name']!r} has no character-specific EVENT anchor"
                 )
 
-    # Explicit death facts in the planned event must agree with the scene's exit state.
-    for number in range(1, expected_scenes + 1):
-        state = parse_scene_state(beats[number])
-        for item in cast:
-            surfaces = _name_surfaces(item["name"], item["aliases"])
-            if not any(re.search(r"(?<!\w)" + re.escape(s) + r"(?!\w)", state.get("EVENT", ""), re.I) for s in surfaces):
-                continue
-            if DEATH_RE.search(state.get("EVENT", "")):
-                if _name_is_present(state.get("EXIT_PRESENT", ""), item):
-                    errors.append(f"scene {number:02d} kills {item['name']!r} but leaves them physically present at exit")
-                if item["fate"].casefold() == "survives":
-                    errors.append(f"scene {number:02d} kills {item['name']!r} despite CAST fate=survives")
+            # CAST fate is the single authoritative death declaration. Do not infer that
+            # a named character died merely because a death verb occurs somewhere in an
+            # EVENT: that character may be the killer, witness, or person discussing another death.
+            death_match = re.fullmatch(r"dies in scene\s+(\d+)", item["fate"].casefold())
+            if death_match and int(death_match.group(1)) == number:
+                if at_exit:
+                    errors.append(
+                        f"scene {number:02d} CAST fate says {item['name']!r} dies here but EXIT_PRESENT still includes them"
+                    )
+                if not event_mentions_person:
+                    errors.append(
+                        f"scene {number:02d} death of {item['name']!r} is not anchored in EVENT"
+                    )
+
+            # Soft warning only: a character whose CAST fate is survives/alive should
+            # not have a death cue co-occurring with their name in EVENT. This string
+            # contains no HARD_FINDING_MARKERS substring, so split_contract_findings()
+            # routes it to warnings, not fatals.
+            if item["fate"].casefold() in {"survives", "alive"} and event_mentions_person:
+                if _DEATH_CUE_RE.search(state["EVENT"]):
+                    errors.append(
+                        f"scene {number:02d} potential fate contradiction: CAST says {item['name']!r} survives "
+                        f"but EVENT uses a death cue near their name (review)"
+                    )
 
     # The compact global ledger must be anchored to the canonical protagonist and key world state.
     ledger = fields.get("CONTINUITY_LEDGER", "")
@@ -604,18 +552,16 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         arriving = new_present - old_present
         for canonical_name in sorted(arriving):
             person = next((item for item in cast if item["name"].casefold() == canonical_name), None)
-            if person is not None and not _has_named_transition(
-                current.get("EVENT", ""), person, MID_SCENE_ARRIVAL_RE, MID_SCENE_ARRIVAL_OBJECT_RE
-            ):
+            if person is not None and not _name_is_present(current.get("EVENT", ""), person):
                 errors.append(
-                    f"scene {number + 1:02d} introduces {person['name']!r} without a character-specific arrival/meeting event"
+                    f"scene {number + 1:02d} introduces {person['name']!r} without a character-specific arrival EVENT anchor"
                 )
         departing = old_present - new_present
         for canonical_name in sorted(departing):
             person = next((item for item in cast if item["name"].casefold() == canonical_name), None)
-            if person is not None and not _has_named_transition(bridge, person, MID_SCENE_DEPARTURE_RE, MID_SCENE_DEPARTURE_OBJECT_RE):
+            if person is not None and not _name_is_present(bridge, person):
                 errors.append(
-                    f"scene {number:02d} removes {person['name']!r} without a character-specific departure/fate transition"
+                    f"scene {number:02d} removes {person['name']!r} without a character-specific departure EVENT anchor"
                 )
 
         before_knowledge = content_tokens(prior.get("EXIT_KNOWS", ""))
@@ -798,7 +744,6 @@ def audit_story_against_blueprint(
         }
         if len(candidate.split()) > 1 and set(candidate_key.split()) & role_words:
             continue
-        source_text = str(source_story or "")
         sentence_start = max(str(story or "").rfind(mark, 0, match.start()) for mark in ".!?\n") + 1
         sentence_end_candidates = [str(story or "").find(mark, match.end()) for mark in ".!?\n"]
         sentence_end_candidates = [v for v in sentence_end_candidates if v >= 0]
