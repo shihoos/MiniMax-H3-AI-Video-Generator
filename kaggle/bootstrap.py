@@ -427,29 +427,6 @@ def _sage_build_stamp_path(install_dir: Path) -> Path:
     return install_dir / ".h3_t4_build_stamp.json"
 
 
-def _resolve_nvcc(env: dict | None = None) -> str:
-    """Resolve the compiler PyTorch extension builds should use, preferring CUDA_HOME."""
-    env = dict(os.environ if env is None else env)
-    # Prefer the runtime-locked pip compiler; _configure_cuda_environment sets CUDA_HOME
-    # to this same toolkit root so PyTorch's extension builder invokes this exact binary.
-    for root in sys.path:
-        candidate = Path(root) / "nvidia" / "cuda_nvcc" / "bin" / "nvcc"
-        if candidate.is_file():
-            return str(candidate.resolve())
-    for variable in ("CUDA_HOME", "CUDA_PATH"):
-        root = str(env.get(variable, "") or "").strip()
-        candidate = Path(root) / "bin" / "nvcc" if root else None
-        if candidate is not None and candidate.is_file():
-            return str(candidate.resolve())
-    path_nvcc = shutil.which("nvcc", path=env.get("PATH"))
-    if path_nvcc:
-        return str(Path(path_nvcc).resolve())
-    fallback = Path("/usr/local/cuda/bin/nvcc")
-    if fallback.is_file():
-        return str(fallback.resolve())
-    return ""
-
-
 def _tool_version(command: str) -> str:
     try:
         result = subprocess.run(
@@ -463,7 +440,7 @@ def _tool_version(command: str) -> str:
     return " | ".join(lines[-2:]) if lines else "unknown"
 
 
-def _sage_build_stamp(runtime: dict, install_dir: Path | None = None, env: dict | None = None) -> dict:
+def _sage_build_stamp(runtime: dict, install_dir: Path | None = None) -> dict:
     pytorch = dict(runtime.get("pytorch", {}) or {})
     sage = dict(runtime.get("sage_attention", {}) or {})
     cuda_runtime = dict(runtime.get("cuda_runtime", {}) or {})
@@ -476,10 +453,8 @@ def _sage_build_stamp(runtime: dict, install_dir: Path | None = None, env: dict 
     kernel_sha256 = None
     if kernel is not None and kernel.is_file():
         kernel_sha256 = hashlib.sha256(kernel.read_bytes()).hexdigest()
-    nvcc_path = _resolve_nvcc(env)
-    nvcc_version = _tool_version(nvcc_path) if nvcc_path else "unavailable"
     return {
-        "schema": 3,
+        "schema": 2,
         "sage_revision": str(sage.get("revision", "") or "").strip(),
         "sage_version": str(sage.get("version", "") or "").strip(),
         "torch_version": str(pytorch.get("version", "") or "").strip(),
@@ -492,9 +467,8 @@ def _sage_build_stamp(runtime: dict, install_dir: Path | None = None, env: dict 
         "platform": sys.platform,
         "machine": __import__("platform").machine(),
         "gpu_arch": "sm75",
-        "cxx_compiler": _tool_version(shutil.which("c++", path=(env or os.environ).get("PATH")) or "c++"),
-        "nvcc_path": nvcc_path or "unavailable",
-        "nvcc_compiler": nvcc_version,
+        "cxx_compiler": _tool_version("c++"),
+        "nvcc_compiler": _tool_version("nvcc"),
         "patched_kernel_sha256": kernel_sha256,
         "patched_setup_sha256": setup_sha256,
     }
@@ -508,13 +482,9 @@ def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
     package_dir = install_dir / "sageattention"
     if not stamp_path.is_file() or not kernel.is_file() or not package_dir.is_dir():
         return False
-    library_dirs = _cuda_library_dirs(runtime)
-    if not library_dirs:
-        return False
-    env = _configure_cuda_environment(library_dirs)
     try:
         stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
-        if stamp != _sage_build_stamp(runtime, install_dir, env):
+        if stamp != _sage_build_stamp(runtime, install_dir):
             return False
         if _git_head(install_dir) != str(runtime.get("sage_attention", {}).get("revision", "")).strip():
             return False
@@ -534,6 +504,10 @@ def _sage_install_is_reusable(runtime: dict, install_dir: Path) -> bool:
     if not any(package_dir.rglob("*.so")):
         return False
     expected_version = str(runtime.get("sage_attention", {}).get("version", "") or "").strip()
+    library_dirs = _cuda_library_dirs(runtime)
+    if not library_dirs:
+        return False
+    env = _configure_cuda_environment(library_dirs)
     env["CUDA_VISIBLE_DEVICES"] = "0"
     probe = subprocess.run(
         [
@@ -617,19 +591,6 @@ def _configure_cuda_environment(
     environment = dict(
         os.environ
     )
-    nvcc = _resolve_nvcc(environment)
-    if nvcc and "/nvidia/cuda_nvcc/" in nvcc.replace("\\", "/"):
-        toolkit_root = str(Path(nvcc).resolve().parent.parent)
-        environment["CUDA_HOME"] = toolkit_root
-        environment["CUDA_PATH"] = toolkit_root
-        environment["PATH"] = str(Path(nvcc).resolve().parent) + os.pathsep + environment.get("PATH", "")
-        runtime_includes = [
-            str(Path(root) / "nvidia" / "cuda_runtime" / "include")
-            for root in sys.path
-            if (Path(root) / "nvidia" / "cuda_runtime" / "include" / "cuda_runtime.h").is_file()
-        ]
-        if runtime_includes:
-            environment["CPATH"] = os.pathsep.join(runtime_includes + ([environment["CPATH"]] if environment.get("CPATH") else []))
     existing = environment.get(
         "LD_LIBRARY_PATH",
         "",
@@ -648,6 +609,114 @@ def _configure_cuda_environment(
         values
     )
     return environment
+_LOCKED_CUDA_TOOLKIT_PACKAGES = ("cuda-nvcc-{mm}", "cuda-cudart-dev-{mm}")
+
+
+def _cuda_major_minor(runtime: dict) -> str:
+    version = str((runtime.get("cuda_runtime", {}) or {}).get("runtime_version", "") or "").strip()
+    parts = version.split(".")
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise RuntimeError("runtime_versions.yaml cuda_runtime.runtime_version must look like 13.2.86.")
+    return f"{parts[0]}.{parts[1]}"
+
+
+def _nvcc_release(nvcc: Path) -> str:
+    try:
+        out = subprocess.run([str(nvcc), "--version"], capture_output=True, text=True, check=False, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    match = re.search(r"release (\d+\.\d+)", out.stdout or "")
+    return match.group(1) if (out.returncode == 0 and match) else ""
+
+
+def install_locked_cuda_toolkit(runtime: dict) -> Path | None:
+    """Install NVIDIA's apt CUDA compiler (cuda-nvcc-<MM>, the real nvcc driver) next to Kaggle's own toolkit.
+
+    Runs in the background while PyTorch installs. It never raises: if anything fails, bootstrap keeps using the
+    system nvcc, which is the combination already proven on Kaggle. Returns the toolkit root or None.
+    """
+    try:
+        mm = _cuda_major_minor(runtime)
+        root = Path(f"/usr/local/cuda-{mm}")
+        if (root / "bin" / "nvcc").is_file() and _nvcc_release(root / "bin" / "nvcc") == mm:
+            print(f"[CUDA TOOLKIT] {root} already provides nvcc {mm}", flush=True)
+            return root
+        import platform
+        release = {}
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            release[key] = value.strip().strip('"')
+        if platform.machine() != "x86_64" or release.get("ID") != "ubuntu":
+            print("[CUDA TOOLKIT] skipped: NVIDIA apt repository is only configured for Ubuntu x86_64.", flush=True)
+            return None
+        distro = "ubuntu" + release.get("VERSION_ID", "").replace(".", "")
+        sudo = [] if os.geteuid() == 0 else (["sudo", "-n"] if shutil.which("sudo") else [])
+        apt_env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        keyring_url = f"https://developer.download.nvidia.com/compute/cuda/repos/{distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+        with tempfile.TemporaryDirectory(prefix="h3-cuda-keyring-") as temporary:
+            keyring = Path(temporary) / "cuda-keyring.deb"
+            import urllib.request
+            with urllib.request.urlopen(keyring_url, timeout=60) as response:
+                keyring.write_bytes(response.read())
+            run(*sudo, "dpkg", "-i", keyring, env=apt_env)
+        sources = sorted(Path("/etc/apt/sources.list.d").glob("cuda-*.list"))
+        update = [*sudo, "apt-get", "update", "-qq"]
+        if len(sources) == 1:
+            # Refresh only NVIDIA's repository; Kaggle's other apt sources are irrelevant and can be slow.
+            update += ["-o", f"Dir::Etc::sourcelist={sources[0]}", "-o", "Dir::Etc::sourceparts=-",
+                       "-o", "APT::Get::List-Cleanup=0"]
+        run(*update, env=apt_env)
+        packages = [name.format(mm=mm.replace(".", "-")) for name in _LOCKED_CUDA_TOOLKIT_PACKAGES]
+        run(*sudo, "apt-get", "install", "-y", "-qq", "--no-install-recommends", *packages, env=apt_env)
+        release_found = _nvcc_release(root / "bin" / "nvcc")
+        if release_found != mm:
+            raise RuntimeError(f"{root}/bin/nvcc reports release {release_found or 'unknown'}, expected {mm}")
+        print(f"[CUDA TOOLKIT] installed {', '.join(packages)}; nvcc {mm} at {root / 'bin' / 'nvcc'}", flush=True)
+        return root
+    except Exception as exc:
+        print(f"[CUDA TOOLKIT] apt install failed ({type(exc).__name__}: {exc}); the system nvcc will be used.", flush=True)
+        return None
+
+
+def activate_locked_cuda_toolkit(runtime: dict, root: Path | None) -> None:
+    """Use the apt nvcc for the Sage build only after a real PyTorch-extension compile with it succeeds."""
+    if root is None:
+        print("[CUDA TOOLKIT] using the system nvcc (apt toolkit not available).", flush=True)
+        return
+    mm = _cuda_major_minor(runtime)
+    nvcc = root / "bin" / "nvcc"
+    try:
+        paths = subprocess.run(
+            [sys.executable, "-c",
+             "import sysconfig; from torch.utils.cpp_extension import include_paths; "
+             "print(';'.join(include_paths() + [sysconfig.get_paths()['include']]))"],
+            capture_output=True, text=True, check=True, timeout=120,
+        ).stdout.strip().splitlines()[-1].split(";")
+        with tempfile.TemporaryDirectory(prefix="h3-nvcc-probe-") as temporary:
+            source = Path(temporary) / "probe.cu"
+            source.write_text(
+                "#include <torch/extension.h>\n#include <cuda_runtime.h>\n#include <cuda_fp16.h>\n"
+                "__global__ void probe_kernel(half* x) { x[0] = __float2half(1.0f); }\n",
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [str(nvcc), "-std=c++20", "-gencode", "arch=compute_75,code=sm_75", "-c", str(source),
+                 "-o", str(Path(temporary) / "probe.o"), f"-I{root / 'include'}", *[f"-I{path}" for path in paths if path],
+                 "-D__CUDA_NO_HALF_OPERATORS__", "-D__CUDA_NO_HALF_CONVERSIONS__"],
+                capture_output=True, text=True, check=False, timeout=300,
+            )
+        if result.returncode != 0:
+            raise RuntimeError("probe compile failed:\n" + "\n".join(((result.stderr or result.stdout) or "").splitlines()[-12:]))
+    except Exception as exc:
+        print(f"[CUDA TOOLKIT] apt nvcc {mm} did not pass the PyTorch-extension probe ({exc}); the system nvcc will be used.",
+              flush=True)
+        return
+    os.environ["CUDA_HOME"] = str(root)
+    os.environ["CUDA_PATH"] = str(root)
+    os.environ["PATH"] = str(root / "bin") + os.pathsep + os.environ.get("PATH", "")
+    print(f"[CUDA TOOLKIT] Sage will build with nvcc {mm} from {nvcc} (probe compile: PASS)", flush=True)
+
+
 def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
     """Provide Kaggle's sitecustomize dependency from the runtime lock."""
     wrapt_version = str(runtime["python"]["wrapt_version"]).strip()
@@ -997,37 +1066,6 @@ def _start_director_server_early() -> None:
         print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
         return
     print(f"[DIRECTOR] server starting in the background (pid {process.pid}); it overlaps the SageAttention build", flush=True)
-
-
-def ensure_locked_cuda_compiler(runtime: dict) -> None:
-    """Install the CUDA compiler matching the locked CUDA runtime before cache/build decisions."""
-    cuda_cfg = dict(runtime.get("cuda_runtime", {}) or {})
-    expected = str(cuda_cfg.get("runtime_version", "") or "").strip()
-    if not expected:
-        raise RuntimeError("runtime_versions.yaml cuda_runtime.runtime_version is required for the CUDA compiler lock.")
-    try:
-        installed = importlib_metadata.version("nvidia-cuda-nvcc")
-    except importlib_metadata.PackageNotFoundError:
-        installed = ""
-    if installed != expected:
-        print(f"[SAGE TOOLCHAIN] installing nvidia-cuda-nvcc=={expected} (found {installed or 'missing'})", flush=True)
-        run(sys.executable, "-m", "pip", "install", "--disable-pip-version-check", f"nvidia-cuda-nvcc=={expected}")
-        installed = importlib_metadata.version("nvidia-cuda-nvcc")
-    if installed != expected:
-        raise RuntimeError(f"CUDA compiler package mismatch: expected nvidia-cuda-nvcc=={expected}, found {installed}.")
-    nvcc = _resolve_nvcc(os.environ)
-    if not nvcc or "/nvidia/cuda_nvcc/" not in nvcc.replace("\\", "/"):
-        raise RuntimeError("The pinned nvidia-cuda-nvcc package installed but its compiler path could not be resolved.")
-    out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, check=False, timeout=20)
-    match = re.search(r"release (\d+)\.(\d+)", out.stdout)
-    expected_major_minor = ".".join(expected.split(".")[:2])
-    actual_major_minor = f"{match.group(1)}.{match.group(2)}" if match else "unknown"
-    if out.returncode != 0 or actual_major_minor != expected_major_minor:
-        raise RuntimeError(
-            f"CUDA compiler mismatch: expected nvcc {expected_major_minor} from nvidia-cuda-nvcc=={expected}, "
-            f"resolved {nvcc} release {actual_major_minor}. Refusing to use stale system nvcc."
-        )
-    print(f"[SAGE TOOLCHAIN] locked nvcc={nvcc} release {actual_major_minor}: PASS", flush=True)
 
 
 def verify_cuda_library_pins(runtime: dict) -> None:
@@ -3004,7 +3042,11 @@ def _patch_sage_cxx_standard(install_dir: Path) -> None:
 def _describe_cuda_toolchain(runtime: dict, env: dict) -> None:
     """Print the CUDA toolchain a native build will use, and warn on a toolkit/torch major mismatch."""
     cuda_home = env.get("CUDA_HOME") or env.get("CUDA_PATH") or ""
-    nvcc = _resolve_nvcc(env)
+    nvcc = shutil.which("nvcc", path=env.get("PATH")) or (
+        str(Path(cuda_home) / "bin" / "nvcc") if cuda_home and (Path(cuda_home) / "bin" / "nvcc").is_file() else ""
+    )
+    if not nvcc and Path("/usr/local/cuda/bin/nvcc").is_file():
+        nvcc = "/usr/local/cuda/bin/nvcc"
     nvcc_text = "not found"
     if nvcc:
         try:
@@ -3409,7 +3451,7 @@ print(
                 f"SageAttention SM75 verification failed on physical GPU {gpu_id}."
             )
 
-    stamp = _sage_build_stamp(runtime, install_dir, child_env)
+    stamp = _sage_build_stamp(runtime, install_dir)
     _sage_build_stamp_path(install_dir).write_text(
         json.dumps(stamp, sort_keys=True, indent=2) + "\n",
         encoding="utf-8",
@@ -3505,6 +3547,9 @@ def main():
                 str(runtime.get("director", {}).get("vllm_env_dir", "")),
             )
         ).expanduser().resolve()
+        from concurrent.futures import ThreadPoolExecutor as _ToolkitExecutor
+        toolkit_executor = _ToolkitExecutor(max_workers=1, thread_name_prefix="h3-cuda-toolkit")
+        toolkit_future = toolkit_executor.submit(_timed_call, "install_locked_cuda_toolkit", install_locked_cuda_toolkit, runtime)
         director_future = None
         director_ready = _probe_director_venv(runtime, director_env)
         if director_ready:
@@ -3543,7 +3588,6 @@ def main():
         _timed_call("install_storyboard_runtime", install_storyboard_runtime, runtime)
         _timed_call("install_pytorch_runtime", install_pytorch_runtime, runtime)
         _timed_call("verify_cuda_library_pins", verify_cuda_library_pins, runtime)
-        _timed_call("ensure_locked_cuda_compiler", ensure_locked_cuda_compiler, runtime)
         _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
 
         if director_future is not None or director_ready:
@@ -3557,6 +3601,9 @@ def main():
                     _start_director_server_early()
                 except Exception as exc:
                     print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
+
+        _timed_call("activate_locked_cuda_toolkit", activate_locked_cuda_toolkit, runtime, toolkit_future.result())
+        toolkit_executor.shutdown(wait=True)
 
         if _sage_install_is_reusable(runtime, sage_dir):
             _BOOTSTRAP_PHASES.append({
