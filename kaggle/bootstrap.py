@@ -1622,6 +1622,7 @@ def install_director_runtime(
         "--index-url", pytorch_index, "--extra-index-url", "https://pypi.org/simple",
         "--index-strategy", "unsafe-best-match",
     )
+    _stage_started = time.perf_counter()
     for requirement, extra in (
         (f"torch=={torch_version}+{cuda_tag}", ()),
         (f"torchvision=={torchvision_pin}", ("--no-deps",)),
@@ -1633,12 +1634,16 @@ def install_director_runtime(
         )
         if step.returncode != 0:
             raise RuntimeError(f"Failed to install {requirement} into the Director environment.")
+        print(f"[DIRECTOR TIMING] {requirement}: {time.perf_counter() - _stage_started:.0f}s since torch install started", flush=True)
+    _stage_started = time.perf_counter()
     step = subprocess.run(
         [uv, "pip", "install", "-q", "--python", str(venv_python), "--link-mode", "copy", "--no-deps", f"vllm=={vllm_version}"],
         env=env, check=False, text=True,
     )
     if step.returncode != 0:
         raise RuntimeError(f"Failed to install vllm=={vllm_version} into the Director environment.")
+    print(f"[DIRECTOR TIMING] vllm=={vllm_version} (no deps): {time.perf_counter() - _stage_started:.0f}s", flush=True)
+    _stage_started = time.perf_counter()
     vllm_requirements = _read_installed_vllm_requirements(venv_python, env)
     with tempfile.TemporaryDirectory(prefix="h3_director_requirements_") as requirements_dir:
         requirements_path = Path(requirements_dir) / "vllm-requirements.txt"
@@ -1668,6 +1673,8 @@ def install_director_runtime(
         )
     if step.returncode != 0:
         raise RuntimeError("Failed to install the vLLM runtime dependencies into the Director environment.")
+    print(f"[DIRECTOR TIMING] vLLM dependencies: {time.perf_counter() - _stage_started:.0f}s", flush=True)
+    _stage_started = time.perf_counter()
     verification = subprocess.run(
         [
             str(venv_python), "-c",
@@ -1712,6 +1719,7 @@ def install_director_runtime(
         print(verification.stderr)
     if verification.returncode != 0:
         raise RuntimeError("vLLM isolated runtime verification failed.")
+    print(f"[DIRECTOR TIMING] verification: {time.perf_counter() - _stage_started:.0f}s", flush=True)
     observed_wrapt_version = None
     for line in verification.stdout.splitlines():
         if line.startswith("wrapt version:"):
@@ -3629,18 +3637,6 @@ def main():
         _timed_call("verify_cuda_library_pins", verify_cuda_library_pins, runtime)
         _timed_call("install_and_verify_pillow_runtime", install_and_verify_pillow_runtime, runtime)
 
-        if director_future is not None or director_ready:
-            # The Director venv and the staged checkpoints are both needed before its server can start.
-            if _director_prewarm_enabled(runtime):
-                try:
-                    if director_future is not None:
-                        director_future.result()
-                    if stage_future is not None:
-                        stage_future.result()
-                    _start_director_server_early()
-                except Exception as exc:
-                    print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
-
         _timed_call("activate_locked_cuda_toolkit", activate_locked_cuda_toolkit, runtime, toolkit_future.result())
         toolkit_executor.shutdown(wait=True)
 
@@ -3668,6 +3664,19 @@ def main():
         _timed_call("patch_h3_sage_attention", patch_h3_sage_attention, runtime)
         _timed_call("apply_embedded_h3_runtime_overlay", apply_embedded_h3_runtime_overlay)
         _timed_call("patch_h3_embedding_memory_compatibility", patch_h3_embedding_memory_compatibility, runtime)
+
+        if director_future is not None or director_ready:
+            # The Director venv and the staged checkpoints are both needed before its server can start. This wait comes
+            # AFTER the Sage build has been submitted: a slow Director install must never delay the Sage compile.
+            if _director_prewarm_enabled(runtime):
+                try:
+                    if director_future is not None:
+                        director_future.result()
+                    if stage_future is not None:
+                        stage_future.result()
+                    _start_director_server_early()
+                except Exception as exc:
+                    print(f"[DIRECTOR] early start skipped: {type(exc).__name__}: {exc}", flush=True)
 
         background_failures = []
         for background_label, background_future in (
