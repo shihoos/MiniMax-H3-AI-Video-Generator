@@ -487,28 +487,31 @@ class QwenDirectorPromptMixin:
             ENTRY_LOCATION=[one physical location]; ENTRY_PRESENT=[people physically present at scene start];
             ON_SCREEN_PRESENT=[every canonical cast member physically visible at any point during this scene];
             ENTRY_KNOWS=[what present people know at entry]; ENTRY_OBJECTS=[important objects and their owner/state or none];
-            MID_SCENE_ENTRIES=[canonical cast names who physically enter after scene start, or none];
             EVENT=[the specific action, resistance, decision, changed situation, and explicit physical transitions];
-            MID_SCENE_EXITS=[canonical cast names who physically leave before scene end, or none];
             EXIT_LOCATION=[location at scene end]; EXIT_PRESENT=[people physically present at scene end];
             EXIT_KNOWS=[what has changed in what people know]; EXIT_OBJECTS=[important objects and their owner/state or none];
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
-            ENTRY_PRESENT and EXIT_PRESENT describe only the boundaries. ON_SCREEN_PRESENT is the full-scene visibility
-            record and MUST include a character who enters during the scene or leaves before it ends. It must not include
-            a remote voice, recording, written mention, or person merely discussed. Every character's CAST on-screen scene
-            list must match ON_SCREEN_PRESENT exactly; boundary presence must be a subset of that list. For every person
-            in ON_SCREEN_PRESENT but not ENTRY_PRESENT, EVENT must name that person and state how they physically arrive,
-            enter, join, or meet someone in the scene. For every person in ON_SCREEN_PRESENT but not EXIT_PRESENT, EVENT
-            must name that person and state how they physically leave, depart, withdraw, are captured, or die. If both
-            conditions apply, describe both actions. A transition verb for one character does not explain another person's
-            entrance or exit.
+            ENTRY_PRESENT and EXIT_PRESENT describe only the scene boundaries. ON_SCREEN_PRESENT is the full-scene
+            visibility record and MUST include a character who enters during the scene or leaves before it ends. It must not
+            include a remote voice, recording, written mention, or person merely discussed. Every character's CAST on-screen
+            scene list must match ON_SCREEN_PRESENT exactly; boundary presence must be a subset of that list.
+            Mid-scene arrivals and departures are derived mechanically from these three presence lists; do NOT output
+            separate MID_SCENE_ENTRIES or MID_SCENE_EXITS fields. For every person in ON_SCREEN_PRESENT but not
+            ENTRY_PRESENT, EVENT must name that person and describe their actual physical arrival, entry, joining, or meeting.
+            For every person in ON_SCREEN_PRESENT but not EXIT_PRESENT, EVENT must name that person and describe their actual
+            physical departure, withdrawal, capture, or death. If both conditions apply, describe both transitions.
+            Mentioning or discussing a person is not the same as showing them physically enter or leave.
+            CAST fate is authoritative: use 'dies in scene NN' only for the person who actually dies, not the person who
+            causes, witnesses, reports, or discusses another character's death. A character who dies must be on screen in
+            that death scene and must not appear in EXIT_PRESENT or any later scene. A survivor may kill another person
+            without their own fate becoming 'dies'.
             A beat is a compact causal event description, not finished prose or a checklist. The state fields are a continuity
             ledger, not a fixed dramatic-function template. Vary scene purpose and dramatic texture; use specific actions
             and consequences rather than mood-only summaries. Do not write camera instructions or exposition dumps.
 
             QUALITY REVIEW BEFORE OUTPUT: replay the complete 12-beat chain. Check that every EXIT becomes the next ENTRY
             or that the next scene explicitly shows travel/time; every CAST on-screen scene is represented in ON_SCREEN_PRESENT;
-            newly present people have an arrival/meeting cause; knowledge
+            each mid-scene presence change is described for that same named person in EVENT; knowledge
             changes have a disclosure/discovery event; and key-object custody/state changes have a physical cause. Check
             that every relationship and named project/institution is explicitly listed above, the reversal is prepared,
             the climax follows from earlier setup, and the ending resolves the central question. Remove any beat that only
