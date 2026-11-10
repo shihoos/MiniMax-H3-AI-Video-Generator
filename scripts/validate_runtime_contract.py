@@ -588,6 +588,9 @@ def _validate_bootstrap_upgrade_source() -> None:
         raise RuntimeError("Bootstrap is missing the AST-level H3 VAE decoder postcondition.")
     # One clean Director install: project torch first, vLLM with --no-deps, its other requirements under constraints.
     # The old two-install route (vLLM with an older torch backend, then a torch swap) must not come back.
+    # The pip package nvidia-cuda-nvcc has no nvcc driver at the assumed path; the real compiler is NVIDIA's apt cuda-nvcc-<MM>.
+    if "nvidia-cuda-nvcc" in source or "cuda_nvcc/bin" in source:
+        raise RuntimeError("Bootstrap must not use the nvidia-cuda-nvcc pip wheel as the CUDA compiler.")
     if "--torch-backend" in source:
         raise RuntimeError("Bootstrap must not install an older torch backend for vLLM and swap it afterwards.")
     for marker in (
@@ -598,6 +601,9 @@ def _validate_bootstrap_upgrade_source() -> None:
         "--index-strategy",
         "vLLM Stable ABI compiled CUDA op: PASS",
         "_patch_sage_cxx_standard(install_dir)",
+        "install_locked_cuda_toolkit",
+        "activate_locked_cuda_toolkit",
+        '"cuda-nvcc-{mm}"',
         '"-std=c++20"',
         "vllm=={vllm_version}",
         "from vllm.config.load import LoadConfig",
