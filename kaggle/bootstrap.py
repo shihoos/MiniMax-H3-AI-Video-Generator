@@ -609,7 +609,17 @@ def _configure_cuda_environment(
         values
     )
     return environment
-_LOCKED_CUDA_TOOLKIT_PACKAGES = ("cuda-nvcc-{mm}", "cuda-cudart-dev-{mm}")
+# nvcc + runtime headers, plus the cuBLAS/cuSPARSE/cuSOLVER headers that PyTorch's ATen/cuda/CUDAContext.h includes
+# (SageAttention's fused.cu includes it); the first build with only the first two packages failed on cusparse.h.
+_LOCKED_CUDA_TOOLKIT_PACKAGES = (
+    "cuda-nvcc-{mm}", "cuda-cudart-dev-{mm}", "libcublas-dev-{mm}", "libcusparse-dev-{mm}", "libcusolver-dev-{mm}",
+)
+_LOCKED_CUDA_REQUIRED_HEADERS = (
+    "cuda_runtime.h", "cuda_runtime_api.h", "cuda_fp16.h", "cuda_bf16.h", "cublas_v2.h", "cublasLt.h",
+    "cusparse.h", "cusolverDn.h", "cusolver_common.h",
+)
+_SYSTEM_CUDA_HOME_BEFORE_APT: str = ""
+_LOCKED_CUDA_TOOLKIT_ACTIVE: bool = False
 
 
 def _cuda_major_minor(runtime: dict) -> str:
@@ -641,6 +651,11 @@ def install_locked_cuda_toolkit(runtime: dict) -> Path | None:
         if (root / "bin" / "nvcc").is_file() and _nvcc_release(root / "bin" / "nvcc") == mm:
             print(f"[CUDA TOOLKIT] {root} already provides nvcc {mm}", flush=True)
             return root
+        global _SYSTEM_CUDA_HOME_BEFORE_APT
+        try:
+            _SYSTEM_CUDA_HOME_BEFORE_APT = str(Path("/usr/local/cuda").resolve()) if Path("/usr/local/cuda").exists() else ""
+        except OSError:
+            _SYSTEM_CUDA_HOME_BEFORE_APT = ""
         import platform
         release = {}
         for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
@@ -679,42 +694,44 @@ def install_locked_cuda_toolkit(runtime: dict) -> Path | None:
 
 
 def activate_locked_cuda_toolkit(runtime: dict, root: Path | None) -> None:
-    """Use the apt nvcc for the Sage build only after a real PyTorch-extension compile with it succeeds."""
+    """Point the Sage build at the apt nvcc, but only if the headers/libraries PyTorch's CUDA headers need are present."""
+    global _LOCKED_CUDA_TOOLKIT_ACTIVE
     if root is None:
         print("[CUDA TOOLKIT] using the system nvcc (apt toolkit not available).", flush=True)
         return
     mm = _cuda_major_minor(runtime)
     nvcc = root / "bin" / "nvcc"
-    try:
-        paths = subprocess.run(
-            [sys.executable, "-c",
-             "import sysconfig; from torch.utils.cpp_extension import include_paths; "
-             "print(';'.join(include_paths() + [sysconfig.get_paths()['include']]))"],
-            capture_output=True, text=True, check=True, timeout=120,
-        ).stdout.strip().splitlines()[-1].split(";")
-        with tempfile.TemporaryDirectory(prefix="h3-nvcc-probe-") as temporary:
-            source = Path(temporary) / "probe.cu"
-            source.write_text(
-                "#include <torch/extension.h>\n#include <cuda_runtime.h>\n#include <cuda_fp16.h>\n"
-                "__global__ void probe_kernel(half* x) { x[0] = __float2half(1.0f); }\n",
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [str(nvcc), "-std=c++20", "-gencode", "arch=compute_75,code=sm_75", "-c", str(source),
-                 "-o", str(Path(temporary) / "probe.o"), f"-I{root / 'include'}", *[f"-I{path}" for path in paths if path],
-                 "-D__CUDA_NO_HALF_OPERATORS__", "-D__CUDA_NO_HALF_CONVERSIONS__"],
-                capture_output=True, text=True, check=False, timeout=300,
-            )
-        if result.returncode != 0:
-            raise RuntimeError("probe compile failed:\n" + "\n".join(((result.stderr or result.stdout) or "").splitlines()[-12:]))
-    except Exception as exc:
-        print(f"[CUDA TOOLKIT] apt nvcc {mm} did not pass the PyTorch-extension probe ({exc}); the system nvcc will be used.",
-              flush=True)
+    include_dirs = [root / "include", root / "targets" / "x86_64-linux" / "include"]
+    missing = [
+        header for header in _LOCKED_CUDA_REQUIRED_HEADERS
+        if not any((directory / header).is_file() for directory in include_dirs)
+    ]
+    if not any((root / lib / "libcudart.so").exists() for lib in ("lib64", "targets/x86_64-linux/lib")):
+        missing.append("libcudart.so")
+    if _nvcc_release(nvcc) != mm or missing:
+        print(f"[CUDA TOOLKIT] apt toolkit {root} is incomplete (missing: {', '.join(missing) or 'nvcc ' + mm}); "
+              "the system nvcc will be used.", flush=True)
+        _restore_system_cuda_toolkit()
         return
     os.environ["CUDA_HOME"] = str(root)
     os.environ["CUDA_PATH"] = str(root)
     os.environ["PATH"] = str(root / "bin") + os.pathsep + os.environ.get("PATH", "")
-    print(f"[CUDA TOOLKIT] Sage will build with nvcc {mm} from {nvcc} (probe compile: PASS)", flush=True)
+    _LOCKED_CUDA_TOOLKIT_ACTIVE = True
+    print(f"[CUDA TOOLKIT] Sage will build with nvcc {mm} from {nvcc} (headers and libraries: PASS)", flush=True)
+
+
+def _restore_system_cuda_toolkit() -> None:
+    """Use the CUDA toolkit Kaggle shipped (apt may have re-pointed /usr/local/cuda at the new one)."""
+    global _LOCKED_CUDA_TOOLKIT_ACTIVE
+    _LOCKED_CUDA_TOOLKIT_ACTIVE = False
+    previous = _SYSTEM_CUDA_HOME_BEFORE_APT
+    if not previous or not (Path(previous) / "bin" / "nvcc").is_file():
+        return
+    os.environ["CUDA_HOME"] = previous
+    os.environ["CUDA_PATH"] = previous
+    parts = [part for part in os.environ.get("PATH", "").split(os.pathsep) if part and not part.startswith("/usr/local/cuda")]
+    os.environ["PATH"] = os.pathsep.join([str(Path(previous) / "bin"), *parts])
+    print(f"[CUDA TOOLKIT] building with the system toolkit {previous}", flush=True)
 
 
 def ensure_kaggle_startup_wrapt(runtime: dict) -> None:
@@ -3159,20 +3176,37 @@ def install_sageattention_sm75(runtime: dict) -> None:
         for artifact in sage_pkg_dir.glob("*.so"):
             artifact.unlink()
 
-    build_env = dict(os.environ)
-    build_env["TORCH_CUDA_ARCH_LIST"] = "7.5"
-    build_env["MAX_JOBS"] = "1"
-    build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
-    _describe_cuda_toolchain(runtime, build_env)
-    _run_logged_build(
-        [
-            sys.executable, "-m", "pip", "install", "-v",
-            "--disable-pip-version-check", "--no-deps", "--no-build-isolation",
-            "-e", str(install_dir),
-        ],
-        env=build_env,
-        label="SAGEATTENTION BUILD",
-    )
+    def _build_sage() -> None:
+        build_env = dict(os.environ)
+        build_env["TORCH_CUDA_ARCH_LIST"] = "7.5"
+        build_env["MAX_JOBS"] = "1"
+        build_env["CMAKE_BUILD_PARALLEL_LEVEL"] = "1"
+        _describe_cuda_toolchain(runtime, build_env)
+        _run_logged_build(
+            [
+                sys.executable, "-m", "pip", "install", "-v",
+                "--disable-pip-version-check", "--no-deps", "--no-build-isolation",
+                "-e", str(install_dir),
+            ],
+            env=build_env,
+            label="SAGEATTENTION BUILD",
+        )
+
+    try:
+        _build_sage()
+    except RuntimeError:
+        if not _LOCKED_CUDA_TOOLKIT_ACTIVE:
+            raise
+        # The apt nvcc could not build this source: rebuild once with the toolkit Kaggle shipped (proven on this stack).
+        print("[CUDA TOOLKIT] Sage did not build with the apt nvcc; rebuilding once with the system toolkit.", flush=True)
+        _restore_system_cuda_toolkit()
+        for relative in ("build", "dist", "sageattention.egg-info"):
+            leftover = install_dir / relative
+            if leftover.is_dir():
+                shutil.rmtree(leftover, ignore_errors=True)
+        for artifact in (install_dir / "sageattention").glob("*.so"):
+            artifact.unlink()
+        _build_sage()
 
     library_dirs = _cuda_library_dirs(runtime)
     if not library_dirs:
