@@ -79,6 +79,8 @@ director:
     thinking_token_budget: 1280
     beat_words_min: 55
     beat_words_max: 120
+    structured_output: true
+    revision_retries: 1
   story_sampling:
     thinking:
       temperature: 0.6
@@ -105,6 +107,7 @@ director:
     writer_words_per_scene: 145
     accept_min_words: 1400
     cast_size_policy: plot_driven
+    author_revision_retries: 1
   prompt_limits:
     story_context_chars: 12000
     critic_story_context_chars: 3500
