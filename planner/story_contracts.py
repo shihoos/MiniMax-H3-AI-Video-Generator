@@ -45,6 +45,7 @@ SPEECH_VERBS = (
 )
 ACTION_VERBS = (
     r"enter\w*|arriv\w*|appear\w*|stands?|standing|stood|walk\w*|runs?|running|ran|cross\w*|climb\w*|"
+    r"hesitat\w*|pause\w*|volunteer\w*|"
     r"follow\w*|reach\w*|turn\w*|grab\w*|holds?|holding|held|carry\w*|open\w*|close\w*|"
     r"lift\w*|pull\w*|push\w*|kneel\w*|sits?|sitting|sat|wait\w*|watch\w*|face\w*|"
     r"step\w*|mov\w*|emerge\w*|join\w*|leaves?|leaving|left|depart\w*|return\w*|look\w*|"
@@ -92,6 +93,7 @@ SCENE_STATE_KEYS = (
 TRAVEL_RE = re.compile(
     r"\b(arriv\w*|enter\w*|reach\w*|travel\w*|walk\w*|drive\w*|cross\w*|climb\w*|"
     r"descend\w*|return\w*|follow\w*|move\w*|head\w*|board\w*|sail\w*|ride\w*|"
+    r"disappear\w*|withdraw\w*|vanish\w*|depart\w*|slip away|go\w*|separate\w*|"
     r"hours later|next morning|by dawn|after sunset|at daybreak|the following day)\b",
     re.I,
 )
@@ -121,16 +123,33 @@ CAUSAL_LINK_RE = re.compile(
     r"now that|once|since|after|unless|before|in order to|must|needs? to|has to|have to)\b", re.I
 )
 
-# Only used as a soft-warning trigger for "CAST says survives but EVENT uses a death cue".
-# Deliberately NOT used to infer a character's death: CAST fate is authoritative for that
-# determination, because a death verb in EVENT may belong to the killer, the victim, or a
-# third party discussing a death elsewhere in the beat.
-_DEATH_CUE_RE = re.compile(
-    r"\b(die[sd]?|dead|killed|murdered|executed|perished|drowned|shot dead|succumbed)\b", re.I
-)
+
+def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
+    """Match an explicit death predicate to its named subject/object, not any name in the beat."""
+    value = str(event or "")
+    for surface in _name_surfaces(item.get("name", ""), item.get("aliases", [])):
+        name = re.escape(surface)
+        # Intransitive/predicative death: Kael dies; Kael is dead; Kael, pinned under debris, dies.
+        subject = (
+            r"\b" + name + r"\b(?:\s*,\s*[^,;.!?]{1,48},)?\s+"
+            r"(?:dies|died|is dead|was dead|perishes|perished|drowns|drowned|succumbs|succumbed)\b"
+        )
+        passive = (
+            r"\b" + name + r"\b\s+(?:is|was|gets|got)\s+"
+            r"(?:killed|murdered|executed|drowned|shot dead|crushed)\b"
+        )
+        # Transitive death where this character is the victim: the beam kills Kael / killing Kael.
+        object_verb = (
+            r"\b(?:kills?|killing|murders?|murdering|executes?|executing|drowns?|drowning|"
+            r"shoots?|shooting|crushes?|crushing|strikes down|striking down)\b"
+            r"[^.;!?]{0,40}\b" + name + r"\b"
+        )
+        if any(re.search(pattern, value, re.I) for pattern in (subject, passive, object_verb)):
+            return True
+    return False
 
 # Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-11.1"
+CONTRACTS_REVISION = "2026-11-11.4"
 
 # Only plan-structure findings may stop a run. Everything else (how a beat is worded, whether a knowledge/location/
 # presence change is "explained" in a heuristic's eyes) is reported as a warning and never blocks prose generation.
@@ -236,9 +255,49 @@ def parse_scene_state(beat: str) -> dict[str, str]:
     return result
 
 
+def is_non_person_cast_entry(name: str, metadata: str, fields: dict[str, str] | None = None) -> bool:
+    """Recognize non-embodied opposition entries so forces/systems are never audited as people.
+
+    Explicit ``kind`` metadata is authoritative. For older Architect output without kind,
+    a narrowly-scoped compatibility rule excludes a generic, voiceless ``opposition`` entry
+    only when the same named entity is independently declared in OPPOSITION. This avoids
+    treating a storm, infrastructure failure, or other impersonal antagonist as a physical
+    cast member while retaining ordinary named human antagonists with a real role.
+    """
+    metadata = str(metadata or "")
+    kind_match = re.search(r"\b(?:kind|entity[_ ]type|category)\s*:\s*([^;,]+)", metadata, re.I)
+    if kind_match:
+        kind = re.sub(r"[\s_/-]+", " ", kind_match.group(1).strip().casefold())
+        if kind in {"person", "human", "animal", "creature", "embodied agent", "sentient embodied character"}:
+            return False
+        # An explicit but unrecognized type is not silently promoted to a physical person.
+        # The prompt's allowed values are closed; add a new embodied type deliberately.
+        return True
+
+    role = metadata.split(";", 1)[0].strip().casefold()
+    known_non_person_role = re.compile(
+        r"\b(?:non[- ]human|relentless force|environmental force|weather system|weather phenomenon|"
+        r"natural phenomenon|natural disaster|environmental hazard|infrastructure|system|location|place|"
+        r"building|object|device|machine|artifact|organization|organisation|company|corporation|abstract concept)\b",
+        re.I,
+    )
+    if known_non_person_role.search(role):
+        return True
+
+    voice_match = re.search(r"\bvoice\s*:\s*([^;]+)", metadata, re.I)
+    voice_is_none = bool(voice_match and voice_match.group(1).strip().casefold() in {"none", "n/a", "-", "silent/no voice"})
+    generic_opposition_role = role in {"opposition", "opposing force", "environmental opposition", "natural force"}
+    opposition_text = str((fields or {}).get("OPPOSITION", "") or "")
+    name = re.sub(r"\s+", " ", str(name or "")).strip()
+    name_is_grounded_as_opposition = bool(
+        name and re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", opposition_text, re.I)
+    )
+    return generic_opposition_role and voice_is_none and name_is_grounded_as_opposition
+
+
 def parse_cast(blueprint: str) -> list[dict[str, Any]]:
-    """Parse canonical names, aliases, on-screen scenes, and terminal fate metadata."""
-    _, _, cast_line = _fields_and_beats(blueprint)
+    """Parse physical character entries; exclude non-person opposition forces/systems."""
+    fields, _, cast_line = _fields_and_beats(blueprint)
     result: list[dict[str, Any]] = []
     if not cast_line:
         return result
@@ -251,6 +310,8 @@ def parse_cast(blueprint: str) -> list[dict[str, Any]]:
         if TITLE_RE.match(name):
             name = TITLE_RE.sub("", name).strip()
         metadata = m.group(2)
+        if is_non_person_cast_entry(name, metadata, fields):
+            continue
         alias_match = re.search(r"aliases\s*:\s*([^;]+)", metadata, re.I)
         aliases: list[str] = []
         if alias_match and alias_match.group(1).strip().casefold() not in {"none", "n/a", "-"}:
@@ -264,48 +325,88 @@ def parse_cast(blueprint: str) -> list[dict[str, Any]]:
 
 
 def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
-    """Make each CAST on-screen scene list agree with the full-scene visibility ledger.
+    """Normalize non-person opponents and reconcile physical presence with boundaries.
 
-    ENTRY_PRESENT and EXIT_PRESENT describe only scene boundaries; ON_SCREEN_PRESENT captures a
-    person who enters mid-scene or leaves before its end. When the full-scene field exists, it is the
-    authoritative visibility map. Older blueprints without it fall back to boundary presence.
+    ENTRY_PRESENT and EXIT_PRESENT are boundary snapshots. Every listed physical person
+    must therefore occur in ON_SCREEN_PRESENT. A declared death is also a physical scene
+    appearance and must be represented there. The model should author the complete ledger;
+    this deterministic normalization repairs only these logically implied inclusions.
     """
     fields, beats, cast_line = _fields_and_beats(blueprint)
     if not cast_line or set(beats) != set(range(1, expected_scenes + 1)):
         return blueprint
-    states = {number: parse_scene_state(beats[number]) for number in beats}
-    rebuilt: list[str] = []
+
+    cast_entries: list[tuple[str, dict[str, Any]]] = []
     for raw in cast_line.partition(":")[2].split("|"):
         raw = raw.strip()
+        parsed_match = re.match(r"^([^()]+?)\s*\((.*)\)\s*$", raw)
+        if parsed_match and is_non_person_cast_entry(parsed_match.group(1).strip(), parsed_match.group(2), fields):
+            continue
         parsed = parse_cast("CAST: " + raw)
         if len(parsed) == 1:
-            item = parsed[0]
-            present = [
-                number for number in sorted(states)
-                if (
-                    _name_is_present(states[number].get("ON_SCREEN_PRESENT", ""), item)
-                    if states[number].get("ON_SCREEN_PRESENT", "").strip()
-                    else (
-                        _name_is_present(states[number].get("ENTRY_PRESENT", ""), item)
-                        or _name_is_present(states[number].get("EXIT_PRESENT", ""), item)
-                    )
-                )
-            ]
-            if item["fate"].casefold().startswith("dies"):
-                death = int(re.search(r"\d+", item["fate"]).group(0))
-                present = sorted({v for v in present if v <= death} | {death})
-            # Only rewrite when the ledger actually says the character appears. If the
-            # character is absent from every scene, leave the CAST declaration intact
-            # so the mismatch surfaces on the ON_SCREEN_PRESENT side, not as a silently
-            # erased appearance list that then trips "has no planned on-screen scenes".
-            if present and present != item["scenes"]:
-                raw = re.sub(
-                    r"on-screen scenes\s*:\s*[0-9, ]+",
-                    "on-screen scenes: " + ", ".join(f"{v:02d}" for v in present),
-                    raw, count=1, flags=re.IGNORECASE,
-                )
+            cast_entries.append((raw, parsed[0]))
+
+    updated_beats = dict(beats)
+    states = {number: parse_scene_state(beats[number]) for number in beats}
+    for number, state in states.items():
+        original_on_screen = state.get("ON_SCREEN_PRESENT", "").strip()
+        additions: list[str] = []
+        for _raw, item in cast_entries:
+            must_be_visible = (
+                _name_is_present(state.get("ENTRY_PRESENT", ""), item)
+                or _name_is_present(state.get("EXIT_PRESENT", ""), item)
+            )
+            fate_match = re.fullmatch(r"dies in scene\s+(\d+)", str(item.get("fate", "")).casefold())
+            death_scene = int(fate_match.group(1)) if fate_match else None
+            if death_scene == number:
+                must_be_visible = True
+            if must_be_visible and not _name_is_present(original_on_screen, item):
+                additions.append(item["name"])
+        if not additions:
+            continue
+        base = "" if original_on_screen.casefold() in {"none", "nobody", "no one", "empty", "-"} else original_on_screen
+        additions = [name for name in dict.fromkeys(additions) if not _name_is_present(base, {"name": name, "aliases": []})]
+        revised_on_screen = ", ".join(part for part in (base, ", ".join(additions)) if part)
+        state["ON_SCREEN_PRESENT"] = revised_on_screen
+        beat_text = beats[number]
+        beat_text, count = re.subn(
+            r"(\bON_SCREEN_PRESENT\s*=\s*)(.*?)(?=\s*;\s*(?:ENTRY_KNOWS|ENTRY_OBJECTS|EVENT|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=|$)",
+            lambda match: match.group(1) + revised_on_screen,
+            beat_text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if count:
+            updated_beats[number] = beat_text
+
+    rebuilt: list[str] = []
+    for raw, item in cast_entries:
+        present = [
+            number for number in sorted(states)
+            if _name_is_present(states[number].get("ON_SCREEN_PRESENT", ""), item)
+        ]
+        fate_match = re.fullmatch(r"dies in scene\s+(\d+)", str(item.get("fate", "")).casefold())
+        if fate_match:
+            death_scene = int(fate_match.group(1))
+            present = sorted({value for value in present if value <= death_scene} | {death_scene})
+        # Preserve the original CAST scene list when the full-scene ledger has no
+        # evidence; the validator will expose the unresolved mismatch rather than erase it.
+        if present and present != item["scenes"]:
+            raw = re.sub(
+                r"on-screen scenes\s*:\s*[0-9, ]+",
+                "on-screen scenes: " + ", ".join(f"{value:02d}" for value in present),
+                raw,
+                count=1,
+                flags=re.IGNORECASE,
+            )
         rebuilt.append(raw)
-    return blueprint.replace(cast_line, "CAST: " + " | ".join(rebuilt), 1)
+
+    revised = blueprint.replace(cast_line, "CAST: " + " | ".join(rebuilt), 1)
+    for number, old_beat in beats.items():
+        new_beat = updated_beats[number]
+        if new_beat != old_beat:
+            revised = revised.replace(old_beat, new_beat, 1)
+    return revised
 
 
 def _name_surfaces(name: str, aliases: list[str] | None = None) -> list[str]:
@@ -506,11 +607,11 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
             # not have a death cue co-occurring with their name in EVENT. This string
             # contains no HARD_FINDING_MARKERS substring, so split_contract_findings()
             # routes it to warnings, not fatals.
-            if item["fate"].casefold() in {"survives", "alive"} and event_mentions_person:
-                if _DEATH_CUE_RE.search(state["EVENT"]):
+            if item["fate"].casefold() in {"survives", "alive"}:
+                if _event_explicitly_assigns_death(state["EVENT"], item):
                     errors.append(
                         f"scene {number:02d} potential fate contradiction: CAST says {item['name']!r} survives "
-                        f"but EVENT uses a death cue near their name (review)"
+                        f"but EVENT explicitly assigns a death to them (review)"
                     )
 
     # The compact global ledger must be anchored to the canonical protagonist and key world state.
@@ -851,7 +952,9 @@ def audit_story_against_blueprint(
                 errors.append(f"scene {number:02d} prose does not show arrival of {', '.join(sorted(newly_present))}")
             departed = prior_people - entry_people
             prior_paragraph = paragraphs[number - 2]
-            if departed and not re.search(r"\b(leave\w*|depart\w*|exit\w*|return\w*|separate\w*|stay\w*|remain\w*|fall\w*|die\w*|killed|drowned|captured|taken)\b", prior_paragraph, re.I):
+            # Reuse the shared movement/transition vocabulary; the former small bespoke
+            # list missed ordinary prose such as "Kael disappeared down the corridor".
+            if departed and not TRAVEL_RE.search(prior_paragraph):
                 errors.append(f"scene {number - 1:02d} removes a planned person without an exit/fate cue")
 
             prior_knowledge = content_tokens(prior.get("EXIT_KNOWS", ""))
