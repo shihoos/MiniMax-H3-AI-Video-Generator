@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import json
 import random
+from datetime import datetime, timezone
 import re
 
 from planner.cinematic_compiler import CinematicCompiler
@@ -17,6 +18,7 @@ from planner.story_contracts import (
     audit_story_against_blueprint,
     blueprint_beat_floor,
     blueprint_field_floor,
+    parse_cast,
     ensure_cinematic_coverage,
     validate_blueprint_state_contract,
     validate_cinematic_coverage,
@@ -113,6 +115,12 @@ class QwenDirector(
         self._semantic_spoken_dialogue: list[dict] = []
         self._last_story_draft: str = ""
         self._story_min_words: int = STORY_ACCEPT_MIN_WORDS
+        self._last_story_blueprint_warnings: list[str] = []
+        self._last_story_contract_warnings: list[str] = []
+        self._last_story_quality_warnings: list[str] = []
+        self._last_story_quality_errors: list[str] = []
+        self._last_story_cleanup_events: list[str] = []
+        self._last_story_word_counts: dict[str, int] = {}
 
         # Optional development diagnostics. Both are disabled unless the
         # corresponding environment variable is explicitly configured.
@@ -1453,10 +1461,118 @@ class QwenDirector(
             ]
             temporary.write_text("\n".join(header), encoding="utf-8")
             temporary.replace(destination)
+            trace_dir = getattr(self, "_trace_dir", None)
+            if trace_dir is not None:
+                trace_copy = Path(trace_dir) / destination.name
+                trace_temporary = trace_copy.with_name(trace_copy.name + ".tmp")
+                trace_temporary.write_text(destination.read_text(encoding="utf-8"), encoding="utf-8")
+                trace_temporary.replace(trace_copy)
             print(f"[QWEN] rejected_story_saved={destination}", flush=True)
         except Exception as exc:
             # A diagnostic write must never replace the real story-contract exception.
             print(f"[QWEN] rejected_story_save_warning={type(exc).__name__}: {exc}", flush=True)
+
+    def _save_story_run_diagnostics(
+        self, *, status: str, stage: str, reason: str = "", word_count: int | None = None,
+    ) -> None:
+        """Persist complete warnings/results beside Qwen traces and in the project root."""
+        try:
+            report = {
+                "schema": 1,
+                "contracts_revision": CONTRACTS_REVISION,
+                "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                "status": str(status),
+                "stage": str(stage),
+                "reason": str(reason or ""),
+                "word_counts": dict(getattr(self, "_last_story_word_counts", {}) or {}),
+                "final_word_count": word_count,
+                "required_minimum_words": int(getattr(self, "_story_min_words", STORY_ACCEPT_MIN_WORDS)),
+                "scene_count": DIRECTOR_STORY_SCENES,
+                "generation_policy": {
+                    "architect_calls": 1,
+                    "author_calls": 1 if "author" in str(stage).casefold() else 0,
+                    "retries": 0,
+                    "repairs": 0,
+                },
+                "blueprint_warnings": list(getattr(self, "_last_story_blueprint_warnings", []) or []),
+                "prose_audit_warnings": list(getattr(self, "_last_story_contract_warnings", []) or []),
+                "quality_warnings": list(getattr(self, "_last_story_quality_warnings", []) or []),
+                "quality_errors": list(getattr(self, "_last_story_quality_errors", []) or []),
+                "cleanup_events": list(getattr(self, "_last_story_cleanup_events", []) or []),
+                "failed_draft_file": (
+                    "story_author_last_failed.txt"
+                    if status != "passed"
+                    and "author" in str(stage).casefold()
+                    and (Path(getattr(self, "project_root", None) or Path.cwd()) / "story_author_last_failed.txt").is_file()
+                    else None
+                ),
+            }
+            lines = [
+                "MINIMAX H3 — STORY RUN DIAGNOSTICS",
+                f"contracts_revision: {report['contracts_revision']}",
+                f"timestamp_utc: {report['timestamp_utc']}",
+                f"status: {report['status']}",
+                f"stage: {report['stage']}",
+                f"reason: {report['reason'] or 'none'}",
+                f"word_counts: {json.dumps(report['word_counts'], ensure_ascii=False, sort_keys=True)}",
+                f"final_word_count: {report['final_word_count']}",
+                f"required_minimum_words: {report['required_minimum_words']}",
+                (
+                    "generation_policy: "
+                    f"architect_calls={report['generation_policy']['architect_calls']}; "
+                    f"author_calls={report['generation_policy']['author_calls']}; retries=0; repairs=0"
+                ),
+                "",
+            ]
+            for label, key in (
+                ("BLUEPRINT WARNINGS", "blueprint_warnings"),
+                ("PROSE AUDIT WARNINGS", "prose_audit_warnings"),
+                ("QUALITY WARNINGS", "quality_warnings"),
+                ("QUALITY ERRORS", "quality_errors"),
+                ("DETERMINISTIC CLEANUP", "cleanup_events"),
+            ):
+                lines.append(f"[{label}] {len(report[key])}")
+                lines.extend(f"- {item}" for item in report[key])
+                lines.append("")
+            text_payload = "\n".join(lines) + "\n"
+            project_root = Path(getattr(self, "project_root", None) or Path.cwd())
+            destinations = [project_root / "story_run_diagnostics.json", project_root / "story_run_diagnostics.txt"]
+            trace_dir = getattr(self, "_trace_dir", None)
+            if trace_dir is not None:
+                trace_dir = Path(trace_dir)
+                destinations.extend([trace_dir / "story_run_diagnostics.json", trace_dir / "story_run_diagnostics.txt"])
+            for destination in destinations:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                payload = json.dumps(report, indent=2, ensure_ascii=False) if destination.suffix == ".json" else text_payload
+                temporary = destination.with_name(destination.name + ".tmp")
+                temporary.write_text(payload, encoding="utf-8")
+                temporary.replace(destination)
+
+            # Attach the report to the existing Author trace too. Even a trace-only ZIP
+            # that includes only the two model-call JSON files will retain all findings.
+            if trace_dir is not None:
+                if "author" in stage:
+                    call_name = "ai_story_text_pass" if "ai_story" in stage else "expand_story_text_pass"
+                else:
+                    call_name = "ai_story_architecture_pass" if "ai_story" in stage else "expand_story_architecture_pass"
+                traces = sorted(trace_dir.glob(call_name + "_*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+                if traces:
+                    trace_path = traces[0]
+                    try:
+                        trace_payload = json.loads(trace_path.read_text(encoding="utf-8"))
+                        trace_payload["post_generation_validation"] = report
+                        trace_payload["post_generation_validation_text"] = text_payload
+                        if status != "passed":
+                            rejected_artifact = trace_dir / "story_author_last_failed.txt"
+                            if rejected_artifact.is_file():
+                                trace_payload["rejected_story_artifact"] = rejected_artifact.read_text(encoding="utf-8")
+                        temporary = trace_path.with_name(trace_path.name + ".tmp")
+                        temporary.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+                        temporary.replace(trace_path)
+                    except Exception as trace_exc:
+                        print(f"[QWEN] trace_validation_attach_warning={type(trace_exc).__name__}: {trace_exc}", flush=True)
+        except Exception as exc:
+            print(f"[QWEN] story_diagnostics_save_warning={type(exc).__name__}: {exc}", flush=True)
 
     def _validate_story_output_contracts(
         self,
@@ -1648,6 +1764,74 @@ class QwenDirector(
             return value, False
         paragraphs[-1] = updated_paragraph
         return "\n\n".join(paragraphs), True
+
+    @staticmethod
+    def _remove_repeated_adjacent_scene_block(
+        story: str, *, minimum_words: int = STORY_ACCEPT_MIN_WORDS,
+    ) -> tuple[str, list[str]]:
+        """Remove a substantial exact copied passage from the later of two adjacent scenes.
+
+        A qualifying block must be at least four complete sentences and 32 words. This
+        intentionally leaves isolated repeated lines/motifs alone. The edit is accepted
+        only when all scene paragraphs remain and the story-wide hard word floor survives.
+        """
+        value = str(story or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", value) if part.strip()]
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
+            return value, []
+
+        def split_sentences(paragraph: str) -> list[str]:
+            return [part.strip() for part in re.split(r"(?<=[.!?])\s+", paragraph.strip()) if part.strip()]
+
+        def normalized(sentence: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9']+", sentence.casefold()))
+
+        def word_count(text: str) -> int:
+            return len(re.findall(r"\b[\w'’-]+\b", text))
+
+        events: list[str] = []
+        for later_index in range(1, len(paragraphs)):
+            prior = split_sentences(paragraphs[later_index - 1])
+            later = split_sentences(paragraphs[later_index])
+            prior_keys = [normalized(item) for item in prior]
+            later_keys = [normalized(item) for item in later]
+            best = None
+            for current_start in range(len(later_keys)):
+                for prior_start in range(len(prior_keys)):
+                    run = 0
+                    while (
+                        current_start + run < len(later_keys)
+                        and prior_start + run < len(prior_keys)
+                        and later_keys[current_start + run]
+                        and later_keys[current_start + run] == prior_keys[prior_start + run]
+                    ):
+                        run += 1
+                    if run < 4:
+                        continue
+                    matched_words = sum(word_count(item) for item in later[current_start:current_start + run])
+                    if matched_words < 32:
+                        continue
+                    candidate = (run, matched_words, current_start, current_start + run)
+                    if best is None or candidate[:2] > best[:2]:
+                        best = candidate
+            if best is None:
+                continue
+            run, matched_words, start, end = best
+            remaining = later[:start] + later[end:]
+            if len(remaining) < 2:
+                continue
+            candidate_paragraphs = list(paragraphs)
+            candidate_paragraphs[later_index] = " ".join(remaining).strip()
+            candidate_story = "\n\n".join(candidate_paragraphs)
+            if word_count(candidate_story) < int(minimum_words):
+                continue
+            paragraphs = candidate_paragraphs
+            remaining_words = word_count(paragraphs[later_index])
+            events.append(
+                f"removed exact copied block of {run} sentences/{matched_words} words from scene {later_index + 1:02d}; "
+                f"matched adjacent scene {later_index:02d}; scene now has {remaining_words} words"
+            )
+        return "\n\n".join(paragraphs), events
 
     def _normalize_story_quotes(self, story: str) -> str:
         """Deterministic, no-model cleanup so at most two concise spoken lines remain per scene.
@@ -1875,6 +2059,11 @@ class QwenDirector(
             return ["empty story"]
 
         issues: list[str] = []
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+        for scene_index, paragraph in enumerate(paragraphs, 1):
+            scene_words = len(re.findall(r"[\w'’-]+", paragraph))
+            if scene_words < 100:
+                issues.append(f"scene {scene_index:02d} is concise after deterministic cleanup ({scene_words} words; under the 100-word drafting guide)")
 
         # Repetition metrics are intentionally structural: no stock-phrase or
         # English vocabulary blacklist is used here.
@@ -1942,6 +2131,10 @@ class QwenDirector(
             if mode == AI_STORY_MODE
             else "expand_story_architecture_pass"
         )
+        try:
+            (Path(getattr(self, "project_root", None) or Path.cwd()) / "story_architect_last_failure.txt").unlink(missing_ok=True)
+        except OSError:
+            pass
         system_prompt = self._story_blueprint_system(mode)
         user_prompt = self._story_blueprint_user(
             mode,
@@ -1989,10 +2182,20 @@ class QwenDirector(
                 )
                 return blueprint
             except RuntimeError as plan_error:
-                raise RuntimeError(
+                reason = (
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
-                    f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted."
-                ) from plan_error
+                    f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted. "
+                    f"Underlying validation: {plan_error}"
+                )
+                self._last_story_quality_errors = [reason]
+                try:
+                    (Path(getattr(self, "project_root", None) or Path.cwd()) / "story_architect_last_failure.txt").write_text(
+                        f"{reason}\n\n----- raw Architect output -----\n{raw}\n", encoding="utf-8"
+                    )
+                except OSError:
+                    pass
+                self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=reason)
+                raise RuntimeError(reason) from plan_error
         try:
             blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
             self._validate_story_blueprint_contract(
@@ -2002,14 +2205,19 @@ class QwenDirector(
                 source_character_names=source_character_names,
             )
         except RuntimeError as rejection:
-            # Failure only: keep the exact Architect output next to the error so every violated rule can be
-            # read at once instead of one run per rule. Overwritten on each failure; never written on success.
+            # Failure only: keep the exact Architect output and a complete trace report.
+            # This also covers normalization errors that occur before the contract validator runs.
+            if not getattr(self, "_last_story_quality_errors", None):
+                self._last_story_quality_errors = [str(rejection)]
             try:
-                (self.project_root / "story_architect_last_failure.txt").write_text(
+                (Path(getattr(self, "project_root", None) or Path.cwd()) / "story_architect_last_failure.txt").write_text(
                     f"{rejection}\n\n----- raw Architect output -----\n{raw}\n", encoding="utf-8"
                 )
             except OSError:
                 pass
+            self._save_story_run_diagnostics(
+                status="failed", stage="ai_story_architect_validation", reason=str(rejection),
+            )
             raise
         return blueprint
 
@@ -2022,6 +2230,28 @@ class QwenDirector(
         source_character_names: list[str] | None = None,
     ) -> None:
         """Fail before the long Author pass when the causal plan is incomplete or self-contradictory."""
+        # A new Architect pass starts a new story run. Clear stale Author artifacts and
+        # all diagnostics except those deliberately populated during this same pass.
+        self._last_story_blueprint_warnings = []
+        self._last_story_contract_warnings = []
+        self._last_story_quality_errors = []
+        self._last_story_quality_warnings = []
+        self._last_story_cleanup_events = []
+        self._last_story_word_counts = {}
+        project_root = Path(getattr(self, "project_root", None) or Path.cwd())
+        stale_artifacts = [project_root / "story_author_last_failed.txt"]
+        trace_dir = getattr(self, "_trace_dir", None)
+        if trace_dir is not None:
+            stale_artifacts.append(Path(trace_dir) / "story_author_last_failed.txt")
+        for stale_artifact in stale_artifacts:
+            try:
+                stale_artifact.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            (project_root / "story_architect_last_failure.txt").unlink(missing_ok=True)
+        except OSError:
+            pass
         fields: dict[str, str] = {}
         beats: dict[int, str] = {}
         cast_line = ""
@@ -2098,15 +2328,24 @@ class QwenDirector(
         if soft_findings:
             self._last_story_blueprint_warnings = list(dict.fromkeys(soft_findings))
             print(
-                f"[QWEN] story_blueprint_warnings={len(self._last_story_blueprint_warnings)} (wording heuristics, not blocking): "
-                + "; ".join(self._last_story_blueprint_warnings[:6]),
+                f"[QWEN] story_blueprint_warnings={len(self._last_story_blueprint_warnings)} (wording heuristics, not blocking)",
                 flush=True,
             )
+            for warning_index, warning in enumerate(self._last_story_blueprint_warnings, 1):
+                print(f"[QWEN] story_blueprint_warning[{warning_index:02d}] {warning}", flush=True)
         if errors:
-            raise RuntimeError(
-                f"Story Architect rejected before prose generation [contracts {CONTRACTS_REVISION}]: " + "; ".join(list(dict.fromkeys(errors))[:16])
+            self._last_story_quality_errors = list(dict.fromkeys(errors))
+            reason = (
+                f"Story Architect rejected before prose generation [contracts {CONTRACTS_REVISION}]: "
+                + "; ".join(self._last_story_quality_errors[:16])
                 + ". No retry or repair call was attempted."
             )
+            self._save_story_run_diagnostics(
+                status="failed", stage="ai_story_architect_validation", reason=reason,
+            )
+            raise RuntimeError(reason)
+        self._last_story_quality_errors = []
+        self._save_story_run_diagnostics(status="passed", stage="ai_story_architect_validation")
 
     def _generate_story_once(
         self,
@@ -2123,8 +2362,22 @@ class QwenDirector(
         """Run exactly one Author pass and preserve any returned draft if validation rejects it."""
         self._last_story_raw_output = ""
         self._last_story_draft = ""
+        self._last_story_quality_errors = []
+        self._last_story_quality_warnings = []
+        self._last_story_contract_warnings = []
+        self._last_story_cleanup_events = []
+        self._last_story_word_counts = {}
+        for previous_failure in (
+            Path(getattr(self, "project_root", Path.cwd())) / "story_author_last_failed.txt",
+            (Path(getattr(self, "_trace_dir")) / "story_author_last_failed.txt") if getattr(self, "_trace_dir", None) else None,
+        ):
+            if previous_failure is not None:
+                try:
+                    previous_failure.unlink(missing_ok=True)
+                except OSError:
+                    pass
         try:
-            return self._generate_story_once_impl(
+            result = self._generate_story_once_impl(
                 mode,
                 user_input,
                 story_system,
@@ -2134,6 +2387,11 @@ class QwenDirector(
                 source_character_names=source_character_names,
                 story_blueprint=story_blueprint,
             )
+            self._save_story_run_diagnostics(
+                status="passed", stage="ai_story_author_validation" if mode == AI_STORY_MODE else "expand_story_author_validation",
+                word_count=len(re.findall(r"\b[\w'’-]+\b", result[0] or "")),
+            )
+            return result
         except Exception as exc:
             raw_text = str(getattr(self, "_last_story_raw_output", "") or "")
             processed_text = str(getattr(self, "_last_story_draft", "") or "")
@@ -2146,6 +2404,11 @@ class QwenDirector(
                     word_count=len(re.findall(r"\b[\w'’-]+\b", processed_text or raw_text)),
                     stage="author_post_generation_rejection",
                 )
+            self._save_story_run_diagnostics(
+                status="failed", stage="ai_story_author_validation" if mode == AI_STORY_MODE else "expand_story_author_validation",
+                reason=f"{type(exc).__name__}: {exc}",
+                word_count=len(re.findall(r"\b[\w'’-]+\b", processed_text or raw_text)),
+            )
             raise
 
     def _generate_story_once_impl(
@@ -2222,6 +2485,7 @@ class QwenDirector(
         raw = self._strip_story_markdown_emphasis(raw)
         raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
         if cleanup_reason:
+            self._last_story_cleanup_events.append(cleanup_reason)
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
         self._last_story_draft = str(raw or "")
@@ -2244,6 +2508,7 @@ class QwenDirector(
         # Log output length before cleanup. The acceptance floor is checked after cleanup,
         # so harmless deterministic cleanup cannot leave a too-short story marked successful.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
+        self._last_story_word_counts["after_raw_prose_normalization"] = usable_words
         print(
             f"[QWEN] story_length words={usable_words} "
             f"target_guidance={STORY_TARGET_WORDS} "
@@ -2270,13 +2535,22 @@ class QwenDirector(
         # Never accept a dangling generation tail; retain only complete sentence boundaries.
         candidate, removed_duplicate_ending = self._trim_repeated_terminal_sentence(candidate)
         if removed_duplicate_ending:
+            self._last_story_cleanup_events.append("removed exact duplicate terminal sentence")
             print("[QWEN] story_cleanup=removed_exact_duplicate_terminal_sentence", flush=True)
 
         candidate = self._normalize_story_quotes(candidate)
+        candidate, duplicate_block_events = self._remove_repeated_adjacent_scene_block(
+            candidate, minimum_words=self._story_min_words,
+        )
+        if duplicate_block_events:
+            self._last_story_cleanup_events.extend(duplicate_block_events)
+            for event in duplicate_block_events:
+                print(f"[QWEN] story_cleanup={event}", flush=True)
         candidate = self._scrub_stock_phrases(candidate)
         candidate = re.sub(r"\s*[:;]\s*(?=[.!?])", "", self._scrub_unsourced_years(candidate, user_input))
         self._last_story_draft = str(candidate or "")
         word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
+        self._last_story_word_counts["after_cleanup"] = word_count
         print(f"[QWEN] story_length_after_cleanup words={word_count}", flush=True)
         if candidate and not self._ends_cleanly(candidate):
             trimmed = self._trim_to_last_sentence(candidate)
@@ -2307,6 +2581,7 @@ class QwenDirector(
         # It is local validation only; no repair request is ever sent.
         self._validate_story_completion_contract(mode, candidate)
         blocking = self._story_hard_quality_errors(candidate, story_blueprint, user_input)
+        self._last_story_quality_errors = list(blocking)
         if blocking:
             raise RuntimeError(
                 failure_prefix + "hard story-quality gate rejected the single Author draft: "
@@ -2317,14 +2592,19 @@ class QwenDirector(
         issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
         issues.extend(self._story_sentence_contract_issues(candidate))
         issues.extend(self._story_craft_issues(candidate))
-        if issues:
+        self._last_story_quality_warnings = list(dict.fromkeys([
+            *(getattr(self, "_last_story_quality_warnings", []) or []), *issues,
+        ]))
+        if self._last_story_quality_warnings:
             print(
                 "[QWEN] story_static_checks=INFO",
                 f"words={word_count}",
                 f"paragraphs={paragraph_count}",
-                "advisory=" + "; ".join(issues[:6]),
+                f"advisories={len(self._last_story_quality_warnings)}",
                 flush=True,
             )
+            for warning_index, warning in enumerate(self._last_story_quality_warnings, 1):
+                print(f"[QWEN] story_static_warning[{warning_index:02d}] {warning}", flush=True)
         else:
             print(
                 "[QWEN] story_static_checks=PASS",
@@ -2380,7 +2660,7 @@ class QwenDirector(
                 key = " ".join(tokens)
                 previous = sentence_scene.get(key)
                 if previous is not None and previous != scene_index:
-                    errors.append(f"sentence duplicated in scenes {previous:02d} and {scene_index:02d}")
+                    advisories.append(f"exact sentence repeated in scenes {previous:02d} and {scene_index:02d}")
                 else:
                     sentence_scene[key] = scene_index
 
@@ -2412,46 +2692,47 @@ class QwenDirector(
             errors.extend(prose_fatal)
             advisories = list(prose_soft) + advisories
 
-        # The Architect's declared physical appearances are binding for the prose pass.
-        for line in str(story_blueprint or "").splitlines():
-            if not line.startswith("CAST:"):
-                continue
-            for entry in line[5:].split("|"):
-                name_match = re.match(r"\s*([^()]+?)\s*\((.*)\)\s*$", entry)
-                if not name_match:
+        # Only embodied characters returned by the canonical parser are checked here.
+        # Environmental opposition (weather, storms, hazards, infrastructure) belongs
+        # in OPPOSITION, not in the physical CAST roster.
+        for item in parse_cast(str(story_blueprint or "")):
+            name = item["name"]
+            planned = list(item.get("scenes", []))
+            surfaces = list(self._name_surfaces(name)) + list(item.get("aliases", []))
+            surfaces += [t for t in name.split()[-1:] if len(t) >= 3]
+            for scene_number in planned:
+                if not 1 <= scene_number <= len(paragraphs):
+                    errors.append(f"CAST entry {name!r} contains invalid on-screen scene {scene_number}")
                     continue
-                name, metadata = name_match.group(1).strip(), name_match.group(2)
-                scene_match = re.search(r"on-screen scenes\s*:\s*([0-9, ]+)", metadata, re.IGNORECASE)
-                if not scene_match:
-                    continue
-                planned = [int(v) for v in re.findall(r"\d+", scene_match.group(1))]
-                surfaces = list(self._name_surfaces(name))
-                # Prose often uses only the surname or the quoted call sign.
-                surfaces += [t for t in re.sub(r"[\"“”‘’]", "", name).split()[-1:] if len(t) >= 3]
-                for scene_number in planned:
-                    if not 1 <= scene_number <= len(paragraphs):
-                        errors.append(f"CAST entry {name!r} contains invalid on-screen scene {scene_number}")
-                        continue
-                    paragraph = paragraphs[scene_number - 1]
-                    if not any(re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", paragraph, re.IGNORECASE) for surface in surfaces):
-                        in_story = any(
-                            re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", str(story or ""), re.IGNORECASE)
-                            for surface in surfaces
+                paragraph = paragraphs[scene_number - 1]
+                if not any(re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", paragraph, re.IGNORECASE) for surface in surfaces):
+                    in_story = any(
+                        re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", str(story or ""), re.IGNORECASE)
+                        for surface in surfaces
+                    )
+                    if in_story:
+                        advisories.append(
+                            f"CAST character {name!r} is not named in declared on-screen scene {scene_number:02d}"
                         )
-                        if in_story:
-                            # Present elsewhere in the story: the character is realized, just not named in this scene.
-                            advisories.append(
-                                f"CAST character {name!r} is not named in declared on-screen scene {scene_number:02d}"
-                            )
-                        else:
-                            errors.append(f"CAST character {name!r} never appears in the story")
+                    else:
+                        errors.append(f"CAST character {name!r} never appears in the story")
         if advisories:
             self._last_story_contract_warnings = list(dict.fromkeys(advisories))
             print(
-                f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking): "
-                + "; ".join(self._last_story_contract_warnings[:8]),
+                f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking)",
                 flush=True,
             )
+            for warning_index, warning in enumerate(self._last_story_contract_warnings, 1):
+                print(f"[QWEN] story_prose_audit_warning[{warning_index:02d}] {warning}", flush=True)
+        if advisories:
+            existing = list(getattr(self, "_last_story_quality_warnings", []) or [])
+            self._last_story_quality_warnings = list(dict.fromkeys([*existing, *advisories]))
+            print(
+                f"[QWEN] story_quality_warnings={len(self._last_story_quality_warnings)} (not blocking)",
+                flush=True,
+            )
+            for warning_index, warning in enumerate(self._last_story_quality_warnings, 1):
+                print(f"[QWEN] story_quality_warning[{warning_index:02d}] {warning}", flush=True)
         return list(dict.fromkeys(errors))
 
     @staticmethod
@@ -2509,25 +2790,8 @@ class QwenDirector(
 
     @staticmethod
     def _blueprint_cast_names(story_blueprint: str | None) -> list[str]:
-        """Read plausible person entries from the sanitized Architect CAST line."""
-        non_person_role = re.compile(
-            r"\b(?:non[- ]human|relentless force|environmental force|weather system|weather phenomenon|sealed chamber|chamber|location|place|building|object|device|machine|artifact|organization|organisation|company|corporation|abstract concept)\b",
-            re.IGNORECASE,
-        )
-        for line in str(story_blueprint or "").splitlines():
-            if line.upper().startswith("CAST:"):
-                names = []
-                for entry in line[5:].split("|"):
-                    role = entry[entry.find("(") + 1:entry.rfind(")")] if "(" in entry and ")" in entry else ""
-                    if non_person_role.search(role.split(";", 1)[0]):
-                        continue
-                    name = re.split(r"[(\[:,\u2013\u2014]", entry, maxsplit=1)[0].strip(" *_`")
-                    name = re.sub(r"\s+", " ", name)
-                    key = EntityResolver.normalize(name)
-                    if 1 < len(name) <= 96 and key and key not in {EntityResolver.normalize(x) for x in names}:
-                        names.append(name)
-                return names
-        return []
+        """Read only embodied story characters from the canonical CAST parser."""
+        return [item["name"] for item in parse_cast(str(story_blueprint or ""))]
 
     @staticmethod
     def _name_surfaces(name: str) -> list[str]:
