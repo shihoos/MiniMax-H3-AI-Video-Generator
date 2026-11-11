@@ -36,6 +36,9 @@ from planner.config import (
     STORY_TARGET_WORDS,
     STORY_WRITER_WORDS_PER_SCENE,
     STORY_ACCEPT_MIN_WORDS,
+    STORY_ARCHITECT_REVISION_RETRIES,
+    STORY_ARCHITECT_STRUCTURED_OUTPUT,
+    STORY_AUTHOR_REVISION_RETRIES,
     STORY_PLAN_BEAT_MIN_WORDS,
     STORY_PLAN_BEAT_MAX_WORDS,
     DIRECTOR_N_CTX,
@@ -53,6 +56,12 @@ from planner.config import (
     director_critic_enabled,
     H3_FPS,
     H3_FRAMES_PER_SHOT,
+)
+
+from planner.story_blueprint_schema import (
+    blueprint_response_format,
+    parse_blueprint_json,
+    render_blueprint_text,
 )
 
 from planner.qwen_director_runtime import (
@@ -2164,12 +2173,66 @@ class QwenDirector(
 
         return issues
 
+    class _BlueprintRejected(RuntimeError):
+        """The Architect answered, but the plan failed a hard contract (as opposed to a server/ceiling failure)."""
+
+    @staticmethod
+    def _blueprint_json_to_text(raw: str) -> str:
+        """Schema-constrained JSON plan -> the text blueprint every contract consumes (legacy text passes through)."""
+        data = parse_blueprint_json(raw)
+        return str(raw or "") if data is None else render_blueprint_text(data, DIRECTOR_STORY_SCENES)
+
+    @staticmethod
+    def _revision_feedback(problems: list[str], subject: str) -> str:
+        """Tell the model exactly why its last attempt was rejected; Qwen, not new regexes, does the fixing."""
+        cleaned: list[str] = []
+        for item in problems:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()
+            text = re.sub(r"^(?:AI|Expand) Story generation failed validation:\s*", "", text)
+            for part in re.split(r"\s+\|\s+", text):
+                if part and part not in cleaned:
+                    cleaned.append(part[:260])
+        if not cleaned:
+            return ""
+        return (
+            f"\n\nREVISION: your previous {subject} was rejected by the quality checker for exactly these problems:\n"
+            + "\n".join(f"- {item}" for item in cleaned[:12])
+            + f"\nWrite a complete new {subject} that fixes every one of them. Do not mention this note."
+        )
+
     def _generate_story_blueprint(
         self,
         mode: str,
         user_input: str,
         *,
         source_character_names: list[str] | None = None,
+    ) -> str:
+        """Architect pass. At most one revision, and only after a hard-gate rejection of a returned plan."""
+        feedback = ""
+        for attempt in range(int(STORY_ARCHITECT_REVISION_RETRIES) + 1):
+            try:
+                return self._generate_story_blueprint_attempt(
+                    mode, user_input, source_character_names=source_character_names, feedback=feedback,
+                )
+            except self._BlueprintRejected as rejection:
+                if attempt >= int(STORY_ARCHITECT_REVISION_RETRIES):
+                    raise
+                problems = list(getattr(self, "_last_story_quality_errors", None) or []) or [str(rejection)]
+                feedback = self._revision_feedback(problems, "story plan")
+                print(
+                    f"[QWEN] story_architecture revision={attempt + 1}/{int(STORY_ARCHITECT_REVISION_RETRIES)} "
+                    f"reason_count={len(problems)}",
+                    flush=True,
+                )
+        raise RuntimeError("Story Architect produced no plan.")  # unreachable; keeps the type checker honest
+
+    def _generate_story_blueprint_attempt(
+        self,
+        mode: str,
+        user_input: str,
+        *,
+        source_character_names: list[str] | None = None,
+        feedback: str = "",
     ) -> str:
         """Create one compact 12-scene plan with a hard Qwen reasoning-token budget."""
         from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, StoryTruncated
@@ -2183,16 +2246,18 @@ class QwenDirector(
             (Path(getattr(self, "project_root", None) or Path.cwd()) / "story_architect_last_failure.txt").unlink(missing_ok=True)
         except OSError:
             pass
-        system_prompt = self._story_blueprint_system(mode)
+        structured = bool(STORY_ARCHITECT_STRUCTURED_OUTPUT)
+        system_prompt = self._story_blueprint_system(mode, structured=structured)
         user_prompt = self._story_blueprint_user(
             mode,
             user_input,
             source_character_names=source_character_names,
-        )
+        ) + feedback
         print(
             f"[QWEN] story_architecture=bounded thinking_budget={DIRECTOR_STORY_PLAN_THINKING_BUDGET} "
             f"max_tokens={DIRECTOR_STORY_PLAN_MAX_TOKENS} "
-            f"scenes={DIRECTOR_STORY_SCENES} retry=false",
+            f"scenes={DIRECTOR_STORY_SCENES} output={'json_schema' if structured else 'text'} "
+            f"revise_on_rejection={bool(STORY_ARCHITECT_REVISION_RETRIES)}",
             flush=True,
         )
         try:
@@ -2215,13 +2280,14 @@ class QwenDirector(
                 ),
                 creative=False,
                 thinking_token_budget=int(DIRECTOR_STORY_PLAN_THINKING_BUDGET),
+                response_format=blueprint_response_format(DIRECTOR_STORY_SCENES) if structured else None,
             )
         except StoryTruncated as exc:
             # Accept a complete 12-beat plan salvaged from a capped response; never
             # make another planning request. Incomplete plans fail explicitly.
             raw = str(exc.partial or "")
             try:
-                blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+                blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
                 self._validate_story_blueprint_contract(
                     mode,
                     blueprint,
@@ -2245,7 +2311,7 @@ class QwenDirector(
                 self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=reason)
                 raise RuntimeError(reason) from plan_error
         try:
-            blueprint = self._normalize_story_blueprint(raw, DIRECTOR_STORY_SCENES)
+            blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
             self._validate_story_blueprint_contract(
                 mode,
                 blueprint,
@@ -2266,7 +2332,7 @@ class QwenDirector(
             self._save_story_run_diagnostics(
                 status="failed", stage="ai_story_architect_validation", reason=str(rejection),
             )
-            raise
+            raise self._BlueprintRejected(str(rejection)) from rejection
         return blueprint
 
     def _validate_story_blueprint_contract(
@@ -2417,7 +2483,7 @@ class QwenDirector(
                 except OSError:
                     pass
         try:
-            result = self._generate_story_once_impl(
+            result = self._run_author_with_one_revision(
                 mode,
                 user_input,
                 story_system,
@@ -2452,6 +2518,44 @@ class QwenDirector(
                 word_count=len(re.findall(r"\b[\w'’-]+\b", processed_text or raw_text)),
             )
             raise
+
+    def _run_author_with_one_revision(self, mode, user_input, story_system, story_user, **kwargs):
+        """One Author pass; if it wrote a draft that failed a hard gate, one rewrite told exactly why.
+
+        A first draft that passes costs exactly one model call. Infrastructure failures (HTTP errors, a hit
+        token ceiling, no draft at all) are never retried, because a rewrite would not change them.
+        """
+        from planner.qwen_director_runtime import StoryTruncated
+
+        try:
+            return self._generate_story_once_impl(mode, user_input, story_system, story_user, **kwargs)
+        except RuntimeError as first:
+            draft = str(getattr(self, "_last_story_draft", "") or "").strip()
+            if (
+                int(STORY_AUTHOR_REVISION_RETRIES) < 1
+                or not draft
+                or isinstance(first, StoryTruncated)
+                or "vLLM request failed" in str(first)
+            ):
+                raise
+            problems = list(getattr(self, "_last_story_quality_errors", None) or []) or [str(first)]
+            self._save_failed_story_draft(
+                str(getattr(self, "_last_story_raw_output", "") or draft),
+                raw_story=str(getattr(self, "_last_story_raw_output", "") or draft),
+                processed_story=draft,
+                reason=f"first draft rejected, one revision follows: {first}",
+                word_count=len(re.findall(r"\b[\w'’-]+\b", draft)),
+                stage="author_first_draft_rejected",
+            )
+            feedback = self._revision_feedback(problems, "story")
+            print(f"[QWEN] story_author revision=1/1 reason_count={len(problems)}", flush=True)
+            self._last_story_raw_output = ""
+            self._last_story_draft = ""
+            self._last_story_quality_errors = []
+            self._last_story_scene_word_counts = {}
+            return self._generate_story_once_impl(
+                mode, user_input, story_system, story_user + feedback, **kwargs,
+            )
 
     def _generate_story_once_impl(
         self,
