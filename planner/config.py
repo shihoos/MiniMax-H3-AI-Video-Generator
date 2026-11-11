@@ -145,6 +145,12 @@ _story_contract = RUNTIME["director"]["story_contract"]
 DIRECTOR_STORY_MAX_TOKENS = int(RUNTIME["director"]["story_max_tokens"])
 DIRECTOR_STORY_PLAN_MAX_TOKENS = int(_story_architecture["max_tokens"])
 DIRECTOR_STORY_PLAN_THINKING_BUDGET = int(_story_architecture["thinking_token_budget"])
+# Architect output is JSON enforced by a vLLM schema (see planner/story_blueprint_schema.py); set
+# story_architecture.structured_output: false to fall back to the legacy free-text blueprint.
+STORY_ARCHITECT_STRUCTURED_OUTPUT = bool(_story_architecture.get("structured_output", True))
+# At most this many revision attempts, used only after a hard-gate rejection (0 disables).
+STORY_ARCHITECT_REVISION_RETRIES = max(0, min(1, int(_story_architecture.get("revision_retries", 1))))
+STORY_AUTHOR_REVISION_RETRIES = max(0, min(1, int(_story_contract.get("author_revision_retries", 1))))
 STORY_PLAN_BEAT_MIN_WORDS = int(_story_architecture["beat_words_min"])
 STORY_PLAN_BEAT_MAX_WORDS = int(_story_architecture["beat_words_max"])
 DIRECTOR_STORY_WRITER_MAX_TOKENS = int(_story_writing_sampling["max_tokens"])
@@ -177,6 +183,12 @@ STORY_WRITER_WORDS_PER_SCENE = int(
 
 # The acceptance floor is explicit and must match minimum_words.
 STORY_ACCEPT_MIN_WORDS = int(_story_contract.get("accept_min_words", STORY_MIN_WORDS))
+# Per-scene length distribution (optional yaml keys; defaults match the validated contract).
+# A scene under the hard floor is too thin to film; at least STORY_SCENE_TARGET_MIN_COUNT scenes
+# must reach STORY_SCENE_TARGET_WORDS so a total above the minimum cannot hide starved scenes.
+STORY_SCENE_HARD_FLOOR_WORDS = int(_story_contract.get("scene_hard_floor_words", 100))
+STORY_SCENE_TARGET_WORDS = int(_story_contract.get("scene_target_words", 120))
+STORY_SCENE_TARGET_MIN_COUNT = int(_story_contract.get("scene_target_min_count", 10))
 # Cast count is a narrative decision, not a numeric runtime contract.
 DIRECTOR_STORY_CAST_SIZE_POLICY = str(_story_contract.get("cast_size_policy", "")).strip().lower()
 
