@@ -337,7 +337,11 @@ class QwenDirectorPromptMixin:
             body sensations. Use visual information, reversals, withheld information, and behavior to reveal character.
             Vary distance, tempo, sentence length, and paragraph emphasis naturally. Use close detail only when it changes
             what the audience notices or understands. Avoid exposition that repeats visible action, abstract moralizing,
-            stock metaphors, generic tension statements, and repetitive gestures.
+            stock metaphors, generic tension statements, and repetitive gestures. Do not use these worn phrases:
+            breath fogging/visible, dust drifting, eyes narrowed, heart pounding, heartbeat, pulse quickened, echoed
+            through, long shadows, sent a shiver, weight of, mind racing, felt heavier, faint smell of. Never begin three
+            consecutive sentences with the same word. Do not open a sentence with a capitalized noun that is not a cast name
+            (write "The permafrost cracked", not "Permafrost cracked"). Name each cast member in every scene they appear in.
 
             CHARACTER AND CONTINUITY: use only the cast established in the Architect's CAST line, plus source characters
             explicitly preserved in Expand mode. Do not invent a new speaking or named person outside that cast. Use each
