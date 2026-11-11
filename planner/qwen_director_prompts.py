@@ -234,6 +234,42 @@ CALIBRATION_SCENE_EXAMPLE = (
 )
 
 
+_CAST_LABEL_ALIASES = {
+    "wants": "wants", "want": "wants", "goal": "wants", "goals": "wants",
+    "objective": "wants", "desire": "wants", "desires": "wants",
+    "pressure": "pressure", "voice": "voice",
+}
+_CAST_LABEL_RE = re.compile(
+    r"^(?P<label>wants?|goals?|objective|desires?|pressure|voice)\b\s*(?:[:=\u2013\u2014-]\s*|\s+)?(?P<value>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def canonicalize_cast_metadata(metadata: str) -> str:
+    """Rewrite the free-form CAST fields the model actually emits into one ``label: value`` form.
+
+    Models write ``wants: X``, ``wants X``, ``wants to X``, ``wants [X]`` and ``goal: X`` for the same field.
+    Only fields that *start* with wants/goal/objective/pressure/voice are touched; kind, role, aliases,
+    on-screen scenes and fate are left exactly as written.  Brackets and trailing periods are stripped.
+    """
+    fields: list[str] = []
+    for position, part in enumerate(str(metadata or "").split(";")):
+        part = part.strip()
+        match = _CAST_LABEL_RE.match(part)
+        # The first field is the kind/role ("voice actor"); only wants-style labels may open it.
+        if match and position == 0 and _CAST_LABEL_ALIASES[match.group("label").casefold()] != "wants":
+            match = None
+        if match and match.group("value").strip():
+            value = match.group("value").strip()
+            value = re.sub(r"^[\[\(<]\s*|\s*[\]\)>]$", "", value).strip().rstrip(".").strip()
+            if value:
+                label = _CAST_LABEL_ALIASES[match.group("label").casefold()]
+                part = f"{label}: {value}"
+        if part:
+            fields.append(part)
+    return "; ".join(fields)
+
+
 class QwenDirectorPromptMixin:
     @staticmethod
     def _expand_longer(text: str) -> str:
@@ -409,7 +445,7 @@ class QwenDirectorPromptMixin:
             The final sentence describes a completed, observable consequence in the present story world, not a future hook.
         """).strip()
 
-    def _story_blueprint_system(self, mode: str) -> str:
+    def _story_blueprint_system(self, mode: str, structured: bool = False) -> str:
         """Create a premise-specific dramatic engine and 12 causal scene beats, without a template plot."""
         n = int(DIRECTOR_STORY_SCENES)
         beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
@@ -429,7 +465,7 @@ class QwenDirectorPromptMixin:
                 "complicate a consequential event. Do not make up an off-screen relative or unseen person as a twist."
             )
 
-        return textwrap.dedent(f"""\
+        prompt = textwrap.dedent(f"""\
             You are the lead story architect for a cinematic short film. Design the plot before the prose writer starts.
             {source_rule}
 
@@ -523,8 +559,8 @@ class QwenDirectorPromptMixin:
 
             CAST FORMAT: output one CAST line first. Include only core embodied people/creatures whose choices matter to the plot. Cast size
             is fully plot-driven; do not target four people. Each entry must use this exact pattern:
-            Full Name (kind: person|animal|embodied agent; role: specific role; wants [specific outcome]; pressure [fear, need, duty, mistake, or private conflict]; voice [distinctive speech style]; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
-            Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
+            Full Name (kind: person|animal|embodied agent; role: specific role; wants: <specific outcome>; pressure: <fear, need, duty, mistake, or private conflict>; voice: <distinctive speech style>; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
+            Every field uses the 'label: value' form shown (including 'wants:'), separated by semicolons, with no square brackets. Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
             Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. A remote-only voice,
             recording, hologram, AI, organization, object, location, weather event, storm, natural disaster, environmental hazard,
             failing infrastructure, or abstract opposing force is not physically present as an embodied cast member. Put such opposition in OPPOSITION
@@ -625,6 +661,60 @@ class QwenDirectorPromptMixin:
             OUTPUT ONLY: CAST, all twelve required plot-field lines, and exactly {n} numbered scene lines. No preamble,
             hidden reasoning, markdown fences, summary, alternatives, or commentary.
         """).strip()
+        if structured:
+            prompt = self._structured_architect_prompt(prompt, n, beat_min, beat_max)
+        return prompt
+
+    @staticmethod
+    def _structured_architect_prompt(text: str, n: int, beat_min: int, beat_max: int) -> str:
+        """Swap only the line-format instructions for the JSON-schema ones; every story rule is unchanged."""
+        def swap(pattern: str, replacement: str, source: str) -> str:
+            result, count = re.subn(pattern, lambda _m: replacement, source, count=1, flags=re.DOTALL)
+            if count != 1:
+                raise RuntimeError(f"Architect prompt changed; structured-output anchor not found: {pattern[:40]!r}")
+            return result
+
+        text = swap(
+            r"CAST FORMAT: output one CAST line first\..*?(?=Keep honorifics such as)",
+            "CAST: fill the `cast` array with only core embodied people/creatures whose choices matter to the plot. "
+            "Cast size is fully plot-driven; do not target four people. Per entry give name (full name; preserve source "
+            "names exactly), kind (person, animal, or embodied agent), role, wants (a specific outcome), pressure (fear, "
+            "need, duty, mistake, or private conflict), voice (distinctive speech style), aliases (usually an empty list; "
+            "only names genuinely used in the story), fate (survives or dies) and death_scene (the scene number if the "
+            "person dies, otherwise 0). On-screen scenes are derived from each scene's on_screen_present list, so do not "
+            "list them separately. ",
+            text,
+        )
+        text = swap(r"CAST FORMAT EXAMPLE.*?(?=REQUIRED PLOT FIELDS:)", "", text)
+        text = swap(
+            r"REQUIRED PLOT FIELDS:.*?inventory:",
+            "REQUIRED PLOT FIELDS: each is a JSON key named as the lowercase label below. Give each concrete, "
+            "story-specific content; use 'none' for an empty relationships/named_entities/key_objects inventory:",
+            text,
+        )
+        text = swap(
+            r"SETUP_PAYOFF_MAP: list every major plant.*?\n",
+            "SETUP_PAYOFF_MAP (key setup_payoff_map): an array with one object per major plant used by REVERSAL or "
+            "CLIMAX_CHOICE: plant_scene, plant (exact observable evidence/rule/object/behavior), payoff_scene, payoff "
+            "(exact later action/reference that reinterprets or uses it). It cannot be empty, and plant_scene must "
+            "precede payoff_scene.\n",
+            text,
+        )
+        text = swap(
+            r"SCENE BEATS: output exactly .*?NEXT_CAUSE=\[[^\]]*\]\.",
+            f"SCENE BEATS: `scenes` holds exactly {n} objects in story order (scene 1 first), each {beat_min}-{beat_max} words "
+            "across its fields. Keys: purpose, entry_location, entry_present (array of names), on_screen_present (array of "
+            "names), entry_knows, entry_objects, event, exit_location, exit_present (array of names), exit_knows, "
+            "exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the final scene). "
+            "The rules below name these same fields in UPPERCASE. Do not use semicolons or pipe characters inside values.",
+            text,
+        )
+        text = swap(
+            r"OUTPUT ONLY: CAST,.*$",
+            "OUTPUT ONLY: one JSON object that matches the supplied schema. No preamble, markdown fences, or commentary.",
+            text,
+        )
+        return text
 
     def _story_blueprint_user(
         self,
@@ -775,16 +865,23 @@ class QwenDirectorPromptMixin:
                         head = f"{head}, addressed as {honorific}" if head else f"addressed as {honorific}"
                 metadata = head + (";" + tail if sep else "")
                 item = f"{name} ({metadata})"
+            # One canonical "wants: / pressure: / voice:" spelling, whatever bracket/colon style the model used.
+            metadata = canonicalize_cast_metadata(metadata)
+            item = f"{name} ({metadata})"
             if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
                 # Only the explicit declaration is missing; no aliases is the safe reading.
                 metadata = metadata.rstrip("; ") + "; aliases: none"
                 item = f"{name} ({metadata})"
-            if not re.search(r"\bwants\s+.{3,}", metadata, re.IGNORECASE):
+            wants_re = r"\bwants\s*:?\s*.{3,}"
+            if not re.search(wants_re, metadata, re.IGNORECASE):
                 # "needs / seeks / hopes to / aims to / tries to ..." state the same goal.
                 metadata = re.sub(r"\b(?:needs|seeks|hopes to|aims to|tries to|is determined to|must)\s+(?=\S)", "wants ", metadata, count=1, flags=re.IGNORECASE)
+                metadata = canonicalize_cast_metadata(metadata)
                 item = f"{name} ({metadata})"
-            if not re.search(r"\bwants\s+.{3,}", metadata, re.IGNORECASE):
-                raise RuntimeError(f"CAST entry {name!r} is missing a specific 'wants' goal.")
+            if not re.search(wants_re, metadata, re.IGNORECASE):
+                raise RuntimeError(
+                    f"CAST entry {name!r} is missing a specific 'wants' goal. Entry as returned: {item[:240]!r}"
+                )
             if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
                 raise RuntimeError(f"CAST entry {name!r} must explicitly declare aliases or none.")
             scene_match = re.search(r"on[- ]screen scenes?\s*:\s*([^;)]*)", metadata, re.IGNORECASE)
