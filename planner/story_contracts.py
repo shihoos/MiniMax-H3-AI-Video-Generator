@@ -130,7 +130,7 @@ _DEATH_CUE_RE = re.compile(
 )
 
 # Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-10.3"
+CONTRACTS_REVISION = "2026-11-11.1"
 
 # Only plan-structure findings may stop a run. Everything else (how a beat is worded, whether a knowledge/location/
 # presence change is "explained" in a heuristic's eyes) is reported as a warning and never blocks prose generation.
@@ -603,6 +603,18 @@ def _is_sentence_initial_common_word(story: str, match: re.Match, candidate: str
     return bool(re.search(r"(?<![A-Za-z])" + re.escape(first) + r"(?![A-Za-z])", story))
 
 
+def _is_isolated_sentence_opener(story: str, match: re.Match, candidate: str) -> bool:
+    """One capitalized word at a sentence start, used once in the whole story, with no speech verb."""
+    if len(candidate.split()) != 1:
+        return False
+    before = story[:match.start()]
+    if before.strip() and not re.search(r"(?:[.!?]['\"”’)]*|\n)\s*['\"“‘(]*$", before):
+        return False
+    if re.search(rf"\b(?:{SPEECH_VERBS})\b", match.group(0), re.I):
+        return False
+    return len(re.findall(r"(?<![A-Za-z])" + re.escape(candidate) + r"(?![A-Za-z])", story)) < 2
+
+
 POSSESSIVE_BODY = (
     r"hands?|fingers?|eyes?|voice|breath|arms?|shoulders?|face|lips?|feet|footsteps?|gaze|head|knees?|"
     r"mouth|jaw|palms?|pulse|heartbeat|chest|legs?|thumbs?|knuckles?|wrists?|fists?"
@@ -735,6 +747,11 @@ def audit_story_against_blueprint(
         if first in COMMON_SENTENCE_STARTERS:
             continue
         if _is_sentence_initial_common_word(str(story or ""), match, candidate, first, allowed_text):
+            continue
+        if _is_isolated_sentence_opener(str(story or ""), match, candidate):
+            # "Permafrost cracked under the rails." A single capitalized word that opens one sentence, never speaks and is
+            # never repeated cannot be told apart from an ordinary noun without a dictionary: report it, do not discard the draft.
+            errors.append(f"possible unrostered name opening a sentence (advisory): {candidate}")
             continue
         candidate_key = candidate.casefold()
         role_words = {
