@@ -2341,9 +2341,14 @@ class QwenDirector(
         story_blueprint: str | None,
         source_story: str = "",
     ) -> list[str]:
-        """Deterministic hard gates for repetition, dialogue fit, and planned cast realization."""
+        """Deterministic hard gates for duplication, dialogue fit and grounding.
+
+        Style heuristics (stock phrasing, repeated sentence openers, a cast member absent from one scene) are advisory:
+        the pipeline makes one Author call and never retries, so a wording check must not discard a complete draft.
+        """
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
         errors: list[str] = []
+        advisories: list[str] = []
         if len(paragraphs) != DIRECTOR_STORY_SCENES:
             return [f"expected {DIRECTOR_STORY_SCENES} scene paragraphs, got {len(paragraphs)}"]
 
@@ -2361,9 +2366,9 @@ class QwenDirector(
         repeated_stock = [phrase for phrase, count in stock_hits if count > 1]
         total_stock = sum(count for _, count in stock_hits)
         if repeated_stock:
-            errors.append("repeated stock phrases: " + ", ".join(repeated_stock[:5]))
+            advisories.append("repeated stock phrases: " + ", ".join(repeated_stock[:5]))
         if total_stock > 3:
-            errors.append(f"stock-phrase load is too high ({total_stock} matches; maximum 3)")
+            advisories.append(f"stock-phrase load is high ({total_stock} matches; advisory maximum 3)")
 
         # A repeated sentence across scenes is a direct prose duplication, not a motif.
         sentence_scene: dict[str, int] = {}
@@ -2379,14 +2384,14 @@ class QwenDirector(
                 else:
                     sentence_scene[key] = scene_index
 
-        # A 3+ consecutive opener run is obvious templating and is not left as a warning.
+        # A 3+ consecutive opener run is templated prose; it is reported, but a wording pattern never discards the draft.
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(story or "")) if s.strip()]
         first_words = [re.findall(r"[\w'’-]+", s.casefold())[:1] for s in sentences]
         run = 1
         for index in range(1, len(first_words)):
             run = run + 1 if first_words[index] and first_words[index] == first_words[index - 1] else 1
             if run >= 3:
-                errors.append("three consecutive sentences share the same opening word")
+                advisories.append("three consecutive sentences share the same opening word")
                 break
 
         # Dialogue should fit the available shot time: no more than two concise spoken lines per scene.
@@ -2405,13 +2410,7 @@ class QwenDirector(
             )
             prose_fatal, prose_soft = split_contract_findings(prose_findings, HARD_PROSE_MARKERS)
             errors.extend(prose_fatal)
-            if prose_soft:
-                self._last_story_contract_warnings = list(dict.fromkeys(prose_soft))
-                print(
-                    f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking): "
-                    + "; ".join(self._last_story_contract_warnings[:6]),
-                    flush=True,
-                )
+            advisories = list(prose_soft) + advisories
 
         # The Architect's declared physical appearances are binding for the prose pass.
         for line in str(story_blueprint or "").splitlines():
@@ -2435,7 +2434,24 @@ class QwenDirector(
                         continue
                     paragraph = paragraphs[scene_number - 1]
                     if not any(re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", paragraph, re.IGNORECASE) for surface in surfaces):
-                        errors.append(f"CAST character {name!r} missing from declared on-screen scene {scene_number:02d}")
+                        in_story = any(
+                            re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", str(story or ""), re.IGNORECASE)
+                            for surface in surfaces
+                        )
+                        if in_story:
+                            # Present elsewhere in the story: the character is realized, just not named in this scene.
+                            advisories.append(
+                                f"CAST character {name!r} is not named in declared on-screen scene {scene_number:02d}"
+                            )
+                        else:
+                            errors.append(f"CAST character {name!r} never appears in the story")
+        if advisories:
+            self._last_story_contract_warnings = list(dict.fromkeys(advisories))
+            print(
+                f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking): "
+                + "; ".join(self._last_story_contract_warnings[:8]),
+                flush=True,
+            )
         return list(dict.fromkeys(errors))
 
     @staticmethod
