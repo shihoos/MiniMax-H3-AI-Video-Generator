@@ -962,6 +962,10 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert("relationships" in blueprint and "named_entities" in blueprint and "entry_present" in blueprint
                 and "on_screen_present" in blueprint and "fate: survives or dies in scene nn" in blueprint,
                 f"{mode}: Architect must declare relationship/entity/fate/full-scene visibility contracts")
+        blueprint_compact = " ".join(blueprint.split())
+        _assert("kind: person|animal|embodied agent" in blueprint_compact and "weather event" in blueprint_compact
+                and "put such opposition in opposition only" in blueprint_compact,
+                f"{mode}: the Architect must type physical cast separately from weather/environmental opposition")
         _assert("each of the eleven transitions" in blueprint,
                 f"{mode}: Architect must explicitly link every scene transition")
 
@@ -1504,6 +1508,192 @@ def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
     _assert(all(item["camera_movement"] in CAMERA_MOVEMENT_OPTIONS for item in sanitized), "sanitizer emitted illegal camera movement")
 
 
+def test_environmental_opposition_is_not_cast_and_boundary_presence_is_reconciled():
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import (
+        _event_explicitly_assigns_death, is_non_person_cast_entry, parse_cast,
+        parse_scene_state, split_contract_findings, validate_blueprint_state_contract,
+    )
+
+    director = QwenDirector.__new__(QwenDirector)
+    lines = _story_blueprint_fixture().splitlines()
+    lines[0] += (
+        " | Dr. Kael (kind: person; role: station biologist; wants to escape the storm; pressure guilt over abandoning his team; "
+        "voice terse; aliases: none; on-screen scenes: 02, 04, 08; fate: dies in scene 08)"
+        " | Arctic Storm (opposition; wants to destroy all life; pressure none; voice: none; "
+        "aliases: none; on-screen scenes: all; fate: none)"
+    )
+    for index, line in enumerate(lines):
+        if line.startswith("OPPOSITION:"):
+            lines[index] = "OPPOSITION: Arctic Storm and failing station infrastructure threaten the sealed vault."
+        elif line.startswith("SCENE 02:"):
+            line = line.replace(
+                "EVENT=Ines examines",
+                "EVENT=Kael arrives at the harbor archive and meets Ines while Ines examines",
+                1,
+            )
+            line = line.replace("EXIT_PRESENT=Ines Vale;", "EXIT_PRESENT=Ines Vale, Kael;", 1)
+            lines[index] = line
+        elif line.startswith("SCENE 03:"):
+            line = line.replace("ENTRY_PRESENT=Ines Vale;", "ENTRY_PRESENT=Ines Vale, Kael;", 1)
+            line = line.replace("EVENT=Ines examines", "EVENT=Kael leaves the harbor archive while Ines examines", 1)
+            lines[index] = line
+        elif line.startswith("SCENE 08:"):
+            line = line.replace(
+                "EVENT=Ines examines",
+                "EVENT=Kael emerges from the lower archive, helps Ines secure the ledger, then dies when the collapsing ceiling strikes him; Ines examines",
+                1,
+            )
+            lines[index] = line
+
+    normalized = director._normalize_story_blueprint("\n".join(lines), 12)
+    cast = {item["name"]: item for item in parse_cast(normalized)}
+    _assert(set(cast) == {"Ines Vale", "Kael"}, f"environmental opposition must not be a physical cast member: {sorted(cast)!r}")
+    _assert("Arctic Storm" not in next(line for line in normalized.splitlines() if line.startswith("CAST:")),
+            "the exact legacy generic-opposition Arctic Storm entry must be removed from canonical CAST")
+    _assert(is_non_person_cast_entry("Arctic Storm", "kind: environmental force; role: opposition; voice: none", {"OPPOSITION": "Arctic Storm approaches"}),
+            "explicit environmental-force types must be excluded from physical CAST")
+    _assert(not is_non_person_cast_entry("Arctic Storm", "kind: person; role: opposition; voice: none", {"OPPOSITION": "Arctic Storm approaches"}),
+            "explicit person type must override a generic opposition role")
+    _assert(not _event_explicitly_assigns_death("Elara Voss kills Kael, then escapes.", {"name": "Elara Voss", "aliases": []}),
+            "the killer must not be misclassified as the victim")
+    _assert(_event_explicitly_assigns_death("Elara Voss kills Kael, then escapes.", {"name": "Kael", "aliases": []}),
+            "the named victim of a transitive death predicate must be identified")
+    scene02 = parse_scene_state(next(line for line in normalized.splitlines() if line.startswith("SCENE 02:")))
+    scene03 = parse_scene_state(next(line for line in normalized.splitlines() if line.startswith("SCENE 03:")))
+    scene08 = parse_scene_state(next(line for line in normalized.splitlines() if line.startswith("SCENE 08:")))
+    _assert("Kael" in scene02["ON_SCREEN_PRESENT"], "an EXIT_PRESENT person must be included in full-scene visibility")
+    _assert("Kael" in scene03["ON_SCREEN_PRESENT"], "an ENTRY_PRESENT person must be included in full-scene visibility")
+    _assert("Kael" in scene08["ON_SCREEN_PRESENT"], "a character declared dead in this scene must appear in its full-scene visibility")
+    _assert(cast["Kael"]["scenes"] == [2, 3, 8], f"CAST scene inventory must follow reconciled physical visibility: {cast['Kael']!r}")
+    findings = validate_blueprint_state_contract(normalized, 12)
+    fatal, _warnings = split_contract_findings(findings)
+    _assert(not fatal, f"reconciled weather opposition and physical boundary state must not be fatal: {fatal!r}")
+
+
+
+def test_prose_presence_audit_accepts_common_departure_and_behavior_cues():
+    from planner.story_contracts import TRAVEL_RE, ACTION_VERBS
+    _assert(TRAVEL_RE.search("Kael disappeared down the corridor toward the power grid room.") is not None,
+            "common prose departure 'disappeared' must be recognized")
+    _assert(re.search(r"\b(?:" + ACTION_VERBS + r")\b", "Elara hesitated, then nodded.", re.I) is not None,
+            "observable hesitation must count as a character behavior cue")
+
+def test_duplicate_adjacent_scene_block_is_cleaned_without_retry_and_isolated_repetition_is_advisory():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._last_story_contract_warnings = []
+    director._last_story_quality_warnings = []
+    paragraphs = _story_test_paragraphs(125)
+    copied = (
+        "The emergency exit remained blocked by frozen debris across the station. "
+        "Elara turned back toward the broken access corridor and checked the vault. "
+        "The sealed chamber held the pathogen behind its final pressure lock. "
+        "The storm had passed, leaving the station silent beneath the snow. "
+        "She understood that the choice had cost her any chance of returning home."
+    )
+    paragraphs[9] += " " + copied
+    paragraphs[10] = "Elara reached the emergency exit. " + copied + " The control lights faded beyond the sealed door."
+    isolated = "The white station lights flickered above the empty harbor archive."
+    paragraphs[0] += " " + isolated
+    paragraphs[1] += " " + isolated
+    source = "\n\n".join(paragraphs)
+    cleaned, events = director._remove_repeated_adjacent_scene_block(source, minimum_words=1400)
+    count = len(re.findall(r"\b[\w'’-]+\b", cleaned))
+    scenes = [part for part in re.split(r"\n\s*\n+", cleaned) if part.strip()]
+    _assert(len(scenes) == 12, "duplicate-block cleanup must preserve all twelve scene paragraphs")
+    _assert(count >= 1400, f"duplicate-block cleanup must preserve the hard story floor, got {count}")
+    _assert(any("5 sentences" in event and "scene 11" in event for event in events),
+            f"the exact copied five-sentence block should be removed deterministically: {events!r}")
+    _assert(copied not in scenes[10], "the later scene must not retain the copied passage")
+    errors = director._story_hard_quality_errors(cleaned, None, "")
+    _assert(not errors, f"an isolated exact sentence repetition must not fail the one-pass draft: {errors!r}")
+    _assert(any("exact sentence repeated" in item for item in director._last_story_quality_warnings),
+            f"an isolated repeat should remain visible as an advisory: {director._last_story_quality_warnings!r}")
+
+
+def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
+    from tempfile import TemporaryDirectory
+    import json
+    from planner.qwen_director import QwenDirector
+
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp) / "project"
+        trace = Path(tmp) / "qwen_director_traces"
+        root.mkdir()
+        trace.mkdir()
+        director = QwenDirector.__new__(QwenDirector)
+        director.project_root = root
+        director._trace_dir = trace
+        director._story_min_words = 1400
+        director._last_story_word_counts = {"after_raw_prose_normalization": 1531, "after_cleanup": 1479}
+        director._last_story_blueprint_warnings = [f"scene {index:02d} knowledge transition needs review" for index in range(1, 23)]
+        director._last_story_contract_warnings = ["cast member not named in one planned scene"]
+        director._last_story_quality_warnings = ["exact sentence repeated in scenes 10 and 11"]
+        director._last_story_quality_errors = ["synthetic hard-gate failure"]
+        director._last_story_cleanup_events = ["removed exact copied block of 5 sentences/64 words from scene 11"]
+        author_trace = trace / "ai_story_text_pass_test.json"
+        author_trace.write_text(json.dumps({"call_name": "ai_story_text_pass", "raw_content": "draft"}), encoding="utf-8")
+        director._save_failed_story_draft(
+            "raw model draft", raw_story="raw model draft", processed_story="cleaned model draft",
+            reason="synthetic hard-gate failure", word_count=1479, stage="author_post_generation_rejection",
+        )
+        director._save_story_run_diagnostics(
+            status="failed", stage="ai_story_author_validation", reason="synthetic hard-gate failure", word_count=1479,
+        )
+        report_path = trace / "story_run_diagnostics.json"
+        text_path = trace / "story_run_diagnostics.txt"
+        failed_draft = trace / "story_author_last_failed.txt"
+        _assert(report_path.is_file() and text_path.is_file() and failed_draft.is_file(),
+                "trace bundle must include the full diagnostics in JSON/TXT and the rejected draft")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        attached = json.loads(author_trace.read_text(encoding="utf-8"))["post_generation_validation"]
+        _assert(report["blueprint_warnings"] == director._last_story_blueprint_warnings,
+                "diagnostics must preserve every blueprint warning")
+        _assert(report["prose_audit_warnings"] == director._last_story_contract_warnings,
+                "diagnostics must preserve every prose-audit warning")
+        _assert(report["quality_warnings"] == director._last_story_quality_warnings,
+                "diagnostics must preserve all quality warnings, even on rejection")
+        _assert(len(report["blueprint_warnings"]) == 22,
+                "diagnostics must preserve the complete warning list, not only console previews")
+        _assert(report["generation_policy"] == {"architect_calls": 1, "author_calls": 1, "retries": 0, "repairs": 0},
+                f"Author rejection must report exactly one Architect and one Author call: {report['generation_policy']!r}")
+        _assert("scene 22 knowledge transition needs review" in text_path.read_text(encoding="utf-8"),
+                "human-readable trace log must retain the final warning, not truncate the list")
+        _assert("architect_calls=1; author_calls=1; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
+                "diagnostic text must accurately state the actual single-pass call policy")
+        _assert(attached["cleanup_events"] == director._last_story_cleanup_events,
+                "the Author trace JSON must carry deterministic cleanup and validation details")
+        _assert("[BLUEPRINT WARNINGS]" in json.loads(author_trace.read_text(encoding="utf-8"))["post_generation_validation_text"],
+                "the Author trace JSON must embed the readable complete warning log for JSON-only trace ZIPs")
+        _assert("cleaned model draft" in json.loads(author_trace.read_text(encoding="utf-8"))["rejected_story_artifact"],
+                "the Author trace JSON must embed the processed rejected draft for JSON-only trace ZIPs")
+        _assert("cleaned model draft" in failed_draft.read_text(encoding="utf-8"),
+                "the rejected processed story must be available as a separate trace artifact too")
+
+        # A subsequent fresh Architect run must not attach the previous Author failure to its log.
+        from planner.config import AI_STORY_MODE
+        (root / "story_author_last_failed.txt").write_text("STALE AUTHOR FAILURE", encoding="utf-8")
+        (root / "story_architect_last_failure.txt").write_text("STALE ARCHITECT FAILURE", encoding="utf-8")
+        (trace / "story_author_last_failed.txt").write_text("STALE TRACE FAILURE", encoding="utf-8")
+        director._last_story_blueprint_warnings = ["stale blueprint warning"]
+        director._last_story_contract_warnings = ["stale prose warning"]
+        director._last_story_quality_warnings = ["stale quality warning"]
+        director._last_story_quality_errors = ["stale quality error"]
+        director._last_story_cleanup_events = ["stale cleanup"]
+        director._last_story_word_counts = {"stale": 1}
+        director._validate_story_blueprint_contract(AI_STORY_MODE, _story_blueprint_fixture(), "new premise")
+        fresh = json.loads(report_path.read_text(encoding="utf-8"))
+        _assert(not (root / "story_author_last_failed.txt").exists()
+                and not (root / "story_architect_last_failure.txt").exists()
+                and not (trace / "story_author_last_failed.txt").exists(),
+                "a fresh Architect pass must remove stale failure artifacts")
+        _assert(fresh["generation_policy"]["author_calls"] == 0,
+                "an Architect-stage report must not claim the Author has already run")
+        _assert(not fresh["prose_audit_warnings"] and not fresh["quality_errors"],
+                "a new story run must not inherit previous run's warnings or errors")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────
 
 def test_director_checkpoint_is_accepted_by_orchestrator_resume():
@@ -1954,6 +2144,10 @@ def main():
         test_cast_and_state_ledger_are_reconciled_like_the_real_failure,
         test_second_real_failure_surnames_call_signs_final_cause_and_connectors,
         test_third_real_failure_wording_heuristics_warn_and_death_scene_is_kept,
+        test_environmental_opposition_is_not_cast_and_boundary_presence_is_reconciled,
+        test_prose_presence_audit_accepts_common_departure_and_behavior_cues,
+        test_duplicate_adjacent_scene_block_is_cleaned_without_retry_and_isolated_repetition_is_advisory,
+        test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle,
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
