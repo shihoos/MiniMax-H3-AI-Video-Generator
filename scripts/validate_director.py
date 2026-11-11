@@ -71,6 +71,24 @@ def _planner():
     return ProductionPlanner(ROOT)
 
 
+def test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    blueprint = _story_blueprint_fixture()
+    paragraphs = _story_contract_fixture_prose().split("\n\n")
+    one_scene = paragraphs.copy()
+    one_scene[11] = one_scene[11].replace("Ines", "She")
+    errors = director._story_hard_quality_errors("\n\n".join(one_scene), blueprint, "")
+    _assert(not any("CAST character" in error for error in errors),
+            f"a cast member named elsewhere but not in one declared scene must not discard the draft: {errors!r}")
+    _assert(any("not named in declared on-screen scene 12" in w for w in director._last_story_contract_warnings),
+            f"the missing scene must still be reported: {director._last_story_contract_warnings!r}")
+    nowhere = [p.replace("Ines", "She").replace("Vale", "") for p in paragraphs]
+    errors = director._story_hard_quality_errors("\n\n".join(nowhere), blueprint, "")
+    _assert(any("never appears in the story" in error for error in errors),
+            f"a planned character who never appears must stay a hard failure: {errors!r}")
+
+
 def _story_contract_fixture_prose():
     paragraphs = []
     for i in range(1, 13):
@@ -1158,8 +1176,10 @@ def test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dia
     defective = paragraphs.copy()
     defective[0] += ' Breath fogging covered the glass. Breath fogging covered the lens. “This line contains far too many words for the available shot duration.” “Second line.” “Third line.”'
     errors = director._story_hard_quality_errors("\n\n".join(defective), None)
-    _assert(any("repeated stock phrases" in error for error in errors),
-            f"repeated stock phrasing must be a hard failure: {errors!r}")
+    _assert(not any("stock phrase" in error or "stock-phrase" in error for error in errors),
+            f"stock phrasing is advisory and must never discard the single Author draft: {errors!r}")
+    _assert(any("repeated stock phrases" in warning for warning in director._last_story_contract_warnings),
+            f"repeated stock phrasing must still be reported as an advisory: {director._last_story_contract_warnings!r}")
     _assert(any("spoken quote pairs" in error for error in errors),
             f"more than two dialogue quote pairs per scene must fail: {errors!r}")
     _assert(any("longer than 9 words" in error for error in errors),
@@ -1647,12 +1667,22 @@ def test_story_contract_regressions_found_by_audit():
     )
     _assert(not audit_story_against_blueprint(winter, _story_blueprint_fixture()),
             "'Winter followed...' must not be read as an unseeded person")
+    # A single capitalized word that opens one sentence, never speaks and is never repeated ("Permafrost followed ...")
+    # cannot be told from an ordinary noun: advisory only. A name that recurs or speaks is still an unseeded person.
+    once = base.replace(
+        "Ines examines transfer stage 1,",
+        "Permafrost followed the surveyor through the harbor archive. Ines examines transfer stage 1,", 1,
+    )
+    once_issues = audit_story_against_blueprint(once, _story_blueprint_fixture())
+    _assert(not any("unseeded named person" in i for i in once_issues)
+            and any("possible unrostered name opening a sentence" in i for i in once_issues),
+            f"a lone sentence-opening noun must be an advisory, not an unseeded person: {once_issues!r}")
     stranger = base.replace(
         "Ines examines transfer stage 1,",
-        "Rourke followed the surveyor through the harbor archive. Ines examines transfer stage 1,", 1,
+        "Rourke followed the surveyor through the harbor archive. Rourke waited by the door. Ines examines transfer stage 1,", 1,
     )
     _assert(any("unseeded named person" in i for i in audit_story_against_blueprint(stranger, _story_blueprint_fixture())),
-            "an unrostered real name must still be rejected")
+            "an unrostered name that recurs must still be rejected")
 
     # Generic 'dead' is not a precise fate; present-tense inflections count as actions.
     issues = validate_blueprint_state_contract(_story_blueprint_fixture().replace("fate: survives", "fate: dead", 1))
@@ -1927,6 +1957,7 @@ def main():
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
+        test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal,
         test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_post_death_presence,
         test_story_entity_relationship_and_person_grounding_is_a_hard_gate,
         test_story_cinematic_coverage_enforces_unique_framing_without_camera_motion_quota,
