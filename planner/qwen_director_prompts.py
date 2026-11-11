@@ -34,7 +34,9 @@ from planner.config import (
     H3_FRAMES_PER_SHOT,
 )
 from planner.entity_resolver import EntityResolver
-from planner.story_contracts import blueprint_beat_floor, blueprint_field_floor, reconcile_cast_scenes
+from planner.story_contracts import (
+    blueprint_beat_floor, blueprint_field_floor, is_non_person_cast_entry, reconcile_cast_scenes,
+)
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
@@ -337,7 +339,9 @@ class QwenDirectorPromptMixin:
             body sensations. Use visual information, reversals, withheld information, and behavior to reveal character.
             Vary distance, tempo, sentence length, and paragraph emphasis naturally. Use close detail only when it changes
             what the audience notices or understands. Avoid exposition that repeats visible action, abstract moralizing,
-            stock metaphors, generic tension statements, and repetitive gestures. Do not use these worn phrases:
+            stock metaphors, generic tension statements, and repetitive gestures. Never copy a complete sentence or
+            contiguous passage from one scene into another; a necessary callback must use new, scene-specific wording.
+            Do not use these worn phrases:
             breath fogging/visible, dust drifting, eyes narrowed, heart pounding, heartbeat, pulse quickened, echoed
             through, long shadows, sent a shiver, weight of, mind racing, felt heavier, faint smell of. Never begin three
             consecutive sentences with the same word. Do not open a sentence with a capitalized noun that is not a cast name
@@ -462,14 +466,15 @@ class QwenDirectorPromptMixin:
             Give scenes different dramatic textures (e.g. discovery, negotiation, pursuit, failure, confrontation,
             quiet decision, physical problem-solving) rather than repeating one obstacle or interruption.
 
-            CAST FORMAT: output one CAST line first. Include only core people whose choices matter to the plot. Cast size
+            CAST FORMAT: output one CAST line first. Include only core embodied people/creatures whose choices matter to the plot. Cast size
             is fully plot-driven; do not target four people. Each entry must use this exact pattern:
-            Full Name (role; wants [specific outcome]; pressure [fear, need, duty, mistake, or private conflict]; voice [distinctive speech style]; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
-            Write it as ONE line starting with the literal label 'CAST:' followed by the entries. Separate entries with |. Use full names for newly invented people and preserve source names exactly.
+            Full Name (kind: person|animal|embodied agent; role: specific role; wants [specific outcome]; pressure [fear, need, duty, mistake, or private conflict]; voice [distinctive speech style]; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
+            Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
             Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. A remote-only voice,
-            recording, hologram, AI, organization, object, or location is not a physically present person and must not be
-            listed as an on-screen person. List only scenes where the person is physically present. Include aliases only
-            when they are genuinely used in the story; never invent kinship or identity aliases.
+            recording, hologram, AI, organization, object, location, weather event, storm, natural disaster, environmental hazard,
+            failing infrastructure, or abstract opposing force is not physically present as an embodied cast member. Put such opposition in OPPOSITION
+            only; never give it a CAST entry or physical on-screen scene list. List only scenes where an embodied person/creature
+            is physically present. Include aliases only when genuinely used in the story; never invent kinship or identity aliases.
 
             REQUIRED PLOT FIELDS: after CAST, output exactly one line for each field below. Give each field concrete,
             story-specific content; use 'none' for an empty relationship/entity/object inventory:
@@ -499,6 +504,12 @@ class QwenDirectorPromptMixin:
             visibility record and MUST include a character who enters during the scene or leaves before it ends. It must not
             include a remote voice, recording, written mention, or person merely discussed. Every character's CAST on-screen
             scene list must match ON_SCREEN_PRESENT exactly; boundary presence must be a subset of that list.
+            KNOWLEDGE SNAPSHOTS ARE CUMULATIVE: ENTRY_KNOWS is the complete set of established facts known at scene entry;
+            carry forward prior EXIT_KNOWS facts using stable wording instead of replacing them with a shorter summary.
+            EXIT_KNOWS is the complete post-event knowledge snapshot, not merely a list of new facts. Preserve prior facts
+            unless this EVENT explicitly disproves, corrects, retracts, or reveals that a character was misled. Add a new fact
+            only when the EVENT shows how it was discovered or disclosed. Attribute private facts to the person who knows them.
+            For each scene transition, compare prior EXIT_KNOWS with the next ENTRY_KNOWS before writing the beat.
             Mid-scene arrivals and departures are derived mechanically from these three presence lists; do NOT output
             separate MID_SCENE_ENTRIES or MID_SCENE_EXITS fields. For every person in ON_SCREEN_PRESENT but not
             ENTRY_PRESENT, EVENT must name that person and describe their actual physical arrival, entry, joining, or meeting.
@@ -664,7 +675,14 @@ class QwenDirectorPromptMixin:
                 head, sep, tail = metadata.partition(";")
                 head = head.strip()
                 if honorific.casefold().rstrip(".") not in head.casefold():
-                    head = f"{head}, addressed as {honorific}" if head else f"addressed as {honorific}"
+                    if re.match(r"^kind\s*:", head, re.IGNORECASE) and sep:
+                        # Keep the closed type token intact; honorific belongs to the role field.
+                        role, role_sep, remainder = tail.partition(";")
+                        role = role.strip()
+                        role = f"{role}, addressed as {honorific}" if role else f"addressed as {honorific}"
+                        tail = role + (";" + remainder if role_sep else "")
+                    else:
+                        head = f"{head}, addressed as {honorific}" if head else f"addressed as {honorific}"
                 metadata = head + (";" + tail if sep else "")
                 item = f"{name} ({metadata})"
             if not re.search(r"\baliases\s*:", metadata, re.IGNORECASE):
@@ -723,7 +741,7 @@ class QwenDirectorPromptMixin:
             )
             item = f"{name} ({metadata})"
             role = metadata.split(";", 1)[0].strip()
-            if non_person_role.search(role):
+            if non_person_role.search(role) or is_non_person_cast_entry(name, metadata, fields):
                 continue
             if re.match(r"^(?:the|a|an)\s+\w", name, re.IGNORECASE):
                 continue  # "The Vault": an article-led label is a place or thing, not a named person
