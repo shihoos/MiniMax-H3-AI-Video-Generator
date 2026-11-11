@@ -86,7 +86,7 @@ STOP_WORDS = {
 }
 
 SCENE_STATE_KEYS = (
-    "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS",
+    "PURPOSE", "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS",
     "EVENT", "EXIT_LOCATION", "EXIT_PRESENT", "EXIT_KNOWS", "EXIT_OBJECTS", "NEXT_CAUSE",
 )
 
@@ -107,12 +107,15 @@ ARRIVAL_RE = re.compile(
 )
 KNOWLEDGE_RE = re.compile(
     r"\b(learn\w*|discover\w*|realiz\w*|recogniz\w*|reveal\w*|tell\w*|show\w*|read\w*|"
-    r"find\w*|decipher\w*|overhear\w*|explain\w*|admit\w*|confess\w*|prove\w*|identify\w*)\b", re.I
+    r"find\w*|decipher\w*|overhear\w*|explain\w*|admit\w*|confess\w*|prove\w*|identify\w*|"
+    r"detect\w*|observ\w*|witness\w*|confirm\w*)\b", re.I
 )
 OBJECT_CHANGE_RE = re.compile(
     r"\b(take\w*|hand\w*|give\w*|steal\w*|drop\w*|leave\w*|carry\w*|move\w*|hide\w*|"
     r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|remove\w*|place\w*|"
-    r"return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*)\b", re.I
+    r"return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*|"
+    r"inject\w*|activat\w*|dispers\w*|releas\w*|escap\w*|consum\w*|"
+    r"dissolv\w*|absorb\w*|seal\w*|unseal\w*)\b", re.I
 )
 CAUSAL_LINK_RE = re.compile(
     r"\b(because|therefore|so that|so|thus|hence|forces?|forcing|forced|leads? to|leading to|led to|which means|"
@@ -148,13 +151,16 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
             return True
     return False
 
-# Printed in the Architect rejection so the code version that ran is unambiguous in a pasted log.
-CONTRACTS_REVISION = "2026-11-11.4"
+# Printed in the diagnostic artifacts so the code version that ran is unambiguous.
+CONTRACTS_REVISION = "2026-11-11.8"
 
-# Only plan-structure findings may stop a run. Everything else (how a beat is worded, whether a knowledge/location/
-# presence change is "explained" in a heuristic's eyes) is reported as a warning and never blocks prose generation.
+# These are high-confidence contract violations. Lexical wording preferences remain advisory; impossible
+# scene handoffs, undeclared spatial movement, and unexplained object/knowledge transitions must not be
+# passed to the single-pass Author as if they were a validated blueprint.
 HARD_FINDING_MARKERS = (
     "missing structured plot/continuity fields",
+    "SETUP_PAYOFF_MAP",
+    "PURPOSE is too vague",
     "missing canonical CAST line",
     "expected exactly",
     "CAST contains no named",
@@ -174,6 +180,19 @@ HARD_FINDING_MARKERS = (
     "has no character-specific arrival",
     "has no character-specific departure",
     "has no character-specific EVENT anchor",
+    "event is not anchored to the previous scene's NEXT_CAUSE",
+    "changes location without a route/time transition",
+    "changes its physical location without an explicit transition",
+    "changes established knowledge without a discovery/disclosure event",
+    "removes established knowledge without a reason",
+    "changes important object custody/state without a physical action",
+    "entry object inventory introduces",
+    "drops terminal object identity",
+    "key object is missing from scene inventory",
+    "object state change is not anchored",
+    "declared object state timing conflicts",
+    "survivor fate is unresolved",
+    "has no NEXT_CAUSE handoff",
 )
 # Prose findings that may stop a run: invented people/organisations/relationships and the dead acting.
 HARD_PROSE_MARKERS = (
@@ -185,7 +204,7 @@ HARD_PROSE_MARKERS = (
 
 
 def split_contract_findings(findings: list[str], hard_markers: tuple[str, ...] = HARD_FINDING_MARKERS) -> tuple[list[str], list[str]]:
-    """Return (fatal, warnings). Anything that is not a known structural/grounding finding is only a warning."""
+    """Return (fatal, warnings), keeping lexical/style preferences advisory and state contradictions fatal."""
     fatal: list[str] = []
     soft: list[str] = []
     for item in findings:
@@ -199,7 +218,14 @@ SOFT_SIZE_RATIO = 0.6
 
 
 def blueprint_field_floor(name: str) -> int:
-    prompted = 35 if name == "CONTINUITY_LEDGER" else (10 if name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"} else 7)
+    if name == "CONTINUITY_LEDGER":
+        prompted = 35
+    elif name == "SETUP_PAYOFF_MAP":
+        prompted = 12
+    elif name in {"LOGLINE", "STORY_ENGINE", "CLIMAX_CHOICE"}:
+        prompted = 10
+    else:
+        prompted = 7
     return max(4, int(prompted * SOFT_SIZE_RATIO))
 
 
@@ -208,11 +234,133 @@ def blueprint_beat_floor(prompted_minimum: int) -> int:
 
 
 def word_tokens(value: str) -> list[str]:
-    return [w.casefold() for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", str(value or ""))]
+    # Normalize possessives to their lexical base. Without this, "Elara's" and
+    # "Elara" never intersect, creating false causal-handoff warnings.
+    result: list[str] = []
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", str(value or "")):
+        normalized = token.casefold()
+        normalized = re.sub(r"['’]s$", "", normalized)
+        if normalized:
+            result.append(normalized)
+    return result
 
 
 def content_tokens(value: str) -> set[str]:
-    return {w for w in word_tokens(value) if len(w) > 2 and w not in STOP_WORDS and not w.isdigit()}
+    return {
+        w for w in word_tokens(value)
+        if len(w) > 2 and w not in STOP_WORDS and w not in {"scene", "scenes"} and not w.isdigit()
+    }
+
+
+_LOCATION_GENERIC_WORDS = {
+    "the", "a", "an", "inside", "interior", "outside", "exterior", "room", "corridor",
+    "entrance", "exit", "control", "lower", "upper", "main", "central", "north", "south",
+    "east", "west", "area", "sector", "point", "platform", "level", "floor",
+}
+
+_SCENE_LOCAL_MOVE_RE = re.compile(
+    r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|move\s+through|"
+    r"descend\w*|climb\w*|open\w*|unlock\w*|bypass\w*|breach\w*|leave\w*|exit\w*|"
+    r"depart\w*|return\w*|travel\w*|walk\w*|run\w*|flee\w*|escape\w*|emerge\w*|"
+    r"evacuate\w*|withdraw\w*|head\s+(?:to|for|toward)|make\s+their\s+way)\b", re.I,
+)
+_SCENE_LOCAL_ACCESS_RE = re.compile(
+    r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|"
+    r"open\w*|unlock\w*|bypass\w*|breach\w*|descend\w*|climb\w*)\b", re.I,
+)
+
+
+def _location_tokens(value: str) -> set[str]:
+    return {
+        token for token in content_tokens(value)
+        if token not in _LOCATION_GENERIC_WORDS and token not in {"arctic", "storm-ravaged"}
+    }
+
+
+def _is_nested_station_location(old_location: str, new_location: str) -> bool:
+    """Treat broad site labels (e.g. station interior) and their named rooms as one site."""
+    old = re.sub(r"\W+", " ", str(old_location or "").casefold()).strip()
+    new = re.sub(r"\W+", " ", str(new_location or "").casefold()).strip()
+    if not old or not new:
+        return False
+    old_tokens = set(old.split())
+    new_tokens = set(new.split())
+    common_site = old_tokens & new_tokens
+    if not common_site:
+        return False
+    if ("exterior" in old_tokens) != ("exterior" in new_tokens):
+        return False
+    # A broad "<site> interior" label may be refined to a room in that same site.
+    if "interior" in old_tokens and ("room" in new_tokens or "control" in new_tokens):
+        return True
+    if "interior" in new_tokens and ("room" in old_tokens or "control" in old_tokens):
+        return True
+    return False
+
+
+def _strip_cast_surfaces(text: str, cast: list[dict[str, Any]]) -> str:
+    value = str(text or "")
+    surfaces: list[str] = []
+    for item in cast:
+        surfaces.extend(_name_surfaces(item.get("name", ""), item.get("aliases", [])))
+    for surface in sorted(set(surfaces), key=len, reverse=True):
+        if surface:
+            value = re.sub(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", " ", value, flags=re.I)
+    return value
+
+
+_CAUSE_SYNONYM_GROUPS = (
+    {"global", "world", "worldwide", "planetwide"},
+    {"response", "react", "reacts", "reacted", "reaction"},
+    {"stay", "stays", "staying", "behind", "sacrifice", "sacrifices", "sacrificed"},
+    {"disperse", "disperses", "dispersed", "spread", "spreads", "spreading"},
+)
+_CAUSE_SYNONYM_MAP = {token: f"synonym_{index}" for index, group in enumerate(_CAUSE_SYNONYM_GROUPS) for token in group}
+
+
+def _cause_event_is_anchored(cause: str, event: str, cast: list[dict[str, Any]]) -> bool:
+    """Compare consequential terms, not shared character names or grammatical wording."""
+    cause_text = _strip_cast_surfaces(cause, cast)
+    event_text = _strip_cast_surfaces(event, cast)
+    cause_tokens = content_tokens(cause_text)
+    event_tokens = content_tokens(event_text)
+    cause_norm = {_CAUSE_SYNONYM_MAP.get(token, token) for token in cause_tokens}
+    event_norm = {_CAUSE_SYNONYM_MAP.get(token, token) for token in event_tokens}
+    return bool(cause_norm & event_norm)
+
+
+def _scene_local_transition_is_explained(
+    entry_location: str,
+    exit_location: str,
+    event: str,
+    cast: list[dict[str, Any]],
+) -> bool:
+    old = re.sub(r"\W+", " ", str(entry_location or "").casefold()).strip()
+    new = re.sub(r"\W+", " ", str(exit_location or "").casefold()).strip()
+    if not old or not new or old == new:
+        return True
+    if _is_nested_station_location(old, new):
+        return True
+    event_text = str(event or "")
+    # Movement by an object/weather system is not proof that the visible cast moved.
+    has_named_mover = any(
+        re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", event_text, re.I)
+        for item in cast
+        for surface in _name_surfaces(item.get("name", ""), item.get("aliases", []))
+    )
+    if not has_named_mover or not _SCENE_LOCAL_MOVE_RE.search(event_text):
+        return False
+    # A movement verb alone is not enough: the event must anchor the declared
+    # destination; otherwise an unrelated action can accidentally justify a jump.
+    destination_tokens = _location_tokens(exit_location)
+    event_tokens = content_tokens(event_text)
+    if destination_tokens and not (destination_tokens & event_tokens):
+        return False
+    target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I))
+    source_is_outside = bool(re.search(r"\b(?:tundra|exterior|outside|entrance)\b", old, re.I))
+    if target_is_interior and source_is_outside and not _SCENE_LOCAL_ACCESS_RE.search(event_text):
+        return False
+    return True
 
 
 def _fields_and_beats(blueprint: str) -> tuple[dict[str, str], dict[int, str], str]:
@@ -245,7 +393,7 @@ def parse_scene_state(beat: str) -> dict[str, str]:
     result: dict[str, str] = {}
     text = str(beat or "")
     pattern = re.compile(
-        r"(?:^|;\s*)(ENTRY_LOCATION|ENTRY_PRESENT|ON_SCREEN_PRESENT|ENTRY_KNOWS|ENTRY_OBJECTS|"
+        r"(?:^|;\s*)(PURPOSE|ENTRY_LOCATION|ENTRY_PRESENT|ON_SCREEN_PRESENT|ENTRY_KNOWS|ENTRY_OBJECTS|"
         r"EVENT|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=\s*", re.I
     )
     matches = list(pattern.finditer(text))
@@ -370,7 +518,7 @@ def reconcile_cast_scenes(blueprint: str, expected_scenes: int = 12) -> str:
         state["ON_SCREEN_PRESENT"] = revised_on_screen
         beat_text = beats[number]
         beat_text, count = re.subn(
-            r"(\bON_SCREEN_PRESENT\s*=\s*)(.*?)(?=\s*;\s*(?:ENTRY_KNOWS|ENTRY_OBJECTS|EVENT|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=|$)",
+            r"(\bON_SCREEN_PRESENT\s*=\s*)(.*?)(?=\s*;\s*(?:PURPOSE|ENTRY_KNOWS|ENTRY_OBJECTS|EVENT|EXIT_LOCATION|EXIT_PRESENT|EXIT_KNOWS|EXIT_OBJECTS|NEXT_CAUSE)\s*=|$)",
             lambda match: match.group(1) + revised_on_screen,
             beat_text,
             count=1,
@@ -500,14 +648,15 @@ def _has_plot_anchor(field_value: str, prose: str, minimum: int = 2) -> bool:
 def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12) -> list[str]:
     """Hard-check scene-state continuity using presence deltas, without lexical transition vocabularies.
 
-    Returns a single ordered list of findings. Structural defects are classified as
-    fatal by split_contract_findings(); findings such as a possible fate contradiction
-    that are not structural defects are routed to warnings by the same function.
+    Returns a single ordered list of findings. Structural continuity defects and
+    unresolved character/object state contradictions are fatal; lexical wording preferences
+    remain advisory and are not emitted by this state validator.
     """
     fields, beats, cast_line = _fields_and_beats(blueprint)
     required_fields = {
         "LOGLINE", "PROTAGONIST_GOAL", "OPPOSITION", "PRESSURE", "STORY_ENGINE", "REVERSAL",
-        "CLIMAX_CHOICE", "RESOLUTION", "RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS", "CONTINUITY_LEDGER",
+        "CLIMAX_CHOICE", "RESOLUTION", "RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS",
+        "SETUP_PAYOFF_MAP", "CONTINUITY_LEDGER",
     }
     errors: list[str] = []
     missing = sorted(name for name in required_fields if not fields.get(name))
@@ -518,6 +667,40 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
     if set(beats) != set(range(1, expected_scenes + 1)):
         errors.append(f"expected exactly {expected_scenes} scene-state beats")
         return errors
+
+    payoff_map = str(fields.get("SETUP_PAYOFF_MAP", "") or "").strip()
+    payoff_pairs = re.findall(
+        r"PLANT\s+Scene\s+(\d{1,2})\s*:\s*(.+?)\s*;\s*"
+        r"PAYOFF\s+Scene\s+(\d{1,2})\s*:\s*(.+?)"
+        r"(?=\s*\|\s*PLANT\s+Scene\s+|$)",
+        payoff_map,
+        flags=re.IGNORECASE,
+    )
+    if not payoff_pairs:
+        errors.append("SETUP_PAYOFF_MAP must contain at least one explicit PLANT Scene NN / PAYOFF Scene NN pair")
+    for plant_raw, plant_detail, payoff_raw, payoff_detail in payoff_pairs:
+        plant_scene, payoff_scene = int(plant_raw), int(payoff_raw)
+        if not plant_detail.strip() or not payoff_detail.strip():
+            errors.append("SETUP_PAYOFF_MAP plant and payoff details must both be concrete")
+        if not (1 <= plant_scene < payoff_scene <= expected_scenes):
+            errors.append(
+                f"SETUP_PAYOFF_MAP has invalid ordering/range: plant scene {plant_scene:02d}, payoff scene {payoff_scene:02d}"
+            )
+            continue
+        plant_event = parse_scene_state(beats[plant_scene]).get("EVENT", "")
+        payoff_event = parse_scene_state(beats[payoff_scene]).get("EVENT", "")
+        if not _has_plot_anchor(plant_detail, plant_event, minimum=2):
+            errors.append(
+                f"SETUP_PAYOFF_MAP plant in scene {plant_scene:02d} is not grounded in that scene's EVENT"
+            )
+        if not _has_plot_anchor(payoff_detail, payoff_event, minimum=2):
+            errors.append(
+                f"SETUP_PAYOFF_MAP payoff in scene {payoff_scene:02d} is not grounded in that scene's EVENT"
+            )
+        if not _has_plot_anchor(plant_detail, payoff_event, minimum=2):
+            errors.append(
+                f"SETUP_PAYOFF_MAP payoff scene {payoff_scene:02d} does not explicitly refer back to the planted evidence from scene {plant_scene:02d}"
+            )
 
     cast = parse_cast(blueprint)
     if not cast:
@@ -549,12 +732,33 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         if missing_state:
             errors.append(f"scene {number:02d} missing state fields: {', '.join(missing_state)}")
             continue
+        if len(word_tokens(state["PURPOSE"])) < 5:
+            errors.append(f"scene {number:02d} PURPOSE is too vague; provide a scene-specific dramatic change")
         if len(word_tokens(state["EVENT"])) < 6:
             errors.append(f"scene {number:02d} event is too thin to dramatize")
-        if number < expected_scenes and len(word_tokens(state["NEXT_CAUSE"])) < 5:
-            errors.append(f"scene {number:02d} next-scene cause is too vague")
+        normalized_cause = re.sub(r"[\W_]+", " ", state["NEXT_CAUSE"].casefold()).strip()
+        if number < expected_scenes and normalized_cause in {
+            "none", "n a", "na", "resolved", "complete", "no next cause", "no next scene", "-",
+        }:
+            errors.append(f"scene {number:02d} has no NEXT_CAUSE handoff")
         if number == expected_scenes and state["NEXT_CAUSE"].casefold() not in {"none", "resolved", "complete", "n/a"}:
             errors.append("scene 12 NEXT_CAUSE must be none/resolved; the final beat must not promise another episode")
+
+        entry_location = state.get("ENTRY_LOCATION", "")
+        exit_location = state.get("EXIT_LOCATION", "")
+        if (
+            entry_location
+            and exit_location
+            and re.sub(r"\W+", " ", entry_location.casefold()).strip()
+            != re.sub(r"\W+", " ", exit_location.casefold()).strip()
+            and not _scene_local_transition_is_explained(
+                entry_location, exit_location, state.get("EVENT", ""), cast,
+            )
+        ):
+            errors.append(
+                f"scene {number:02d} changes its physical location without an explicit transition "
+                f"({entry_location!r} to {exit_location!r})"
+            )
         for key in ("ENTRY_PRESENT", "ON_SCREEN_PRESENT", "EXIT_PRESENT"):
             raw = state[key].casefold()
             if raw.strip() not in {"none", "nobody", "no one", "empty"}:
@@ -613,6 +817,28 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
                         f"scene {number:02d} potential fate contradiction: CAST says {item['name']!r} survives "
                         f"but EVENT explicitly assigns a death to them (review)"
                     )
+                # "Sacrifices herself/himself" is materially ambiguous when the CAST
+                # asserts survival and the scene removes the character from the exit
+                # boundary. Require a character-specific survival/rescue statement.
+                sacrifice = re.search(
+                    r"\bsacrific(?:e|es|ed|ing)\s+(?:herself|himself|themselves|their\s+life|"
+                    r"her\s+life|his\s+life)\b",
+                    state["EVENT"], re.I,
+                )
+                if sacrifice and not at_exit:
+                    explicitly_survives = any(
+                        re.search(
+                            r"(?<!\w)" + re.escape(surface) + r"(?!\w)[^.;!?]{0,55}\b"
+                            r"(?:survives?|survived|is rescued|gets rescued|is recovered|gets recovered)\b",
+                            state["EVENT"], re.I,
+                        )
+                        for surface in _name_surfaces(item["name"], item.get("aliases", []))
+                    )
+                    if not explicitly_survives:
+                        errors.append(
+                            f"scene {number:02d} survivor fate is unresolved for {item['name']!r}: "
+                            "the character self-sacrifices and exits the scene without an explicit survival outcome"
+                        )
 
     # The compact global ledger must be anchored to the canonical protagonist and key world state.
     ledger = fields.get("CONTINUITY_LEDGER", "")
@@ -630,12 +856,7 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         current = parse_scene_state(beats[number])
         following = parse_scene_state(beats[number + 1])
         cause = current.get("NEXT_CAUSE", "")
-        if not CAUSAL_LINK_RE.search(cause):
-            errors.append(f"scene {number:02d} NEXT_CAUSE lacks an explicit causal connector")
-        cause_tokens = content_tokens(cause)
-        next_event_tokens = content_tokens(following.get("EVENT", ""))
-        shared = cause_tokens & next_event_tokens
-        if len(shared) < 1:
+        if not _cause_event_is_anchored(cause, following.get("EVENT", ""), cast):
             errors.append(f"scene {number + 1:02d} event is not anchored to the previous scene's NEXT_CAUSE")
 
     # Scene-to-scene continuity for physical location, cast presence, knowledge and object state.
@@ -645,7 +866,19 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         old_location = re.sub(r"\W+", " ", prior.get("EXIT_LOCATION", "").casefold()).strip()
         new_location = re.sub(r"\W+", " ", current.get("ENTRY_LOCATION", "").casefold()).strip()
         bridge = current.get("EVENT", "") + " " + prior.get("NEXT_CAUSE", "")
-        if old_location and new_location and old_location != new_location and not TRAVEL_RE.search(bridge):
+        old_normalized = re.sub(r"\W+", " ", old_location).strip()
+        new_normalized = re.sub(r"\W+", " ", new_location).strip()
+        nested_same_site = _is_nested_station_location(old_location, new_location)
+        location_terms = _location_tokens(new_location)
+        bridge_tokens = content_tokens(bridge)
+        transition_named = bool(location_terms & bridge_tokens)
+        if (
+            old_location
+            and new_location
+            and old_normalized != new_normalized
+            and not nested_same_site
+            and (not TRAVEL_RE.search(bridge) or not transition_named)
+        ):
             errors.append(f"scene {number + 1:02d} changes location without a route/time transition")
 
         old_present = _present_names(prior.get("EXIT_PRESENT", ""), cast)
@@ -669,16 +902,99 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         after_knowledge = content_tokens(current.get("ENTRY_KNOWS", ""))
         gained = after_knowledge - before_knowledge
         lost = before_knowledge - after_knowledge
-        if len(gained) >= 3 and not KNOWLEDGE_RE.search(current.get("EVENT", "")):
+        # ENTRY_KNOWS is knowledge already held at the scene boundary. A fact added
+        # there must have been discovered/disclosed by the preceding scene's EVENT,
+        # not by the current scene's later action.
+        if len(gained) >= 2 and not KNOWLEDGE_RE.search(prior.get("EVENT", "")):
             errors.append(f"scene {number + 1:02d} changes established knowledge without a discovery/disclosure event")
-        if len(lost) >= 3 and not re.search(r"\b(forget\w*|misremember\w*|doubt\w*|retract\w*|disprove\w*|correct\w*|mislead\w*)\b", current.get("EVENT", ""), re.I):
+        if len(lost) >= 2 and not re.search(
+            r"\b(forget\w*|misremember\w*|doubt\w*|retract\w*|disprove\w*|correct\w*|mislead\w*|"
+            r"conceal\w*|withhold\w*|hide\w*|revise\w*)\b", prior.get("EVENT", ""), re.I,
+        ):
             errors.append(f"scene {number + 1:02d} removes established knowledge without a reason")
 
-        before_objects = content_tokens(prior.get("EXIT_OBJECTS", ""))
-        after_objects = content_tokens(current.get("ENTRY_OBJECTS", ""))
-        object_delta = before_objects ^ after_objects
-        if len(object_delta) >= 3 and not OBJECT_CHANGE_RE.search(current.get("EVENT", "")):
-            errors.append(f"scene {number + 1:02d} changes important object custody/state without a physical action")
+        prior_exit_text = str(prior.get("EXIT_OBJECTS", "") or "").strip()
+        current_entry_text = str(current.get("ENTRY_OBJECTS", "") or "").strip()
+        before_objects = content_tokens(prior_exit_text)
+        after_objects = content_tokens(current_entry_text)
+        prior_is_empty = prior_exit_text.casefold() in {"none", "n/a", "-", "no objects"}
+        current_is_empty = current_entry_text.casefold() in {"none", "n/a", "-", "no objects"}
+        if not prior_is_empty and current_is_empty:
+            errors.append(
+                f"scene {number + 1:02d} drops terminal object identity from ENTRY_OBJECTS; carry its final state forward"
+            )
+        elif not prior_is_empty and not current_is_empty:
+            identity_tokens = before_objects & after_objects
+            if not identity_tokens:
+                errors.append(
+                    f"scene {number + 1:02d} entry object inventory introduces or changes an object without a prior-scene physical action"
+                )
+
+        # A same-scene state/custody change must name the affected object in EVENT
+        # and include an action verb; an unrelated action cannot explain it.
+        entry_object_text = str(current.get("ENTRY_OBJECTS", "") or "")
+        exit_object_text = str(current.get("EXIT_OBJECTS", "") or "")
+        entry_object_tokens = content_tokens(entry_object_text)
+        exit_object_tokens = content_tokens(exit_object_text)
+        if entry_object_tokens != exit_object_tokens:
+            event_tokens = content_tokens(current.get("EVENT", ""))
+            object_anchors = (entry_object_tokens | exit_object_tokens) & event_tokens
+            has_object_action = bool(OBJECT_CHANGE_RE.search(current.get("EVENT", "")))
+            if not object_anchors or not has_object_action:
+                errors.append(
+                    f"scene {number + 1:02d} object state change is not anchored to the named object and a physical action"
+                )
+
+    # KEY_OBJECTS may declare when a consequential state begins (e.g. "damaged in
+    # Scene 05"). Reject an earlier scene that already depicts that same state.
+    key_objects = fields.get("KEY_OBJECTS", "")
+    for match in re.finditer(
+        r"(?P<label>[A-Za-z][^()|;]{2,48})\([^)]*?\bstate\s*:\s*"
+        r"(?P<state>damaged|broken|activated|dispersed|destroyed|sealed|unsealed)\b"
+        r"[^)]*?\bscene\s*(?P<scene>\d{1,2})\b[^)]*\)",
+        key_objects, re.I,
+    ):
+        label_tokens = content_tokens(match.group("label"))
+        state_word = match.group("state").casefold()
+        declared_scene = int(match.group("scene"))
+        # The final specific noun is the most reliable anchor for the object name.
+        anchors = {token for token in label_tokens if len(token) >= 4}
+        for earlier_scene in range(1, min(declared_scene, expected_scenes + 1)):
+            event = parse_scene_state(beats[earlier_scene]).get("EVENT", "")
+            event_tokens = content_tokens(event)
+            state_patterns = {
+                "damaged": r"damag\w*", "broken": r"brok\w*", "activated": r"activat\w*",
+                "dispersed": r"dispers\w*", "destroyed": r"destroy\w*", "sealed": r"seal\w*",
+                "unsealed": r"unseal\w*",
+            }
+            if anchors & event_tokens and re.search(state_patterns.get(state_word, re.escape(state_word) + r"\w*"), event, re.I):
+                errors.append(
+                    f"declared object state timing conflicts: {match.group('label').strip()} is already "
+                    f"{state_word} in scene {earlier_scene:02d}, before its declared scene {declared_scene:02d}"
+                )
+                break
+
+    # Every declared key object must be represented in a scene inventory, not only in metadata.
+    for segment in re.split(r"\s*;\s*(?=[A-Za-z][^;()]{2,48}\()", key_objects):
+        object_match = re.match(
+            r"\s*(?P<label>[A-Za-z][^()|;]{2,48})\([^)]*?\bscene\s*(?P<scene>\d{1,2})\b[^)]*\)",
+            segment, re.I,
+        )
+        if not object_match:
+            continue
+        label_tokens = {token for token in content_tokens(object_match.group("label")) if len(token) >= 4}
+        scene_number = int(object_match.group("scene"))
+        if not label_tokens or not 1 <= scene_number <= expected_scenes:
+            continue
+        scene_state = parse_scene_state(beats[scene_number])
+        inventory_tokens = content_tokens(
+            scene_state.get("ENTRY_OBJECTS", "") + " " + scene_state.get("EXIT_OBJECTS", "")
+        )
+        if not (label_tokens & inventory_tokens):
+            errors.append(
+                f"scene {scene_number:02d} key object is missing from scene inventory: "
+                f"{object_match.group('label').strip()}"
+            )
 
     return list(dict.fromkeys(errors))
 
