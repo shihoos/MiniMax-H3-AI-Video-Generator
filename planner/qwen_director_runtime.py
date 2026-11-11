@@ -2292,6 +2292,7 @@ class QwenDirectorRuntimeMixin:
         seed: int | None = None,
         creative: bool = False,
         thinking_token_budget: int | None = None,
+        response_format: dict | None = None,
     ) -> str:
         if self._vllm_session is None:
             raise RuntimeError(
@@ -2359,6 +2360,7 @@ class QwenDirectorRuntimeMixin:
                 creative=creative,
                 enable_thinking=not disable_thinking,
                 thinking_token_budget=thinking_token_budget,
+                response_format=response_format,
                 n_samples=_h3_n,
             )
         except Exception as exc:
