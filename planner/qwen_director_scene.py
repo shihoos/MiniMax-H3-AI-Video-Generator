@@ -6,10 +6,11 @@ import re
 class QwenDirectorSceneMixin:
     """Prepare deterministic scene context without guessing story semantics.
 
-    Scene IDs and scene boundaries are structural. Dramatic purpose, mood,
-    location, weather, time of day, and lighting are story-dependent and are
-    authored by the existing Qwen shot-batch response. This layer only keeps
-    the source-grounded visible moment compact enough for that response.
+    Scene IDs and scene boundaries are structural. In AI Story/Expand mode,
+    dramatic purpose is authored by the Architect and must survive this layer
+    unchanged. The shot-batch response supplies cinematic setting, mood, weather,
+    time of day, and lighting. This layer only keeps the source-grounded visible
+    moment compact enough for that response.
     """
 
     @classmethod
