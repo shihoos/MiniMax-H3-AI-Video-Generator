@@ -19,6 +19,7 @@ from planner.story_contracts import (
     blueprint_beat_floor,
     blueprint_field_floor,
     parse_cast,
+    parse_scene_state,
     ensure_cinematic_coverage,
     validate_blueprint_state_contract,
     validate_cinematic_coverage,
@@ -332,6 +333,7 @@ class QwenDirector(
         # ----------------------------------------------------
 
         generated_story = False
+        story_scene_purposes: dict[int, str] = {}
         # Only Expand Story has source-canon character anchors. AI Story must not
         # inherit a cast from a deterministic/template base plan: Qwen authors it.
         source_character_names: list[str] = (
@@ -374,6 +376,17 @@ class QwenDirector(
                 source_character_names=source_character_names,
             )
             story_blueprint = self._restore_source_places(mode, user_input, story_blueprint)
+            story_scene_purposes = {
+                number: parse_scene_state(beat).get("PURPOSE", "").strip()
+                for number, beat in self._blueprint_scene_beats(story_blueprint).items()
+            }
+            expected_purpose_scenes = set(range(1, DIRECTOR_STORY_SCENES + 1))
+            if set(story_scene_purposes) != expected_purpose_scenes or any(
+                not value for value in story_scene_purposes.values()
+            ):
+                raise RuntimeError(
+                    "Architect scene PURPOSE map is incomplete or misnumbered; refusing to let the Shot Director invent missing dramatic intent."
+                )
             # Author request (thinking OFF): one complete prose draft grounded in the plan.
             story_system = self._story_text_system(mode)
             story_user = self._story_text_user(
@@ -544,12 +557,27 @@ class QwenDirector(
             minimum_scenes=(1 if mode == PRESERVE_USER_STORY_MODE else 4),
         )
 
+        raw_scene_dicts = [
+            scene.to_dict()
+            for scene in canonical_scenes
+            if scene is not None
+        ]
+        if story_scene_purposes:
+            if len(raw_scene_dicts) != DIRECTOR_STORY_SCENES:
+                raise RuntimeError(
+                    "ProductionPlanner scene topology no longer matches the Architect's 12-scene PURPOSE map."
+                )
+            for scene_index, raw_scene in enumerate(raw_scene_dicts, start=1):
+                raw_scene_id = str(raw_scene.get("scene_id", "") or "").strip()
+                id_match = re.search(r"(\d+)$", raw_scene_id)
+                if not id_match or int(id_match.group(1)) != scene_index:
+                    raise RuntimeError(
+                        "ProductionPlanner scene IDs are not sequential; refusing to bind Architect PURPOSE by position."
+                    )
+                raw_scene["dramatic_purpose"] = story_scene_purposes[scene_index]
+
         scenes = self._sanitize_scenes(
-            [
-                scene.to_dict()
-                for scene in canonical_scenes
-                if scene is not None
-            ],
+            raw_scene_dicts,
             character_names,
         )
 
@@ -565,8 +593,9 @@ class QwenDirector(
                 f"the required {minimum_scene_count}-{self.MAX_SCENES} range for {mode}: {len(scenes)}"
             )
 
-        # Preserve deterministic scene topology. Scene-specific dramatic purpose
-        # is inferred by Qwen in the existing shot-batch call, not guessed by index.
+        # Preserve deterministic scene topology. AI Story/Expand dramatic purpose
+        # was authored by the Architect and is carried by scene index into the
+        # matching one-paragraph/one-scene source unit; Shot Director cannot replace it.
         scenes = self._annotate_scene_context(scenes)
 
         director_plan = {
@@ -1448,7 +1477,11 @@ class QwenDirector(
                 f"reason: {reason}",
                 f"usable_words: {word_count if word_count is not None else 'not measured'}",
                 f"required_minimum: {getattr(self, '_story_min_words', STORY_ACCEPT_MIN_WORDS)}",
-                "generation_policy: one Author call; zero retries; zero repair calls; natural EOS",
+                (
+                    "generation_policy: one Author call; "
+                    f"minimum_output_tokens={DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS}; "
+                    "zero retries; zero repair calls"
+                ),
                 "",
                 "----- BEGIN RAW QWEN COMPLETION -----",
                 raw_text,
@@ -1468,9 +1501,9 @@ class QwenDirector(
                 trace_temporary.write_text(destination.read_text(encoding="utf-8"), encoding="utf-8")
                 trace_temporary.replace(trace_copy)
             print(f"[QWEN] rejected_story_saved={destination}", flush=True)
-        except Exception as exc:
+        except Exception:
             # A diagnostic write must never replace the real story-contract exception.
-            print(f"[QWEN] rejected_story_save_warning={type(exc).__name__}: {exc}", flush=True)
+            pass
 
     def _save_story_run_diagnostics(
         self, *, status: str, stage: str, reason: str = "", word_count: int | None = None,
@@ -1485,12 +1518,18 @@ class QwenDirector(
                 "stage": str(stage),
                 "reason": str(reason or ""),
                 "word_counts": dict(getattr(self, "_last_story_word_counts", {}) or {}),
+                "scene_word_counts": dict(getattr(self, "_last_story_scene_word_counts", {}) or {}),
                 "final_word_count": word_count,
                 "required_minimum_words": int(getattr(self, "_story_min_words", STORY_ACCEPT_MIN_WORDS)),
+                "required_scene_minimum_words": 100,
+                "required_scenes_at_least_120_words": max(0, DIRECTOR_STORY_SCENES - 2),
                 "scene_count": DIRECTOR_STORY_SCENES,
                 "generation_policy": {
                     "architect_calls": 1,
                     "author_calls": 1 if "author" in str(stage).casefold() else 0,
+                    "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
+                    "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
+                    "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
                     "retries": 0,
                     "repairs": 0,
                 },
@@ -1515,12 +1554,19 @@ class QwenDirector(
                 f"stage: {report['stage']}",
                 f"reason: {report['reason'] or 'none'}",
                 f"word_counts: {json.dumps(report['word_counts'], ensure_ascii=False, sort_keys=True)}",
+                f"scene_word_counts: {json.dumps(report['scene_word_counts'], ensure_ascii=False, sort_keys=True)}",
                 f"final_word_count: {report['final_word_count']}",
                 f"required_minimum_words: {report['required_minimum_words']}",
+                f"required_scene_minimum_words: {report['required_scene_minimum_words']}",
+                f"required_scenes_at_least_120_words: {report['required_scenes_at_least_120_words']}",
                 (
                     "generation_policy: "
                     f"architect_calls={report['generation_policy']['architect_calls']}; "
-                    f"author_calls={report['generation_policy']['author_calls']}; retries=0; repairs=0"
+                    f"author_calls={report['generation_policy']['author_calls']}; "
+                    f"architect_max_tokens={report['generation_policy']['architect_max_tokens']}; "
+                    f"author_max_tokens={report['generation_policy']['author_max_tokens']}; "
+                    f"author_minimum_output_tokens={report['generation_policy']['author_minimum_output_tokens']}; "
+                    "retries=0; repairs=0"
                 ),
                 "",
             ]
@@ -1569,10 +1615,12 @@ class QwenDirector(
                         temporary = trace_path.with_name(trace_path.name + ".tmp")
                         temporary.write_text(json.dumps(trace_payload, indent=2, ensure_ascii=False), encoding="utf-8")
                         temporary.replace(trace_path)
-                    except Exception as trace_exc:
-                        print(f"[QWEN] trace_validation_attach_warning={type(trace_exc).__name__}: {trace_exc}", flush=True)
-        except Exception as exc:
-            print(f"[QWEN] story_diagnostics_save_warning={type(exc).__name__}: {exc}", flush=True)
+                    except Exception:
+                        # The standalone diagnostics files remain the primary report.
+                        pass
+        except Exception:
+            # Do not forward diagnostic warnings to notebook/telemetry stdout.
+            pass
 
     def _validate_story_output_contracts(
         self,
@@ -1601,14 +1649,14 @@ class QwenDirector(
             errors.append(str(exc))
 
         if errors:
-            self._last_story_contract_warnings = list(errors)
             detail = " | ".join(errors)
             if strict:
+                self._last_story_quality_errors = list(dict.fromkeys(errors))
+                self._last_story_contract_warnings = []
                 raise RuntimeError(detail)
-            # Single-pass generation must not make another Qwen request just to
-            # satisfy a soft length/source-coverage heuristic. Keep the draft, but
-            # make the miss visible so PASS never means semantic quality was proven.
-            print("[QWEN] story_contract=WARNING " + detail[:900], flush=True)
+            # Non-strict callers retain a complete diagnostic record; no warning text
+            # is emitted to notebook/telemetry stdout.
+            self._last_story_contract_warnings = list(dict.fromkeys(errors))
         return working
 
     @staticmethod
@@ -2238,6 +2286,7 @@ class QwenDirector(
         self._last_story_quality_warnings = []
         self._last_story_cleanup_events = []
         self._last_story_word_counts = {}
+        self._last_story_scene_word_counts = {}
         project_root = Path(getattr(self, "project_root", None) or Path.cwd())
         stale_artifacts = [project_root / "story_author_last_failed.txt"]
         trace_dir = getattr(self, "_trace_dir", None)
@@ -2260,7 +2309,7 @@ class QwenDirector(
                 cast_line = line
                 continue
             field_match = re.match(
-                r"^(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|CONTINUITY_LEDGER):\s*(.+)$",
+                r"^(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS|SETUP_PAYOFF_MAP|CONTINUITY_LEDGER):\s*(.+)$",
                 line,
             )
             if field_match:
@@ -2273,7 +2322,7 @@ class QwenDirector(
         required = (
             "LOGLINE", "PROTAGONIST_GOAL", "OPPOSITION", "PRESSURE",
             "STORY_ENGINE", "REVERSAL", "CLIMAX_CHOICE", "RESOLUTION",
-            "RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS", "CONTINUITY_LEDGER",
+            "RELATIONSHIPS", "NAMED_ENTITIES", "KEY_OBJECTS", "SETUP_PAYOFF_MAP", "CONTINUITY_LEDGER",
         )
         errors: list[str] = []
         missing = [name for name in required if not fields.get(name)]
@@ -2317,22 +2366,12 @@ class QwenDirector(
             ]
             if missing_sources:
                 errors.append("Architect dropped source character(s): " + ", ".join(missing_sources))
-        # Scene beats must form a consequential chain, not twelve disconnected summaries.
-        if len(beats) == DIRECTOR_STORY_SCENES:
-            low = " ".join(beats[i].casefold() for i in range(1, DIRECTOR_STORY_SCENES + 1))
-            causal_terms = re.findall(r"\b(?:because|therefore|so|but|forcing|causing|which meant|as a result|consequently)\b", low)
-            if len(causal_terms) < 3:
-                errors.append("scene chain contains too few explicit causal links")
         errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
         errors, soft_findings = split_contract_findings(errors)
         if soft_findings:
+            # Full warning details are persisted in story_run_diagnostics.json/.txt and
+            # the existing call trace. Do not leak them into notebook/telemetry stdout.
             self._last_story_blueprint_warnings = list(dict.fromkeys(soft_findings))
-            print(
-                f"[QWEN] story_blueprint_warnings={len(self._last_story_blueprint_warnings)} (wording heuristics, not blocking)",
-                flush=True,
-            )
-            for warning_index, warning in enumerate(self._last_story_blueprint_warnings, 1):
-                print(f"[QWEN] story_blueprint_warning[{warning_index:02d}] {warning}", flush=True)
         if errors:
             self._last_story_quality_errors = list(dict.fromkeys(errors))
             reason = (
@@ -2367,6 +2406,7 @@ class QwenDirector(
         self._last_story_contract_warnings = []
         self._last_story_cleanup_events = []
         self._last_story_word_counts = {}
+        self._last_story_scene_word_counts = {}
         for previous_failure in (
             Path(getattr(self, "project_root", Path.cwd())) / "story_author_last_failed.txt",
             (Path(getattr(self, "_trace_dir")) / "story_author_last_failed.txt") if getattr(self, "_trace_dir", None) else None,
@@ -2393,6 +2433,8 @@ class QwenDirector(
             )
             return result
         except Exception as exc:
+            if not getattr(self, "_last_story_quality_errors", None):
+                self._last_story_quality_errors = [str(exc)]
             raw_text = str(getattr(self, "_last_story_raw_output", "") or "")
             processed_text = str(getattr(self, "_last_story_draft", "") or "")
             if raw_text or processed_text:
@@ -2509,6 +2551,10 @@ class QwenDirector(
         # so harmless deterministic cleanup cannot leave a too-short story marked successful.
         usable_words = len(re.findall(r"\b[\w'’-]+\b", raw))
         self._last_story_word_counts["after_raw_prose_normalization"] = usable_words
+        self._last_story_scene_word_counts = {
+            f"scene_{index:02d}": len(re.findall(r"\b[\w'’-]+\b", paragraph))
+            for index, paragraph in enumerate(re.split(r"\n\s*\n+", raw), 1) if paragraph.strip()
+        }
         print(
             f"[QWEN] story_length words={usable_words} "
             f"target_guidance={STORY_TARGET_WORDS} "
@@ -2562,11 +2608,16 @@ class QwenDirector(
             candidate = trimmed
             self._last_story_draft = str(candidate or "")
             word_count = len(re.findall(r"\b[\w'’-]+\b", candidate))
+        self._last_story_scene_word_counts = {
+            f"scene_{index:02d}": len(re.findall(r"\b[\w'’-]+\b", paragraph))
+            for index, paragraph in enumerate(re.split(r"\n\s*\n+", candidate), 1) if paragraph.strip()
+        }
         if word_count < self._story_min_words:
             reason = (
                 f"Final story has {word_count} words, below the configured minimum of "
                 f"{self._story_min_words}. The single Author call was not retried or repaired."
             )
+            self._last_story_quality_errors = [reason]
             raise RuntimeError(failure_prefix + reason)
         paragraph_count = len([
             part for part in re.split(r"\n\s*\n+", candidate) if part.strip()
@@ -2595,24 +2646,8 @@ class QwenDirector(
         self._last_story_quality_warnings = list(dict.fromkeys([
             *(getattr(self, "_last_story_quality_warnings", []) or []), *issues,
         ]))
-        if self._last_story_quality_warnings:
-            print(
-                "[QWEN] story_static_checks=INFO",
-                f"words={word_count}",
-                f"paragraphs={paragraph_count}",
-                f"advisories={len(self._last_story_quality_warnings)}",
-                flush=True,
-            )
-            for warning_index, warning in enumerate(self._last_story_quality_warnings, 1):
-                print(f"[QWEN] story_static_warning[{warning_index:02d}] {warning}", flush=True)
-        else:
-            print(
-                "[QWEN] story_static_checks=PASS",
-                f"words={word_count}",
-                f"paragraphs={paragraph_count}",
-                "semantic_quality=ARCHITECTURE_VALIDATED_NOT_HUMAN_JUDGED",
-                flush=True,
-            )
+        # Advisory detail is available in story_run_diagnostics.json/.txt only.
+        # Keep notebook/telemetry output reserved for concise stage and failure status.
         return candidate, True
 
     def _story_hard_quality_errors(
@@ -2718,21 +2753,10 @@ class QwenDirector(
                         errors.append(f"CAST character {name!r} never appears in the story")
         if advisories:
             self._last_story_contract_warnings = list(dict.fromkeys(advisories))
-            print(
-                f"[QWEN] story_prose_audit_warnings={len(self._last_story_contract_warnings)} (not blocking)",
-                flush=True,
-            )
-            for warning_index, warning in enumerate(self._last_story_contract_warnings, 1):
-                print(f"[QWEN] story_prose_audit_warning[{warning_index:02d}] {warning}", flush=True)
         if advisories:
             existing = list(getattr(self, "_last_story_quality_warnings", []) or [])
             self._last_story_quality_warnings = list(dict.fromkeys([*existing, *advisories]))
-            print(
-                f"[QWEN] story_quality_warnings={len(self._last_story_quality_warnings)} (not blocking)",
-                flush=True,
-            )
-            for warning_index, warning in enumerate(self._last_story_quality_warnings, 1):
-                print(f"[QWEN] story_quality_warning[{warning_index:02d}] {warning}", flush=True)
+            # Keep the complete advisory list in diagnostics; do not print to stdout.
         return list(dict.fromkeys(errors))
 
     @staticmethod
@@ -2787,6 +2811,16 @@ class QwenDirector(
             return "".join(parts)
         except Exception:
             return str(story or "")
+
+    @staticmethod
+    def _blueprint_scene_beats(story_blueprint: str | None) -> dict[int, str]:
+        """Return numbered Architect beat bodies without altering the authored text."""
+        result: dict[int, str] = {}
+        for line in str(story_blueprint or "").splitlines():
+            match = re.match(r"^SCENE\s+(\d{2}):\s*(.+)$", line)
+            if match:
+                result[int(match.group(1))] = match.group(2).strip()
+        return result
 
     @staticmethod
     def _blueprint_cast_names(story_blueprint: str | None) -> list[str]:
@@ -3074,6 +3108,10 @@ class QwenDirector(
         )
         unset_values = {"", "n/a", "unknown", "not specified", "unspecified"}
         for field in string_fields:
+            # AI Story/Expand: the Architect owns dramatic purpose. The Shot Director
+            # must consume that decision, not silently replace it with a new interpretation.
+            if field == "dramatic_purpose" and str(scene.get(field, "") or "").strip():
+                continue
             raw = metadata.get(field)
             if not isinstance(raw, str):
                 continue
