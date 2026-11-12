@@ -1473,11 +1473,6 @@ class ProductionRunner:
                         f"{production_id}"
                     )
 
-        resume_active = checkpoint_status in {
-            "rendering",
-            "interrupted",
-            "failed",
-        }
 
         completed_shots = {
             str(shot_id): dict(
