@@ -1241,9 +1241,6 @@ class QwenDirectorRuntimeMixin:
             health_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/health"
             models_url = self._vllm_base_url() + "/models"
             version_url = self._vllm_base_url().rsplit("/v1", 1)[0] + "/version"
-            keep_alive = os.getenv("H3_DIRECTOR_VLLM_KEEP_ALIVE", "0").strip().lower() in {
-                "1", "true", "yes", "on"
-            }
             external_server = os.getenv("H3_DIRECTOR_VLLM_EXTERNAL", "0").strip().lower() in {
                 "1", "true", "yes", "on"
             }
@@ -1257,7 +1254,6 @@ class QwenDirectorRuntimeMixin:
                 _SHARED_VLLM_PROCESS is not None
                 and _SHARED_VLLM_PROCESS.poll() is None
             )
-            allow_port_reuse = shared_process_alive or keep_alive or external_server
             reuse_deadline = time.monotonic() + reuse_timeout
             last_error = ""
             # H3_AUTOFIX_FAST_PORT_PROBE_V1: skip reuse loop entirely if port closed
