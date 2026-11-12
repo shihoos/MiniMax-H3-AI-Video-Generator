@@ -633,6 +633,10 @@ class QwenDirectorPromptMixin:
             CAUSAL HANDOFF: every non-final NEXT_CAUSE must describe the specific action/result that the following
             scene's EVENT actually depicts. Do not use a broad label such as "global response" if the next EVENT is a
             different action. The next scene must visibly realize that handoff; if it does not, redesign the two beats.
+            PACING: the story must still be escalating at scene {n - 2}. Act out the CLIMAX_CHOICE no earlier than scene
+            {n - 2}; scenes {n - 1} and {n} carry its consequence and the RESOLUTION. Every scene before scene {n} needs a real
+            NEXT_CAUSE. If the plot feels finished early, the middle is too thin: add another complication that costs the
+            protagonist something, instead of filling the end with rescue, evacuation, reflection, or aftermath scenes.
             PURPOSE is authored here by the Architect and is the canonical dramatic intent for this scene. It must be
             specific to the scene's EVENT and describe the change the scene causes; it is not a generic beat label.
             The Author must honor it, and the Shot Director must consume it rather than invent a competing purpose.
@@ -702,11 +706,27 @@ class QwenDirectorPromptMixin:
         )
         text = swap(
             r"SCENE BEATS: output exactly .*?NEXT_CAUSE=\[[^\]]*\]\.",
-            f"SCENE BEATS: `scenes` holds exactly {n} objects in story order (scene 1 first), each {beat_min}-{beat_max} words "
-            "across its fields. Keys: purpose, entry_location, entry_present (array of names), on_screen_present (array of "
-            "names), entry_knows, entry_objects, event, exit_location, exit_present (array of names), exit_knows, "
-            "exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the final scene). "
-            "The rules below name these same fields in UPPERCASE. Do not use semicolons or pipe characters inside values.",
+            f"SCENE BEATS: `opening` gives the starting state of scene 1 (location, present people, what they know, objects). "
+            f"`scenes` then holds exactly {n} objects in story order, each {beat_min}-{beat_max} words across its fields. "
+            "Keys: purpose, on_screen_present (array of names), event, exit_location, exit_present (array of names), "
+            "exit_knows, exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the "
+            "final scene). Entry state is not written: each scene begins exactly where the previous one ended. The rules "
+            "below name these same fields in UPPERCASE, and ENTRY_* means the previous scene's exit. Do not use "
+            "semicolons or pipe characters inside values.",
+            text,
+        )
+        text = swap(
+            r"PHYSICAL LOCATION RULE:.*?(?=Mid-scene arrivals and departures)",
+            "STATE CARRIES FORWARD AUTOMATICALLY: exit_location, exit_present, exit_knows and exit_objects are complete "
+            "snapshots after the scene's event. Keep earlier facts and object states unless this event changes them, and add "
+            "a new fact or object change only when the event shows how it was discovered, disclosed, or physically done. "
+            "If exit_location differs from where the scene began, event must name the character(s) who physically move and "
+            "describe the actual passage (enter, unlock/open, cross, descend, leave, flee, return); a storm moving or an "
+            "object escaping does not move the human cast, and no character is placed at a destination the event never "
+            "shows them reaching. exit_present are the people physically present at scene end. on_screen_present is the "
+            "full-scene visibility record and includes anyone who enters or leaves mid-scene; it never includes a remote "
+            "voice, recording, written mention, or person merely discussed. KEY_OBJECTS must name the exact scene of each "
+            "first state change; no earlier event may already depict that change. ",
             text,
         )
         text = swap(
@@ -968,9 +988,9 @@ class QwenDirectorPromptMixin:
             # The prompt asks for beat_words_min-beat_words_max words; the gate only rejects beats too thin to carry
             # the ten state fields. Their content is enforced by the state contract, not by an exact word count.
             beat_floor = blueprint_beat_floor(STORY_PLAN_BEAT_MIN_WORDS)
-            if words < beat_floor or words > max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120):
+            if words < beat_floor or words > max(int(STORY_PLAN_BEAT_MAX_WORDS * 1.5), 120):
                 raise RuntimeError(
-                    f"Story Architect scene {number:02d} beat has {words} words; expected at least {beat_floor} and no more than {max(STORY_PLAN_BEAT_MAX_WORDS + 35, 120)}."
+                    f"Story Architect scene {number:02d} beat has {words} words; expected at least {beat_floor} and no more than {max(int(STORY_PLAN_BEAT_MAX_WORDS * 1.5), 120)}."
                 )
             if number == count:
                 # The last scene has no next scene: whatever the model wrote there, its cause is none.
