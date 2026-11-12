@@ -40,8 +40,6 @@ from planner.story_contracts import (
 
 
 # Canonical camera vocabulary shared by the prompt schema, sanitizer, and compiler.
-import re
-
 CAMERA_SHOT_OPTIONS = (
     "extreme wide",
     "wide",
@@ -682,7 +680,9 @@ class QwenDirectorPromptMixin:
             "need, duty, mistake, or private conflict), voice (distinctive speech style), aliases (usually an empty list; "
             "only names genuinely used in the story), fate (survives or dies) and death_scene (the scene number if the "
             "person dies, otherwise 0). On-screen scenes are derived from each scene's on_screen_present list, so do not "
-            "list them separately. ",
+            "list them separately. Only beings that physically appear in at least one scene's on_screen_present belong in "
+            "cast; a storm, weather, hazard, system, institution, place, or an absent/remembered person is never cast: "
+            "put it in opposition instead. ",
             text,
         )
         text = swap(r"CAST FORMAT EXAMPLE.*?(?=REQUIRED PLOT FIELDS:)", "", text)
@@ -986,9 +986,6 @@ class QwenDirectorPromptMixin:
         """Years the Architect invented (not in the user's source) become plain words; no model call."""
         known = set(re.findall(r"\b(?:1[5-9]\d\d|20\d\d)\b", str(source or "")))
 
-        def _year(m):
-            return m.group(0) if m.group(1) in known else None
-
         def _sub_prep(m):
             return m.group(0) if m.group(1) in known else "long ago"
 
@@ -1000,57 +997,6 @@ class QwenDirectorPromptMixin:
         text = re.sub(r"\b((?:1[5-9]\d\d|20\d\d))\b", _sub_bare, text)
         text = re.sub(r"[ \t]{2,}", " ", text)
         return re.sub(r"[ \t]+(?=[.,;:!?\u201d\"])", "", text)
-
-    @staticmethod
-    def _blueprint_quote_markers(line: str) -> str:
-        kept = [0]
-
-        def _convert(m):
-            text = m.group(1)
-            words = len(text.split())
-            if words <= 3 and not re.search(r"[.!?,]$", text.strip()):
-                return text
-            if words <= 9 and kept[0] < 2:
-                kept[0] += 1
-                return "\u201c" + text.strip() + "\u201d"
-            if kept[0] < 2:
-                # Over-long line: keep its first clause (3-9 words) as a quoted line; a "(words to convey)" marker made the
-                # Writer drop the quotation marks and lose the dialogue event entirely.
-                best = None
-                for cm in re.finditer(r"[,;:\u2014\u2013\u2026]|\.{3}|(?<=[.!?])\s", text):
-                    n_pre = len(text[:cm.start()].split())
-                    if 3 <= n_pre <= 9:
-                        best = cm
-                if best is not None:
-                    prefix = text[:best.start()].strip().rstrip(",;:\u2014\u2013.!? ")
-                    if prefix:
-                        kept[0] += 1
-                        tail = m.string[m.end():]
-                        end = "." if re.match(r"\s*(?:[A-Z]{4,}:|$)", tail) else ","
-                        return "\u201c" + prefix + end + "\u201d"
-            if kept[0] < 2 and words > 9:
-                kept[0] += 1
-                return "\u201c" + " ".join(text.split()[:8]).rstrip(",;:\u2014\u2013\u2026.!? ") + ".\u201d"
-            return text.strip()  # surplus line: plain narration, never a template marker the Writer could copy
-
-        def _bare(m):
-            body = m.group(2).strip()
-            if re.match(r"(?:he|she|they|his|her|their)\b", body, re.IGNORECASE):
-                return m.group(0)
-            parts = re.split(r"(?<=[,;:\u2014\u2013\u2026])\s*|(?<=[.!?])\s+", body)
-            out = ""
-            for part in parts:
-                cand = (out + " " + part).strip()
-                if len(cand.split()) > 9:
-                    break
-                out = cand
-            if len(out.split()) < 3:
-                out = " ".join(body.split()[:8])
-            out = out.rstrip(",;:\u2014\u2013\u2026.!? ") + "."
-            return m.group(1) + ", \u201c" + out + "\u201d "
-
-        line = re.sub(r"\b((?:muttered|snapped|hissed|whispered|said|screamed|asked|replied|shouted|growled|murmured|barked|cried|demanded))\s*,\s*([A-Z][^\u201c\u201d\"\n.!?]{2,}(?:\u2026[^\u201c\u201d\"\n.!?]*)*[.!?]+(?:\s+(?:I|You|We|It|That|Don|Let|Why|What|How|Then|But|And|No|Yes)\b[^\u201c\u201d\"\n.!?]*[.!?]+)?)(?=\s|$)", _bare, line)
-        return re.sub(r"[\u201c\"]([^\u201d\"\n]{1,240})[\u201d\"]", _convert, line)
 
     def _story_text_user(
         self,
@@ -1574,7 +1520,6 @@ class QwenDirectorPromptMixin:
             for item in accepted_candidates
             if EntityResolver.normalize(str(item.get("name", "")))
         }
-        accepted_names = set(canonical_names)
         accepted_aliases = EntityResolver.build_character_alias_map(accepted_candidates)
 
         def resolve_roster_speaker(surface: str) -> str | None:
