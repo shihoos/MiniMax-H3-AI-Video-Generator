@@ -1628,7 +1628,7 @@ def build_app(
                         shot_selector = gr.Dropdown(label="Selected Shot", choices=[], value=None, interactive=True)
                         shot_refresh = gr.Button("Load Shot Details")
                     shot_detail = gr.Markdown("### Select a shot\nThe selected shot's prompt, references, continuity, critic, VLM and QA state will appear here.", elem_classes=["h3-panel"])
-                    shot_inspector_hint = gr.Markdown("Select a shot to inspect its visual result, quality decision, and retake controls.", elem_classes=["h3-shot-inspector-hint"])
+                    gr.Markdown("Select a shot to inspect its visual result, quality decision, and retake controls.", elem_classes=["h3-shot-inspector-hint"])
                     with gr.Row():
                         with gr.Column(scale=2):
                             shot_visual = gr.Image(label="Selected Shot Preview", type="filepath", height=360, elem_classes=["h3-preview"])
