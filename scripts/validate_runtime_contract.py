@@ -521,7 +521,7 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     if int(director.get("story_max_tokens", 0) or 0) != 6500:
         raise RuntimeError("Global Director story ceiling must remain 6,500 tokens.")
     if int(architecture.get("max_tokens", 0) or 0) != 5400:
-        raise RuntimeError("Story Architect ceiling must remain 3,600 tokens.")
+        raise RuntimeError("Story Architect ceiling must remain 5,400 tokens.")
     if int(writing.get("max_tokens", 0) or 0) != 3000:
         raise RuntimeError("Single-pass Story Author ceiling must be 3,000 tokens.")
     if int(contract.get("minimum_words", 0) or 0) < 1400 or int(contract.get("accept_min_words", 0) or 0) != int(contract.get("minimum_words", 0) or 0):
