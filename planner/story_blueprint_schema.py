@@ -128,8 +128,13 @@ def derive_on_screen_scenes(
     return found
 
 
-def render_blueprint_text(data: dict, scene_count: int) -> str:
-    """Serialise the validated JSON plan into the text blueprint the rest of the pipeline consumes."""
+def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | None = None) -> str:
+    """Serialise the validated JSON plan into the text blueprint the rest of the pipeline consumes.
+
+    Cast means beings that are physically on screen. A listed "cast member" that no scene's
+    on_screen_present names (a storm, an institution, a person only mentioned) is not cast; it is left out
+    and its name appended to ``dropped`` so the caller can report it. Opposition already carries such forces.
+    """
     scenes = data.get("scenes") or []
     if not isinstance(scenes, list) or len(scenes) != scene_count:
         raise RuntimeError(
@@ -146,6 +151,10 @@ def render_blueprint_text(data: dict, scene_count: int) -> str:
         name = re.sub(r"[()]", "", _clean(member.get("name")))
         aliases = [_clean(a) for a in (member.get("aliases") or []) if _clean(a)]
         scene_numbers = derive_on_screen_scenes(name, aliases, scenes, shared)
+        if not scene_numbers:
+            if dropped is not None:
+                dropped.append(name)
+            continue
         fate = "survives"
         if str(member.get("fate", "")).casefold() == "dies":
             try:
