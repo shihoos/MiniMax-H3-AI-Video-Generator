@@ -874,7 +874,6 @@ class QwenDirector(
 
                     batch_response = None
                     batch_dialogue_index: dict[str, dict[str, dict]] = {}
-                    batch_dialogue_ids: list[str] = []
                     if not batch_context_fits:
                         self._record_recovery(
                             "shot_batch_context_budget_fallback",
@@ -2180,7 +2179,13 @@ class QwenDirector(
     def _blueprint_json_to_text(raw: str) -> str:
         """Schema-constrained JSON plan -> the text blueprint every contract consumes (legacy text passes through)."""
         data = parse_blueprint_json(raw)
-        return str(raw or "") if data is None else render_blueprint_text(data, DIRECTOR_STORY_SCENES)
+        if data is None:
+            return str(raw or "")
+        dropped: list[str] = []
+        text = render_blueprint_text(data, DIRECTOR_STORY_SCENES, dropped)
+        if dropped:
+            print(f"[QWEN] story_architecture cast_not_on_screen_removed={dropped}", flush=True)
+        return text
 
     @staticmethod
     def _revision_feedback(problems: list[str], subject: str) -> str:
@@ -2464,7 +2469,7 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Run exactly one Author pass and preserve any returned draft if validation rejects it."""
+        """Run the Author pass (one revision after a hard-gate rejection) and preserve any rejected draft."""
         self._last_story_raw_output = ""
         self._last_story_draft = ""
         self._last_story_quality_errors = []
@@ -2572,7 +2577,8 @@ class QwenDirector(
         """Write the story once in non-thinking mode from the bounded causal blueprint.
 
         Paragraph topology is normalized deterministically. Length and completion are
-        hard contracts; source-coverage heuristics stay advisory. Nothing is retried.
+        hard contracts; source-coverage heuristics stay advisory. This method never retries;
+        _run_author_with_one_revision owns the single permitted revision.
         """
         from planner.qwen_director_runtime import (
             DIRECTOR_VLLM_SEED,
@@ -4413,25 +4419,6 @@ class QwenDirector(
             )
         return segments
 
-    @classmethod
-    def _extract_story_spoken_texts(
-        cls,
-        story: str,
-        semantic_spoken_dialogue: list[dict] | None = None,
-    ) -> dict[str, set[str]]:
-        """Return source dialogue anchors for compatibility with existing callers."""
-        anchors: dict[str, set[str]] = {}
-        for segment in cls._extract_story_spoken_segments(story, semantic_spoken_dialogue):
-            anchor = str(segment.get("text", "") or "").strip()
-            if not anchor:
-                continue
-            anchors.setdefault(anchor, set()).update(
-                str(value).strip()
-                for value in (segment.get("source_speakers", set()) or set())
-                if str(value).strip()
-            )
-        return anchors
-
     def _remote_only_dialogue_speakers(self, characters: list[dict]) -> list[str]:
         """Return explicit remote speakers not represented in the visual/canonical cast.
 
@@ -5974,7 +5961,6 @@ def _h3_apply_kaggle_runtime_fix_20261010():
         return
 
     from copy import deepcopy
-    from planner.config import AI_STORY_MODE, EXPAND_USER_STORY_MODE
 
     # 1) Compact extraction schema while preserving the planner contract.
     # is_character remains required because the existing planner reads it.
