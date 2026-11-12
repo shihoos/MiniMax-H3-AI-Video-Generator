@@ -1259,14 +1259,19 @@ def _blueprint_json_from_fixture():
     from planner.config import DIRECTOR_STORY_SCENES
     from planner.qwen_director import QwenDirector
     from planner.story_contracts import parse_scene_state
+    from planner.story_blueprint_schema import AUTHORED_SCENE_FIELDS
     text = _story_blueprint_fixture()
     director = QwenDirector.__new__(QwenDirector)
     scenes = []
+    opening = {}
     for number, beat in sorted(director._blueprint_scene_beats(text).items()):
         state = {k.lower(): v for k, v in parse_scene_state(beat).items()}
         for key in ("entry_present", "on_screen_present", "exit_present"):
             state[key] = [v.strip() for v in state[key].split(",") if v.strip()]
-        scenes.append(state)
+        if number == 1:
+            opening = {"location": state["entry_location"], "present": state["entry_present"],
+                       "knows": state["entry_knows"], "objects": state["entry_objects"]}
+        scenes.append({k: state[k] for k in AUTHORED_SCENE_FIELDS})
     fields = {k: v for k, v in (line.split(": ", 1) for line in text.splitlines()[1:14])}
     data = {
         "cast": [{"name": "Ines Vale", "kind": "person", "role": "harbor surveyor",
@@ -1275,6 +1280,7 @@ def _blueprint_json_from_fixture():
                   "aliases": [], "fate": "survives", "death_scene": 0}],
         "setup_payoff_map": [{"plant_scene": 2, "plant": "the duplicate manifest's pressure seal has a shifted notch",
                               "payoff_scene": 8, "payoff": "Ines uses that same shifted notch to prove her correction changed the route"}],
+        "opening": opening,
         "scenes": scenes,
     }
     for key in ("logline", "protagonist_goal", "opposition", "pressure", "story_engine", "reversal",
@@ -1327,8 +1333,8 @@ def test_structured_architect_json_round_trips_through_every_contract():
     twin["scenes"][5]["on_screen_present"] = ["Tomas Vale"]
     twin_line = render_blueprint_text(twin, DIRECTOR_STORY_SCENES).splitlines()[0]
     ines, tomas = twin_line.split(" | ")[:2]
-    _assert("on-screen scenes: 06;" in tomas and "05, 07" in ines,
-            f"each person must get exactly the scenes that name them: {twin_line}")
+    _assert("on-screen scenes: 06;" in tomas and "on-screen scenes: 01, 02, 03, 04, 05, 06, 07" in ines,
+            f"Tomas gets only the scene that names him; Ines stays at both boundaries throughout: {twin_line}")
 
 
 def test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make_one_call():
@@ -1371,6 +1377,39 @@ def test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make
         _assert(isinstance(result, RuntimeError) and len(users) == 2, "a second rejection must fail, with no third attempt")
     finally:
         tempfile_dir.cleanup()
+
+
+def test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory():
+    import json
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES as N
+    from planner.qwen_director import QwenDirector
+    from planner.story_blueprint_schema import blueprint_json_schema, render_blueprint_text, resolve_scenes
+    from planner.story_contracts import parse_scene_state, split_contract_findings, validate_blueprint_state_contract
+    data = _blueprint_json_from_fixture()
+    schema_scene = blueprint_json_schema(N)["properties"]["scenes"]["items"]["properties"]
+    _assert(not any(key.startswith("entry_") for key in schema_scene),
+            "the model must not be asked to write entry state; it is the previous scene's exit")
+    # A messy plan: every later scene's exit wording differs and the handoffs share no words with the next event.
+    messy = json.loads(json.dumps(data))
+    for scene in messy["scenes"][:-1]:
+        scene["next_cause"] = "an unrelated consequence nobody mentions again"
+        scene["exit_knows"] = "the situation has changed in ways that are phrased differently every time"
+    text = render_blueprint_text(messy, N)
+    beats = {int(line[6:8]): parse_scene_state(line) for line in text.splitlines() if line.startswith("SCENE ")}
+    for number in range(2, N + 1):
+        for entry, exit_ in (("ENTRY_LOCATION", "EXIT_LOCATION"), ("ENTRY_PRESENT", "EXIT_PRESENT"),
+                             ("ENTRY_KNOWS", "EXIT_KNOWS"), ("ENTRY_OBJECTS", "EXIT_OBJECTS")):
+            _assert(beats[number][entry].casefold() == beats[number - 1][exit_].casefold(),
+                    f"scene {number:02d} {entry} must equal scene {number - 1:02d} {exit_}")
+    normalized = QwenDirector._normalize_story_blueprint(text, N)
+    fatal, soft = split_contract_findings(validate_blueprint_state_contract(normalized, N))
+    _assert(not any(t in item for item in fatal for t in ("knowledge", "location", "object inventory", "NEXT_CAUSE")),
+            f"paraphrase must never be a fatal knowledge/location/object/handoff finding: {fatal!r}")
+    _assert(any("NEXT_CAUSE" in item for item in soft), f"the wording mismatch is still reported as a warning: {soft!r}")
+    # Anyone present at either boundary is on screen by definition.
+    forgetful = json.loads(json.dumps(data))
+    forgetful["scenes"][3]["on_screen_present"] = []
+    _assert(resolve_scenes(forgetful)[3]["on_screen_present"], "boundary presence must imply on-screen presence")
 
 
 def test_story_minimum_is_a_hard_floor_without_retry():
@@ -2397,8 +2436,10 @@ def test_third_real_failure_semantic_handoffs_block_and_death_scene_is_kept():
             f"death scene must stay on screen and nothing follows it: {cast['Rian Kael']!r}")
     fatal, soft = split_contract_findings(validate_blueprint_state_contract(normalized, N))
     _assert(not any("death scene" in item for item in fatal), f"death-scene error must not return: {fatal!r}")
-    _assert(any("event is not anchored to the previous scene's NEXT_CAUSE" in item for item in fatal),
-            f"a handoff that does not describe the next event must block the Architect plan: {fatal!r}")
+    # Wording overlap between NEXT_CAUSE and the next EVENT is advisory: it is reported, it does not reject the plan.
+    _assert(not any("event is not anchored to the previous scene's NEXT_CAUSE" in item for item in fatal)
+            and any("event is not anchored to the previous scene's NEXT_CAUSE" in item for item in soft),
+            f"a paraphrased handoff must be a warning, not a fatal rejection: fatal={fatal!r} soft={soft!r}")
     _assert(not any("lacks an explicit causal connector" in item for item in soft),
             f"literal connector wording must not create false warnings: {soft!r}")
 
@@ -2463,6 +2504,7 @@ def main():
         test_story_architect_uses_native_bounded_thinking_and_no_retry,
         test_structured_architect_json_round_trips_through_every_contract,
         test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make_one_call,
+        test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory,
         test_story_minimum_is_a_hard_floor_without_retry,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
         test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal,
