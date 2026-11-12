@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from pathlib import Path
 
 from pipeline.production_checkpoint import ProductionCheckpoint
 
@@ -1583,17 +1582,6 @@ class QwenDirectorSanitizeMixin:
         return coverage, missing
 
     @staticmethod
-    def _preserve_story_requires_semantic_dialogue(text: str) -> bool:
-        """Return True when Preserve Story contains quote-delimited prose that needs semantic attribution."""
-        value = str(text or "")
-        return bool(
-            re.search(r'"[^"\n]+"', value)
-            or re.search(r'“[^”\n]+”', value)
-            or re.search(r'‘[^’\n]+’', value)
-            or re.search(r"(?<!\w)'[^'\n]+'(?!\w)", value)
-        )
-
-    @staticmethod
     def _story_has_open_ended_finale(text: str) -> bool:
         value = str(text or "").strip()
         if not value:
@@ -1642,12 +1630,6 @@ class QwenDirectorSanitizeMixin:
             any(re.search(pattern, final_sentence, flags=re.IGNORECASE) for pattern in hook_patterns)
             or any(re.search(pattern, final_scene, flags=re.IGNORECASE) for pattern in scene_hook_patterns)
         )
-
-    @staticmethod
-    def _final_paragraph_word_count(text: str) -> int:
-        value = str(text or "").strip()
-        paragraph = value.split("\n\n")[-1].strip()
-        return len(re.findall(r"\b[\w'’-]+\b", paragraph))
 
     @staticmethod
     def _ends_cleanly(text: str) -> bool:
@@ -1712,14 +1694,8 @@ class QwenDirectorSanitizeMixin:
 
         # The final scene must resolve the story; do not impose a numeric paragraph quota.
 
-        # Sentence count is a writing-quality target, not a hard production gate.
-        try:
-            sentence_issues = self._story_sentence_contract_issues(result)
-        except (AttributeError, TypeError):
-            sentence_issues = []
-        # Sentence count remains a writing-quality target, not a hard production gate.
-        # _generate_story_once reports these issues through story_static_checks.
-        # Keep all other completion-contract checks blocking.
+        # Sentence count is a writing-quality target, not a hard production gate; it is reported
+        # through story_static_checks in _generate_story_once. Every check above is blocking.
 
         if errors:
             raise RuntimeError(" | ".join(errors))
@@ -1818,35 +1794,8 @@ class QwenDirectorSanitizeMixin:
                     "the supplied story unchanged."
                 )
 
-            source_words = (
-                self._meaningful_tokens(
-                    source
-                )
-            )
-
-            if source_words:
-
-                result_words = (
-                    self._meaningful_tokens(
-                        result
-                    )
-                )
-
-                overlap = (
-                    len(
-                        source_words
-                        & result_words
-                    )
-                    / max(
-                        1,
-                        len(source_words),
-                    )
-                )
-
-                # Lexical overlap is not a reliable semantic-preservation gate:
-                # valid paraphrases can use different words while retaining source events.
-                # Required anchors and the stricter source-event coverage check below
-                # remain blocking, so do not reject an expansion on token overlap alone.
+            # Lexical overlap is not a reliable semantic-preservation gate: valid paraphrases use different
+            # words. The required anchors and the source-event coverage check below remain the blocking gates.
 
             anchors = self._preservation_anchors(source)
             result_lower = result.lower()
