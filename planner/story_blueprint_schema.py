@@ -26,6 +26,16 @@ SCENE_ORDER = (
     "purpose", "entry_location", "entry_present", "on_screen_present", "entry_knows", "entry_objects",
     "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause",
 )
+# What the model writes per scene. Entry state is never authored after scene 1: every scene starts exactly
+# where the previous one ended, so the boundary continuity the checkers verify holds by construction.
+AUTHORED_SCENE_FIELDS = (
+    "purpose", "on_screen_present", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause",
+)
+OPENING_FIELDS = ("location", "present", "knows", "objects")
+_ENTRY_FROM_EXIT = {
+    "entry_location": "exit_location", "entry_present": "exit_present",
+    "entry_knows": "exit_knows", "entry_objects": "exit_objects",
+}
 KINDS = ("person", "animal", "embodied agent")
 
 
@@ -48,11 +58,17 @@ def blueprint_json_schema(scene_count: int) -> dict:
         "required": ["name", "kind", "role", "wants", "pressure", "voice", "aliases", "fate", "death_scene"],
         "additionalProperties": False,
     }
-    scene_props = {k: (names if k in SCENE_LIST_FIELDS else text) for k in SCENE_ORDER}
+    scene_props = {k: (names if k in SCENE_LIST_FIELDS else text) for k in AUTHORED_SCENE_FIELDS}
     scene_item = {
         "type": "object",
         "properties": scene_props,
-        "required": list(SCENE_ORDER),
+        "required": list(AUTHORED_SCENE_FIELDS),
+        "additionalProperties": False,
+    }
+    opening = {
+        "type": "object",
+        "properties": {"location": text, "present": names, "knows": text, "objects": text},
+        "required": list(OPENING_FIELDS),
         "additionalProperties": False,
     }
     payoff_item = {
@@ -71,6 +87,7 @@ def blueprint_json_schema(scene_count: int) -> dict:
         properties[key] = text
     properties["setup_payoff_map"] = {"type": "array", "minItems": 1, "items": payoff_item}
     properties["continuity_ledger"] = text
+    properties["opening"] = opening
     properties["scenes"] = {"type": "array", "minItems": scene_count, "maxItems": scene_count, "items": scene_item}
     return {
         "type": "object",
@@ -128,6 +145,38 @@ def derive_on_screen_scenes(
     return found
 
 
+def _as_list(value: object) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    return [re.sub(r"\s+", " ", str(v)).strip() for v in values if str(v or "").strip()]
+
+
+def resolve_scenes(data: dict) -> list[dict]:
+    """Complete scene states from the authored fields.
+
+    Scene 1 starts in ``opening``; every later scene starts exactly where the previous one ended, and anyone
+    present at either boundary is on screen by definition. Plans that still carry explicit entry_* fields
+    (older traces) keep them.
+    """
+    opening = data.get("opening") if isinstance(data.get("opening"), dict) else {}
+    resolved: list[dict] = []
+    for index, authored in enumerate(data.get("scenes") or []):
+        scene = dict(authored) if isinstance(authored, dict) else {}
+        for entry_key, exit_key in _ENTRY_FROM_EXIT.items():
+            if scene.get(entry_key):
+                continue
+            if index == 0:
+                scene[entry_key] = opening.get(entry_key[len("entry_"):], "")
+            else:
+                scene[entry_key] = resolved[-1].get(exit_key, "")
+        union: list[str] = []
+        for name in _as_list(scene.get("entry_present")) + _as_list(scene.get("on_screen_present")) + _as_list(scene.get("exit_present")):
+            if name.casefold() not in {u.casefold() for u in union} and name.casefold() not in {"none", "nobody", "no one"}:
+                union.append(name)
+        scene["on_screen_present"] = union
+        resolved.append(scene)
+    return resolved
+
+
 def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | None = None) -> str:
     """Serialise the validated JSON plan into the text blueprint the rest of the pipeline consumes.
 
@@ -135,10 +184,10 @@ def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | Non
     on_screen_present names (a storm, an institution, a person only mentioned) is not cast; it is left out
     and its name appended to ``dropped`` so the caller can report it. Opposition already carries such forces.
     """
-    scenes = data.get("scenes") or []
-    if not isinstance(scenes, list) or len(scenes) != scene_count:
+    scenes = resolve_scenes(data)
+    if len(scenes) != scene_count:
         raise RuntimeError(
-            f"Story Architect returned {len(scenes) if isinstance(scenes, list) else 0} scenes; exactly {scene_count} are required."
+            f"Story Architect returned {len(scenes)} scenes; exactly {scene_count} are required."
         )
     entries: list[str] = []
     cast = [m for m in (data.get("cast") or []) if isinstance(m, dict)]
