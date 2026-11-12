@@ -443,8 +443,6 @@ class H3ContextIRCompiler:
     @classmethod
     def _task_types(cls, refs: list[dict[str, Any]], shot: dict[str, Any]) -> list[str]:
         types: list[str] = []
-        role_blob = " ".join(cls._clean(r.get("role")) for r in refs).lower()
-        relation_blob = " ".join(cls._clean(r.get("relationship")) for r in refs).lower()
         if any("edit" in cls._clean(r.get("role")).lower() or "source video" in cls._clean(r.get("role")).lower() for r in refs if r["media_type"] == "video"):
             types.append("video editing")
         elif any(r["media_type"] == "video" for r in refs) and any("motion" in cls._clean(r.get("role")).lower() or "camera" in cls._clean(r.get("role")).lower() for r in refs):
