@@ -152,14 +152,19 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-11.8"
+CONTRACTS_REVISION = "2026-11-12.1"
 
-# These are high-confidence contract violations. Lexical wording preferences remain advisory; impossible
-# scene handoffs, undeclared spatial movement, and unexplained object/knowledge transitions must not be
-# passed to the single-pass Author as if they were a validated blueprint.
+# Hard findings are structural facts or direct contradictions: missing/invalid structure, impossible cast
+# state, the dead acting, an unresolved ending. Findings that only compare the *wording* of two free-text fields
+# (does this event repeat words from the previous NEXT_CAUSE, does the payoff reuse the plant's nouns, does a
+# verb from a list appear) are advisory: a 14B model paraphrases, and rejecting a sound story for paraphrase made
+# runs fail at random. Scene-boundary state (location, presence, knowledge, objects) is derived from the previous
+# scene's exit by the Architect schema, so those boundary findings cannot occur for structured plans.
 HARD_FINDING_MARKERS = (
     "missing structured plot/continuity fields",
-    "SETUP_PAYOFF_MAP",
+    "SETUP_PAYOFF_MAP must contain",
+    "SETUP_PAYOFF_MAP plant and payoff details",
+    "SETUP_PAYOFF_MAP has invalid ordering",
     "PURPOSE is too vague",
     "missing canonical CAST line",
     "expected exactly",
@@ -180,17 +185,9 @@ HARD_FINDING_MARKERS = (
     "has no character-specific arrival",
     "has no character-specific departure",
     "has no character-specific EVENT anchor",
-    "event is not anchored to the previous scene's NEXT_CAUSE",
-    "changes location without a route/time transition",
-    "changes its physical location without an explicit transition",
-    "changes established knowledge without a discovery/disclosure event",
-    "removes established knowledge without a reason",
-    "changes important object custody/state without a physical action",
     "entry object inventory introduces",
     "drops terminal object identity",
     "key object is missing from scene inventory",
-    "object state change is not anchored",
-    "declared object state timing conflicts",
     "survivor fate is unresolved",
     "has no NEXT_CAUSE handoff",
 )
