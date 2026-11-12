@@ -319,7 +319,7 @@ class DialogueTimeline:
                     )
                 except ValueError as exc:
                     detail = (
-                        f" Explicit continuation was requested, but the dialogue segment "
+                        " Explicit continuation was requested, but the dialogue segment "
                         "cannot fit in the maximum legal H3 shot and must be split."
                         if continues_next
                         else " Increase shot duration or split the dialogue into shorter events."
