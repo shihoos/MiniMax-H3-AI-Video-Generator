@@ -2448,7 +2448,7 @@ class QwenDirector(
             reason = (
                 f"Story Architect rejected before prose generation [contracts {CONTRACTS_REVISION}]: "
                 + "; ".join(self._last_story_quality_errors[:16])
-                + ". No retry or repair call was attempted."
+                + "."
             )
             self._save_story_run_diagnostics(
                 status="failed", stage="ai_story_architect_validation", reason=reason,
