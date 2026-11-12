@@ -1307,12 +1307,28 @@ def test_structured_architect_json_round_trips_through_every_contract():
     member = schema["properties"]["cast"]["items"]
     _assert({"wants", "pressure", "voice"} <= set(member["required"]),
             "wants/pressure/voice are schema keys, so a goal can no longer be mis-labelled or omitted")
+    # Regression (Kaggle run): the model listed "The Storm" as cast; it is never on screen, so it must be
+    # removed (and reported) rather than failing the whole plan with an empty on-screen scene list.
+    storm = json.loads(json.dumps(data))
+    storm["cast"].append({"name": "The Storm", "kind": "embodied agent", "role": "relentless antagonist",
+                          "wants": "drown the harbor", "pressure": "none", "voice": "roaring",
+                          "aliases": [], "fate": "survives", "death_scene": 0})
+    dropped = []
+    storm_text = render_blueprint_text(storm, DIRECTOR_STORY_SCENES, dropped)
+    _assert(dropped == ["The Storm"] and "The Storm" not in storm_text.splitlines()[0], "a never-on-screen cast entry must be removed")
+    QwenDirector._normalize_story_blueprint(storm_text, DIRECTOR_STORY_SCENES)
     # Two cast members sharing a surname are not conflated by name-part matching.
     twin = json.loads(json.dumps(data))
     twin["cast"].append(dict(twin["cast"][0], name="Tomas Vale"))
+    twin_dropped = []
+    twin_line = render_blueprint_text(twin, DIRECTOR_STORY_SCENES, twin_dropped).splitlines()[0]
+    _assert(twin_dropped == ["Tomas Vale"] and "Tomas Vale" not in twin_line and "Ines Vale (kind: person" in twin_line,
+            f"a shared surname must not put one person in the other's scenes (Tomas is on screen nowhere): {twin_line}")
+    twin["scenes"][5]["on_screen_present"] = ["Tomas Vale"]
     twin_line = render_blueprint_text(twin, DIRECTOR_STORY_SCENES).splitlines()[0]
-    _assert(twin_line.count("on-screen scenes: 01, 02") == 1 and "Tomas Vale (kind: person; role: harbor surveyor; wants: recover the original shipping ledger before the flood; pressure: her own signature is on the forgery; voice: precise and restrained; aliases: none; on-screen scenes: ;" in twin_line,
-            f"a shared surname must not make one person appear in the other's scenes: {twin_line}")
+    ines, tomas = twin_line.split(" | ")[:2]
+    _assert("on-screen scenes: 06;" in tomas and "05, 07" in ines,
+            f"each person must get exactly the scenes that name them: {twin_line}")
 
 
 def test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make_one_call():
