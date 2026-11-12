@@ -660,18 +660,3 @@ class ComfyClient:
             raise RuntimeError(f"ComfyUI download failed: {last_error}")
         finally:
             temp_path.unlink(missing_ok=True)
-
-    @staticmethod
-    def _is_video(
-        filename,
-    ):
-
-        return Path(
-            filename
-        ).suffix.lower() in {
-            ".mp4",
-            ".mov",
-            ".mkv",
-            ".webm",
-        }
-
