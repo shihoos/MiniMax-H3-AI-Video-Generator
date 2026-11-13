@@ -183,12 +183,10 @@ STORY_WRITER_WORDS_PER_SCENE = int(
 
 # The acceptance floor is explicit and must match minimum_words.
 STORY_ACCEPT_MIN_WORDS = int(_story_contract.get("accept_min_words", STORY_MIN_WORDS))
-# Per-scene length distribution (optional yaml keys; defaults match the validated contract).
-# A scene under the hard floor is too thin to film; at least STORY_SCENE_TARGET_MIN_COUNT scenes
-# must reach STORY_SCENE_TARGET_WORDS so a total above the minimum cannot hide starved scenes.
-STORY_SCENE_HARD_FLOOR_WORDS = int(_story_contract.get("scene_hard_floor_words", 100))
-STORY_SCENE_TARGET_WORDS = int(_story_contract.get("scene_target_words", 120))
-STORY_SCENE_TARGET_MIN_COUNT = int(_story_contract.get("scene_target_min_count", 10))
+# A scene below this many words is starved (too thin to film) however long the whole story is. Per-scene
+# lengths above it are guidance only: a model that writes 95 words instead of 100 has not written a bad scene,
+# and the total-length floor above already bounds the story. Per-scene counts are kept in the diagnostics.
+STORY_SCENE_HARD_FLOOR_WORDS = int(_story_contract.get("scene_hard_floor_words", 70))
 # Cast count is a narrative decision, not a numeric runtime contract.
 DIRECTOR_STORY_CAST_SIZE_POLICY = str(_story_contract.get("cast_size_policy", "")).strip().lower()
 
