@@ -33,10 +33,10 @@ from planner.config import (
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
-    STORY_TARGET_WORDS,
     STORY_WRITER_WORDS_PER_SCENE,
     STORY_ACCEPT_MIN_WORDS,
     STORY_ARCHITECT_REVISION_RETRIES,
+    STORY_SCENE_HARD_FLOOR_WORDS,
     STORY_ARCHITECT_STRUCTURED_OUTPUT,
     STORY_AUTHOR_REVISION_RETRIES,
     STORY_PLAN_BEAT_MIN_WORDS,
@@ -2552,15 +2552,46 @@ class QwenDirector(
                 word_count=len(re.findall(r"\b[\w'’-]+\b", draft)),
                 stage="author_first_draft_rejected",
             )
-            feedback = self._revision_feedback(problems, "story")
-            print(f"[QWEN] story_author revision=1/1 reason_count={len(problems)}", flush=True)
+            revision_user = self._story_expansion_user(draft)
+            if revision_user:
+                # Too short: expand the draft Qwen already wrote. A fresh re-roll was measured to come out
+                # shorter, because it has the same target and no draft to build on.
+                print("[QWEN] story_author revision=1/1 mode=expand_draft", flush=True)
+            else:
+                revision_user = story_user + self._revision_feedback(problems, "story")
+                print(f"[QWEN] story_author revision=1/1 mode=rewrite reason_count={len(problems)}", flush=True)
             self._last_story_raw_output = ""
             self._last_story_draft = ""
             self._last_story_quality_errors = []
             self._last_story_scene_word_counts = {}
             return self._generate_story_once_impl(
-                mode, user_input, story_system, story_user + feedback, **kwargs,
+                mode, user_input, story_system, revision_user, **kwargs,
             )
+
+    @staticmethod
+    def _story_expansion_user(draft: str) -> str:
+        """User prompt that asks for the same story at full length; empty when length is not the problem."""
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(draft or "")) if part.strip()]
+        if len(paragraphs) != DIRECTOR_STORY_SCENES:
+            return ""
+        counts = [len(re.findall(r"\b[\w'’-]+\b", part)) for part in paragraphs]
+        if sum(counts) >= STORY_ACCEPT_MIN_WORDS and min(counts) >= STORY_SCENE_HARD_FLOOR_WORDS:
+            return ""
+        writer_total = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
+        per_scene = writer_total // DIRECTOR_STORY_SCENES
+        listing = "; ".join(f"scene {i:02d} = {c} words" for i, c in enumerate(counts, 1))
+        blocks = "\n\n".join(f"[[SCENE_{i:02d}]] {part}" for i, part in enumerate(paragraphs, 1))
+        return (
+            "REVISION TASK: the draft below is the right story, but it is too short "
+            f"({sum(counts)} words; at least {STORY_ACCEPT_MIN_WORDS} are required and about {writer_total} are wanted). "
+            f"Current lengths: {listing}.\n"
+            "Write the complete story again in the same [[SCENE_01]] to "
+            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]] format. Keep every event, name, location, object, decision, outcome and the "
+            "order of scenes exactly; add no new characters, twists or a different ending. Develop each scene to roughly "
+            f"{per_scene} words by dramatizing what already happens in more physical detail: the action step by step, the "
+            "obstacle, how the character decides, and what visibly changes. Do not add filler or repeat earlier wording. "
+            "Do not shorten any scene. Return only the scene blocks.\n\nDRAFT:\n" + blocks
+        )
 
     def _generate_story_once_impl(
         self,
@@ -2667,7 +2698,7 @@ class QwenDirector(
         }
         print(
             f"[QWEN] story_length words={usable_words} "
-            f"target_guidance={STORY_TARGET_WORDS} "
+            f"target_guidance={DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE} "
             f"stretch_guidance={DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE}",
             flush=True,
         )
