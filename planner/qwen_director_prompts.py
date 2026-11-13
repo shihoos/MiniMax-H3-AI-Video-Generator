@@ -305,11 +305,11 @@ class QwenDirectorPromptMixin:
     def _story_text_system_raw(self, mode: str) -> str:
         """One-pass screenwriting contract: cinematic prose, flexible scene rhythm, and 1,400-word floor."""
         n = int(DIRECTOR_STORY_SCENES)
-        target = int(STORY_TARGET_WORDS)
         minimum = int(STORY_MIN_WORDS)
-        stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
-        # One explicit allocation schedule replaces overlapping per-scene word-count prose.
-        # For the production 12-scene / 1,560-word contract this schedule sums exactly to target.
+        # The model is asked for the writer budget, above the acceptance floor: a non-thinking writer given a
+        # target equal to the floor lands below it, so the floor is stated as a rejection line, not a goal.
+        target = int(n * max(STORY_WRITER_WORDS_PER_SCENE, STORY_WORDS_PER_SCENE))
+        # One explicit allocation schedule replaces overlapping per-scene word-count prose; it sums to target.
         base_schedule = [120, 125, 125, 130, 130, 130, 130, 130, 135, 135, 135, 135]
         if n == len(base_schedule):
             raw_total = sum(base_schedule)
@@ -348,19 +348,14 @@ class QwenDirectorPromptMixin:
             You are an acclaimed screenwriter writing a cinematic, emotionally engaging short film in third-person past tense.
             Write finished scenes, not an outline or synopsis. {source_rule}
 
-            STORY LENGTH: produce exactly {n} scene blocks. The hard story-wide acceptance floor is {minimum} usable
-            words; the target is {target} words; {stretch} is an optional upper stretch only when the actual events need it.
-            Use this single per-scene allocation schedule as your drafting budget (the values sum to the target):
-            {scene_allocation}. Treat the target as guidance, not permission to pad; use each number as a scene target,
-            not a demand for identical paragraph shapes.
-            Variation of roughly 20-25% is acceptable when a scene's dramatic work justifies it, but never let any scene
-            fall below 100 usable words and ensure at least ten scenes reach 120 words. Do not use a fixed sentence count;
-            vary scene lengths and paragraph shapes according to each scene's dramatic work. Do not force every scene into
-            the same action-obstacle-choice cadence. Do not front-load the budget or
-            compress scenes 08-12. Give each scene enough space to dramatize its objective, resistance, decision, and
-            changed situation. Before ending, silently check all {n} scene counts, the {minimum}-word floor, and proximity
-            to the {target}-word target. If short, deepen an underdeveloped scene with premise-specific action, resistance,
-            evidence, decisions, and consequences—not filler, repeated description, or extra twists. Do not add a title,
+            STORY LENGTH: produce exactly {n} scene blocks. Draft toward {target} words in total. {minimum} usable words is
+            only the rejection floor, and a story that lands near it is under-written. Use this per-scene budget (the values
+            sum to {target}): {scene_allocation}. Reach each number with the concrete action, resistance, decisions, evidence
+            and consequences the scene's events need, not with filler, repeated description, or extra twists. Never let any
+            scene fall below 100 usable words, and give at least ten scenes 120 or more. Vary scene lengths and paragraph
+            shapes according to each scene's dramatic work; do not use a fixed sentence count or force every scene into
+            the same action-obstacle-choice cadence. Do not front-load the budget or compress scenes 08-12. Give each scene
+            enough space to dramatize its objective, resistance, decision, and changed situation. Do not add a title,
             synopsis, cast list, word count, or postscript. For every scene, physically introduce a character who is absent
             from the opening boundary before they act; explicitly show a character's exit before treating them as absent
             from the ending boundary. If a person enters and leaves within one scene, dramatize both actions in that scene.
@@ -1049,21 +1044,17 @@ class QwenDirectorPromptMixin:
                 "location, presence, knowledge, and object state with the ledger. Follow the declared on-screen scene map "
                 "and cast fate rules."
             )
+        writer_total = int(DIRECTOR_STORY_SCENES * max(STORY_WRITER_WORDS_PER_SCENE, STORY_WORDS_PER_SCENE))
         result += (
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
-            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Aim near {STORY_TARGET_WORDS} usable words overall "
-            f"(about {round(STORY_TARGET_WORDS / DIRECTOR_STORY_SCENES)} words per scene on average), with a hard "
-            f"story-wide minimum of {STORY_MIN_WORDS}. HARD SCENE DISTRIBUTION: no scene below 100 usable words, "
-            "and at least ten scenes must contain 120 or more usable words. Aim for 125–140 words per scene; "
-            "do not compress later scenes or place most of the word budget in the opening. "
-            f"The story may extend toward {DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE} words only when "
-            "events genuinely need the room. Complete all twelve scenes at full dramatic depth before ending, including "
-            "a fully dramatized final third and concrete aftermath. If the draft is below the 1,400-word floor or materially "
-            "below target, deepen underwritten scenes through consequential action, resistance, evidence, dialogue, decisions, "
-            "and outcomes; do not add filler, repeat description, or invent extra twists. Vary scene length and sentence "
-            "rhythm; do not force equal paragraph sizes. Silently verify the complete story against the minimum and target "
-            "before returning prose; count each paragraph separately and do not stop merely because all twelve scene "
-            "markers have been written. Finish the full action and aftermath of Scene 12 before ending."
+            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Draft toward {writer_total} usable words overall "
+            f"(about {writer_total // DIRECTOR_STORY_SCENES} words per scene); {STORY_MIN_WORDS} is only the rejection "
+            "floor, and a story that lands near it is under-written. Give every scene its full share: no scene under 100 "
+            "usable words, at least ten scenes at 120 or more, and do not compress later scenes or spend the budget on the "
+            "opening. Complete all twelve scenes at full dramatic depth, including a fully dramatized final third and "
+            "concrete aftermath, and reach the length through consequential action, resistance, evidence, decisions, and "
+            "outcomes rather than filler, repeated description, or extra twists. Vary scene length and sentence rhythm. "
+            "Finish the full action and aftermath of Scene 12 before ending."
         )
         return result
 
