@@ -950,7 +950,7 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         writer_prompt = q._story_text_user(
             mode, "premise", story_blueprint=_story_blueprint_fixture()
         ).lower()
-        _assert(str(STORY_TARGET_WORDS) in writer_prompt
+        _assert(str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in writer_prompt
                 and str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in low
                 and "validated plot architecture" in writer_prompt
                 and "source-preservation lock" in writer_prompt if mode == EXPAND_USER_STORY_MODE else "validated plot architecture" in writer_prompt,
@@ -985,13 +985,17 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
         _assert(not re.search(r"__[A-Z0-9_]+__", rendered), "rendered prompt has unresolved placeholders")
     _assert(str(STORY_MIN_WORDS) in system and str(STORY_MIN_WORDS) in writer and STORY_MIN_WORDS >= 1400,
             "1,400-word minimum must be explicit to both system and user prompts")
-    _assert(str(STORY_TARGET_WORDS) in system and str(STORY_TARGET_WORDS) in writer,
-            "system and user prompts must agree on the configured word target")
+    # Both prompts must give the model the same single length instruction: the writer budget, with the
+    # acceptance floor stated only as a rejection line.
     _assert(str(stretch) in system and str(stretch) in writer,
-            "system and user prompts must agree on stretch guidance")
+            "system and user prompts must agree on the drafting target")
+    _assert(str(STORY_TARGET_WORDS) not in system and str(STORY_TARGET_WORDS) not in writer,
+            "the acceptance-level target must not compete with the drafting target in either prompt")
+    _assert("only the rejection floor" in " ".join(system.split()) and "only the rejection floor" in " ".join(writer.split()),
+            "both prompts must call the minimum a rejection floor, not a goal")
     system_flat = " ".join(system.lower().split())
-    _assert("target as guidance, not permission to pad" in system_flat,
-            "target length must be guidance, not padding quota")
+    _assert("not with filler, repeated description, or extra twists" in system_flat,
+            "length must come from events, not padding")
     _assert("do not use a fixed sentence count" in system_flat
             and "action-obstacle-choice" in system_flat,
             "writer must be free of rigid nine-sentence scene shape")
@@ -1000,16 +1004,17 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
     _assert("each of the eleven transitions" in blueprint and "each scene changes" in blueprint,
             "Architect must define causal progression across all eleven transitions")
     allocation_match = re.search(
-        r"use this single per-scene allocation schedule.*?:\s*(.*?)\. treat the target", system_flat, re.S
+        r"use this per-scene budget \(the values sum to \d+\):\s*(.*?)\. reach each number", system_flat, re.S
     )
     allocations = [int(value) for value in re.findall(r"scene \d{2}: (\d+) words", allocation_match.group(1))] if allocation_match else []
-    _assert(len(allocations) == 12 and sum(allocations) == STORY_TARGET_WORDS,
-            "Author must receive one explicit twelve-scene allocation that sums to the configured target")
+    _assert(len(allocations) == 12 and sum(allocations) == DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE,
+            "Author must receive one explicit twelve-scene allocation that sums to the writer drafting budget")
     _assert("never let any scene fall below 100 usable words" in system_flat
-            and "at least ten scenes reach 120 words" in system_flat,
-            "Author must receive the hard per-scene completeness guard")
-    _assert("silently check all 12 scene counts" in system_flat and "proximity" in system_flat,
-            "Author must check scene distribution and story-wide target before ending")
+            and "at least ten scenes 120 or more" in system_flat,
+            "Author must be told the per-scene length guidance")
+    # A non-thinking writer cannot "silently count"; the model is given a budget and an expansion retry instead.
+    _assert("silently check" not in system_flat and "silently verify" not in " ".join(writer.split()),
+            "the Author must not be asked to count words silently")
     _assert("premise-specific mechanism" in blueprint and "same plot would work unchanged" in blueprint,
             "Architect must anchor the plot's causal engine to the supplied premise")
     _assert("explicitly refer back to the planted evidence" in system_flat and "climax" in system_flat
@@ -1154,14 +1159,18 @@ def test_scene_purpose_survives_scene_sanitizer_and_scene_floor_is_enforced():
     try:
         director._validate_story_completion_contract(AI_STORY_MODE, "\n\n".join(starved))
     except RuntimeError as exc:
-        _assert("below the 100-word hard floor" in str(exc), f"thin scene not named: {exc}")
+        _assert("below the 70-word hard floor" in str(exc), f"thin scene not named: {exc}")
     else:
-        raise AssertionError("a 60-word scene must fail the per-scene hard floor")
+        raise AssertionError("a 60-word scene is starved and must fail the per-scene hard floor")
+    # A near miss (95 words against a 100-word guideline) is not a defect and must not reject the story.
+    near_miss = _story_test_paragraphs(140)
+    near_miss[3] = " ".join(near_miss[3].split()[:95]) + "."
+    director._validate_story_completion_contract(AI_STORY_MODE, "\n\n".join(near_miss))
 
 
 def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpose():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS, STORY_WRITER_WORDS_PER_SCENE
     from planner.qwen_director_prompts import SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
 
     director = QwenDirector.__new__(QwenDirector)
@@ -1183,11 +1192,11 @@ def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpo
     _assert("Architect-authored `dramatic_purpose`" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
             and "copy it verbatim" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT,
             "Shot Director must consume, not reinvent, Architect dramatic purpose")
-    allocation_match = re.search(r"Use this single per-scene allocation schedule.*?:\s*(.*?)\. Treat the target", " ".join(author.split()), re.S)
+    allocation_match = re.search(r"Use this per-scene budget \(the values sum to \d+\):\s*(.*?)\. Reach each number", " ".join(author.split()), re.S)
     _assert(allocation_match is not None, "Author needs one explicit per-scene allocation schedule")
     allocated = [int(value) for value in re.findall(r"SCENE \d{2}: (\d+) words", allocation_match.group(1))]
-    _assert(len(allocated) == 12 and sum(allocated) == 1560,
-            f"Author allocation must cover twelve scenes and total 1,560 words: {allocated!r}")
+    _assert(len(allocated) == 12 and sum(allocated) == 12 * STORY_WRITER_WORDS_PER_SCENE >= 1560,
+            f"Author allocation must cover twelve scenes and total the writer budget: {allocated!r}")
     _assert("minimum_output_tokens" not in author and "min_tokens" not in author,
             "Prompt improvement must not change the runtime min_tokens setting")
     _assert(DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS == 0,
@@ -1446,8 +1455,9 @@ def test_story_minimum_is_a_hard_floor_without_retry():
     short_result, short_generated, short_calls, short_error = run(65)
     _assert(not short_generated and short_result is None and len(short_calls) == 2,
             "sub-1,400-word story must fail after the first draft plus exactly one revision")
-    _assert("REVISION" in short_calls[1].get("_user", "") and "below the" in short_calls[1].get("_user", ""),
-            "the revision must be told the exact reason the first draft was rejected")
+    _assert("REVISION TASK" in short_calls[1].get("_user", "") and "DRAFT:" in short_calls[1].get("_user", "")
+            and "[[SCENE_01]]" in short_calls[1].get("_user", ""),
+            "a too-short draft must be expanded from its own text, not re-rolled from scratch")
     _assert("below the configured minimum" in (short_error or "").lower(),
             f"sub-floor story should report the hard minimum: {short_error}")
     completion_probe = QwenDirector.__new__(QwenDirector)
@@ -1463,12 +1473,9 @@ def test_story_minimum_is_a_hard_floor_without_retry():
     distribution_probe = QwenDirector.__new__(QwenDirector)
     distribution_probe._story_min_words = STORY_MIN_WORDS
     uneven = _story_test_paragraphs(117)
-    try:
-        distribution_probe._validate_story_completion_contract(AI_STORY_MODE, "\n\n".join(uneven))
-    except RuntimeError as exc:
-        _assert("120 words" in str(exc).lower(), f"scene distribution failure is not explicit: {exc}")
-    else:
-        raise AssertionError("a 1,400+ word story with fewer than ten 120-word scenes must fail")
+    # 117 words per scene is a sound 1,404-word story: per-scene lengths above the starvation floor are
+    # guidance, so it is accepted (the 1,400 total and the 70-word starvation floor are the hard limits).
+    distribution_probe._validate_story_completion_contract(AI_STORY_MODE, "\n\n".join(uneven))
 
 
 def test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue():
