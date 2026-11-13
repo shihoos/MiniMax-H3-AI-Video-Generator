@@ -943,8 +943,8 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prose prompt must not impose a cast quota")
         _assert("not physically present" in low and "remote" in low,
                 f"{mode}: remote speakers must not be rendered as visible characters")
-        _assert("do not use a fixed sentence count" in low and "vary scene lengths" in low,
-                f"{mode}: fixed 9-sentence template must be removed")
+        _assert("three paragraphs" in low and "unfinished" in low,
+                f"{mode}: every scene must be asked for a multi-paragraph dramatized sequence")
         _assert("no more than two" in low and "nine words or fewer" in low,
                 f"{mode}: spoken dialogue limits must match 3-shot timing")
         writer_prompt = q._story_text_user(
@@ -994,23 +994,22 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
     _assert("only the rejection floor" in " ".join(system.split()) and "only the rejection floor" in " ".join(writer.split()),
             "both prompts must call the minimum a rejection floor, not a goal")
     system_flat = " ".join(system.lower().split())
-    _assert("not with filler, repeated description, or extra twists" in system_flat,
+    _assert("not filler, repeated description, or extra twists" in system_flat,
             "length must come from events, not padding")
-    _assert("do not use a fixed sentence count" in system_flat
-            and "action-obstacle-choice" in system_flat,
-            "writer must be free of rigid nine-sentence scene shape")
+    _assert("three paragraphs" in system_flat and "same depth as scenes 01-04" in system_flat,
+            "writer must give every scene a multi-paragraph shape and the final third full depth")
     _assert("no more than two" in system.lower() and "spoken lines per scene" in system.lower(),
             "writer must respect the two-line dialogue maximum")
     _assert("each of the eleven transitions" in blueprint and "each scene changes" in blueprint,
             "Architect must define causal progression across all eleven transitions")
     allocation_match = re.search(
-        r"use this per-scene budget \(the values sum to \d+\):\s*(.*?)\. reach each number", system_flat, re.S
+        r"per-scene quota \(sums to \d+\):\s*(.*?)\. every scene is", system_flat, re.S
     )
     allocations = [int(value) for value in re.findall(r"scene \d{2}: (\d+) words", allocation_match.group(1))] if allocation_match else []
     _assert(len(allocations) == 12 and sum(allocations) == DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE,
             "Author must receive one explicit twelve-scene allocation that sums to the writer drafting budget")
-    _assert("never let any scene fall below 100 usable words" in system_flat
-            and "at least ten scenes 120 or more" in system_flat,
+    _assert("a scene of one or two short paragraphs is unfinished" in system_flat
+            and "scenes 08-12 get exactly the same depth" in system_flat,
             "Author must be told the per-scene length guidance")
     # A non-thinking writer cannot "silently count"; the model is given a budget and an expansion retry instead.
     _assert("silently check" not in system_flat and "silently verify" not in " ".join(writer.split()),
@@ -1192,7 +1191,7 @@ def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpo
     _assert("Architect-authored `dramatic_purpose`" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
             and "copy it verbatim" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT,
             "Shot Director must consume, not reinvent, Architect dramatic purpose")
-    allocation_match = re.search(r"Use this per-scene budget \(the values sum to \d+\):\s*(.*?)\. Reach each number", " ".join(author.split()), re.S)
+    allocation_match = re.search(r"Per-scene quota \(sums to \d+\):\s*(.*?)\. Every scene is", " ".join(author.split()), re.S)
     _assert(allocation_match is not None, "Author needs one explicit per-scene allocation schedule")
     allocated = [int(value) for value in re.findall(r"SCENE \d{2}: (\d+) words", allocation_match.group(1))]
     _assert(len(allocated) == 12 and sum(allocated) == 12 * STORY_WRITER_WORDS_PER_SCENE >= 1560,
@@ -1525,6 +1524,25 @@ def test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_pos
             f"a character cannot be scheduled physically after death: {issues!r}")
 
 
+def test_a_prop_the_plan_declares_is_seeded_but_an_invented_organization_is_not():
+    """Regression (Kaggle run): 'Containment Protocol Manual' was declared in KEY_OBJECTS yet flagged as unseeded."""
+    from planner.story_contracts import audit_story_against_blueprint
+    story = _story_contract_fixture_prose()
+    with_prop = story.replace("Ines examines transfer stage 1,",
+                              "Ines opens the Containment Protocol Manual. Ines examines transfer stage 1,", 1)
+    _assert(with_prop != story, "fixture sentence to extend was not found")
+    blueprint = _story_blueprint_fixture()
+    undeclared = [i for i in audit_story_against_blueprint(with_prop, blueprint) if "unseeded named project" in i]
+    _assert(undeclared, "a protocol manual nobody planned is still an unseeded name")
+    declared = re.sub(r"(?m)^(KEY_OBJECTS: .*)$", r"\1, Containment Protocol Manual", blueprint, count=1)
+    _assert(declared != blueprint, "fixture must have a KEY_OBJECTS line")
+    issues = [i for i in audit_story_against_blueprint(with_prop, declared) if "unseeded named project" in i]
+    _assert(not issues, f"a prop declared in KEY_OBJECTS is seeded by the plan: {issues!r}")
+    invented = story.replace("Ines examines transfer stage 1,", "Ines reads about Project Hydra. Ines examines transfer stage 1,", 1)
+    _assert(any("Project Hydra" in i for i in audit_story_against_blueprint(invented, declared)),
+            "an organization the plan never mentions must still be rejected")
+
+
 def test_story_entity_relationship_and_person_grounding_is_a_hard_gate():
     from planner.story_contracts import audit_story_against_blueprint
     blueprint = _story_blueprint_fixture()
@@ -1651,8 +1669,8 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
             and calls[0].get("top_p") == DIRECTOR_STORY_WRITER_TOP_P == 0.8,
             f"Writer sampler changed unexpectedly: {calls[0]}")
     expected = min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS)
-    _assert(calls[0].get("max_completion") == expected and expected == 3000,
-            f"Writer must use the configured 3,000-token completion ceiling: {calls[0]}")
+    _assert(calls[0].get("max_completion") == expected and expected == 3800,
+            f"Writer must use the configured 3,800-token completion ceiling: {calls[0]}")
     _assert(DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS == 0,
             "Author must preserve natural EOS; minimum output tokens must remain 0")
     _assert(calls[0].get("minimum_output_tokens") == 0,
@@ -1690,12 +1708,12 @@ def test_author_min_tokens_zero_is_omitted_from_vllm_payload():
     director._model_path = None
     director._post_chat(
         messages=[{"role": "user", "content": "Write the story."}],
-        temperature=0.7, top_p=0.8, max_tokens=3000,
+        temperature=0.7, top_p=0.8, max_tokens=3800,
         min_tokens=0, creative=True, enable_thinking=False, n_samples=1,
     )
     payload = director._vllm_session.payload
     _assert(payload is not None, "the one Author request must be sent")
-    _assert(payload.get("max_tokens") == 3000, f"Author max_tokens changed: {payload!r}")
+    _assert(payload.get("max_tokens") == 3800, f"Author max_tokens changed: {payload!r}")
     _assert("min_tokens" not in payload,
             f"min_tokens=0 must be omitted from the vLLM payload, not converted into a positive floor: {payload!r}")
 
@@ -2008,12 +2026,12 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "diagnostics must preserve the complete warning list, not only console previews")
         _assert(report["generation_policy"] == {
             "architect_calls": 1, "author_calls": 1,
-            "architect_max_tokens": 5400, "author_max_tokens": 3000,
+            "architect_max_tokens": 5400, "author_max_tokens": 3800,
             "author_minimum_output_tokens": 0, "retries": 0, "repairs": 0,
         }, f"Author rejection must report the exact single-pass token/call policy: {report['generation_policy']!r}")
         _assert("scene 22 knowledge transition needs review" in text_path.read_text(encoding="utf-8"),
                 "human-readable trace log must retain the final warning, not truncate the list")
-        _assert("architect_calls=1; author_calls=1; architect_max_tokens=5400; author_max_tokens=3000; author_minimum_output_tokens=0; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
+        _assert("architect_calls=1; author_calls=1; architect_max_tokens=5400; author_max_tokens=3800; author_minimum_output_tokens=0; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
                 "diagnostic text must accurately state the actual single-pass call and token policy")
         _assert(attached["cleanup_events"] == director._last_story_cleanup_events,
                 "the Author trace JSON must carry deterministic cleanup and validation details")
@@ -2517,6 +2535,7 @@ def main():
         test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal,
         test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_post_death_presence,
         test_story_entity_relationship_and_person_grounding_is_a_hard_gate,
+        test_a_prop_the_plan_declares_is_seeded_but_an_invented_organization_is_not,
         test_story_cinematic_coverage_enforces_unique_framing_without_camera_motion_quota,
         test_story_completion_contract_rejects_unresolved_final_hook,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
