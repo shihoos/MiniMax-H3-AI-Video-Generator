@@ -348,18 +348,20 @@ class QwenDirectorPromptMixin:
             You are an acclaimed screenwriter writing a cinematic, emotionally engaging short film in third-person past tense.
             Write finished scenes, not an outline or synopsis. {source_rule}
 
-            STORY LENGTH: produce exactly {n} scene blocks. Draft toward {target} words in total. {minimum} usable words is
-            only the rejection floor, and a story that lands near it is under-written. Use this per-scene budget (the values
-            sum to {target}): {scene_allocation}. Reach each number with the concrete action, resistance, decisions, evidence
-            and consequences the scene's events need, not with filler, repeated description, or extra twists. Never let any
-            scene fall below 100 usable words, and give at least ten scenes 120 or more. Vary scene lengths and paragraph
-            shapes according to each scene's dramatic work; do not use a fixed sentence count or force every scene into
-            the same action-obstacle-choice cadence. Do not front-load the budget or compress scenes 08-12. Give each scene
-            enough space to dramatize its objective, resistance, decision, and changed situation. Do not add a title,
-            synopsis, cast list, word count, or postscript. For every scene, physically introduce a character who is absent
-            from the opening boundary before they act; explicitly show a character's exit before treating them as absent
-            from the ending boundary. If a person enters and leaves within one scene, dramatize both actions in that scene.
-            Do not make a person appear or vanish solely because the outline's presence list says so.
+            STORY LENGTH: produce exactly {n} scene blocks. Write about {target} words in total; this is a drafting
+            quota, and {minimum} is only the rejection floor. Per-scene quota (sums to {target}): {scene_allocation}.
+            Every scene is a fully dramatized sequence of THREE paragraphs of three to four sentences each:
+            (1) establish the place, the pressure and the character's immediate objective through concrete action and
+            perception; (2) play out the resistance, with specific dialogue or physical struggle and at least one
+            discovery or complication; (3) show the decision, its cost, and the changed situation, and end on the
+            hand-off into the next scene. A scene of one or two short paragraphs is unfinished. Reach the quota with
+            consequential action, dialogue, evidence and aftermath, not filler, repeated description, or extra twists.
+            Scenes 08-12 get exactly the same depth as scenes 01-04; never summarize or compress the final third. Do not
+            add a title, synopsis, cast list, word count, or postscript. For every scene, physically introduce a
+            character who is absent from the opening boundary before they act; explicitly show a character's exit before
+            treating them as absent from the ending boundary. If a person enters and leaves within one scene, dramatize
+            both actions in that scene. Do not make a person appear or vanish solely because the outline's presence
+            list says so.
 
             DRAMATIC EXECUTION: make the protagonist's immediate objective and pressure understandable early. The opposition
             must have an intelligible goal and a credible method, not merely be evil or obstructive. Give major characters
@@ -1047,14 +1049,13 @@ class QwenDirectorPromptMixin:
         writer_total = int(DIRECTOR_STORY_SCENES * max(STORY_WRITER_WORDS_PER_SCENE, STORY_WORDS_PER_SCENE))
         result += (
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
-            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Draft toward {writer_total} usable words overall "
-            f"(about {writer_total // DIRECTOR_STORY_SCENES} words per scene); {STORY_MIN_WORDS} is only the rejection "
-            "floor, and a story that lands near it is under-written. Give every scene its full share: no scene under 100 "
-            "usable words, at least ten scenes at 120 or more, and do not compress later scenes or spend the budget on the "
-            "opening. Complete all twelve scenes at full dramatic depth, including a fully dramatized final third and "
-            "concrete aftermath, and reach the length through consequential action, resistance, evidence, decisions, and "
-            "outcomes rather than filler, repeated description, or extra twists. Vary scene length and sentence rhythm. "
-            "Finish the full action and aftermath of Scene 12 before ending."
+            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Write about {writer_total} words overall "
+            f"(about {writer_total // DIRECTOR_STORY_SCENES} per scene); {STORY_MIN_WORDS} is only the rejection floor. "
+            "Build every scene as three full paragraphs of three to four sentences: establish the place and "
+            "objective through action, play out the resistance with dialogue or struggle, then show the decision, its "
+            "cost and the hand-off. Give scenes 08-12 the same depth as scenes 01-04 and finish the full action and "
+            "aftermath of Scene 12 before ending. Reach the length with consequential action, evidence and outcomes, "
+            "not filler or extra twists."
         )
         return result
 
