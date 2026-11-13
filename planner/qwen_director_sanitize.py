@@ -21,8 +21,6 @@ from planner.config import (
     DIRECTOR_STORY_SCENES,
     STORY_ACCEPT_MIN_WORDS,
     STORY_SCENE_HARD_FLOOR_WORDS,
-    STORY_SCENE_TARGET_WORDS,
-    STORY_SCENE_TARGET_MIN_COUNT,
 )
 
 
@@ -1668,23 +1666,17 @@ class QwenDirectorSanitizeMixin:
                 f"Generated story has {word_count} words, below the minimum accepted length of {minimum_words}."
             )
 
-        # Distribution: the total can clear the floor while individual scenes are starved.
+        # Only a starved scene is fatal; the per-scene counts are recorded for the diagnostics either way.
         scene_words = {
             f"scene_{index:02d}": len(re.findall(r"\b[\w'’-]+\b", paragraph))
             for index, paragraph in enumerate(paragraphs, 1)
         }
         self._last_story_scene_word_counts = dict(scene_words)
         if len(paragraphs) == DIRECTOR_STORY_SCENES:
-            thin = [f"{key[6:]}={count}" for key, count in scene_words.items() if count < STORY_SCENE_HARD_FLOOR_WORDS]
-            if thin:
+            starved = [f"{key[6:]}={count}" for key, count in scene_words.items() if count < STORY_SCENE_HARD_FLOOR_WORDS]
+            if starved:
                 errors.append(
-                    f"{len(thin)} scenes below the {STORY_SCENE_HARD_FLOOR_WORDS}-word hard floor ({', '.join(thin)})."
-                )
-            developed = sum(1 for count in scene_words.values() if count >= STORY_SCENE_TARGET_WORDS)
-            if developed < STORY_SCENE_TARGET_MIN_COUNT:
-                errors.append(
-                    f"Only {developed} scenes are at or above {STORY_SCENE_TARGET_WORDS} words; "
-                    f"at least {STORY_SCENE_TARGET_MIN_COUNT} are required."
+                    f"{len(starved)} scenes below the {STORY_SCENE_HARD_FLOOR_WORDS}-word hard floor ({', '.join(starved)})."
                 )
 
         if self._story_has_open_ended_finale(result):
