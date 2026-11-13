@@ -104,7 +104,7 @@ director:
     words_per_scene: 130
     target_words: 1560
     minimum_words: 1400
-    writer_words_per_scene: 145
+    writer_words_per_scene: 155
     accept_min_words: 1400
     cast_size_policy: plot_driven
     author_revision_retries: 1
