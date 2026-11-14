@@ -1598,7 +1598,7 @@ class QwenDirector(
                     "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
                     "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
                     "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-                    "story_revision_policy": "up to one conditional revision per stage after a returned artifact fails a hard gate",
+                    "story_revision_policy": "up to one conditional revision per stage: after a returned artifact fails a hard gate, or (Author only) as a fall-back-protected tail rebalance of a passing draft whose ending is starved",
                     "runtime_retry_calls": accounting["runtime_retry_calls"],
                     "repair_calls": accounting["repair_calls"],
                 },
@@ -2511,7 +2511,7 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Run one primary Author pass, with one conditional hard-gate revision and draft preservation."""
+        """Run one primary Author pass, with one conditional revision (hard-gate rejection, or a fall-back-protected rebalance of a starved ending) and draft preservation."""
         self._last_story_raw_output = ""
         self._last_story_draft = ""
         self._last_story_quality_errors = []
@@ -2708,7 +2708,7 @@ class QwenDirector(
             for name, value in snapshot.items():
                 setattr(self, name, value)
             print(
-                f"[QWEN] story_author tail_rebalance=failed ({type(exc).__name__}); keeping first draft",
+                f"[QWEN] story_author tail_rebalance=failed ({type(exc).__name__}: {str(exc)[:160]}); keeping first draft",
                 flush=True,
             )
             return result
@@ -2826,7 +2826,8 @@ class QwenDirector(
             + f"directly from the final situation of Scene {split:02d} and follow the VALIDATED PLOT ARCHITECTURE "
             + f"for scenes {split + 1:02d}-{total_scenes:02d} as the authority for events, order, locations, object "
             + f"states, climax and resolution. Write about {per_scene} words per scene "
-            + f"(up to {int(STORY_WRITER_WORDS_PER_SCENE)} when a scene needs more room). Every scene dramatizes its "
+            + f"(up to {int(STORY_WRITER_WORDS_PER_SCENE)} when a scene needs more room; exceed that only if "
+            + "the overall minimum length requires it). Every scene dramatizes its "
             + "own planned event with new action, evidence and consequence; never reuse a sentence, action, "
             + "countdown reading or setup from any earlier scene, and keep any timer, count or damage state "
             + f"moving in one consistent direction. Give Scenes {total_scenes - 4:02d}-{total_scenes:02d} the same "
@@ -2957,7 +2958,7 @@ class QwenDirector(
             f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
             f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
             f"request_mode=single_completion author_revision_limit={STORY_AUTHOR_REVISION_RETRIES} "
-            "revision=conditional_on_returned_draft_rejection infrastructure_retries=0 repairs=0",
+            "revision=conditional_on_draft_rejection_or_starved_tail infrastructure_retries=0 repairs=0",
             flush=True,
         )
         part_kwargs = dict(
