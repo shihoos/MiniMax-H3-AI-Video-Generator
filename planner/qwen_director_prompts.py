@@ -1153,6 +1153,8 @@ class QwenDirectorPromptMixin:
             f"on average, with a soft maximum of {scene_cap} words for an individual scene; use the extra room "
             "only when the scene needs fuller action, character interaction, or aftermath. Vary scene lengths "
             "when the action needs it. "
+            "Do not let scenes shrink as the story proceeds: each of scenes 07-12 must be at least as long as your average "
+            "for scenes 01-06, because the climax and resolution need the most room. "
             "Do not force equal paragraph or sentence counts. Give scenes 08-12 the same causal depth as scenes 01-04 "
             "and finish the full action and aftermath of Scene 12 before ending. Reach the length with consequential "
             "action, evidence, character decisions, and visible outcomes—not filler, repeated description, or extra twists."
