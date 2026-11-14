@@ -680,9 +680,11 @@ class QwenDirectorPromptMixin:
             EXIT_KNOWS=[what has changed in what people know]; EXIT_OBJECTS=[important objects and their owner/state or none];
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
             PHYSICAL LOCATION RULE: ENTRY_LOCATION and EXIT_LOCATION are literal boundary locations. If they differ,
-            EVENT must name the character(s) who physically move and describe the actual passage (enter, unlock/open,
-            cross, descend, leave, flee, return, take shelter inside, retreat into, or another explicit action) AND
-            name the destination. "Finds/locates the vault/lab/archive" is not the same as physically entering it.
+            EVENT must name the character(s) who physically move and describe the actual passage (enter, cross,
+            descend, leave, flee, return, take shelter inside, retreat into, or another explicit action) AND
+            name the destination in that same movement clause. Opening, unlocking or bypassing a door is only an
+            ACCESS action: the EVENT must also show the character physically entering or reaching the destination.
+            "Finds/locates the vault/lab/archive" is not the same as physically entering it.
             A door being detected, a storm moving,
             or an object escaping does not move the human cast. Do not place a character at a destination that EVENT
             never shows them reaching. Between scenes, the previous EXIT_LOCATION is the next ENTRY_LOCATION unless
@@ -704,7 +706,11 @@ class QwenDirectorPromptMixin:
             ENTRY_OBJECTS with the same owner and state unless the previous EVENT explicitly transfers, damages,
             activates, consumes, disperses, releases, or destroys it. An object first appears in ENTRY_OBJECTS only when
             the previous scene's EVENT and EXIT_OBJECTS establish it. If an object is destroyed, consumed, or dispersed,
-            record that terminal state rather than silently forgetting its identity. KEY_OBJECTS must name the exact
+            record that terminal state rather than silently forgetting its identity. In EXIT_OBJECTS record every
+            portable plot-critical object's owner, location and condition in EVERY scene, even while it is off-screen
+            or unused; an object may be acquired, lost, handed over, hidden, recovered or destroyed only through a
+            sentence in that scene's EVENT that shows the action, and may never vanish from or reappear in the
+            inventory without one. KEY_OBJECTS must name the exact
             scene of each first state change; no earlier EVENT may already depict that change. A requirement, intention,
             warning, or future possibility is NOT a completed object-state change: "requires a PIN to activate" means the
             panel remains inactive; "will open" means it remains closed. Mark an object activated, opened, retrieved,
@@ -830,7 +836,9 @@ class QwenDirectorPromptMixin:
             "snapshots after the scene's event. Keep earlier facts and object states unless this event changes them, and add "
             "a new fact or object change only when the event shows how it was discovered, disclosed, or physically done. "
             "If exit_location differs from where the scene began, event must name the character(s) who physically move and "
-            "describe the actual passage (enter, unlock/open, cross, descend, leave, flee, return); a storm moving or an "
+            "describe the actual passage (enter, cross, descend, leave, flee, return) and name the destination in that same movement "
+            "clause; opening or unlocking a door is only access, so the event must also show the character physically entering "
+            "or reaching the destination, and finding or locating a place is not entering it; a storm moving or an "
             "object escaping does not move the human cast, and no character is placed at a destination the event never "
             "shows them reaching. exit_present are the people physically present at scene end. on_screen_present is the "
             "full-scene visibility record and includes anyone who enters or leaves mid-scene; it never includes a remote "
