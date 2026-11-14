@@ -414,8 +414,15 @@ def _scene_local_transition_is_explained(
     # A passage verb and the destination must appear in the SAME clause ("descends to the lower level"),
     # inside a sentence that names a canonical cast member. Opening a door, or a monitor displaying a room
     # elsewhere in the sentence, does not count as reaching the destination.
+    cast_named_earlier = False
     for sentence in re.split(r"(?<=[.!?])\s+", event_text):
-        if not _has_named_mover(sentence):
+        named_here = _has_named_mover(sentence)
+        # A pronoun sentence ("...forces her to take shelter inside") continues the cast member named earlier.
+        pronoun_continues = cast_named_earlier and bool(
+            re.search(r"\b(?:she|he|they|her|his|him|their|them)\b", sentence, re.I)
+        )
+        cast_named_earlier = cast_named_earlier or named_here
+        if not (named_here or pronoun_continues):
             continue
         for clause in _CLAUSE_SPLIT_RE.split(sentence):
             if not clause or not _SCENE_LOCAL_MOVE_RE.search(clause):
