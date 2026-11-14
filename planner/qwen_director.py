@@ -9,6 +9,7 @@ import random
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import re
+import shutil
 
 from planner.cinematic_compiler import CinematicCompiler
 from planner.entity_resolver import EntityResolver
@@ -2522,6 +2523,7 @@ class QwenDirector(
         for previous_failure in (
             Path(getattr(self, "project_root", Path.cwd())) / "story_author_last_failed.txt",
             (Path(getattr(self, "_trace_dir")) / "story_author_last_failed.txt") if getattr(self, "_trace_dir", None) else None,
+            Path(getattr(self, "project_root", Path.cwd())) / "story_author_first_failed.txt",
         ):
             if previous_failure is not None:
                 try:
@@ -2593,8 +2595,28 @@ class QwenDirector(
                 word_count=len(re.findall(r"\b[\w'’-]+\b", draft)),
                 stage="author_first_draft_rejected",
             )
-            revision_user = self._story_expansion_user(draft, base_user=story_user)
-            if revision_user:
+            # The revision's own rejection overwrites story_author_last_failed.txt; keep the first draft too.
+            try:
+                first_copy = Path(getattr(self, "project_root", Path.cwd())) / "story_author_last_failed.txt"
+                if first_copy.exists():
+                    shutil.copyfile(first_copy, first_copy.with_name("story_author_first_failed.txt"))
+            except OSError:
+                pass
+            locked_prefix = ""
+            revision_user = ""
+            continuation = self._story_continuation_plan(draft, problems, base_user=story_user)
+            if continuation:
+                revision_user, locked_prefix = continuation
+                print(
+                    "[QWEN] story_author revision=1/1 mode=continue_second_half "
+                    f"locked_scenes={DIRECTOR_STORY_SCENES // 2}; first half kept verbatim, no repair call",
+                    flush=True,
+                )
+            else:
+                revision_user = self._story_expansion_user(draft, base_user=story_user)
+            if continuation:
+                pass
+            elif revision_user:
                 # Rebuild from the validated Architect plan. Do not lock the revision to a defective draft's
                 # duplicated/unfinished events; use the failed prose only to target thin or repeated scenes.
                 print("[QWEN] story_author revision=1/1 mode=rebuild_from_validated_architecture", flush=True)
@@ -2614,9 +2636,74 @@ class QwenDirector(
             self._last_story_draft = ""
             self._last_story_quality_errors = []
             self._last_story_scene_word_counts = {}
+            if locked_prefix:
+                kwargs = {**kwargs, "locked_prefix": locked_prefix}
             return self._generate_story_once_impl(
                 mode, user_input, story_system, revision_user, **kwargs,
             )
+
+    @staticmethod
+    def _story_continuation_plan(
+        draft: str, problems: list[str], *, base_user: str,
+    ) -> tuple[str, str] | None:
+        """Plan a revision that keeps a healthy first half and rewrites only the collapsed second half.
+
+        Observed failure: a single non-thinking completion degrades in its second half (copied scenes,
+        looping countdowns, 75-word endings). Re-asking for all twelve scenes repeats the same collapse.
+        This still costs exactly one model request: the revision writes only scenes 07-12, with scenes
+        01-06 supplied verbatim as locked context, and the first half is re-attached locally.
+        Returns (revision_user, locked_prefix) or None when a full rebuild is the safer choice.
+        """
+        if not base_user.strip():
+            return None
+        # Only length/duplication failures are safe to carry a locked first half through.
+        if not problems or not all(
+            re.search(r"below the (?:configured )?minimum|minimum accepted length|near-duplicate", str(p), re.I)
+            for p in problems
+        ):
+            return None
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(draft or "")) if part.strip()]
+        total_scenes = int(DIRECTOR_STORY_SCENES)
+        if len(paragraphs) != total_scenes or total_scenes < 4:
+            return None
+        split = total_scenes // 2
+        counts = [len(re.findall(r"\b[\w'’-]+\b", part)) for part in paragraphs]
+        if min(counts[:split]) < max(70, int(STORY_SCENE_HARD_FLOOR_WORDS)):
+            return None
+        norm = [re.sub(r"[^a-z0-9]+", " ", part.casefold()).strip() for part in paragraphs]
+        for left in range(split):
+            for right in range(left + 1, split):
+                if SequenceMatcher(None, norm[left], norm[right]).ratio() >= 0.90:
+                    return None
+        locked_words = sum(counts[:split])
+        remaining = total_scenes - split
+        per_scene = max(int(STORY_WRITER_WORDS_PER_SCENE), int(STORY_WORDS_PER_SCENE))
+        # Make sure a delivered tail of this size clears the floor with margin for model under-delivery.
+        needed = int(STORY_ACCEPT_MIN_WORDS) + 150 - locked_words
+        per_scene = max(per_scene, -(-needed // remaining))
+        locked_blocks = "\n\n".join(
+            f"[[SCENE_{index:02d}]] {text}" for index, text in enumerate(paragraphs[:split], 1)
+        )
+        last_marker = f"[[SCENE_{total_scenes:02d}]]"
+        revision_user = (
+            base_user.rstrip()
+            + "\n\nAUTHOR CONTINUATION — THIS OVERRIDES THE EARLIER INSTRUCTION TO WRITE ALL "
+            + f"{total_scenes} BLOCKS. Scenes 01-{split:02d} below are approved and locked; do not repeat, "
+            + "summarize or rewrite them. The previous draft's second half failed (too short, copied scenes or "
+            + "looping beats).\n\nLOCKED SCENES:\n"
+            + locked_blocks
+            + f"\n\nWrite ONLY [[SCENE_{split + 1:02d}]] through {last_marker} ({remaining} blocks). Continue "
+            + f"directly from the final situation of Scene {split:02d} and follow the VALIDATED PLOT ARCHITECTURE "
+            + f"for scenes {split + 1:02d}-{total_scenes:02d} as the authority for events, order, locations, object "
+            + f"states, climax and resolution. Write about {per_scene} words per scene. Every scene dramatizes its "
+            + "own planned event with new action, evidence and consequence; never reuse a sentence, action, "
+            + "countdown reading or setup from any earlier scene, and keep any timer, count or damage state "
+            + f"moving in one consistent direction. Give Scenes {total_scenes - 4:02d}-{total_scenes:02d} the same "
+            + f"depth as the locked scenes and finish the full resolution and aftermath in {last_marker}. Do not add "
+            + "characters outside the validated CAST. Return only the "
+            + f"{remaining} scene blocks, each starting with its [[SCENE_NN]] marker."
+        )
+        return revision_user, locked_blocks
 
     @staticmethod
     def _story_expansion_user(draft: str, *, base_user: str = "") -> str:
@@ -2707,6 +2794,7 @@ class QwenDirector(
         top_p: float,
         source_character_names: list[str],
         story_blueprint: str | None = None,
+        locked_prefix: str = "",
     ) -> tuple[str, bool]:
         """Write one complete story completion in non-thinking mode from the causal blueprint.
 
@@ -2748,12 +2836,18 @@ class QwenDirector(
         raw, original = self._author_write_part(story_system, story_user, **part_kwargs)
         self._last_story_raw_output = original
 
+        locked_text = str(locked_prefix or "").strip()
+        if locked_text:
+            self._last_story_raw_output = locked_text + "\n\n" + str(original or "")
         raw = self._strip_story_markdown_emphasis(raw)
         raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
         if cleanup_reason:
             self._last_story_cleanup_events.append(cleanup_reason)
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
+        if locked_text and not re.search(r"(?im)^[ \t]*\[\[SCENE_01\]\]", str(raw or "")):
+            # Continuation revision: re-attach the approved first half verbatim (no model call).
+            raw = locked_text + "\n\n" + str(raw or "").lstrip()
         self._last_story_draft = str(raw or "")
         try:
             raw = self._coerce_story_to_scene_paragraphs(raw)
@@ -5415,7 +5509,10 @@ class QwenDirector(
             missing_ids = set(ids) - seen
             if missing_ids:
                 _record("omitted_source_dialogue_restored", f"scene={scene} ids={','.join(sorted(missing_ids))}")
-            if len(ids) > 1:
+            final_assignments = {
+                did: slot for slot, slot_ids in enumerate(assigned) for did in slot_ids
+            }
+            if len(ids) > 1 and final_assignments != current_assignments:
                 _record("source_dialogue_rebalanced", f"scene={scene} lines={len(ids)} shots={len(scene_shots)} exactly_once=true")
         return out
 
