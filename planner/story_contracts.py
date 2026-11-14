@@ -1087,11 +1087,14 @@ def audit_story_against_blueprint(
         if value and not _has_plot_anchor(value, prose, minimum):
             errors.append(f"story prose does not visibly realize Architect field {field_name}")
 
-    # Named programs, facilities and institutions must originate in source or Architect plan.
+    # Named programs, facilities and institutions must originate in the source or the Architect plan. "The plan"
+    # is the whole plan: a prop the Architect declared in KEY_OBJECTS, or named in a beat or the setup/payoff
+    # map, is seeded even though it is not listed under NAMED_ENTITIES.
+    plan_text = " ".join([allowed_text, *(str(v) for v in fields.values()), *(str(v) for v in beats.values())]).casefold()
     for regex in (PROJECT_ENTITY_RE, NAMED_FACILITY_RE):
         for match in regex.finditer(str(story or "")):
             entity = re.sub(r"\s+", " ", match.group(0)).strip()
-            if entity.casefold() not in allowed_text:
+            if entity.casefold() not in plan_text:
                 errors.append(f"unseeded named project/facility/organization: {entity}")
 
     # Kinship labels and personal relationship types must be grounded in source or RELATIONSHIPS.
