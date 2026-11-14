@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.5.0"
+CONTRACTS_REVISION = "2026-11-14.5.1"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -272,18 +272,33 @@ _LOCATION_GENERIC_WORDS = {
     "abandoned", "research", "station",
 }
 
+# Physical-PASSAGE verbs. Opening/unlocking/bypassing/breaching a door is only an access action: it must be
+# followed by an actual crossing in the same clause. Discovery/search verbs (explore, find, locate, discover,
+# search, investigate, approach, follow) are deliberately NOT movement: finding a vault is not entering it.
+# Verbs that are ambiguous without a direction (proceed, venture, rush, ...) require a directional preposition.
 _SCENE_LOCAL_MOVE_RE = re.compile(
-    r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|move\s+through|"
-    r"navigat\w*|reach\w*|transport\w*|escort\w*|transfer\w*|"
-    r"descend\w*|climb\w*|open\w*|unlock\w*|bypass\w*|breach\w*|leave\w*|exit\w*|"
-    r"depart\w*|return\w*|travel\w*|walk\w*|run\w*|flee\w*|escape\w*|emerge\w*|"
-    r"evacuate\w*|withdraw\w*|head\s+(?:to|for|toward)|make\s+their\s+way|"
-    r"take\s+shelter|seek\s+shelter|retreat\w*|duck\s+inside|shelter\w*\s+inside)\b", re.I,
+    r"\b(?:enter\w*|go(?:es|ing)?\s+inside|step(?:s|ped|ping)?\s+inside|cross\w*|pass(?:es|ed|ing)?\s+through|"
+    r"mov(?:e|es|ed|ing)\s+through|navigat\w*|reach\w*|transport\w*|escort\w*|transfer\w*|"
+    r"descend\w*|climb\w*|leave|leaves|leaving|left|exit\w*|"
+    r"depart\w*|return\w*|travel\w*|walk\w*|run\w*|runs|ran|flee\w*|fled|escape\w*|emerge\w*|"
+    r"evacuate\w*|withdraw\w*|withdrew|"
+    r"tak(?:e|es|ing)\s+shelter|took\s+shelter|seek(?:s|ing)?\s+shelter|sought\s+shelter|"
+    r"retreat\w*|duck(?:s|ed|ing)?\s+inside|shelter\w*\s+inside|"
+    r"arriv\w*\s+(?:at|in|inside|to)|"
+    r"(?:proceed\w*|venture\w*|crawl\w*|slip\w*|sneak\w*|stumbl\w*|rush\w*|dash\w*)\s+"
+    r"(?:to|into|inside|through|down|up|toward|towards|past|across)|"
+    r"head(?:s|ed|ing)?\s+(?:to|for|toward|towards|down|up|into|out)|"
+    r"go(?:es|ing)?\s+(?:to|into|down|up|through)|went\s+(?:to|into|inside|down|up|through)|"
+    r"(?:make|makes|made|making)\s+(?:her|his|their)\s+way)\b", re.I,
+)
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;!?]+|,|\b(?:while|as|but|and|then|before|after|when|although|though|whereas|yet|so)\b", re.I,
 )
 _SCENE_LOCAL_ACCESS_RE = re.compile(
-    r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|"
+    r"\b(?:enter\w*|go(?:es|ing)?\s+inside|step(?:s|ped|ping)?\s+inside|cross\w*|pass(?:es|ed|ing)?\s+through|"
     r"open\w*|unlock\w*|bypass\w*|breach\w*|descend\w*|climb\w*|"
-    r"take\s+shelter|seek\s+shelter|retreat\w*|duck\s+inside|shelter\w*\s+inside)\b", re.I,
+    r"tak(?:e|es|ing)\s+shelter|took\s+shelter|seek(?:s|ing)?\s+shelter|sought\s+shelter|"
+    r"retreat\w*|duck(?:s|ed|ing)?\s+inside|shelter\w*\s+inside)\b", re.I,
 )
 
 
@@ -346,6 +361,30 @@ def _cause_event_is_anchored(cause: str, event: str, cast: list[dict[str, Any]])
     return bool(cause_norm & event_norm)
 
 
+_INVARIANT_PLURALS = {"species", "series", "news", "means", "crossroads", "headquarters", "analysis", "basis", "axis"}
+
+
+def _plural_variants(tokens: set[str]) -> set[str]:
+    """Every token plus its conservative singular form (levels->level, archives->archive, laboratories->laboratory).
+
+    Invariant plurals (species, series) and words ending in ss/us/is (glass, process, status) are left alone.
+    """
+    variants: set[str] = set()
+    for token in tokens:
+        variants.add(token)
+        if token in _INVARIANT_PLURALS or len(token) <= 3:
+            continue
+        if token.endswith(("ss", "us", "is")):
+            continue
+        if token.endswith("ies") and len(token) > 4:
+            variants.add(token[:-3] + "y")
+        elif token.endswith(("sses", "xes", "zes", "ches", "shes")):
+            variants.add(token[:-2])
+        elif token.endswith("s"):
+            variants.add(token[:-1])
+    return variants
+
+
 def _scene_local_transition_is_explained(
     entry_location: str,
     exit_location: str,
@@ -358,26 +397,35 @@ def _scene_local_transition_is_explained(
         return True
     if _is_nested_station_location(old, new):
         return True
-    event_text = str(event or "")
-    # Movement by an object/weather system is not proof that the visible cast moved.
-    has_named_mover = any(
-        re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", event_text, re.I)
-        for item in cast
-        for surface in _name_surfaces(item.get("name", ""), item.get("aliases", []))
-    )
-    if not has_named_mover or not _SCENE_LOCAL_MOVE_RE.search(event_text):
-        return False
-    # A movement verb alone is not enough: the event must anchor the declared
-    # destination; otherwise an unrelated action can accidentally justify a jump.
-    destination_tokens = _location_tokens(exit_location)
-    event_tokens = content_tokens(event_text)
-    if destination_tokens and not (destination_tokens & event_tokens):
-        return False
+    # Title abbreviations ("Dr. Hale") must not be mistaken for sentence ends.
+    event_text = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|St|Col|Gen|Capt|Lt|Sgt|Cmdr)\.", r"\1", str(event or ""))
+    destination_tokens = _plural_variants(_location_tokens(exit_location))
     target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I))
     source_is_outside = bool(re.search(r"\b(?:tundra|exterior|outside|entrance)\b", old, re.I))
-    if target_is_interior and source_is_outside and not _SCENE_LOCAL_ACCESS_RE.search(event_text):
-        return False
-    return True
+
+    def _has_named_mover(text: str) -> bool:
+        # Movement by an object/weather system is not proof that the visible cast moved.
+        return any(
+            re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", text, re.I)
+            for item in cast
+            for surface in _name_surfaces(item.get("name", ""), item.get("aliases", []))
+        )
+
+    # A passage verb and the destination must appear in the SAME clause ("descends to the lower level"),
+    # inside a sentence that names a canonical cast member. Opening a door, or a monitor displaying a room
+    # elsewhere in the sentence, does not count as reaching the destination.
+    for sentence in re.split(r"(?<=[.!?])\s+", event_text):
+        if not _has_named_mover(sentence):
+            continue
+        for clause in _CLAUSE_SPLIT_RE.split(sentence):
+            if not clause or not _SCENE_LOCAL_MOVE_RE.search(clause):
+                continue
+            if destination_tokens and not (_plural_variants(content_tokens(clause)) & destination_tokens):
+                continue
+            if target_is_interior and source_is_outside and not _SCENE_LOCAL_ACCESS_RE.search(clause):
+                continue
+            return True
+    return False
 
 
 def _fields_and_beats(blueprint: str) -> tuple[dict[str, str], dict[int, str], str]:
