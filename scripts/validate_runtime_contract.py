@@ -534,31 +534,27 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
     director_path = ROOT / "planner/qwen_director.py"
     director_source = director_path.read_text(encoding="utf-8")
     tree = ast.parse(director_source, filename=str(director_path))
-    author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once_impl"), None)
-    if author is None:
-        author = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_generate_story_once"), None)
-    if author is None:
-        raise RuntimeError("Single-pass story author method is missing.")
-    author_calls = [
-        node for node in ast.walk(author)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_chat_text"
-    ]
-    if len(author_calls) != 1:
-        raise RuntimeError(f"Story author must make exactly one _chat_text call; found {len(author_calls)}.")
-    # Deterministic text normalization/auditing may iterate over scenes and sentences.
-    # The invariant is that no model request occurs inside a loop (which would be a retry/repair).
-    model_request_names = {"_chat_text", "_chat_json", "_post_chat", "_generate_story_once"}
-    for loop in (node for node in ast.walk(author) if isinstance(node, (ast.For, ast.While))):
-        loop_model_calls = [
-            node for node in ast.walk(loop)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr in model_request_names
-        ]
-        if loop_model_calls:
-            raise RuntimeError("Story author must not loop to retry or repair a model request.")
+    def _method(name: str):
+        return next((n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name), None)
+
+    author = _method("_generate_story_once_impl")
+    part = _method("_author_write_part")
+    if author is None or part is None:
+        raise RuntimeError("Story author methods are missing.")
+
+    def _attr_calls(node, names):
+        return [n for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in names]
+
+    if len(_attr_calls(part, {"_chat_text"})) != 1 or _attr_calls(author, {"_chat_text"}):
+        raise RuntimeError("Only _author_write_part may issue the Author model request, exactly once.")
+    if len(_attr_calls(author, {"_author_write_part"})) != 1:
+        raise RuntimeError("The Story Author draft must make exactly one model request.")
+    # No model request may sit inside a loop (that would be a hidden retry or repair).
+    model_request_names = {"_chat_text", "_chat_json", "_post_chat", "_generate_story_once", "_author_write_part"}
+    for fn in (author, part):
+        for loop in (n for n in ast.walk(fn) if isinstance(n, (ast.For, ast.While))):
+            if _attr_calls(loop, model_request_names):
+                raise RuntimeError("Story author must not loop to retry or repair a model request.")
 
     runtime_path = ROOT / "planner/qwen_director_runtime.py"
     runtime_source = runtime_path.read_text(encoding="utf-8")
@@ -578,7 +574,7 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
         raise RuntimeError(f"One model completion must issue exactly one HTTP POST; found {len(requests)}.")
     if "sampling_extra_fallback" in runtime_source:
         raise RuntimeError("Qwen runtime still retries with weakened sampling parameters.")
-    print("PASS single-pass story contract: 1,400-word floor, 12x3 topology, 3,000-token Author, one HTTP request")
+    print("PASS story author contract: 1,400-word floor, 12x3 topology, 3,000-token Author parts, one HTTP request each")
 
 
 def _validate_bootstrap_upgrade_source() -> None:
