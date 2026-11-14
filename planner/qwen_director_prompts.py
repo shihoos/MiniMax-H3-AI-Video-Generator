@@ -287,7 +287,6 @@ class QwenDirectorPromptMixin:
         n = int(DIRECTOR_STORY_SCENES)
         # Render the active runtime contract; keep guidance and diagnostics configuration-driven.
         per = int(STORY_WORDS_PER_SCENE)
-        stretch = int(n * STORY_WRITER_WORDS_PER_SCENE)
         shot_seconds = float(H3_FRAMES_PER_SHOT) / float(H3_FPS)
         seconds = n * int(DIRECTOR_SHOTS_PER_SCENE) * shot_seconds
         line_words = max(6, int((shot_seconds - 1.0) * 2.2))
@@ -295,7 +294,6 @@ class QwenDirectorPromptMixin:
             text.replace("__N__", str(n))
             .replace("__PER__", str(per))
             .replace("__TOTAL__", str(STORY_TARGET_WORDS))
-            .replace("__STRETCH__", str(stretch))
             .replace("__MINW__", str(STORY_MIN_WORDS))
             .replace("__MINUTES__", f"{seconds / 60:.1f}")
             .replace("__SHOT_SECONDS__", f"{shot_seconds:.1f}")
@@ -306,10 +304,9 @@ class QwenDirectorPromptMixin:
         """One-pass screenwriting contract: cinematic prose, flexible scene rhythm, and 1,400-word floor."""
         n = int(DIRECTOR_STORY_SCENES)
         minimum = int(STORY_MIN_WORDS)
-        # Use the explicit story target. The prior max(writer_words_per_scene, words_per_scene)
-        # promoted a stale 190-word stretch value into a 2,280-word quota despite target_words=1,560.
-        # 1,560 words is a realistic drafting target under the 3,000-token Author ceiling; 1,400 remains
-        # the hard acceptance floor. Keep the runtime YAML writer value aligned for diagnostics/revisions.
+        # The overall drafting target is explicit and remains 1,560 words. writer_words_per_scene is
+        # a per-scene soft maximum (190), not an average and not a 12-scene aggregate quota. The
+        # 1,400-word value remains the hard acceptance floor under the bounded 3,000-token Author call.
         target = int(STORY_TARGET_WORDS)
         # One explicit allocation schedule replaces overlapping per-scene word-count prose; it sums to target.
         base_schedule = [120, 125, 125, 130, 130, 130, 130, 130, 135, 135, 135, 135]
@@ -328,7 +325,7 @@ class QwenDirectorPromptMixin:
         scene_allocation = "; ".join(
             f"SCENE {index + 1:02d}: {words} words" for index, words in enumerate(allocations)
         )
-        scene_cap = (target // n) * 5 // 4
+        scene_cap = int(STORY_WRITER_WORDS_PER_SCENE)
         if mode == AI_STORY_MODE:
             source_rule = (
                 "Create a genuinely original short film from the supplied premise. Preserve its defining anchors, "
@@ -358,8 +355,10 @@ class QwenDirectorPromptMixin:
             lengths: (1) establish the immediate objective and pressure through action; (2) dramatize resistance and a
             discovery or complication; (3) show the decision, its cost, and the changed situation that hands off to the
             next scene. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
-            not a fragment. Aim for the per-scene allocation above; the soft scene cap is {scene_cap} words. The output
-            budget is designed for the {target}-word total, and Scene {n:02d} must reach its actual resolution. Reach the quota with
+            not a fragment. Aim for roughly 120-140 words per scene on average, following the allocation above; the
+            per-scene soft maximum is {scene_cap} words, reserved for scenes that need fuller action or aftermath.
+            Do not treat that maximum as a quota for every scene. The output budget is designed for the {target}-word
+            total, and Scene {n:02d} must reach its actual resolution. Reach the quota with
             consequential action, dialogue, evidence and aftermath, not filler, repeated description, or extra twists.
             Scenes 08-12 receive the same causal and dramatic care as scenes 01-04; do not compress the final third.
             Do not add a title, synopsis, cast list, word count, or postscript. Follow the presence ledger exactly:
@@ -1144,14 +1143,16 @@ class QwenDirectorPromptMixin:
             )
         writer_total = int(STORY_TARGET_WORDS)
         per_scene = writer_total // DIRECTOR_STORY_SCENES
-        scene_cap = (per_scene * 5) // 4
+        scene_cap = int(STORY_WRITER_WORDS_PER_SCENE)
         result += (
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
             f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Target about {writer_total} words overall "
             f"(roughly {per_scene} per scene); {STORY_MIN_WORDS} is only the rejection floor, not the target. "
             "Use three distinct dramatic movements per scene—objective/action, resistance/discovery, then decision/cost—"
-            f"usually in 2-3 paragraphs with natural sentence lengths. Aim for roughly 120-140 words per scene, "
-            f"with a soft scene cap of {scene_cap} words; vary scene lengths when the action needs it. "
+            f"usually in 2-3 paragraphs with natural sentence lengths. Aim for roughly 120-140 words per scene "
+            f"on average, with a soft maximum of {scene_cap} words for an individual scene; use the extra room "
+            "only when the scene needs fuller action, character interaction, or aftermath. Vary scene lengths "
+            "when the action needs it. "
             "Do not force equal paragraph or sentence counts. Give scenes 08-12 the same causal depth as scenes 01-04 "
             "and finish the full action and aftermath of Scene 12 before ending. Reach the length with consequential "
             "action, evidence, character decisions, and visible outcomes—not filler, repeated description, or extra twists."
