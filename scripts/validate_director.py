@@ -1461,6 +1461,23 @@ def test_architect_and_author_get_only_informed_hard_gate_revisions():
         _assert("REVISION:" in users[1][0] and "NEXT_CAUSE" in users[1][0],
                 "the Architect revision must be informed by the exact failed handoff contract")
 
+        presence_feedback = QwenDirector._revision_feedback(
+            [
+                "scene 08 mid-scene entry for 'Marcus Hale' has no character-specific EVENT anchor",
+                "scene 08 mid-scene exit for 'Marcus Hale' has no character-specific EVENT anchor",
+            ],
+            "story plan",
+        )
+        _assert(
+            "Marcus Hale" in presence_feedback
+            and "Scene 07 exit_present" in presence_feedback
+            and "this scene's exit_present" in presence_feedback
+            and "BOTH arrival and later departure" in presence_feedback
+            and "Do not invent an ENTRY_PRESENT JSON field" in presence_feedback
+            and "Do not remove a valid CAST member" in presence_feedback,
+            "mid-scene presence rejection must produce character-specific boundary reconciliation instructions",
+        )
+
         still_rejected, users = architect([json.dumps(broken), json.dumps(broken)])
         _assert(isinstance(still_rejected, RuntimeError) and len(users) == 2,
                 "a second rejected plan must fail closed without a third Architect call")
