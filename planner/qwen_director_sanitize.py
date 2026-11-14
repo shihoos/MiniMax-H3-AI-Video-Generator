@@ -1658,7 +1658,8 @@ class QwenDirectorSanitizeMixin:
             )
 
         # A minimum length is a hard lower acceptance boundary, not an exact target.
-        # It must not cause trimming or padding; a short draft fails the single-pass run.
+        # It must not cause trimming or padding; a short draft fails this attempt and may receive
+        # the one configured conditional Author revision from the outer wrapper.
         word_count = len(re.findall(r"\b[\w'’-]+\b", str(result or "")))
         minimum_words = int(getattr(self, "_story_min_words", STORY_ACCEPT_MIN_WORDS))
         if word_count < minimum_words:
@@ -1680,7 +1681,7 @@ class QwenDirectorSanitizeMixin:
                 )
 
         # A phrase list cannot tell a sequel hook from a resolved ending that mentions the future, and the pipeline
-        # makes one Author call, so this is reported as a warning. The Author prompt and the Architect's RESOLUTION
+        # treats this as advisory, including across any hard-gate revision. The Author prompt and Architect RESOLUTION
         # field are what drive a completed ending.
         if self._story_has_open_ended_finale(result):
             warnings = list(getattr(self, "_last_story_quality_warnings", []) or [])
