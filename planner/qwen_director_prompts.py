@@ -306,9 +306,11 @@ class QwenDirectorPromptMixin:
         """One-pass screenwriting contract: cinematic prose, flexible scene rhythm, and 1,400-word floor."""
         n = int(DIRECTOR_STORY_SCENES)
         minimum = int(STORY_MIN_WORDS)
-        # The model is asked for the writer budget, above the acceptance floor: a non-thinking writer given a
-        # target equal to the floor lands below it, so the floor is stated as a rejection line, not a goal.
-        target = int(n * max(STORY_WRITER_WORDS_PER_SCENE, STORY_WORDS_PER_SCENE))
+        # Use the explicit story target. The prior max(writer_words_per_scene, words_per_scene)
+        # promoted a stale 190-word stretch value into a 2,280-word quota despite target_words=1,560.
+        # 1,560 words is a realistic drafting target under the 3,000-token Author ceiling; 1,400 remains
+        # the hard acceptance floor. Keep the runtime YAML writer value aligned for diagnostics/revisions.
+        target = int(STORY_TARGET_WORDS)
         # One explicit allocation schedule replaces overlapping per-scene word-count prose; it sums to target.
         base_schedule = [120, 125, 125, 130, 130, 130, 130, 130, 135, 135, 135, 135]
         if n == len(base_schedule):
@@ -336,11 +338,12 @@ class QwenDirectorPromptMixin:
             )
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
-                "Expand the supplied story into a complete, coherent short film while preserving its established "
-                "characters, identities, setting, chronology, defining events, twists, and outcome. Add only plot "
-                "development that grows from those facts. Do not inflate a one-person premise by automatically adding "
-                "an ally, rival, and fourth character; introduce only people whose decisions are necessary to this plot. "
-                "Do not add an off-screen relative, clone, ancestor, or other unseen person as a surprise explanation."
+                "Expand the supplied story into a complete, coherent short film while preserving every source "
+                "character's identity, defining event, setting, chronology, twist mechanism, and outcome. The Architect's "
+                "approved cast may include new premise-grounded people whose independent decisions make the source plot "
+                "dramatically complete; honor those approved characters rather than treating the source cast size as a "
+                "limit. Do not invent any additional people beyond the Architect's cast or add unrelated subplots, "
+                "surprise relatives, clones, or unseen ancestors."
             )
         else:
             source_rule = "Preserve all supplied story facts and do not invent a different outcome."
@@ -351,18 +354,22 @@ class QwenDirectorPromptMixin:
 
             STORY LENGTH: produce exactly {n} scene blocks. Write about {target} words in total; this is a drafting
             quota, and {minimum} is only the rejection floor. Per-scene quota (sums to {target}): {scene_allocation}.
-            Every scene is a fully dramatized sequence of THREE paragraphs of three sentences each (about 60 words per paragraph), one short paragraph per beat of the scene's EVENT:
-            (1) establish the place, the pressure and the character's immediate objective through concrete action and
-            perception; (2) play out the resistance, with specific dialogue or physical struggle and at least one
-            discovery or complication; (3) show the decision, its cost, and the changed situation, and end on the
-            hand-off into the next scene. A scene of one or two short paragraphs is unfinished. Hold every scene to its quota: no scene may run past {scene_cap} words, because the output space is only slightly larger than the {target}-word quota and a story that has not finished Scene {n:02d} when it ends is rejected. Reach the quota with
+            Every scene must contain three distinct dramatic movements, usually in 2-3 paragraphs with natural sentence
+            lengths: (1) establish the immediate objective and pressure through action; (2) dramatize resistance and a
+            discovery or complication; (3) show the decision, its cost, and the changed situation that hands off to the
+            next scene. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
+            not a fragment. Aim for the per-scene allocation above; the soft scene cap is {scene_cap} words. The output
+            budget is designed for the {target}-word total, and Scene {n:02d} must reach its actual resolution. Reach the quota with
             consequential action, dialogue, evidence and aftermath, not filler, repeated description, or extra twists.
-            Scenes 08-12 get exactly the same depth as scenes 01-04; never summarize or compress the final third. Do not
-            add a title, synopsis, cast list, word count, or postscript. For every scene, physically introduce a
-            character who is absent from the opening boundary before they act; explicitly show a character's exit before
-            treating them as absent from the ending boundary. If a person enters and leaves within one scene, dramatize
-            both actions in that scene. Do not make a person appear or vanish solely because the outline's presence
-            list says so.
+            Scenes 08-12 receive the same causal and dramatic care as scenes 01-04; do not compress the final third.
+            Do not add a title, synopsis, cast list, word count, or postscript. Follow the presence ledger exactly:
+            a scene begins with the previous scene's EXIT_PRESENT. Do NOT invent an entrance in every scene. If a
+            character is already present at the scene boundary, continue their presence without reintroducing them.
+            Only when ON_SCREEN_PRESENT includes someone absent from ENTRY_PRESENT must EVENT explicitly show that
+            named character physically entering/joining. Only when ON_SCREEN_PRESENT includes someone absent from
+            EXIT_PRESENT must EVENT explicitly show that named character physically leaving/withdrawing. If absent
+            from both boundaries but visible mid-scene, show both actions in that scene. Remote voices, recordings,
+            screens, and discussed people are not physical entrances or visible cast members.
 
             DRAMATIC EXECUTION: make the protagonist's immediate objective and pressure understandable early. The opposition
             must have an intelligible goal and a credible method, not merely be evil or obstructive. Give major characters
@@ -401,16 +408,21 @@ class QwenDirectorPromptMixin:
             a role, not in a name. Preserve distinct cast identities: do not collapse two people with different goals into
             one generic colleague, operator, or system voice. A person speaking remotely is not physically present in the
             scene; distinguish a live remote transmission from a person standing in the location. A sentient AI/system may
-            speak and make decisions as an active character, but never depict it as a human. If the Architect assigns it a
-            visible nonhuman body, projected avatar, or holographic figure in a scene, show that actual manifestation there;
-            do not substitute a text-only interface or voice. If no visible form is specified, keep it audio/interface-only
-            and do not imply physical presence. A recording, written message, or ordinary user interface is not a person.
+            speak and make decisions as an active narrative agent, but never depict it as a human. A voice-only AI remains
+            off-screen and is not a visible cast member. If the Architect assigns it a visible nonhuman body, projected
+            avatar, or holographic figure in a scene, show that actual manifestation there; do not substitute a text-only
+            interface or voice. If no visible form is specified, keep it audio/interface-only and do not imply physical
+            presence. A recording, written message, or ordinary user interface is not a person. Every character listed as
+            visibly present in a scene must perform a scene-specific action or show a visible, consequential reaction; if
+            they do not participate, the scene's physical presence list is wrong.
             Use only relationships listed in the Architect's RELATIONSHIPS field or stated in the source.
             Use only named projects, facilities, institutions, protocols, and organizations listed in NAMED_ENTITIES or
             stated in the source. Do not create a new named person, title-based identity, alias, relative, company, station,
             lab, project, or protocol. Track the per-scene ENTRY/EXIT locations, present people, knowledge, object custody,
             and state exactly as declared in the corresponding beat. Keep all state transitions causal and visible. Injuries,
             access restrictions, damage, death, and irreversible actions persist unless a plausible transition explains a change.
+            If the approved plan contains a countdown or timestamp, preserve its exact units and arithmetic across every
+            scene; do not add a second timer, silently reset it, or jump to zero without the elapsed time being shown.
 
             DIALOGUE: use dialogue only when it reveals character, changes a decision, shifts leverage, or exposes conflict.
             Attribute every spoken line to its actual speaker. Keep spoken lines concise enough for a single shot (normally
@@ -460,34 +472,47 @@ class QwenDirectorPromptMixin:
             )
             cast_design_rule = (
                 "CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story merely because the premise "
-                "introduces one protagonist or uses an isolated setting. Before fixing the outline, deliberately compare "
-                "whether the strongest version needs 1, 2, 3, 4, 5, or more active characters; these are possibilities to "
-                "evaluate, NOT a minimum, maximum, or target. Look for premise-grounded people with independent goals: "
-                "a colleague with conflicting evidence, a field partner with a different risk threshold, an authority who "
-                "controls access/resources, a witness who changes what can be proved, a rescuer/operator whose decision "
-                "changes the available plan, or an opposing person with their own strategy. Choose each only when that "
-                "person makes a consequential decision or action that changes the protagonist's options, leverage, "
-                "knowledge, relationships, or cost, and is actually dramatized in at least one present-time scene. Give "
-                "each included person a distinct want, pressure, tactic, and consequence; do not merge distinct human "
-                "decision-makers into a generic institution/system voice for convenience. An abandoned or remote setting "
-                "does not automatically mean nobody else can act: consider credible on-site survivors, arrivals, or live "
-                "counterparts when the premise supports them. Conversely, keep a small cast when isolation is itself the "
-                "strongest premise-specific engine. Never add filler, token roles, or characters who only appear in a "
-                "memory, label, recording, or exposition. Qwen chooses the cast organically; there is no numeric quota."
+                "introduces one protagonist or uses an isolated setting. For a 12-scene short film, actively test a "
+                "3-5 person active ensemble as the first strong design candidate, then compare it against 1, 2, 6, or "
+                "more. This 3-5 range is a design comparison, NOT a minimum, maximum, or quota: choose fewer when "
+                "isolation is the premise-specific engine, and choose more only when every added person changes the plot. "
+                "Look for premise-grounded people with independent goals: a colleague with conflicting evidence, a field "
+                "partner with a different risk threshold, an authority who controls access/resources, a witness whose "
+                "decision changes what can be proved, a rescuer/operator who changes the available plan, or an opposing "
+                "person with their own strategy. Do not use an off-screen voice or disembodied AI to substitute for a "
+                "human decision-maker when the premise supports a physically dramatized person. Choose each added person "
+                "only when they make a consequential decision that changes options, leverage, knowledge, relationships, "
+                "or cost. Give every core person a distinct want, pressure, tactic, and consequence; recurring core "
+                "characters should materially affect at least two separate scenes unless one decisive action has a major "
+                "irreversible payoff. Do not merge distinct human decision-makers into a generic institution/system "
+                "voice. An abandoned or remote setting does not mean nobody else can act: consider credible on-site "
+                "survivors, arrivals, field counterparts, operators, or opposing agents when the premise supports them. "
+                "Never add filler, token roles, or characters who exist only in memories, labels, recordings, or exposition. "
+                "Qwen makes the final plot-driven cast decision; no numeric quota is imposed."
             )
-        else:
+        elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
-                "Expand the user's story. Preserve every established source character's identity and role, and retain "
-                "the source's core setting, chronology, defining events, twists, and outcome. Do not automatically add "
-                "three people to a one-person premise. Add a character only when that person is needed to cause or "
-                "complicate a consequential event. Do not make up an off-screen relative or unseen person as a twist."
+                "Expand the user's story while preserving every established source character's identity and role, "
+                "the core setting, chronology, defining events, twists, and outcome. The source's original cast size "
+                "is not a limit. Add premise-grounded people when distinct causal roles are missing and their decisions "
+                "materially affect the established plot; do not change the source's defining outcome."
             )
             cast_design_rule = (
-                "CAST DESIGN / SOURCE FIDELITY: preserve every active source character; do not omit a person who "
-                "makes a present-time decision, changes the protagonist's plan, or participates in a consequential "
-                "relationship. Do not inflate the source with filler. If the source leaves a genuine causal role "
-                "unassigned, add a person only when the role is necessary and can be dramatized consistently with "
-                "the established story."
+                "CAST DESIGN / EXPANSION ENSEMBLE: preserve every active source character. Actively test whether a "
+                "3-5 person active ensemble makes this 12-scene film stronger, while comparing 1, 2, 6, or more; "
+                "3-5 is a design comparison band, not a quota or cap. A sparse source premise may gain a field partner, "
+                "rival, local survivor, authority/operator, witness, or rescuer only when that person has an independent "
+                "want, pressure, tactic, and a consequential decision that changes the plot. Do not create a role merely "
+                "to reach a number. Keep 1-2 when isolation is the strongest engine; allow 6+ only for genuinely distinct "
+                "decision-makers. Preserve the source's identities and outcome; new characters must grow from the source "
+                "setting and events, not from unrelated subplots or surprise relatives. Give recurring added characters "
+                "meaningful actions in multiple scenes unless one decisive action has a major irreversible payoff."
+            )
+        else:
+            source_rule = "Preserve all supplied story facts and do not invent a different outcome."
+            cast_design_rule = (
+                "CAST DESIGN / SOURCE FIDELITY: preserve the supplied story's actual active characters and do not "
+                "invent new people or a new outcome in Preserve mode."
             )
 
         prompt = textwrap.dedent(f"""\
@@ -577,6 +602,21 @@ class QwenDirectorPromptMixin:
                 detail. The payoff must name or unmistakably restage the planted evidence; silent recurrence or mere topic
                 similarity is not enough. If the map cannot point to a concrete earlier beat, the payoff is unearned.
 
+            OPPOSITION VARIETY: do not turn the film into a repeated puzzle/trap treadmill. When an AI, institution,
+            or agent opposes the protagonist, no more than two consecutive beats may simply activate another lock,
+            code, force field, alarm, or countdown. Give the opposition distinct tactics that close different options
+            and force different responses (e.g. withholding evidence, manipulating a relationship, changing access,
+            bargaining, pursuing, exposing a cost, or physically intervening). Each tactic must be causally grounded.
+            When the opposition is environmental, vary the physical consequences rather than repeating generic damage.
+            CLOCK AND TIMELINE INTEGRITY: do not invent a countdown merely to manufacture urgency. If a clock is
+            genuinely premise-dependent, establish its initial value, units, exact decrement triggers, and elapsed
+            time; keep every later timestamp arithmetically consistent and record the timeline in CONTINUITY_LEDGER.
+            Do not jump from a near-full timer to zero without enough elapsed time, and do not mix unrelated timers.
+            FAMILY/LOCATION SHORTCUTS: do not invent a dead parent, secret relative, inherited blueprint, or family
+            artifact merely to supply a puzzle key or emotional motive unless the source supports it. Do not keep all
+            twelve scenes in one room by default: use purposeful locations when they change access, risk, leverage, or
+            available action, and explicitly show every physical route between scene boundaries.
+
             SCENE ARCHITECTURE: create exactly {n} linked beats. Use the broad dramatic movement flexibly: opening
             pressure and commitment; complications and a meaningful change in understanding; consequences and a
             narrowing set of choices; final approach and climax; aftermath. Do not assign the same fixed function to
@@ -584,9 +624,22 @@ class QwenDirectorPromptMixin:
             Give scenes different dramatic textures (e.g. discovery, negotiation, pursuit, failure, confrontation,
             quiet decision, physical problem-solving) rather than repeating one obstacle or interruption.
 
-            CAST FORMAT: output one CAST line first. Include only core people/creatures whose decisions matter to the plot and
-            whose presence is actually dramatized. Cast size is fully plot-driven with no fixed minimum, maximum, or target;
-            the ensemble decision above is mandatory, but no numeric cast quota is. Each entry must use this exact pattern:
+            DISTINCT-BEAT / STATE-CHANGE AUDIT: before returning the JSON, compare all twelve EVENTs as a sequence.
+            Each scene must contribute a new decision, discovery, reversal, loss, tactical move, or irreversible
+            consequence. Do not repeat a completed action as if it were still pending (for example, do not open a vault
+            in one scene and later make opening that same already-open vault the climax again). Once an object, door,
+            system, or relationship changes state, carry that state forward and make later actions operate on the new
+            state. A repeated attempt is allowed only when the first attempt visibly failed or the object was explicitly
+            reset/resealed. Give every recurring cast member a scene-specific action, choice, or visible, consequential
+            reaction in each scene where they are listed as on-screen; if they do not participate, remove them from that
+            scene's ON_SCREEN_PRESENT list and CAST scene list. The final three scenes must contain distinct climax,
+            immediate consequence, and resolution work—not three compressed repetitions of the same action.
+
+            CAST FORMAT: output one CAST line first. Include only core physical people/creatures whose decisions matter
+            and whose presence is actually dramatized. A voice-only system can be active opposition but is not physical
+            CAST unless a nonhuman embodiment is visibly present. Cast size remains plot-driven with no fixed minimum,
+            maximum, or target; compare the 3-5 person design band above without treating it as a quota. Each entry must
+            use this exact pattern:
             Full Name (kind: person|animal|embodied agent; role: specific role; wants: <specific outcome>; pressure: <fear, need, duty, mistake, or private conflict>; voice: <distinctive speech style>; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
             Every field uses the 'label: value' form shown (including 'wants:'), separated by semicolons, with no square brackets. Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
             Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. Do not exclude a real, story-active character merely because the premise begins with one protagonist. Every added person needs an independent want, pressure, consequential action/decision, and at least one scene in which that person is actually present. A remote-only voice or recording is not physically present and must not be placed in ON_SCREEN_PRESENT. A sentient AI/system belongs in physical CAST as kind 'embodied agent' only when it has an actual visible nonhuman embodiment (robot/body, projected avatar, or holographic figure) in at least one scene; list only scenes where that manifestation is genuinely visible. A control panel, text on a screen, disembodied voice, or ordinary user interface is not an embodied agent. Never label an AI or other nonhuman agent as a human PERSON. Put remote-only voices, institutions, objects, locations, weather, natural disasters, environmental hazards, failing infrastructure, and abstract opposing forces in OPPOSITION rather than physical CAST. Include aliases only when genuinely used in the story; never invent kinship or identity aliases.
@@ -718,8 +771,9 @@ class QwenDirectorPromptMixin:
         text = swap(
             r"CAST FORMAT: output one CAST line first\..*?(?=Keep honorifics such as)",
             "CAST: fill the `cast` array with core people/creatures whose decisions matter and whose presence is "
-            "actually dramatized. Cast size is plot-driven with no fixed minimum, maximum, or target; perform the "
-            "ensemble decision in the prompt rather than defaulting to one protagonist. Per entry give name, kind "
+            "actually dramatized. Cast size is plot-driven with no fixed minimum, maximum, or target; actively test a "
+            "3-5 person ensemble as a design comparison for this 12-scene short, not as a quota, and justify smaller or "
+            "larger casts by the premise. Per entry give name, kind "
             "(person, animal, or embodied agent), role, wants, pressure, voice, aliases, fate and death_scene. On-screen "
             "scenes are derived from each scene's on_screen_present list. A sentient AI/system belongs in physical cast "
             "only if it has an actual visible nonhuman body, robot, projected avatar, or holographic figure in a listed "
@@ -1088,17 +1142,19 @@ class QwenDirectorPromptMixin:
                 "location, presence, knowledge, and object state with the ledger. Follow the declared on-screen scene map "
                 "and cast fate rules."
             )
-        writer_total = int(DIRECTOR_STORY_SCENES * max(STORY_WRITER_WORDS_PER_SCENE, STORY_WORDS_PER_SCENE))
+        writer_total = int(STORY_TARGET_WORDS)
+        per_scene = writer_total // DIRECTOR_STORY_SCENES
+        scene_cap = (per_scene * 5) // 4
         result += (
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
-            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Write about {writer_total} words overall "
-            f"(about {writer_total // DIRECTOR_STORY_SCENES} per scene); {STORY_MIN_WORDS} is only the rejection floor. "
-            f"Build every scene as three paragraphs of three sentences each (about 60 words per paragraph, no scene over "
-            f"{(writer_total // DIRECTOR_STORY_SCENES) * 5 // 4} words, so that all {DIRECTOR_STORY_SCENES} scenes fit): establish the place and "
-            "objective through action, play out the resistance with dialogue or struggle, then show the decision, its "
-            "cost and the hand-off. Give scenes 08-12 the same depth as scenes 01-04 and finish the full action and "
-            "aftermath of Scene 12 before ending. Reach the length with consequential action, evidence and outcomes, "
-            "not filler or extra twists."
+            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Target about {writer_total} words overall "
+            f"(roughly {per_scene} per scene); {STORY_MIN_WORDS} is only the rejection floor, not the target. "
+            "Use three distinct dramatic movements per scene—objective/action, resistance/discovery, then decision/cost—"
+            f"usually in 2-3 paragraphs with natural sentence lengths. Aim for roughly 120-140 words per scene, "
+            f"with a soft scene cap of {scene_cap} words; vary scene lengths when the action needs it. "
+            "Do not force equal paragraph or sentence counts. Give scenes 08-12 the same causal depth as scenes 01-04 "
+            "and finish the full action and aftermath of Scene 12 before ending. Reach the length with consequential "
+            "action, evidence, character decisions, and visible outcomes—not filler, repeated description, or extra twists."
         )
         return result
 
