@@ -2593,6 +2593,35 @@ class QwenDirector(
             "Do not shorten any scene. Return only the scene blocks.\n\nDRAFT:\n" + blocks
         )
 
+    def _author_write_part(
+        self, system: str, user: str, *, mode: str, call_name: str, failure_prefix: str, budget: int,
+        min_tokens: int, temperature: float, top_p: float,
+    ) -> tuple[str, str]:
+        """One non-thinking Author request. Returns (usable text, text as generated)."""
+        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, StoryTruncated
+
+        try:
+            raw = self._chat_text(
+                system,
+                user,
+                minimum_completion=350,
+                minimum_output_tokens=min_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                call_name=call_name,
+                max_completion=budget,
+                disable_thinking=True,
+                seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
+                creative=True,
+            )
+        except StoryTruncated as exc:
+            original = str(exc.partial or "")
+            raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
+            if not raw:
+                raise RuntimeError(failure_prefix + str(exc)) from exc
+            return str(raw), original
+        return str(raw or ""), str(raw or "")
+
     def _generate_story_once_impl(
         self,
         mode: str,
@@ -2605,17 +2634,12 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Write the story once in non-thinking mode from the bounded causal blueprint.
+        """Write the story in non-thinking mode from the bounded causal blueprint.
 
-        Paragraph topology is normalized deterministically. Length and completion are
-        hard contracts; source-coverage heuristics stay advisory. This method never retries;
-        _run_author_with_one_revision owns the single permitted revision.
+        One Author call writes all scenes; the single permitted revision (owned by _run_author_with_one_revision)
+        is also one call. Paragraph topology is normalized deterministically. Length and completion are hard
+        contracts; source-coverage heuristics stay advisory. This method never retries.
         """
-        from planner.qwen_director_runtime import (
-            DIRECTOR_VLLM_SEED,
-            StoryTruncated,
-        )
-
         call_name = (
             "ai_story_text_pass"
             if mode == AI_STORY_MODE
@@ -2639,31 +2663,15 @@ class QwenDirector(
         print(
             f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
             f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
-            "single_pass=true retries=0 repairs=0",
+            f"single_pass=true retries=0 repairs=0",
             flush=True,
         )
-
-        try:
-            raw = self._chat_text(
-                story_system,
-                story_user,
-                minimum_completion=350,
-                minimum_output_tokens=story_min_output_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                call_name=call_name,
-                max_completion=story_budget,
-                disable_thinking=True,
-                seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
-                creative=True,
-            )
-        except StoryTruncated as exc:
-            self._last_story_raw_output = str(exc.partial or "")
-            raw = self._salvage_runaway_story(exc.partial) or self._trim_to_last_sentence(exc.partial)
-            if not raw:
-                raise RuntimeError(failure_prefix + str(exc)) from exc
-        else:
-            self._last_story_raw_output = str(raw or "")
+        part_kwargs = dict(
+            mode=mode, call_name=call_name, failure_prefix=failure_prefix, budget=story_budget,
+            min_tokens=story_min_output_tokens, temperature=temperature, top_p=top_p,
+        )
+        raw, original = self._author_write_part(story_system, story_user, **part_kwargs)
+        self._last_story_raw_output = original
 
         raw = self._strip_story_markdown_emphasis(raw)
         raw, cleanup_reason = self._strip_story_nonprose_tail(raw)
