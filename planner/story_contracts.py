@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.5.1"
+CONTRACTS_REVISION = "2026-11-14.5.2"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -289,7 +289,14 @@ _SCENE_LOCAL_MOVE_RE = re.compile(
     r"(?:to|into|inside|through|down|up|toward|towards|past|across)|"
     r"head(?:s|ed|ing)?\s+(?:to|for|toward|towards|down|up|into|out)|"
     r"go(?:es|ing)?\s+(?:to|into|down|up|through)|went\s+(?:to|into|inside|down|up|through)|"
-    r"(?:make|makes|made|making)\s+(?:her|his|their)\s+way)\b", re.I,
+    r"(?:make|makes|made|making)\s+(?:her|his|their)\s+way|"
+    r"step(?:s|ped|ping)?\s+(?:into|out|through|onto)|"
+    r"(?:push|slid|slide|squeez|drop|lower|jump|leap|dive|dove)\w*\s+(?:through|into|down|past|across)|"
+    r"(?:make|makes|made|making)\s+it\s+(?:to|into|inside|through))\b", re.I,
+)
+_MOVE_STOP_RE = re.compile(
+    r"\b(?:carrying|carries|carried|holding|holds|bearing|clutching|dragging|pushing|pulling|with|for|about|"
+    r"using|while|after|before|because|since|until|which|that|where|whose)\b|[,;:]", re.I,
 )
 _CLAUSE_SPLIT_RE = re.compile(
     r"[.;!?]+|,|\b(?:while|as|but|and|then|before|after|when|although|though|whereas|yet|so)\b", re.I,
@@ -402,36 +409,55 @@ def _scene_local_transition_is_explained(
     destination_tokens = _plural_variants(_location_tokens(exit_location))
     target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I))
     source_is_outside = bool(re.search(r"\b(?:tundra|exterior|outside|entrance)\b", old, re.I))
-
-    def _has_named_mover(text: str) -> bool:
-        # Movement by an object/weather system is not proof that the visible cast moved.
-        return any(
-            re.search(r"(?<!\w)" + re.escape(surface) + r"(?!\w)", text, re.I)
-            for item in cast
+    surfaces = sorted(
+        {
+            surface for item in cast
             for surface in _name_surfaces(item.get("name", ""), item.get("aliases", []))
-        )
+            if surface
+        },
+        key=len, reverse=True,
+    )
+    surface_re = re.compile(r"(?<!\w)(?:" + "|".join(re.escape(x) for x in surfaces) + r")(?!\w)", re.I) if surfaces else None
+    pronoun_re = re.compile(r"\b(?:she|he|they|her|him|his|them|their)\b", re.I)
 
-    # A passage verb and the destination must appear in the SAME clause ("descends to the lower level"),
-    # inside a sentence that names a canonical cast member. Opening a door, or a monitor displaying a room
-    # elsewhere in the sentence, does not count as reaching the destination.
-    cast_named_earlier = False
+    # A passage needs (1) a canonical cast member as the one moving, (2) a passage verb, and (3) the destination
+    # inside THAT verb's own object phrase (the words after the verb up to the next stopper such as "carrying",
+    # "for", "with", "while"). So "enters the access code for the reactor chamber", "reaches for the reactor
+    # chamber map" and "walks through the corridor carrying the reactor chamber map" do not reach the chamber,
+    # and "remains in the control room while Kael descends..." is not Elena moving.
+    cast_subject = False
     for sentence in re.split(r"(?<=[.!?])\s+", event_text):
-        named_here = _has_named_mover(sentence)
-        # A pronoun sentence ("...forces her to take shelter inside") continues the cast member named earlier.
-        pronoun_continues = cast_named_earlier and bool(
-            re.search(r"\b(?:she|he|they|her|his|him|their|them)\b", sentence, re.I)
-        )
-        cast_named_earlier = cast_named_earlier or named_here
-        if not (named_here or pronoun_continues):
-            continue
-        for clause in _CLAUSE_SPLIT_RE.split(sentence):
-            if not clause or not _SCENE_LOCAL_MOVE_RE.search(clause):
+        for clause_index, clause in enumerate(_CLAUSE_SPLIT_RE.split(sentence)):
+            clause = (clause or "").strip()
+            if not clause:
                 continue
-            if destination_tokens and not (_plural_variants(content_tokens(clause)) & destination_tokens):
-                continue
-            if target_is_interior and source_is_outside and not _SCENE_LOCAL_ACCESS_RE.search(clause):
-                continue
-            return True
+            for verb in _SCENE_LOCAL_MOVE_RE.finditer(clause):
+                if re.match(r"reach\w*\s+(?:for|out)\b", clause[verb.start():], re.I):
+                    continue  # "reaches for the map" is grasping, not arriving
+                before = clause[:verb.start()]
+                named_before = bool(surface_re and surface_re.search(before))
+                if named_before:
+                    cast_subject = True
+                elif re.search(r"(?<!^)\b[A-Z][a-z]+", before.strip()) and not pronoun_re.search(before):
+                    cast_subject = False  # a different, non-cast name is the subject (e.g. "Kael descends")
+                mover_ok = named_before or (
+                    cast_subject and (not before.strip() or bool(pronoun_re.search(before)))
+                )
+                if not mover_ok:
+                    continue
+                phrase = _MOVE_STOP_RE.split(clause[verb.end():], maxsplit=1)[0]
+                phrase_tokens = _plural_variants(content_tokens(phrase))
+                if destination_tokens and not (destination_tokens & phrase_tokens):
+                    continue
+                if not destination_tokens and not phrase.strip() and not re.search(
+                    r"shelter|inside|retreat|flee|fled|escape|emerge|leave|exit|evacuat|withdr", verb.group(0), re.I
+                ):
+                    continue
+                if target_is_interior and source_is_outside and not _SCENE_LOCAL_ACCESS_RE.search(clause):
+                    continue
+                return True
+            if surface_re and surface_re.search(clause):
+                cast_subject = True
     return False
 
 
