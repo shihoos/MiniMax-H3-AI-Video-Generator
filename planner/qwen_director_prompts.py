@@ -278,7 +278,7 @@ class QwenDirectorPromptMixin:
         self,
         mode: str,
     ) -> str:
-        """Configured scene-length prose contract with a craft brief; one author call, no retries."""
+        """Configured scene-length prose contract; one primary Author call and at most one hard-gate revision."""
         _txt = self._fill_story_length(self._story_text_system_raw(mode))
         return self._expand_longer(_txt)
 
@@ -397,10 +397,15 @@ class QwenDirectorPromptMixin:
 
             CHARACTER AND CONTINUITY: use only the cast established in the Architect's CAST line, plus source characters
             explicitly preserved in Expand mode. Do not invent a new speaking or named person outside that cast. Use each
-            full name on first mention, then a consistent given name or pronoun. A title belongs in a role, not in a name.
-            A person speaking remotely is not physically present in the scene; distinguish a live remote transmission from
-            a person standing in the location. Do not bind a remote voice, recording, hologram, AI, or written message as
-            a visible human. Use only relationships listed in the Architect's RELATIONSHIPS field or stated in the source.
+            person's full canonical name on first mention, then a consistent declared alias or pronoun. A title belongs in
+            a role, not in a name. Preserve distinct cast identities: do not collapse two people with different goals into
+            one generic colleague, operator, or system voice. A person speaking remotely is not physically present in the
+            scene; distinguish a live remote transmission from a person standing in the location. A sentient AI/system may
+            speak and make decisions as an active character, but never depict it as a human. If the Architect assigns it a
+            visible nonhuman body, projected avatar, or holographic figure in a scene, show that actual manifestation there;
+            do not substitute a text-only interface or voice. If no visible form is specified, keep it audio/interface-only
+            and do not imply physical presence. A recording, written message, or ordinary user interface is not a person.
+            Use only relationships listed in the Architect's RELATIONSHIPS field or stated in the source.
             Use only named projects, facilities, institutions, protocols, and organizations listed in NAMED_ENTITIES or
             stated in the source. Do not create a new named person, title-based identity, alias, relative, company, station,
             lab, project, or protocol. Track the per-scene ENTRY/EXIT locations, present people, knowledge, object custody,
@@ -453,6 +458,23 @@ class QwenDirectorPromptMixin:
                 "emotional promise. Choose genre, cast size, locations, and plot mechanism from the premise, not from "
                 "a preselected template."
             )
+            cast_design_rule = (
+                "CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story merely because the premise "
+                "introduces one protagonist or uses an isolated setting. Before fixing the outline, deliberately compare "
+                "whether the strongest version needs 1, 2, 3, 4, 5, or more active characters; these are possibilities to "
+                "evaluate, NOT a minimum, maximum, or target. Look for premise-grounded people with independent goals: "
+                "a colleague with conflicting evidence, a field partner with a different risk threshold, an authority who "
+                "controls access/resources, a witness who changes what can be proved, a rescuer/operator whose decision "
+                "changes the available plan, or an opposing person with their own strategy. Choose each only when that "
+                "person makes a consequential decision or action that changes the protagonist's options, leverage, "
+                "knowledge, relationships, or cost, and is actually dramatized in at least one present-time scene. Give "
+                "each included person a distinct want, pressure, tactic, and consequence; do not merge distinct human "
+                "decision-makers into a generic institution/system voice for convenience. An abandoned or remote setting "
+                "does not automatically mean nobody else can act: consider credible on-site survivors, arrivals, or live "
+                "counterparts when the premise supports them. Conversely, keep a small cast when isolation is itself the "
+                "strongest premise-specific engine. Never add filler, token roles, or characters who only appear in a "
+                "memory, label, recording, or exposition. Qwen chooses the cast organically; there is no numeric quota."
+            )
         else:
             source_rule = (
                 "Expand the user's story. Preserve every established source character's identity and role, and retain "
@@ -460,10 +482,19 @@ class QwenDirectorPromptMixin:
                 "three people to a one-person premise. Add a character only when that person is needed to cause or "
                 "complicate a consequential event. Do not make up an off-screen relative or unseen person as a twist."
             )
+            cast_design_rule = (
+                "CAST DESIGN / SOURCE FIDELITY: preserve every active source character; do not omit a person who "
+                "makes a present-time decision, changes the protagonist's plan, or participates in a consequential "
+                "relationship. Do not inflate the source with filler. If the source leaves a genuine causal role "
+                "unassigned, add a person only when the role is necessary and can be dramatized consistently with "
+                "the established story."
+            )
 
         prompt = textwrap.dedent(f"""\
             You are the lead story architect for a cinematic short film. Design the plot before the prose writer starts.
             {source_rule}
+
+            {cast_design_rule}
 
             DESIGN THE STORY ENGINE FIRST. Decide:
             - the protagonist's concrete, filmable objective and why it matters now;
@@ -553,15 +584,12 @@ class QwenDirectorPromptMixin:
             Give scenes different dramatic textures (e.g. discovery, negotiation, pursuit, failure, confrontation,
             quiet decision, physical problem-solving) rather than repeating one obstacle or interruption.
 
-            CAST FORMAT: output one CAST line first. Include only core embodied people/creatures whose choices matter to the plot. Cast size
-            is fully plot-driven; do not target four people. Each entry must use this exact pattern:
+            CAST FORMAT: output one CAST line first. Include only core people/creatures whose decisions matter to the plot and
+            whose presence is actually dramatized. Cast size is fully plot-driven with no fixed minimum, maximum, or target;
+            the ensemble decision above is mandatory, but no numeric cast quota is. Each entry must use this exact pattern:
             Full Name (kind: person|animal|embodied agent; role: specific role; wants: <specific outcome>; pressure: <fear, need, duty, mistake, or private conflict>; voice: <distinctive speech style>; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
             Every field uses the 'label: value' form shown (including 'wants:'), separated by semicolons, with no square brackets. Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
-            Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. A remote-only voice,
-            recording, hologram, AI, organization, object, location, weather event, storm, natural disaster, environmental hazard,
-            failing infrastructure, or abstract opposing force is not physically present as an embodied cast member. Put such opposition in OPPOSITION
-            only; never give it a CAST entry or physical on-screen scene list. List only scenes where an embodied person/creature
-            is physically present. Include aliases only when genuinely used in the story; never invent kinship or identity aliases.
+            Keep honorifics such as Dr., Captain, or Mr. in the role, never in the canonical name. Do not exclude a real, story-active character merely because the premise begins with one protagonist. Every added person needs an independent want, pressure, consequential action/decision, and at least one scene in which that person is actually present. A remote-only voice or recording is not physically present and must not be placed in ON_SCREEN_PRESENT. A sentient AI/system belongs in physical CAST as kind 'embodied agent' only when it has an actual visible nonhuman embodiment (robot/body, projected avatar, or holographic figure) in at least one scene; list only scenes where that manifestation is genuinely visible. A control panel, text on a screen, disembodied voice, or ordinary user interface is not an embodied agent. Never label an AI or other nonhuman agent as a human PERSON. Put remote-only voices, institutions, objects, locations, weather, natural disasters, environmental hazards, failing infrastructure, and abstract opposing forces in OPPOSITION rather than physical CAST. Include aliases only when genuinely used in the story; never invent kinship or identity aliases.
             CAST FORMAT EXAMPLE (format only; do not reuse this name, role, motive, or story):
             Mara Quill (kind: person; role: field archivist; wants: verify the disputed record; pressure: the evidence transfer closes at dawn; voice: exact, guarded; aliases: none; on-screen scenes: 01, 03, 08; fate: survives)
 
@@ -676,15 +704,15 @@ class QwenDirectorPromptMixin:
 
         text = swap(
             r"CAST FORMAT: output one CAST line first\..*?(?=Keep honorifics such as)",
-            "CAST: fill the `cast` array with only core embodied people/creatures whose choices matter to the plot. "
-            "Cast size is fully plot-driven; do not target four people. Per entry give name (full name; preserve source "
-            "names exactly), kind (person, animal, or embodied agent), role, wants (a specific outcome), pressure (fear, "
-            "need, duty, mistake, or private conflict), voice (distinctive speech style), aliases (usually an empty list; "
-            "only names genuinely used in the story), fate (survives or dies) and death_scene (the scene number if the "
-            "person dies, otherwise 0). On-screen scenes are derived from each scene's on_screen_present list, so do not "
-            "list them separately. Only beings that physically appear in at least one scene's on_screen_present belong in "
-            "cast; a storm, weather, hazard, system, institution, place, or an absent/remembered person is never cast: "
-            "put it in opposition instead. ",
+            "CAST: fill the `cast` array with core people/creatures whose decisions matter and whose presence is "
+            "actually dramatized. Cast size is plot-driven with no fixed minimum, maximum, or target; perform the "
+            "ensemble decision in the prompt rather than defaulting to one protagonist. Per entry give name, kind "
+            "(person, animal, or embodied agent), role, wants, pressure, voice, aliases, fate and death_scene. On-screen "
+            "scenes are derived from each scene's on_screen_present list. A sentient AI/system belongs in physical cast "
+            "only if it has an actual visible nonhuman body, robot, projected avatar, or holographic figure in a listed "
+            "scene; an interface, screen text, or disembodied voice is not an embodiment. Never label a nonhuman agent "
+            "as a human PERSON. Remote-only voices, weather, hazards, infrastructure, organizations, places and "
+            "absent/remembered people are not physically present cast members. ",
             text,
         )
         text = swap(r"CAST FORMAT EXAMPLE.*?(?=REQUIRED PLOT FIELDS:)", "", text)
@@ -1476,7 +1504,7 @@ class QwenDirectorPromptMixin:
 
     Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist. The JSON lists `quote_classifications` first and `candidates` second: every speaker you attribute in an in_person_spoken quote who physically takes part in the story MUST also appear in `candidates`, together with every other named person who acts. `candidates` is never empty.
 
-    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. A name printed on a drawer, label, screen, journal, or directive is not an active character. A line spoken by one character that mentions another person is still the first character's dialogue, not evidence that the mentioned person is present or speaking. Only include a human as an active present-time cast member when the story shows that person physically acting/appearing or directly speaking in a present-time scene. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON.
+    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. A name printed on a drawer, label, screen, journal, or directive is not an active character. A line spoken by one character that mentions another person is still the first character's dialogue, not evidence that the mentioned person is present or speaking. Only include a human as an active present-time cast member when the story shows that person physically acting/appearing or directly speaking in a present-time scene. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON. When Qwen has identified a generic sentient agent such as "AI" as a character, retain it if the story gives it live causal agency; prefer a grounded host-specific canonical label such as "Station AI" when the prose itself uses a phrase like "the station's AI", and keep the original term as an alias. Do not invent a serial number or proper name that the story never uses.
 
     Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. `name_surface_index` and `name_surface_evidence` are recall aids generated from source text; they can contain places, objects, sentence-initial words, or other false positives. They are NOT a cast list. The evidence entries contain short source contexts around name-like surfaces that may be absent from compacted story evidence. Use them to check the source, and include a surface only when the source supports a person physically participating in present-time events. Qwen alone decides which names are people, how aliases resolve, and who belongs in `candidates`. The `candidates` array is the final cast decision; no downstream step will add names from these indexes, a planned cast, or dialogue speakers. A dialogue speaker must also be represented in `candidates` when that person physically participates in the story.
 
