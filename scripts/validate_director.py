@@ -2127,6 +2127,118 @@ def test_blueprint_story_structure_failures_are_hard_and_feedback_is_actionable(
         _assert(phrase in feedback, f"Architect revision must provide field-level repair instructions for {phrase}")
 
 
+def _architect_repair_fixture():
+    cast = (
+        "CAST: Elena Voss (kind: person; role: polar systems engineer; wants: recover reactor data; "
+        "pressure: storm damage; voice: precise; aliases: Elena; "
+        "on-screen scenes: 01, 02, 03, 04, 05, 06, 07, 08, 09, 10, 11, 12; fate: survives)"
+    )
+    lines = [
+        cast,
+        "LOGLINE: An engineer must retrieve reactor evidence from an abandoned Arctic station.",
+        "CLIMAX_CHOICE: Elena uses the manual override although it risks destroying the station.",
+        "RESOLUTION: Elena stabilizes the reactor data and sacrifices the station to prevent a larger disaster.",
+        "SETUP_PAYOFF_MAP: PLANT Scene 02: The sealed vault access panel has a pressure lock and manual override; PAYOFF Scene 09: Elena uses the manual override code to depressurize the vault. | PLANT Scene 04: The control-room panel contains the security officer's manual override code; PAYOFF Scene 10: Elena enters the officer's PIN into the control panel to trigger the failsafe.",
+        "SCENE 02: PURPOSE=Elena discovers the override; ENTRY_OBJECTS=none; EVENT=Elena finds a control panel with a manual override function, but it requires a security officer's PIN to activate.; EXIT_OBJECTS=Control Panel (activated); NEXT_CAUSE=Elena must find the security officer's log.",
+        "SCENE 03: PURPOSE=Elena finds the log; ENTRY_LOCATION=Abandoned Arctic Research Station, control room; ENTRY_OBJECTS=Control Panel (activated); EVENT=Elena navigates through a hidden maintenance corridor to the archive room, where she finds the security officer's final log.; EXIT_LOCATION=Abandoned Arctic Research Station, archive room; EXIT_OBJECTS=Security Officer's Log (discovered); NEXT_CAUSE=Elena must return to the control room.",
+        "SCENE 04: PURPOSE=Elena activates the override; ENTRY_LOCATION=Abandoned Arctic Research Station, archive room; EVENT=Elena returns to the control room, enters the officer's PIN into the control panel, and activates the manual override.; EXIT_LOCATION=Abandoned Arctic Research Station, control room; NEXT_CAUSE=Elena must reach the hidden terminal.",
+        "SCENE 08: PURPOSE=Elena stabilizes the reactor; ENTRY_OBJECTS=Geothermal Reactor Data Core (retrieved); EVENT=Elena uses the geothermal reactor data core to stabilize the reactor.; EXIT_OBJECTS=Geothermal Reactor Data Core (stabilized); NEXT_CAUSE=The station collapses and Elena must survive the storm.",
+        "SCENE 09: PURPOSE=Elena survives; EVENT=Elena shelters from the storm and waits for rescue.; NEXT_CAUSE=The rescue team must locate Elena.",
+        "SCENE 10: PURPOSE=Elena is rescued; EVENT=Elena is rescued by a search team.; NEXT_CAUSE=none",
+        "SCENE 11: PURPOSE=Elena reaches safety; ENTRY_LOCATION=Abandoned Arctic Research Station, exterior; EVENT=Elena is transported to a recovery facility.; EXIT_LOCATION=Recovery Facility, Arctic; NEXT_CAUSE=none",
+        "SCENE 12: PURPOSE=The story resolves; EVENT=Elena receives confirmation that the reactor data prevented a larger disaster.; NEXT_CAUSE=none",
+    ]
+    return "\n".join(lines)
+
+
+def test_architect_repair_recognizes_logged_location_and_object_verbs():
+    from planner.story_contracts import _scene_local_transition_is_explained, OBJECT_CHANGE_RE
+    cast = [{"name": "Elena Voss", "aliases": ["Elena"]}]
+    _assert(_scene_local_transition_is_explained(
+        "Abandoned Arctic Research Station, control room",
+        "Abandoned Arctic Research Station, archive room",
+        "Elena navigates through a hidden maintenance corridor to the archive room.", cast,
+    ), "navigates + named destination should ground the logged control-room to archive-room move")
+    _assert(_scene_local_transition_is_explained(
+        "Abandoned Arctic Research Station, archive room",
+        "Abandoned Arctic Research Station, control room",
+        "Elena returns to the control room and enters the officer's PIN.", cast,
+    ), "returns + control-room anchor should ground the logged return transition")
+    _assert(_scene_local_transition_is_explained(
+        "Abandoned Arctic Research Station, exterior", "Recovery Facility, Arctic",
+        "Elena is transported to a recovery facility.", cast,
+    ), "transported + recovery-facility anchor should ground the logged transport")
+    _assert(not _scene_local_transition_is_explained(
+        "control room", "archive room", "Elena repairs the control panel and reads the log.", cast,
+    ), "an unrelated event must not satisfy a declared location transition")
+    _assert(OBJECT_CHANGE_RE.search("Elena finds the security officer's final log."),
+            "finding a named object must count as an observable acquisition/discovery action")
+    _assert(OBJECT_CHANGE_RE.search("Elena uses the geothermal reactor data core to stabilize the reactor."),
+            "using a named data core to stabilize the reactor must count as a physical state action")
+    _assert(not OBJECT_CHANGE_RE.search("Elena considers the consequences of the decision."),
+            "an event with no object-action verb must not validate an object-state change")
+
+
+def test_architect_revision_context_preserves_the_failed_plan_and_compacts_findings():
+    from planner.qwen_director import QwenDirector
+    blueprint = _architect_repair_fixture()
+    problems = [
+        "SETUP_PAYOFF_MAP payoff scene 09 does not explicitly refer back to the planted evidence from scene 02",
+        "SETUP_PAYOFF_MAP payoff in scene 10 is not grounded in that scene's EVENT",
+        "SETUP_PAYOFF_MAP payoff scene 10 does not explicitly refer back to the planted evidence from scene 04",
+        "scene 03 changes its physical location without an explicit transition ('control room' to 'archive room')",
+        "scene 04 changes its physical location without an explicit transition ('archive room' to 'control room')",
+        "scene 03 object state change is not anchored to the named object and a physical action",
+        "scene 08 object state change is not anchored to the named object and a physical action",
+        "scene 10 has no NEXT_CAUSE handoff",
+        "scene 11 has no NEXT_CAUSE handoff",
+    ]
+    context = QwenDirector._story_blueprint_revision_context(blueprint, problems)
+    _assert("CAST TO PRESERVE: Elena Voss" in context, "revision context must preserve the prior canonical cast")
+    _assert(context.index("S02 PLANT:") < context.index("S09 PAYOFF:"),
+            "the plant scene must not be reversed with the payoff scene in revision context")
+    _assert(context.index("S04 PLANT:") < context.index("S10 PAYOFF:"),
+            "the second plant/payoff pair must preserve its scene order")
+    _assert("S02: EVENT=" in context and "Control Panel (activated)" in context,
+            "revision context must expose that scene 02 marked a PIN-gated panel as already activated")
+    _assert("S03: FROM=control room" in context and "TO=archive room" in context,
+            "revision context must retain the exact location transition and its event")
+    _assert("S10: EVENT=" in context and "NEXT_CAUSE=none" in context,
+            "revision context must retain the missing handoff location")
+    _assert(len(context) < 3200, f"revision context must stay compact for the bounded Architect window: {len(context)} chars")
+    warnings = [f"scene {n} event is not anchored to the previous scene's NEXT_CAUSE" for n in (10, 11, 12)]
+    feedback = QwenDirector._revision_feedback(
+        problems, "story plan", previous_plan_context=context, advisory_findings=warnings,
+    )
+    for phrase in ("SETUP/PAYOFF", "LOCATION CONTINUITY", "OBJECT STATE", "NEXT_CAUSE", "PREVIOUS PLAN EXCERPTS"):
+        _assert(phrase in feedback, f"revised Architect feedback must preserve {phrase} repair guidance")
+    _assert(len(feedback) < 4500, f"revision feedback must not consume excessive output budget: {len(feedback)} chars")
+
+
+def test_architect_revision_retry_receives_the_actual_rejected_blueprint():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    director._last_story_quality_errors = [
+        "scene 10 has no NEXT_CAUSE handoff",
+        "scene 11 has no NEXT_CAUSE handoff",
+    ]
+    director._last_story_blueprint_warnings = []
+    candidate = _architect_repair_fixture()
+    prompts = []
+    def fake_attempt(mode, user_input, *, source_character_names=None, feedback=""):
+        prompts.append(feedback)
+        if len(prompts) == 1:
+            raise QwenDirector._BlueprintRejected("test rejection", blueprint=candidate)
+        return "repaired blueprint"
+    director._generate_story_blueprint_attempt = fake_attempt
+    result = QwenDirector._generate_story_blueprint(director, "ai_story", "A polar engineer finds a vault.")
+    _assert(result == "repaired blueprint" and len(prompts) == 2,
+            "the Architect should retain one conditional revision and no extra call")
+    _assert("PREVIOUS PLAN EXCERPTS" in prompts[1] and "Elena Voss" in prompts[1]
+            and "S10: EVENT=" in prompts[1] and "S11: EVENT=" in prompts[1],
+            "the revision request must contain the exact rejected candidate's affected scene excerpts")
+
+
 def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
     from planner.qwen_director import QwenDirector
     from planner.qwen_director_prompts import CAMERA_SHOT_OPTIONS, CAMERA_MOVEMENT_OPTIONS
@@ -2878,6 +2990,9 @@ def main():
         test_story_quote_cleanup_preserves_all_dialogue_words,
         test_duplicate_scene_blocks_are_hard_and_author_revision_rebuilds_from_architecture,
         test_blueprint_story_structure_failures_are_hard_and_feedback_is_actionable,
+        test_architect_repair_recognizes_logged_location_and_object_verbs,
+        test_architect_revision_context_preserves_the_failed_plan_and_compacts_findings,
+        test_architect_revision_retry_receives_the_actual_rejected_blueprint,
         test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
     ]
     import contextlib
