@@ -481,8 +481,8 @@ def _validate_runtime_configuration_contract(runtime: dict) -> None:
     writing = dict(director.get("story_sampling", {}).get("writing", {}) or {})
     if story.get("minimum_words", 0) < 1400 or story.get("accept_min_words") != story.get("minimum_words"):
         raise RuntimeError("The 1,400+ word single-pass story contract must be preserved.")
-    if writing.get("max_tokens") != 3800:
-        raise RuntimeError("Director story Writer token ceiling must remain 3,800.")
+    if writing.get("max_tokens") != 3000:
+        raise RuntimeError("Director story Writer token ceiling must remain 3,000.")
     if story.get("scene_count") != 12 or story.get("shots_per_scene") != 3:
         raise RuntimeError("12 scenes x 3 shots story topology must be preserved.")
     if runtime.get("generation", {}).get("frames_per_shot") != 141:
@@ -522,8 +522,8 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
         raise RuntimeError("Global Director story ceiling must remain 6,500 tokens.")
     if int(architecture.get("max_tokens", 0) or 0) != 5400:
         raise RuntimeError("Story Architect ceiling must remain 5,400 tokens.")
-    if int(writing.get("max_tokens", 0) or 0) != 3800:
-        raise RuntimeError("Single-pass Story Author ceiling must be 3,800 tokens.")
+    if int(writing.get("max_tokens", 0) or 0) != 3000:
+        raise RuntimeError("Single-pass Story Author ceiling must be 3,000 tokens.")
     if int(contract.get("minimum_words", 0) or 0) < 1400 or int(contract.get("accept_min_words", 0) or 0) != int(contract.get("minimum_words", 0) or 0):
         raise RuntimeError("Story acceptance must enforce the 1,400-word minimum with no lower secondary floor.")
     if int(contract.get("scene_count", 0) or 0) != 12 or int(contract.get("shots_per_scene", 0) or 0) != 3:
@@ -578,7 +578,7 @@ def _validate_single_pass_story_writer(runtime: dict) -> None:
         raise RuntimeError(f"One model completion must issue exactly one HTTP POST; found {len(requests)}.")
     if "sampling_extra_fallback" in runtime_source:
         raise RuntimeError("Qwen runtime still retries with weakened sampling parameters.")
-    print("PASS single-pass story contract: 1,400-word floor, 12x3 topology, 3,800-token Author, one HTTP request")
+    print("PASS single-pass story contract: 1,400-word floor, 12x3 topology, 3,000-token Author, one HTTP request")
 
 
 def _validate_bootstrap_upgrade_source() -> None:
