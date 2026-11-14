@@ -1133,6 +1133,13 @@ def audit_story_against_blueprint(
     # Source names may be mentioned, but an unrostered source-only person cannot silently
     # become a physical actor or an unqualified in-person speaker in the new story.
     allowed_surfaces = {s.casefold() for c in cast for s in _name_surfaces(c["name"], c["aliases"])}
+    # A person the Architect named but never put on screen is seeded: the story may refer to them.
+    mentioned_only = re.search(r"Named but never on screen:\s*(.+)$", fields.get("RELATIONSHIPS", ""), re.S)
+    for mentioned_name in (re.split(r"\s*,\s*", mentioned_only.group(1)) if mentioned_only else []):
+        mentioned_name = mentioned_name.strip().rstrip(".")
+        if mentioned_name:
+            allowed_names.add(mentioned_name.casefold())
+            allowed_surfaces.update(s.casefold() for s in _name_surfaces(mentioned_name, []))
     source_only_names = source_names - allowed_surfaces - allowed_names
     unknown_people: set[str] = set()
 
