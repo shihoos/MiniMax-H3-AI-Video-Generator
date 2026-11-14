@@ -987,8 +987,9 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         _assert("full canonical name" in low and "never depict it as a human" in low
                 and "visible nonhuman" in low,
                 f"{mode}: the Author must preserve canonical sentient-agent identity without humanizing it")
-        _assert("three paragraphs" in low and "unfinished" in low,
-                f"{mode}: every scene must be asked for a multi-paragraph dramatized sequence")
+        _assert("three distinct dramatic movements" in low and "2-3 paragraphs" in low
+                and "natural sentence lengths" in low,
+                f"{mode}: each scene must have three distinct dramatized movements without a rigid sentence quota")
         _assert("no more than two" in low and "nine words or fewer" in low,
                 f"{mode}: spoken dialogue limits must match 3-shot timing")
         writer_prompt = q._story_text_user(
@@ -999,26 +1000,34 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 and "validated plot architecture" in writer_prompt
                 and "source-preservation lock" in writer_prompt if mode == EXPAND_USER_STORY_MODE else "validated plot architecture" in writer_prompt,
                 f"{mode}: prose request must bind the plan and length target")
-        blueprint = q._story_blueprint_system(mode).lower()
+        blueprint = " ".join(q._story_blueprint_system(mode).lower().split())
         for structured in (False, True):
             rendered_architect = " ".join(q._story_blueprint_system(mode, structured=structured).lower().split())
             design_heading = ("cast design / ensemble decision" if mode == AI_STORY_MODE
-                              else "cast design / source fidelity")
+                              else "cast design / expansion ensemble")
             _assert(design_heading in rendered_architect,
                     f"{mode}: structured={structured} Architect must include the mode-appropriate cast-design instructions")
             _assert("no fixed minimum, maximum, or target" in rendered_architect,
                     f"{mode}: structured={structured} Architect must remain free of cast-count quotas")
             if mode == AI_STORY_MODE:
-                _assert("1, 2, 3, 4, 5, or more active characters" in rendered_architect
+                _assert("3-5 person active ensemble" in rendered_architect
+                        and "compare it against 1, 2, 6, or more" in rendered_architect
                         and "do not default to a one-person story" in rendered_architect,
-                        f"{mode}: structured={structured} Architect must evaluate a larger ensemble without forcing one")
+                        f"{mode}: structured={structured} Architect must compare an ensemble without forcing a cast quota")
                 _assert("independent goals" in rendered_architect and "consequential decision" in rendered_architect,
                         f"{mode}: structured={structured} supporting characters must have independent agency")
         _assert("plot-driven" in blueprint and "no fixed minimum, maximum, or target" in blueprint,
                 f"{mode}: Architect must not impose a numeric cast quota")
+        if mode == EXPAND_USER_STORY_MODE:
+            _assert("source's original cast size is not a limit" in blueprint
+                    and "3-5 person active ensemble" in blueprint
+                    and "do not create a role merely to reach a number" in blueprint,
+                    "Expand mode must preserve source anchors while considering purposeful ensemble additions")
+            _assert("architect's approved cast may include new premise-grounded people" in low,
+                    "Expand Author must honor new characters approved by the Architect")
         if mode == AI_STORY_MODE:
-            _assert("1, 2, 3, 4, 5, or more active characters" in blueprint
-                    and "deliberately compare" in blueprint
+            _assert("3-5 person active ensemble" in blueprint
+                    and "compare it against 1, 2, 6, or more" in blueprint
                     and "do not default to a one-person story" in blueprint,
                     "AI Story Architect must actively evaluate an ensemble without imposing a cast count")
             _assert("independent goals" in blueprint and "consequential decision" in blueprint,
@@ -1053,30 +1062,36 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
             "1,400-word minimum must be explicit to both system and user prompts")
     # Both prompts must give the model the same single length instruction: the writer budget, with the
     # acceptance floor stated only as a rejection line.
-    _assert(str(stretch) in system and str(stretch) in writer,
-            "system and user prompts must agree on the drafting target")
-    _assert(str(STORY_TARGET_WORDS) not in system and str(STORY_TARGET_WORDS) not in writer,
-            "the acceptance-level target must not compete with the drafting target in either prompt")
+    _assert(str(stretch) in system and str(stretch) in writer and stretch == STORY_TARGET_WORDS == 1560,
+            "system and user prompts must agree on the configured 1,560-word drafting target")
+    _assert("2280" not in system and "2280" not in writer,
+            "the stale 2,280-word stretch quota must not override the 1,560-word target")
     _assert("only the rejection floor" in " ".join(system.split()) and "only the rejection floor" in " ".join(writer.split()),
             "both prompts must call the minimum a rejection floor, not a goal")
     system_flat = " ".join(system.lower().split())
     _assert("not filler, repeated description, or extra twists" in system_flat,
             "length must come from events, not padding")
-    _assert("three paragraphs" in system_flat and "same depth as scenes 01-04" in system_flat,
-            "writer must give every scene a multi-paragraph shape and the final third full depth")
+    _assert("three distinct dramatic movements" in system_flat and "2-3 paragraphs" in system_flat
+            and "same causal and dramatic care as scenes 01-04" in system_flat,
+            "writer must give every scene three distinct movements and the final third full depth")
     _assert("no more than two" in system.lower() and "spoken lines per scene" in system.lower(),
             "writer must respect the two-line dialogue maximum")
     _assert("each of the eleven transitions" in blueprint and "each scene changes" in blueprint,
             "Architect must define causal progression across all eleven transitions")
+    _assert("opposition variety" in blueprint and "clock and timeline integrity" in blueprint
+            and "family/location shortcuts" in blueprint,
+            "Architect must avoid repetitive puzzle traps, arbitrary countdowns, family shortcuts, and unmotivated geography")
+    _assert("exact units and arithmetic" in system_flat,
+            "Author must preserve any approved countdown/timestamp arithmetic across scenes")
     allocation_match = re.search(
-        r"per-scene quota \(sums to \d+\):\s*(.*?)\. every scene is", system_flat, re.S
+        r"per-scene quota \(sums to \d+\):\s*(.*?)\. every scene must contain", system_flat, re.S
     )
     allocations = [int(value) for value in re.findall(r"scene \d{2}: (\d+) words", allocation_match.group(1))] if allocation_match else []
     _assert(len(allocations) == 12 and sum(allocations) == DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE,
             "Author must receive one explicit twelve-scene allocation that sums to the writer drafting budget")
-    _assert("a scene of one or two short paragraphs is unfinished" in system_flat
-            and "scenes 08-12 get exactly the same depth" in system_flat,
-            "Author must be told the per-scene length guidance")
+    _assert("a scene must be complete, not a fragment" in system_flat
+            and "scenes 08-12 receive the same causal and dramatic care" in system_flat,
+            "Author must be told the per-scene completeness and final-third depth guidance")
     # A non-thinking writer cannot "silently count"; the model is given a budget and an expansion retry instead.
     _assert("silently check" not in system_flat and "silently verify" not in " ".join(writer.split()),
             "the Author must not be asked to count words silently")
@@ -1570,8 +1585,9 @@ def test_a_cut_off_draft_is_rewritten_with_pacing_not_expanded_as_if_complete():
     )
     _assert(QwenDirector._story_expansion_user(cut) == "", "a draft missing scene markers must not be expanded")
     system = " ".join(QwenDirector.__new__(QwenDirector)._story_text_system("ai_story").split()).lower()
-    _assert("no scene may run past" in system and "about 60 words per paragraph" in system,
-            "Author must be given a per-scene cap and a paragraph size so it cannot front-load the story")
+    _assert("soft scene cap" in system and "natural sentence lengths" in system
+            and "120-140 words per scene" in system,
+            "Author must be given a realistic per-scene range and cap so it cannot front-load the story")
 
 
 def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
@@ -1592,8 +1608,11 @@ def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
         director._validate_story_output_contracts = lambda _mode, _input, candidate, **_kwargs: candidate
         try:
             with redirect_stdout(StringIO()):
-                result, generated = director._generate_story_once(AI_STORY_MODE, "premise", "system", "user",
-                    temperature=temperature, top_p=top_p, source_character_names=[])
+                result, generated = director._generate_story_once(
+                    AI_STORY_MODE, "premise", "system",
+                    "VALIDATED PLOT ARCHITECTURE:\n" + _story_blueprint_fixture(),
+                    temperature=temperature, top_p=top_p, source_character_names=[]
+                )
             return result, generated, calls, None
         except RuntimeError as exc:
             return None, False, calls, str(exc)
@@ -1608,10 +1627,11 @@ def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
     short_result, short_generated, short_calls, short_error = run(65)
     _assert(not short_generated and short_result is None and len(short_calls) == 2,
             "a returned sub-1,400-word draft must receive at most one conditional Author revision")
-    _assert("REVISION TASK" in short_calls[1].get("_user", "")
-            and "DRAFT:" in short_calls[1].get("_user", "")
-            and "[[SCENE_01]]" in short_calls[1].get("_user", ""),
-            "a too-short draft must be revised using its own content rather than re-rolled")
+    _assert("AUTHOR REVISION" in short_calls[1].get("_user", "")
+            and "VALIDATED PLOT ARCHITECTURE" in short_calls[1].get("_user", "")
+            and "01=65" in short_calls[1].get("_user", "")
+            and "DRAFT:" not in short_calls[1].get("_user", ""),
+            "a too-short draft must be rebuilt from the validated plan with targeted scene diagnostics")
     _assert("below the configured minimum" in (short_error or "").lower(),
             f"sub-floor story should report the hard minimum: {short_error}")
     completion_probe = QwenDirector.__new__(QwenDirector)
@@ -2041,6 +2061,65 @@ def test_story_context_compactor_keeps_causal_middle_action():
     _assert("P1:" in compact and "P6:" in compact, "shot context must retain all six paragraph anchors")
 
 
+
+def test_story_quote_cleanup_preserves_all_dialogue_words():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    paragraphs = [f"Scene {i:02d} proceeds through a distinct decision and visible consequence." for i in range(1, 13)]
+    paragraphs[0] = (
+        'Mara said, “First short line.” Eli replied, “Second short line.” '
+        'Kael answered, “Third line remains in the story even when it exceeds the shot quote allowance.” '
+        'The log displayed “ACCESS DENIED”. Mara continued, “Fourth short line remains too.”'
+    )
+    source = "\n\n".join(paragraphs)
+    cleaned = director._normalize_story_quotes(source)
+    tokens = lambda value: re.findall(r"[\w'’-]+", value.casefold())
+    _assert(tokens(source) == tokens(cleaned),
+            "quote cleanup may normalize punctuation but must never delete dialogue or attribution words")
+    quote_pairs = re.findall(r'"([^"\n]+)"|“([^”\n]+)”', cleaned.split("\n\n")[0])
+    _assert(len(quote_pairs) <= 2,
+            f"only two concise lines should remain quoted for shot timing; overflow must be unquoted, not deleted: {quote_pairs!r}")
+    _assert("Third line remains in the story" in cleaned and "Fourth short line remains too" in cleaned,
+            "overflow dialogue must remain present as text")
+
+
+def test_duplicate_scene_blocks_are_hard_and_author_revision_rebuilds_from_architecture():
+    from planner.qwen_director import QwenDirector
+    director = QwenDirector.__new__(QwenDirector)
+    paragraphs = _story_test_paragraphs(120)
+    paragraphs[9] = paragraphs[8]
+    paragraphs[10] = paragraphs[8]
+    paragraphs[11] = paragraphs[8]
+    story = "\n\n".join(paragraphs)
+    errors = director._story_hard_quality_errors(story, None, "")
+    _assert(any("near-duplicate scene blocks" in error for error in errors),
+            f"duplicating complete scene blocks must be a hard Author rejection: {errors!r}")
+    revision = QwenDirector._story_expansion_user(
+        story, base_user="SOURCE STORY\nVALIDATED PLOT ARCHITECTURE: preserve the approved twelve-scene plan"
+    )
+    _assert("AUTHOR REVISION" in revision and "near-duplicates" in revision
+            and "VALIDATED PLOT ARCHITECTURE" in revision and "Target 1560 words" in revision
+            and "DRAFT:" not in revision,
+            "duplicate/short story revision must target the validated architecture rather than copy defective prose")
+
+
+def test_blueprint_story_structure_failures_are_hard_and_feedback_is_actionable():
+    from planner.story_contracts import split_contract_findings
+    from planner.qwen_director import QwenDirector
+    findings = [
+        "SETUP_PAYOFF_MAP plant in scene 03 is not grounded in that scene's EVENT",
+        "SETUP_PAYOFF_MAP payoff in scene 08 is not grounded in that scene's EVENT",
+        "scene 01 changes its physical location without an explicit transition ('main hall' to 'vault chamber')",
+        "scene 04 object state change is not anchored to the named object and a physical action",
+    ]
+    fatal, warnings = split_contract_findings(findings)
+    _assert(len(fatal) == 4 and not warnings,
+            f"ungrounded plants/payoffs, unexplained movement and object-state changes must reject the blueprint: {fatal!r}")
+    feedback = QwenDirector._revision_feedback(findings, "story plan")
+    for phrase in ("SETUP/PAYOFF PLANT", "SETUP/PAYOFF PAYOFF", "LOCATION CONTINUITY", "OBJECT STATE"):
+        _assert(phrase in feedback, f"Architect revision must provide field-level repair instructions for {phrase}")
+
+
 def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
     from planner.qwen_director import QwenDirector
     from planner.qwen_director_prompts import CAMERA_SHOT_OPTIONS, CAMERA_MOVEMENT_OPTIONS
@@ -2189,6 +2268,11 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
         director._trace_dir = trace
         director._story_min_words = 1400
         director._last_story_word_counts = {"after_raw_prose_normalization": 1531, "after_cleanup": 1479}
+        director._last_story_scene_word_counts = {
+            "scene_01": 192, "scene_02": 146, "scene_03": 128, "scene_04": 112,
+            "scene_05": 101, "scene_06": 109, "scene_07": 110, "scene_08": 95,
+            "scene_09": 90, "scene_10": 75, "scene_11": 76, "scene_12": 76,
+        }
         director._last_story_blueprint_warnings = [f"scene {index:02d} knowledge transition needs review" for index in range(1, 23)]
         director._last_story_contract_warnings = ["cast member not named in one planned scene"]
         director._last_story_quality_warnings = ["exact sentence repeated in scenes 10 and 11"]
@@ -2217,6 +2301,11 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "trace bundle must include the full diagnostics in JSON/TXT and the rejected draft")
         report = json.loads(report_path.read_text(encoding="utf-8"))
         attached = json.loads(author_trace.read_text(encoding="utf-8"))["post_generation_validation"]
+        _assert(report["required_scene_minimum_words"] == 70
+                and report["scene_guidance_range_words"] == [120, 140]
+                and report["scenes_at_least_120_words"] == 3
+                and "required_scenes_at_least_120_words" not in report,
+                "diagnostics must distinguish the actual 70-word hard floor from the 120-140-word guidance and report observed counts")
         _assert(report["blueprint_warnings"] == director._last_story_blueprint_warnings,
                 "diagnostics must preserve every blueprint warning")
         _assert(report["prose_audit_warnings"] == director._last_story_contract_warnings,
@@ -2778,6 +2867,9 @@ def main():
         test_scene_markers_preserve_one_to_one_scene_boundaries,
         test_context_compaction_never_loses_closing_quote_or_splits_attribution,
         test_story_context_compactor_keeps_causal_middle_action,
+        test_story_quote_cleanup_preserves_all_dialogue_words,
+        test_duplicate_scene_blocks_are_hard_and_author_revision_rebuilds_from_architecture,
+        test_blueprint_story_structure_failures_are_hard_and_feedback_is_actionable,
         test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
     ]
     import contextlib
