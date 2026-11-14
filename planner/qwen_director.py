@@ -2691,6 +2691,31 @@ class QwenDirector(
     def _maybe_rebalance_starved_tail(
         self, result: tuple[str, bool], mode: str, user_input: str, story_system: str, story_user: str, **kwargs,
     ) -> tuple[str, bool]:
+        """Run the optional tail rebalance without ever endangering an already-passing story.
+
+        Any ordinary Exception from the optional attempt (validation, transport, runtime, or a bug in the
+        optional logic itself) restores the first draft's state and returns it. BaseException subclasses
+        (KeyboardInterrupt, SystemExit) are deliberately not caught.
+        """
+        snapshot = {
+            name: deepcopy(value) for name, value in vars(self).items() if name.startswith("_last_story_")
+        }
+        try:
+            return self._rebalance_starved_tail_attempt(
+                result, mode, user_input, story_system, story_user, **kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001 - the optional step must never destroy a passing draft
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+            print(
+                f"[QWEN] story_author tail_rebalance=failed ({type(exc).__name__}); keeping first draft",
+                flush=True,
+            )
+            return result
+
+    def _rebalance_starved_tail_attempt(
+        self, result: tuple[str, bool], mode: str, user_input: str, story_system: str, story_user: str, **kwargs,
+    ) -> tuple[str, bool]:
         """Optionally spend the one allowed revision on a passing draft whose ending is starved.
 
         Safe by construction: the first draft already passed every hard gate and is kept unless the
@@ -2780,7 +2805,7 @@ class QwenDirector(
         remaining = total_scenes - split
         # Ask for the configured allocation, kept close to the locked half's own pace (so the tail is not
         # starved) and large enough to clear the floor with margin for under-delivery. The writer soft
-        # maximum caps the request; it is not a mandatory per-scene target.
+        # maximum caps the request unless the floor margin needs more; it is not a mandatory per-scene target.
         head_avg = locked_words / split
         per_scene = max(int(STORY_WORDS_PER_SCENE), int(0.85 * head_avg + 0.999))
         needed = int(STORY_ACCEPT_MIN_WORDS) + 250 - locked_words
