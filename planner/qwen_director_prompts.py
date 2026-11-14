@@ -553,7 +553,10 @@ class QwenDirectorPromptMixin:
             The reversal must explicitly refer back to the earlier plant, change its interpretation, and force a genuinely
             different plan. Every setup element used by the reversal or climax must have a specific earlier scene number
             and a concrete planted detail; the payoff beat must explicitly reference that detail and show what it now means.
-            Silent recurrence is not payoff. If no earlier beat contains the plant, redesign the payoff or plant it earlier.
+            Silent recurrence is not payoff. The declared PAYOFF scene's own EVENT must perform the listed action and
+            repeat the distinctive evidence/object/rule from the PLANT; the map is not a promise of something that happens
+            elsewhere. Never assign a payoff to a scene whose EVENT only waits, arrives, is rescued, travels, or reflects.
+            If no earlier beat contains the plant, redesign the payoff or plant it earlier.
             The climax must use an established capability, rule, relationship, or piece of evidence; no new ability,
             convenient helper, or last-minute rule may solve it.
 
@@ -695,7 +698,10 @@ class QwenDirectorPromptMixin:
             activates, consumes, disperses, releases, or destroys it. An object first appears in ENTRY_OBJECTS only when
             the previous scene's EVENT and EXIT_OBJECTS establish it. If an object is destroyed, consumed, or dispersed,
             record that terminal state rather than silently forgetting its identity. KEY_OBJECTS must name the exact
-            scene of each first state change; no earlier EVENT may already depict that change.
+            scene of each first state change; no earlier EVENT may already depict that change. A requirement, intention,
+            warning, or future possibility is NOT a completed object-state change: "requires a PIN to activate" means the
+            panel remains inactive; "will open" means it remains closed. Mark an object activated, opened, retrieved,
+            stabilized, or destroyed only when that scene's EVENT explicitly completes the action on that object.
             MID-SCENE PRESENCE CONTRACT (apply separately to every named cast member in every scene):
             ENTRY_PRESENT means physically present at the first instant of the scene; EXIT_PRESENT means physically
             present at the final instant; ON_SCREEN_PRESENT means visibly present at any point in between. Keep these
@@ -728,6 +734,10 @@ class QwenDirectorPromptMixin:
             {n - 2}; scenes {n - 1} and {n} carry its consequence and the RESOLUTION. Every scene before scene {n} needs a real
             NEXT_CAUSE. If the plot feels finished early, the middle is too thin: add another complication that costs the
             protagonist something, instead of filling the end with rescue, evacuation, reflection, or aftermath scenes.
+            For a twelve-scene story, do not enact the final irreversible climax choice before Scene 10 and do not
+            resolve the central dramatic question before Scene 12. Scenes 10-12 must form a connected climax, immediate
+            consequence, and final resolution; consecutive generic rescue/transport/reflection/report beats are not a
+            substitute for those three distinct changes.
             PURPOSE is authored here by the Architect and is the canonical dramatic intent for this scene. It must be
             specific to the scene's EVENT and describe the change the scene causes; it is not a generic beat label.
             The Author must honor it, and the Shot Director must consume it rather than invent a competing purpose.
