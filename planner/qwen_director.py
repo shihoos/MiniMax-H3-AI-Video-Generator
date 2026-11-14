@@ -24,6 +24,9 @@ from planner.story_contracts import (
     parse_scene_state,
     ensure_cinematic_coverage,
     validate_blueprint_state_contract,
+    _scene_local_transition_is_explained,
+    reconcile_cast_scenes,
+    _fields_and_beats,
     validate_cinematic_coverage,
 )
 from pipeline.production_checkpoint import ProductionCheckpoint
@@ -2130,142 +2133,244 @@ class QwenDirector(
 
     @staticmethod
     def _story_blueprint_revision_context(blueprint: str, problems: list[str]) -> str:
-        """Return small, exact excerpts so a rejected Architect plan is repaired, not replaced."""
-        fields: dict[str, str] = {}
-        beats: dict[int, str] = {}
-        for line in str(blueprint or "").splitlines():
-            field_match = re.match(
-                r"^(CAST|CLIMAX_CHOICE|RESOLUTION|SETUP_PAYOFF_MAP):\s*(.+)$", line,
-            )
-            if field_match:
-                fields[field_match.group(1)] = field_match.group(2).strip()
-                continue
-            scene_match = re.match(r"^SCENE\s+(\d{2}):\s*(.+)$", line)
-            if scene_match:
-                beats[int(scene_match.group(1))] = scene_match.group(2).strip()
-        if not beats:
+        """Give Qwen the complete rejected plan so one revision can patch it without story drift."""
+        original = str(blueprint or "").strip()
+        fields, beats, cast_line = _fields_and_beats(original)
+        if not beats or not cast_line:
             return ""
-
-        selected: set[int] = set()
-        requested_fields: dict[int, set[str]] = {}
-        relevant_pairs: set[tuple[int, int]] = set()
-
-        def require(number: int, *names: str) -> None:
-            if 1 <= number <= DIRECTOR_STORY_SCENES and number in beats:
-                selected.add(number)
-                requested_fields.setdefault(number, set()).update(names)
-
-        has_map_findings = any("SETUP_PAYOFF_MAP" in item for item in problems)
+        affected: set[int] = set()
+        field_notes: list[str] = []
         for problem in problems:
-            link = re.search(
-                r"payoff scene\s+(\d+)\s+does not explicitly refer back to the planted evidence from scene\s+(\d+)",
+            patterns = (
+                (r"scene\s+(\d+)\s+changes its physical location", "EVENT and EXIT_LOCATION"),
+                (r"scene\s+(\d+)\s+(?:key-)?object state change", "EVENT and EXIT_OBJECTS"),
+                (r"scene\s+(\d+)\s+has no NEXT_CAUSE handoff", "NEXT_CAUSE"),
+                (r"scene\s+(\d+)\s+mid-scene (?:entry|exit)", "EVENT and boundary presence"),
+                (r"scene\s+(\d+)\s+death of", "EVENT and EXIT_PRESENT"),
+                (r"scene\s+(\d+)\s+repeats the preceding scene beat", "PURPOSE and EVENT"),
+            )
+            for pattern, label in patterns:
+                match = re.search(pattern, problem, re.I)
+                if match:
+                    number = int(match.group(1))
+                    if 1 <= number <= DIRECTOR_STORY_SCENES:
+                        affected.add(number)
+                        field_notes.append(f"S{number:02d}: repair only {label}")
+            handoff = re.search(r"scene\s+(\d+)\s+event is not anchored to the previous scene's NEXT_CAUSE", problem, re.I)
+            if handoff:
+                number = int(handoff.group(1))
+                if 1 <= number <= DIRECTOR_STORY_SCENES:
+                    affected.add(number)
+                    affected.add(max(1, number - 1))
+                    field_notes.append(f"S{number - 1:02d}/S{number:02d}: repair the causal handoff")
+
+        map_scenes: set[int] = set()
+        if any("SETUP_PAYOFF_MAP" in problem for problem in problems):
+            map_scenes.update(int(value) for value in re.findall(r"PLANT\s+Scene\s+(\d+)", fields.get("SETUP_PAYOFF_MAP", ""), re.I))
+            map_scenes.update(int(value) for value in re.findall(r"PAYOFF\s+Scene\s+(\d+)", fields.get("SETUP_PAYOFF_MAP", ""), re.I))
+            affected.update(n for n in map_scenes if 1 <= n <= DIRECTOR_STORY_SCENES)
+            field_notes.append("SETUP_PAYOFF_MAP and the EVENT fields of its exact plant/payoff scenes")
+
+        notes = "\n".join(dict.fromkeys(field_notes)) or "Only the exact validator findings listed in the revision request."
+        return (
+            "PREVIOUS PLAN — IMMUTABLE BASE. This is the complete rejected blueprint, not a suggestion.\n"
+            "IDENTITY LOCK: copy the CAST line exactly, including every canonical name, kind, role, wants, pressure, "
+            "voice, aliases and fate. Do not add, remove, rename, retype or reinterpret any cast member.\n"
+            "PLOT LOCK: copy every global plot field exactly, except SETUP_PAYOFF_MAP only when a setup/payoff finding "
+            "requires correcting the map. Preserve the original premise, story engine, reversal, climax choice and resolution.\n"
+            "SCENE LOCK: keep every scene and every field unchanged unless it is explicitly listed below as affected. "
+            "Do not move the climax, renumber scenes, merge scenes, or repeat a preceding EVENT.\n"
+            "AFFECTED SCENES / ALLOWED PATCH SCOPE:\n" + notes + "\n\n"
+            "FULL ORIGINAL BLUEPRINT (copy all unlisted lines/values verbatim):\n" + original
+        )
+
+    @staticmethod
+    def _merge_story_blueprint_revision(
+        original_blueprint: str,
+        revised_blueprint: str,
+        problems: list[str],
+        advisory_findings: list[str] | None = None,
+    ) -> str:
+        """Merge only validator-scoped corrections; preserve cast, plot frame and untouched scenes."""
+        original = str(original_blueprint or "").strip()
+        revised = str(revised_blueprint or "").strip()
+        old_fields, old_beats, old_cast = _fields_and_beats(original)
+        new_fields, new_beats, new_cast = _fields_and_beats(revised)
+        expected = int(DIRECTOR_STORY_SCENES)
+        required = set(range(1, expected + 1))
+        if not old_cast or not new_cast or set(old_beats) != required or set(new_beats) != required:
+            raise RuntimeError("Cannot safely merge Architect revision: original/revised blueprint structure is incomplete.")
+
+        candidate_state_errors = validate_blueprint_state_contract(revised, expected)
+        old_states = {n: parse_scene_state(old_beats[n]) for n in required}
+        new_states = {n: parse_scene_state(new_beats[n]) for n in required}
+        original_cast_entries = parse_cast(original)
+
+        def normalize_event(value: str) -> str:
+            return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+        def boundary_pair_matches(left: str, right: str) -> bool:
+            """Only import a revised exit state when the candidate's next entry inherits it exactly."""
+            return normalize_event(left) == normalize_event(right)
+
+        def candidate_boundary_is_safe(scene_number: int, exit_key: str, next_entry_key: str) -> bool:
+            if scene_number >= expected:
+                return True
+            return boundary_pair_matches(
+                new_states[scene_number].get(exit_key, ""),
+                new_states[scene_number + 1].get(next_entry_key, ""),
+            )
+
+        # Never import a revision event that duplicates its preceding scene, even when
+        # the candidate happens to satisfy a different field-level validator.
+        repeated_candidate_scenes = {
+            n for n in range(2, expected + 1)
+            if normalize_event(new_states[n].get("EVENT", ""))
+            and normalize_event(new_states[n].get("EVENT", "")) == normalize_event(new_states[n - 1].get("EVENT", ""))
+        }
+        patched_fields = {key: value for key, value in old_fields.items()}
+        patched_states = {n: dict(state) for n, state in old_states.items()}
+
+        def candidate_has(pattern: str) -> bool:
+            return any(re.search(pattern, item, re.I) for item in candidate_state_errors)
+
+        # A changed payoff map is accepted only when every pair in the revised map is grounded
+        # by the revised plant/payoff EVENTs. The cast and all other plot fields remain locked.
+        has_map_problem = any("SETUP_PAYOFF_MAP" in item for item in problems)
+        if has_map_problem:
+            candidate_map_errors = [item for item in candidate_state_errors if "SETUP_PAYOFF_MAP" in item]
+            pair_text = new_fields.get("SETUP_PAYOFF_MAP", "")
+            map_scenes = set(int(x) for x in re.findall(r"(?:PLANT|PAYOFF)\s+Scene\s+(\d+)", pair_text, re.I))
+            if pair_text and not candidate_map_errors and not (map_scenes & repeated_candidate_scenes):
+                patched_fields["SETUP_PAYOFF_MAP"] = pair_text
+                for number in map_scenes:
+                    if number in required:
+                        patched_states[number]["EVENT"] = new_states[number].get("EVENT", patched_states[number].get("EVENT", ""))
+
+        for problem in problems:
+            location = re.search(r"scene\s+(\d+)\s+changes its physical location", problem, re.I)
+            if location:
+                n = int(location.group(1))
+                if (
+                    n in required
+                    and n not in repeated_candidate_scenes
+                    and not candidate_has(rf"scene\s+{n:02d}\s+changes its physical location")
+                    and boundary_pair_matches(new_states[n].get("ENTRY_LOCATION", ""), old_states[n].get("ENTRY_LOCATION", ""))
+                    and candidate_boundary_is_safe(n, "EXIT_LOCATION", "ENTRY_LOCATION")
+                    and (
+                        n >= expected
+                        or _scene_local_transition_is_explained(
+                            new_states[n + 1].get("ENTRY_LOCATION", ""),
+                            old_states[n + 1].get("EXIT_LOCATION", ""),
+                            old_states[n + 1].get("EVENT", ""),
+                            original_cast_entries,
+                        )
+                    )
+                ):
+                    patched_states[n]["EVENT"] = new_states[n].get("EVENT", patched_states[n].get("EVENT", ""))
+                    patched_states[n]["EXIT_LOCATION"] = new_states[n].get("EXIT_LOCATION", patched_states[n].get("EXIT_LOCATION", ""))
+                    if n < expected:
+                        patched_states[n + 1]["ENTRY_LOCATION"] = new_states[n + 1].get("ENTRY_LOCATION", patched_states[n + 1].get("ENTRY_LOCATION", ""))
+
+            obj = re.search(r"scene\s+(\d+)\s+(?:key-)?object state change", problem, re.I)
+            if obj:
+                n = int(obj.group(1))
+                next_object_boundary_safe = candidate_boundary_is_safe(n, "EXIT_OBJECTS", "ENTRY_OBJECTS")
+                next_object_boundary_clean = n >= expected or not candidate_has(
+                    rf"scene\s+{n + 1:02d}\s+(?:object inventory drops|object inventory introduces|object state change|key-object state change)"
+                )
+                if (
+                    n in required
+                    and n not in repeated_candidate_scenes
+                    and not candidate_has(rf"scene\s+{n:02d}\s+key-object state change|scene\s+{n:02d}\s+object state change")
+                    and boundary_pair_matches(new_states[n].get("ENTRY_OBJECTS", ""), old_states[n].get("ENTRY_OBJECTS", ""))
+                    and next_object_boundary_safe
+                    and next_object_boundary_clean
+                    and (
+                        n >= expected
+                        or boundary_pair_matches(new_states[n + 1].get("ENTRY_OBJECTS", ""), old_states[n + 1].get("EXIT_OBJECTS", ""))
+                        or boundary_pair_matches(new_states[n + 1].get("ENTRY_OBJECTS", ""), old_states[n + 1].get("ENTRY_OBJECTS", ""))
+                    )
+                ):
+                    patched_states[n]["EVENT"] = new_states[n].get("EVENT", patched_states[n].get("EVENT", ""))
+                    patched_states[n]["EXIT_OBJECTS"] = new_states[n].get("EXIT_OBJECTS", patched_states[n].get("EXIT_OBJECTS", ""))
+                    if n < expected:
+                        patched_states[n + 1]["ENTRY_OBJECTS"] = new_states[n + 1].get("ENTRY_OBJECTS", patched_states[n + 1].get("ENTRY_OBJECTS", ""))
+
+            handoff = re.search(r"scene\s+(\d+)\s+has no NEXT_CAUSE handoff", problem, re.I)
+            if handoff:
+                n = int(handoff.group(1))
+                if n in required and new_states[n].get("NEXT_CAUSE", "").strip().casefold() not in {"", "none", "n/a", "resolved", "complete"}:
+                    patched_states[n]["NEXT_CAUSE"] = new_states[n]["NEXT_CAUSE"]
+
+            transition = re.search(
+                r"""scene\s+(\d+)\s+mid-scene (entry|exit) for ['"]([^'"]+)['"] has no character-specific EVENT anchor""",
                 problem, re.I,
             )
-            if link:
-                payoff_scene, plant_scene = map(int, link.groups())
-                relevant_pairs.add((plant_scene, payoff_scene))
-                require(plant_scene, "EVENT")
-                require(payoff_scene, "EVENT")
-            payoff_event = re.search(r"SETUP_PAYOFF_MAP payoff in scene (\d+)", problem, re.I)
-            if payoff_event:
-                require(int(payoff_event.group(1)), "EVENT")
-            plant_event = re.search(r"SETUP_PAYOFF_MAP plant in scene (\d+)", problem, re.I)
-            if plant_event:
-                require(int(plant_event.group(1)), "EVENT")
-            location_error = re.search(r"scene (\d+) changes its physical location", problem, re.I)
-            if location_error:
-                require(int(location_error.group(1)), "ENTRY_LOCATION", "EVENT", "EXIT_LOCATION")
-            object_error = re.search(r"scene (\d+) object state change", problem, re.I)
-            if object_error:
-                number = int(object_error.group(1))
-                require(number, "ENTRY_OBJECTS", "EVENT", "EXIT_OBJECTS")
-                # Include the prior scene's resulting inventory too: an object may
-                # have been incorrectly marked completed before the reported delta.
-                require(number - 1, "EVENT", "ENTRY_OBJECTS", "EXIT_OBJECTS")
-            missing_handoff = re.search(r"scene\s+(\d+)\s+has no NEXT_CAUSE handoff", problem, re.I)
-            if missing_handoff:
-                number = int(missing_handoff.group(1))
-                require(number, "PURPOSE", "EVENT", "NEXT_CAUSE")
-                require(number + 1, "PURPOSE", "EVENT")
+            if transition:
+                n = int(transition.group(1))
+                if n in required and n not in repeated_candidate_scenes and not candidate_has(rf"scene\s+{n:02d}\s+mid-scene"):
+                    patched_states[n]["EVENT"] = new_states[n].get("EVENT", patched_states[n].get("EVENT", ""))
+                    patched_states[n]["ON_SCREEN_PRESENT"] = new_states[n].get("ON_SCREEN_PRESENT", patched_states[n].get("ON_SCREEN_PRESENT", ""))
+                    if candidate_boundary_is_safe(n, "EXIT_PRESENT", "ENTRY_PRESENT"):
+                        patched_states[n]["EXIT_PRESENT"] = new_states[n].get("EXIT_PRESENT", patched_states[n].get("EXIT_PRESENT", ""))
+                        if n < expected:
+                            patched_states[n + 1]["ENTRY_PRESENT"] = new_states[n + 1].get("ENTRY_PRESENT", patched_states[n + 1].get("ENTRY_PRESENT", ""))
+                    if transition.group(2).casefold() == "entry" and n > 1 and candidate_boundary_is_safe(n - 1, "EXIT_PRESENT", "ENTRY_PRESENT"):
+                        patched_states[n - 1]["EXIT_PRESENT"] = new_states[n - 1].get("EXIT_PRESENT", patched_states[n - 1].get("EXIT_PRESENT", ""))
+                        patched_states[n]["ENTRY_PRESENT"] = new_states[n].get("ENTRY_PRESENT", patched_states[n].get("ENTRY_PRESENT", ""))
 
-        map_pairs = re.findall(
-            r"PLANT\s+Scene\s+(\d{1,2})\s*:\s*(.+?)\s*;\s*"
-            r"PAYOFF\s+Scene\s+(\d{1,2})\s*:\s*(.+?)"
-            r"(?=\s*\|\s*PLANT\s+Scene\s+|$)",
-            fields.get("SETUP_PAYOFF_MAP", ""), re.I,
+            death = re.search(r"scene\s+(\d+)\s+death of", problem, re.I)
+            if death:
+                n = int(death.group(1))
+                if n in required and n not in repeated_candidate_scenes and not candidate_has(rf"scene\s+{n:02d}\s+death of"):
+                    patched_states[n]["EVENT"] = new_states[n].get("EVENT", patched_states[n].get("EVENT", ""))
+                    if candidate_boundary_is_safe(n, "EXIT_PRESENT", "ENTRY_PRESENT"):
+                        patched_states[n]["EXIT_PRESENT"] = new_states[n].get("EXIT_PRESENT", patched_states[n].get("EXIT_PRESENT", ""))
+                        if n < expected:
+                            patched_states[n + 1]["ENTRY_PRESENT"] = new_states[n + 1].get("ENTRY_PRESENT", patched_states[n + 1].get("ENTRY_PRESENT", ""))
+
+            repeat = re.search(r"scene\s+(\d+)\s+repeats the preceding scene beat", problem, re.I)
+            if repeat:
+                n = int(repeat.group(1))
+                new_event = normalize_event(new_states[n].get("EVENT", ""))
+                prior_event = normalize_event(new_states[n - 1].get("EVENT", "")) if n > 1 else ""
+                if n in required and n not in repeated_candidate_scenes and new_event and new_event != prior_event:
+                    # Only replace the event/purpose; do not import a regenerated ending or identity.
+                    patched_states[n]["EVENT"] = new_states[n].get("EVENT", old_states[n].get("EVENT", ""))
+                    patched_states[n]["PURPOSE"] = new_states[n].get("PURPOSE", old_states[n].get("PURPOSE", ""))
+
+        # Causal mismatch is wording-sensitive. Accept a revised cause/event pair only if the
+        # candidate no longer produces the advisory finding for that exact transition.
+        for item in advisory_findings or []:
+            handoff = re.search(r"scene\s+(\d+)\s+event is not anchored to the previous scene's NEXT_CAUSE", item, re.I)
+            if not handoff:
+                continue
+            n = int(handoff.group(1))
+            if 1 <= n <= expected and n not in repeated_candidate_scenes and not any(
+                re.search(rf"scene\s+{n:02d}\s+event is not anchored to the previous scene's NEXT_CAUSE", warning, re.I)
+                for warning in candidate_state_errors
+            ):
+                patched_states[n]["EVENT"] = new_states[n].get("EVENT", patched_states[n].get("EVENT", ""))
+                if n > 1:
+                    patched_states[n - 1]["NEXT_CAUSE"] = new_states[n - 1].get("NEXT_CAUSE", patched_states[n - 1].get("NEXT_CAUSE", ""))
+
+        # Emit the original CAST and global fields, with only explicitly approved field patches.
+        field_order = list(old_fields)
+        lines = [old_cast]
+        for key in field_order:
+            lines.append(f"{key}: {patched_fields.get(key, old_fields[key])}")
+        scene_order = (
+            "PURPOSE", "ENTRY_LOCATION", "ENTRY_PRESENT", "ON_SCREEN_PRESENT", "ENTRY_KNOWS", "ENTRY_OBJECTS",
+            "EVENT", "EXIT_LOCATION", "EXIT_PRESENT", "EXIT_KNOWS", "EXIT_OBJECTS", "NEXT_CAUSE",
         )
-        if has_map_findings and not relevant_pairs:
-            relevant_pairs = {
-                (int(plant), int(payoff)) for plant, _, payoff, _ in map_pairs
-                if int(plant) in selected or int(payoff) in selected
-            }
-        map_lines = []
-        for plant, plant_detail, payoff, payoff_detail in map_pairs:
-            pair = (int(plant), int(payoff))
-            if has_map_findings and pair in relevant_pairs:
-                plant_excerpt = str(plant_detail).strip()[:220]
-                payoff_excerpt = str(payoff_detail).strip()[:220]
-                map_lines.append(
-                    f"S{pair[0]:02d} PLANT: {plant_excerpt} -> S{pair[1]:02d} PAYOFF: {payoff_excerpt}"
-                )
-                require(pair[0], "EVENT")
-                require(pair[1], "EVENT")
-
-        def object_delta(state: dict[str, str]) -> str:
-            def items(value: str) -> dict[str, str]:
-                found: dict[str, str] = {}
-                for raw in re.split(r",\s*(?=[A-Z])", str(value or "")):
-                    item = raw.strip()
-                    if not item:
-                        continue
-                    label = re.sub(r"\s*\([^)]*\)\s*$", "", item).strip()
-                    if label:
-                        found[label.casefold()] = item
-                return found
-            before = items(state.get("ENTRY_OBJECTS", ""))
-            after = items(state.get("EXIT_OBJECTS", ""))
-            changes = []
-            for key in sorted(set(before) | set(after)):
-                if before.get(key) != after.get(key):
-                    changes.append(f"{before.get(key, '[absent]')} -> {after.get(key, '[absent]')}")
-            return "; ".join(changes) or "no listed inventory delta"
-
-        lines = [
-            "PREVIOUS PLAN EXCERPTS — repair this plan; do not restart.",
-        ]
-        cast_names = [item.get("name", "").strip() for item in parse_cast(blueprint) if item.get("name")]
-        if cast_names:
-            lines.append("CAST TO PRESERVE: " + ", ".join(cast_names))
-        resolution = fields.get("RESOLUTION", "")
-        if resolution:
-            lines.append("EXISTING ENDING: " + resolution[:220])
-        if map_lines:
-            lines.append("FAILED MAP PAIRS: " + " | ".join(map_lines))
-
-        for number in sorted(selected):
-            state = parse_scene_state(beats[number])
-            names = requested_fields.get(number, {"EVENT"})
-            parts = []
-            if "ENTRY_LOCATION" in names and state.get("ENTRY_LOCATION"):
-                location = state["ENTRY_LOCATION"].replace("Abandoned Arctic Research Station, ", "")
-                parts.append("FROM=" + location)
-            if "EVENT" in names and state.get("EVENT"):
-                parts.append("EVENT=" + state["EVENT"][:175])
-            if "EXIT_LOCATION" in names and state.get("EXIT_LOCATION"):
-                location = state["EXIT_LOCATION"].replace("Abandoned Arctic Research Station, ", "")
-                parts.append("TO=" + location)
-            if "NEXT_CAUSE" in names and state.get("NEXT_CAUSE"):
-                parts.append("NEXT_CAUSE=" + state["NEXT_CAUSE"][:125])
-            if "ENTRY_OBJECTS" in names or "EXIT_OBJECTS" in names:
-                parts.append("OBJECT_DELTA=" + object_delta(state))
-            if parts:
-                lines.append(f"S{number:02d}: " + "; ".join(parts))
-
-        lines.append(
-            "Repair only implicated fields. Payoffs must reuse the planted evidence in the mapped EVENT; "
-            "each non-final cause must force the next EVENT. State only completed object actions."
-        )
-        return "\n".join(lines)
+        for number in range(1, expected + 1):
+            state = patched_states[number]
+            parts = [f"{key}={state.get(key, 'none') or 'none'}" for key in scene_order]
+            lines.append(f"SCENE {number:02d}: " + "; ".join(parts))
+        merged = "\n".join(lines)
+        # Reconcile on-screen scene ranges without changing canonical identities/metadata.
+        return reconcile_cast_scenes(merged, expected)
 
     @staticmethod
     def _revision_feedback(
@@ -2320,7 +2425,7 @@ class QwenDirector(
                 short = lambda value: value.rsplit(",", 1)[-1].strip()
                 location_details.append(f"S{int(number):02d} {short(origin)} -> {short(destination)}")
                 continue
-            obj = re.search(r"scene (\d+) object state change", problem, re.I)
+            obj = re.search(r"scene (\d+) (?:key-)?object state change", problem, re.I)
             if obj:
                 object_scenes.add(int(obj.group(1)))
                 continue
@@ -2435,7 +2540,12 @@ class QwenDirector(
 
         if previous_plan_context:
             feedback += "\n\n" + previous_plan_context
-            feedback += "\nSCOPE: minimally repair the excerpts. Preserve premise, cast and unaffected events; do not invent a new plot or move the climax earlier."
+            feedback += (
+                "\nREVISION OUTPUT RULE: return the complete required JSON object, but copy the locked CAST and all "
+                "unaffected values exactly. Change only the named fields in the affected scenes. Do not change a "
+                "character's kind/role/identity, do not delete a cast member, do not renumber/reorder scenes, and do "
+                "not move the climax earlier. The application will preserve unapproved fields from the original plan."
+            )
         feedback += f"\nReturn the complete revised {subject} in the required JSON schema only."
         return feedback
 
@@ -2448,10 +2558,16 @@ class QwenDirector(
     ) -> str:
         """One primary Architect pass; at most one revision after a returned plan fails a hard gate."""
         feedback = ""
+        revision_base = None
+        revision_problems: list[str] | None = None
+        revision_advisories: list[str] | None = None
         for attempt in range(int(STORY_ARCHITECT_REVISION_RETRIES) + 1):
             try:
                 return self._generate_story_blueprint_attempt(
                     mode, user_input, source_character_names=source_character_names, feedback=feedback,
+                    revision_base=revision_base,
+                    revision_problems=revision_problems,
+                    revision_advisories=revision_advisories,
                 )
             except self._BlueprintRejected as rejection:
                 if attempt >= int(STORY_ARCHITECT_REVISION_RETRIES):
@@ -2459,6 +2575,9 @@ class QwenDirector(
                 problems = list(getattr(self, "_last_story_quality_errors", None) or []) or [str(rejection)]
                 previous_context = self._story_blueprint_revision_context(rejection.blueprint, problems)
                 advisory_findings = list(getattr(self, "_last_story_blueprint_warnings", None) or [])
+                revision_base = rejection.blueprint
+                revision_problems = problems
+                revision_advisories = advisory_findings
                 feedback = self._revision_feedback(
                     problems,
                     "story plan",
@@ -2479,6 +2598,9 @@ class QwenDirector(
         *,
         source_character_names: list[str] | None = None,
         feedback: str = "",
+        revision_base: str | None = None,
+        revision_problems: list[str] | None = None,
+        revision_advisories: list[str] | None = None,
     ) -> str:
         """Create one compact 12-scene plan with a hard Qwen reasoning-token budget."""
         from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, StoryTruncated
@@ -2534,6 +2656,10 @@ class QwenDirector(
             raw = str(exc.partial or "")
             try:
                 blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
+                if revision_base:
+                    blueprint = self._merge_story_blueprint_revision(
+                        revision_base, blueprint, revision_problems or [], revision_advisories,
+                    )
                 self._validate_story_blueprint_contract(
                     mode,
                     blueprint,
@@ -2559,6 +2685,10 @@ class QwenDirector(
         blueprint = ""
         try:
             blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
+            if revision_base:
+                blueprint = self._merge_story_blueprint_revision(
+                    revision_base, blueprint, revision_problems or [], revision_advisories,
+                )
             self._validate_story_blueprint_contract(
                 mode,
                 blueprint,
@@ -2662,6 +2792,16 @@ class QwenDirector(
                 a, b = normalized[index - 1], normalized[index]
                 if a and b and a == b:
                     errors.append(f"scene {index + 1:02d} repeats the preceding scene beat")
+            # Scene-state fields can differ while the actual EVENT is repeated verbatim.
+            # An identical consecutive event is a structural duplicate, especially damaging in S10-S12.
+            event_texts = [parse_scene_state(beats[i]).get("EVENT", "") for i in range(1, DIRECTOR_STORY_SCENES + 1)]
+            for index in range(1, len(event_texts)):
+                normalize_event = lambda value: re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).strip()
+                left, right = normalize_event(event_texts[index - 1]), normalize_event(event_texts[index])
+                if left and right and left == right:
+                    finding = f"scene {index + 1:02d} repeats the preceding scene beat"
+                    if finding not in errors:
+                        errors.append(finding)
 
         cast_names = self._blueprint_cast_names(blueprint)
         if not cast_line or not cast_names:
