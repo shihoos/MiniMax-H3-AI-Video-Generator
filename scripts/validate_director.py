@@ -1611,21 +1611,41 @@ def test_story_cinematic_coverage_enforces_unique_framing_without_camera_motion_
             "coverage normalization must not invent an object, viewpoint, or second participant")
 
 
-def test_story_completion_contract_rejects_unresolved_final_hook():
+def test_story_completion_contract_reports_an_unresolved_final_hook_as_a_warning():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS
+    from planner.config import AI_STORY_MODE, STORY_MIN_WORDS
     director = QwenDirector.__new__(QwenDirector)
     director._story_min_words = STORY_MIN_WORDS
     paragraphs = _story_test_paragraphs(120)
-    paragraphs[-1] = paragraphs[-1].replace(". ", ". ", 1) + " I’ll find it. The harbor gate closes and the rescue crew reaches safe ground."
+    paragraphs[-1] = paragraphs[-1].replace(". ", ". ", 1) + " I\u2019ll find it. The harbor gate closes and the rescue crew reaches safe ground."
     story = "\n\n".join(paragraphs)
-    _assert(len(re.findall(r"\b[\w'’-]+\b", story)) >= 1400, "hook fixture must meet the length floor")
-    try:
-        director._validate_story_completion_contract(AI_STORY_MODE, story)
-    except RuntimeError as exc:
-        _assert("unresolved future hook" in str(exc).lower(), f"completion gate did not catch an earlier final-scene hook: {exc}")
-    else:
-        raise AssertionError("a future promise anywhere in the final scene must fail")
+    _assert(len(re.findall(r"\b[\w'\u2019-]+\b", story)) >= 1400, "hook fixture must meet the length floor")
+    # A phrase list cannot separate a sequel hook from a resolved ending that mentions the future: warn, do not discard.
+    director._validate_story_completion_contract(AI_STORY_MODE, story)
+    _assert(any("open future hook" in w for w in director._last_story_quality_warnings),
+            f"the ending phrase check must still be reported: {getattr(director, '_last_story_quality_warnings', None)!r}")
+
+
+def test_a_person_the_architect_named_but_never_put_on_screen_is_seeded():
+    """Regression (Kaggle run): 'Dr. Marcus Hale' was dropped from CAST (never on screen), then flagged as unseeded in prose."""
+    from planner.story_contracts import audit_story_against_blueprint
+    from planner.story_blueprint_schema import render_blueprint_text
+    from planner.config import DIRECTOR_STORY_SCENES
+    data = _blueprint_json_from_fixture()
+    data["cast"].append(dict(data["cast"][0], name="Dr. Marcus Hale", aliases=[]))
+    dropped = []
+    text = render_blueprint_text(data, DIRECTOR_STORY_SCENES, dropped)
+    _assert(dropped == ["Dr. Marcus Hale"], "a never-on-screen person is still removed from CAST")
+    _assert("Named but never on screen: Dr. Marcus Hale" in text, "the removed person must stay named in the plan")
+    story = _story_contract_fixture_prose().replace(
+        "Ines examines transfer stage 1,", "Dr. Hale's journal lay open beside the ledger. Ines examines transfer stage 1,", 1)
+    blueprint = _story_blueprint_fixture()
+    _assert(any("unseeded named person" in i for i in audit_story_against_blueprint(story, blueprint)),
+            "a person nobody planned is still an unseeded name")
+    declared = re.sub(r"(?m)^RELATIONSHIPS: .*$", "RELATIONSHIPS: Named but never on screen: Dr. Marcus Hale", blueprint, count=1)
+    _assert(declared != blueprint, "fixture must have a RELATIONSHIPS line")
+    issues = [i for i in audit_story_against_blueprint(story, declared) if "unseeded named person" in i]
+    _assert(not issues, f"a person the Architect named is seeded: {issues!r}")
 
 
 def test_story_uses_one_architect_and_one_author_without_retry_or_repair():
@@ -2549,8 +2569,9 @@ def main():
         test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_post_death_presence,
         test_story_entity_relationship_and_person_grounding_is_a_hard_gate,
         test_a_prop_the_plan_declares_is_seeded_but_an_invented_organization_is_not,
+        test_a_person_the_architect_named_but_never_put_on_screen_is_seeded,
         test_story_cinematic_coverage_enforces_unique_framing_without_camera_motion_quota,
-        test_story_completion_contract_rejects_unresolved_final_hook,
+        test_story_completion_contract_reports_an_unresolved_final_hook_as_a_warning,
         test_story_uses_one_architect_and_one_author_without_retry_or_repair,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_author_min_tokens_zero_is_omitted_from_vllm_payload,
