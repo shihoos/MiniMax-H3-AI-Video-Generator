@@ -152,7 +152,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-12.1"
+CONTRACTS_REVISION = "2026-11-14.1"
 
 # Hard findings are structural facts or direct contradictions: missing/invalid structure, impossible cast
 # state, the dead acting, an unresolved ending. Findings that only compare the *wording* of two free-text fields
