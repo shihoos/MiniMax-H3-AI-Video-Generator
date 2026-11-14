@@ -334,7 +334,9 @@ class QwenDirector(
                 ]
 
         # Two distinct, bounded stages: Architect (thinking ON), then Author (thinking OFF).
-        # Each stage is invoked exactly once. No retries, repairs, best-of-N or rescue calls.
+        # Each has one primary request and at most one conditional revision after a returned
+        # artifact is rejected by a hard gate. Infrastructure retries, repairs, best-of-N,
+        # and rescue calls remain disabled.
         temperature, top_p = self._sampling_for_mode(mode)
 
         # ----------------------------------------------------
@@ -1461,6 +1463,43 @@ class QwenDirector(
             "director_notes": director_notes,
         }
 
+    def _story_generation_accounting(self) -> dict[str, object]:
+        """Count actual Architect/Author completion attempts from this generation session.
+
+        The general Qwen telemetry also includes character extraction and shot planning;
+        those calls must not be misreported as story-writing calls. Revisions reuse the
+        primary call_name, so their count is the number of stage calls beyond the first.
+        """
+        telemetry = getattr(self, "_qwen_telemetry", {}) or {}
+        calls = list(telemetry.get("calls", []) or []) if isinstance(telemetry, dict) else []
+        architect_names = {"ai_story_architecture_pass", "expand_story_architecture_pass"}
+        author_names = {"ai_story_text_pass", "expand_story_text_pass"}
+        architect_sequence = [
+            str(item.get("call_name", "unknown"))
+            for item in calls
+            if isinstance(item, dict) and str(item.get("call_name", "")) in architect_names
+        ]
+        author_sequence = [
+            str(item.get("call_name", "unknown"))
+            for item in calls
+            if isinstance(item, dict) and str(item.get("call_name", "")) in author_names
+        ]
+        architect_revisions = max(0, len(architect_sequence) - 1)
+        author_revisions = max(0, len(author_sequence) - 1)
+        return {
+            "architect_calls": len(architect_sequence),
+            "author_calls": len(author_sequence),
+            "architect_revisions": architect_revisions,
+            "author_revisions": author_revisions,
+            "architect_revision_limit": int(STORY_ARCHITECT_REVISION_RETRIES),
+            "author_revision_limit": int(STORY_AUTHOR_REVISION_RETRIES),
+            "total_story_revisions": architect_revisions + author_revisions,
+            "runtime_retry_calls": max(0, int(telemetry.get("retries", 0) or 0)) if isinstance(telemetry, dict) else 0,
+            "repair_calls": 0,
+            "architect_call_sequence": architect_sequence,
+            "author_call_sequence": author_sequence,
+        }
+
     def _save_failed_story_draft(
         self,
         story: str,
@@ -1479,16 +1518,25 @@ class QwenDirector(
             temporary = destination.with_name(destination.name + ".tmp")
             raw_text = str(story if raw_story is None else raw_story or "")
             processed_text = str(story if processed_story is None else processed_story or "")
+            accounting = self._story_generation_accounting()
             header = [
-                "MINIMAX H3 — LAST REJECTED AUTHOR DRAFT",
+                "MINIMAX H3 — REJECTED AUTHOR DRAFT",
                 f"stage: {stage}",
                 f"reason: {reason}",
                 f"usable_words: {word_count if word_count is not None else 'not measured'}",
                 f"required_minimum: {getattr(self, '_story_min_words', STORY_ACCEPT_MIN_WORDS)}",
                 (
-                    "generation_policy: one Author call; "
+                    "generation_policy: "
+                    f"architect_calls={accounting['architect_calls']}; "
+                    f"author_calls={accounting['author_calls']}; "
+                    f"architect_revisions={accounting['architect_revisions']}; "
+                    f"author_revisions={accounting['author_revisions']}; "
+                    f"architect_revision_limit={accounting['architect_revision_limit']}; "
+                    f"author_revision_limit={accounting['author_revision_limit']}; "
                     f"minimum_output_tokens={DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS}; "
-                    "zero retries; zero repair calls"
+                    f"total_story_revisions={accounting['total_story_revisions']}; "
+                    f"runtime_retry_calls={accounting['runtime_retry_calls']}; "
+                    f"repair_calls={accounting['repair_calls']}"
                 ),
                 "",
                 "----- BEGIN RAW QWEN COMPLETION -----",
@@ -1518,8 +1566,13 @@ class QwenDirector(
     ) -> None:
         """Persist complete warnings/results beside Qwen traces and in the project root."""
         try:
+            accounting = self._story_generation_accounting()
+            author_failure_path = (
+                Path(getattr(self, "project_root", None) or Path.cwd()) / "story_author_last_failed.txt"
+            )
+            rejected_draft_exists = author_failure_path.is_file()
             report = {
-                "schema": 1,
+                "schema": 2,
                 "contracts_revision": CONTRACTS_REVISION,
                 "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                 "status": str(status),
@@ -1533,14 +1586,21 @@ class QwenDirector(
                 "required_scenes_at_least_120_words": max(0, DIRECTOR_STORY_SCENES - 2),
                 "scene_count": DIRECTOR_STORY_SCENES,
                 "generation_policy": {
-                    "architect_calls": 1,
-                    "author_calls": 1 if "author" in str(stage).casefold() else 0,
+                    **accounting,
                     "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
                     "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
                     "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-                    "retries": 0,
-                    "repairs": 0,
+                    "story_revision_policy": "up to one conditional revision per stage after a returned artifact fails a hard gate",
+                    "runtime_retry_calls": accounting["runtime_retry_calls"],
+                    "repair_calls": accounting["repair_calls"],
                 },
+                "rejected_draft_artifact": "story_author_last_failed.txt" if rejected_draft_exists else None,
+                "recovered_after_architect_revision": bool(
+                    status == "passed" and accounting["architect_revisions"] > 0
+                ),
+                "recovered_after_author_revision": bool(
+                    status == "passed" and accounting["author_revisions"] > 0 and rejected_draft_exists
+                ),
                 "blueprint_warnings": list(getattr(self, "_last_story_blueprint_warnings", []) or []),
                 "prose_audit_warnings": list(getattr(self, "_last_story_contract_warnings", []) or []),
                 "quality_warnings": list(getattr(self, "_last_story_quality_warnings", []) or []),
@@ -1571,11 +1631,22 @@ class QwenDirector(
                     "generation_policy: "
                     f"architect_calls={report['generation_policy']['architect_calls']}; "
                     f"author_calls={report['generation_policy']['author_calls']}; "
+                    f"architect_revisions={report['generation_policy']['architect_revisions']}; "
+                    f"author_revisions={report['generation_policy']['author_revisions']}; "
+                    f"architect_revision_limit={report['generation_policy']['architect_revision_limit']}; "
+                    f"author_revision_limit={report['generation_policy']['author_revision_limit']}; "
                     f"architect_max_tokens={report['generation_policy']['architect_max_tokens']}; "
                     f"author_max_tokens={report['generation_policy']['author_max_tokens']}; "
                     f"author_minimum_output_tokens={report['generation_policy']['author_minimum_output_tokens']}; "
-                    "retries=0; repairs=0"
+                    f"total_story_revisions={report['generation_policy']['total_story_revisions']}; "
+                    f"runtime_retry_calls={report['generation_policy']['runtime_retry_calls']}; "
+                    f"repair_calls={report['generation_policy']['repair_calls']}"
                 ),
+                f"recovered_after_architect_revision: {report['recovered_after_architect_revision']}",
+                f"recovered_after_author_revision: {report['recovered_after_author_revision']}",
+                f"rejected_draft_artifact: {report['rejected_draft_artifact'] or 'none'}",
+                f"architect_call_sequence: {json.dumps(report['generation_policy']['architect_call_sequence'])}",
+                f"author_call_sequence: {json.dumps(report['generation_policy']['author_call_sequence'])}",
                 "",
             ]
             for label, key in (
@@ -1641,9 +1712,10 @@ class QwenDirector(
     ) -> str:
         """Validate the current story without rewriting its topology.
 
-        Raw model output is authoritative. The single-pass production writer uses strict=True:
-        detected premise-coverage, sentence-depth, completion, or ending-contract defects fail
-        before entity extraction and shot batches. No retry, repair call, or paragraph reshaping is allowed.
+        Raw model output is authoritative. Each strict validation attempt checks the current
+        completion without rewriting it. A hard rejection may trigger the one conditional
+        Author revision in the outer generation wrapper; this validator itself makes no calls,
+        repairs, or paragraph reshaping.
         Paragraph topology is validated after explicit scene markers are normalized.
         """
         working = self._normalize_story(story)
@@ -1720,7 +1792,7 @@ class QwenDirector(
             )
 
     # ------------------------------------------------------------------
-    # Story generation: one thinking-enabled call, deterministic checks, no retries
+    # Story generation: bounded Architect + Author, with hard-gate-only revisions
     # ------------------------------------------------------------------
     def _salvage_runaway_story(self, text: str) -> str:
         """Recover a clean story from a draft that kept generating after it ended."""
@@ -2212,7 +2284,7 @@ class QwenDirector(
         *,
         source_character_names: list[str] | None = None,
     ) -> str:
-        """Architect pass. At most one revision, and only after a hard-gate rejection of a returned plan."""
+        """One primary Architect pass; at most one revision after a returned plan fails a hard gate."""
         feedback = ""
         for attempt in range(int(STORY_ARCHITECT_REVISION_RETRIES) + 1):
             try:
@@ -2303,8 +2375,8 @@ class QwenDirector(
             except RuntimeError as plan_error:
                 reason = (
                     f"{call_name} hit its token ceiling and the partial output was not a complete "
-                    f"{DIRECTOR_STORY_SCENES}-scene blueprint. No retry was attempted. "
-                    f"Underlying validation: {plan_error}"
+                    f"{DIRECTOR_STORY_SCENES}-scene blueprint. This infrastructure/truncation failure "
+                    f"is not eligible for a content revision. Underlying validation: {plan_error}"
                 )
                 self._last_story_quality_errors = [reason]
                 try:
@@ -2469,7 +2541,7 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Run the Author pass (one revision after a hard-gate rejection) and preserve any rejected draft."""
+        """Run one primary Author pass, with one conditional hard-gate revision and draft preservation."""
         self._last_story_raw_output = ""
         self._last_story_draft = ""
         self._last_story_quality_errors = []
@@ -2525,10 +2597,10 @@ class QwenDirector(
             raise
 
     def _run_author_with_one_revision(self, mode, user_input, story_system, story_user, **kwargs):
-        """One Author pass; if it wrote a draft that failed a hard gate, one rewrite told exactly why.
+        """One primary Author pass; after a returned draft fails validation, allow one informed revision.
 
         A first draft that passes costs exactly one model call. Infrastructure failures (HTTP errors, a hit
-        token ceiling, no draft at all) are never retried, because a rewrite would not change them.
+        token ceiling, no draft at all) are never retried, because a revision would not change them.
         """
         from planner.qwen_director_runtime import StoryTruncated
 
@@ -2647,11 +2719,11 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Write the story in non-thinking mode from the bounded causal blueprint.
+        """Write one complete story completion in non-thinking mode from the causal blueprint.
 
-        One Author call writes all scenes; the single permitted revision (owned by _run_author_with_one_revision)
-        is also one call. Paragraph topology is normalized deterministically. Length and completion are hard
-        contracts; source-coverage heuristics stay advisory. This method never retries.
+        The outer wrapper may issue one conditional revision only after this returned draft
+        fails a hard contract. Each invocation of this method is exactly one completion; it
+        never retries internally. Paragraph topology is normalized deterministically.
         """
         call_name = (
             "ai_story_text_pass"
@@ -2676,7 +2748,8 @@ class QwenDirector(
         print(
             f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
             f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
-            f"single_pass=true retries=0 repairs=0",
+            f"request_mode=single_completion author_revision_limit={STORY_AUTHOR_REVISION_RETRIES} "
+            "revision=conditional_on_returned_draft_rejection infrastructure_retries=0 repairs=0",
             flush=True,
         )
         part_kwargs = dict(
@@ -2705,7 +2778,8 @@ class QwenDirector(
             raise RuntimeError(
                 failure_prefix
                 + f"Author returned {initial_scene_count} scene paragraphs; exactly {DIRECTOR_STORY_SCENES} are required. "
-                "Scene boundaries were preserved; no split, merge, retry, or repair call was attempted."
+                "Scene boundaries were preserved; no local split, merge, or repair was applied. "
+                "The outer Author policy may issue one conditional revision for this rejected draft."
             )
         self._last_story_draft = raw
 
@@ -2765,7 +2839,8 @@ class QwenDirector(
             if not trimmed:
                 raise RuntimeError(
                     failure_prefix + "The cleaned story ends mid-sentence and cannot be safely trimmed "
-                    "without a safe complete-sentence boundary. No retry was attempted."
+                    "without a safe complete-sentence boundary. No local retry or repair was attempted; "
+                    "the outer Author revision policy may issue one conditional revision."
                 )
             candidate = trimmed
             self._last_story_draft = str(candidate or "")
@@ -2777,7 +2852,8 @@ class QwenDirector(
         if word_count < self._story_min_words:
             reason = (
                 f"Final story has {word_count} words, below the configured minimum of "
-                f"{self._story_min_words}. The single Author call was not retried or repaired."
+                f"{self._story_min_words}. The current completion was not locally repaired; "
+                "the outer Author revision policy may issue one conditional revision."
             )
             self._last_story_quality_errors = [reason]
             raise RuntimeError(failure_prefix + reason)
@@ -2788,7 +2864,8 @@ class QwenDirector(
             raise RuntimeError(
                 failure_prefix
                 + f"Final story topology must contain exactly {DIRECTOR_STORY_SCENES} scene paragraphs "
-                f"(got {paragraph_count}). No retry or paragraph reshaping was attempted."
+                f"(got {paragraph_count}). No local paragraph reshaping was attempted; "
+                "the outer Author revision policy may issue one conditional revision."
             )
         # Run the completion contract again after deterministic quote/stock cleanup.
         # It is local validation only; no repair request is ever sent.
@@ -2799,7 +2876,7 @@ class QwenDirector(
             raise RuntimeError(
                 failure_prefix + "hard story-quality gate rejected the single Author draft: "
                 + "; ".join(blocking[:12])
-                + ". No retry or repair call was attempted."
+                + ". No local repair was attempted; the outer Author revision policy may issue one conditional revision."
             )
         issues = self._story_quality_issues(candidate)
         issues.extend(self._story_cast_contract_issues(candidate, story_blueprint))
@@ -2821,7 +2898,8 @@ class QwenDirector(
         """Deterministic hard gates for duplication, dialogue fit and grounding.
 
         Style heuristics (stock phrasing, repeated sentence openers, a cast member absent from one scene) are advisory:
-        the pipeline makes one Author call and never retries, so a wording check must not discard a complete draft.
+        they must not discard a complete draft and trigger a revision. A hard rejection may receive one
+        conditional Author revision; no wording-only revision is permitted.
         """
         paragraphs = [p.strip() for p in re.split(r"\n\s*\n+", str(story or "")) if p.strip()]
         errors: list[str] = []
@@ -3211,7 +3289,7 @@ class QwenDirector(
                 raise ValueError(
                     "Story scene markers must appear exactly once and in order as "
                     f"[[SCENE_01]] through [[SCENE_{DIRECTOR_STORY_SCENES:02d}]]; "
-                    f"found {actual}. No retry or paragraph reshaping was attempted."
+                    f"found {actual}. No local reshaping was attempted; the outer Author policy may conditionally revise a returned draft."
                 )
             scenes: list[str] = []
             for index, marker in enumerate(markers):
@@ -3221,13 +3299,13 @@ class QwenDirector(
                 if not scene:
                     raise ValueError(
                         f"Story scene marker [[SCENE_{index + 1:02d}]] has no prose. "
-                        "No retry or paragraph reshaping was attempted."
+                        "No local reshaping was attempted; the outer Author policy may conditionally revise a returned draft."
                     )
                 scenes.append(scene)
             if len(scenes) != DIRECTOR_STORY_SCENES:
                 raise ValueError(
                     f"Story must contain exactly {DIRECTOR_STORY_SCENES} marked scenes; "
-                    f"found {len(scenes)}. No retry or paragraph reshaping was attempted."
+                    f"found {len(scenes)}. No local reshaping was attempted; the outer Author policy may conditionally revise a returned draft."
                 )
             return "\n\n".join(scenes)
 
