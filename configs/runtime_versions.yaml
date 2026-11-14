@@ -96,7 +96,7 @@ director:
       top_k: 20
       min_p: 0.0
       presence_penalty: 0.8
-      max_tokens: 3800
+      max_tokens: 3000
       minimum_output_tokens: 0
   story_contract:
     scene_count: 12
@@ -104,7 +104,7 @@ director:
     words_per_scene: 130
     target_words: 1560
     minimum_words: 1400
-    writer_words_per_scene: 190
+    writer_words_per_scene: 170
     accept_min_words: 1400
     cast_size_policy: plot_driven
     author_revision_retries: 1
