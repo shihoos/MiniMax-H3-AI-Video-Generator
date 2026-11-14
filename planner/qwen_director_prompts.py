@@ -326,6 +326,7 @@ class QwenDirectorPromptMixin:
         scene_allocation = "; ".join(
             f"SCENE {index + 1:02d}: {words} words" for index, words in enumerate(allocations)
         )
+        scene_cap = (target // n) * 5 // 4
         if mode == AI_STORY_MODE:
             source_rule = (
                 "Create a genuinely original short film from the supplied premise. Preserve its defining anchors, "
@@ -350,11 +351,11 @@ class QwenDirectorPromptMixin:
 
             STORY LENGTH: produce exactly {n} scene blocks. Write about {target} words in total; this is a drafting
             quota, and {minimum} is only the rejection floor. Per-scene quota (sums to {target}): {scene_allocation}.
-            Every scene is a fully dramatized sequence of THREE paragraphs of three to four sentences each, one paragraph per beat of the scene's EVENT:
+            Every scene is a fully dramatized sequence of THREE paragraphs of three sentences each (about 60 words per paragraph), one short paragraph per beat of the scene's EVENT:
             (1) establish the place, the pressure and the character's immediate objective through concrete action and
             perception; (2) play out the resistance, with specific dialogue or physical struggle and at least one
             discovery or complication; (3) show the decision, its cost, and the changed situation, and end on the
-            hand-off into the next scene. A scene of one or two short paragraphs is unfinished. Reach the quota with
+            hand-off into the next scene. A scene of one or two short paragraphs is unfinished. Hold every scene to its quota: no scene may run past {scene_cap} words, because the output space is only slightly larger than the {target}-word quota and a story that has not finished Scene {n:02d} when it ends is rejected. Reach the quota with
             consequential action, dialogue, evidence and aftermath, not filler, repeated description, or extra twists.
             Scenes 08-12 get exactly the same depth as scenes 01-04; never summarize or compress the final third. Do not
             add a title, synopsis, cast list, word count, or postscript. For every scene, physically introduce a
@@ -1051,7 +1052,8 @@ class QwenDirectorPromptMixin:
             f"\n\nWrite exactly {DIRECTOR_STORY_SCENES} blocks, tagged [[SCENE_01]] through "
             f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]]. Write about {writer_total} words overall "
             f"(about {writer_total // DIRECTOR_STORY_SCENES} per scene); {STORY_MIN_WORDS} is only the rejection floor. "
-            "Build every scene as three full paragraphs of three to four sentences: establish the place and "
+            f"Build every scene as three paragraphs of three sentences each (about 60 words per paragraph, no scene over "
+            f"{(writer_total // DIRECTOR_STORY_SCENES) * 5 // 4} words, so that all {DIRECTOR_STORY_SCENES} scenes fit): establish the place and "
             "objective through action, play out the resistance with dialogue or struggle, then show the decision, its "
             "cost and the hand-off. Give scenes 08-12 the same depth as scenes 01-04 and finish the full action and "
             "aftermath of Scene 12 before ending. Reach the length with consequential action, evidence and outcomes, "
