@@ -112,9 +112,9 @@ KNOWLEDGE_RE = re.compile(
 )
 OBJECT_CHANGE_RE = re.compile(
     r"\b(take\w*|hand\w*|give\w*|steal\w*|drop\w*|leave\w*|carry\w*|move\w*|hide\w*|"
-    r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|remove\w*|place\w*|"
-    r"return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*|"
-    r"inject\w*|activat\w*|dispers\w*|releas\w*|escap\w*|consum\w*|"
+    r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|retriev\w*|remove\w*|place\w*|"
+    r"find\w*|discover\w*|locate\w*|return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*|"
+    r"inject\w*|activat\w*|dispers\w*|releas\w*|escap\w*|consum\w*|use\w*|stabiliz\w*|"
     r"dissolv\w*|absorb\w*|seal\w*|unseal\w*)\b", re.I
 )
 CAUSAL_LINK_RE = re.compile(
@@ -152,7 +152,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.4.1"
+CONTRACTS_REVISION = "2026-11-14.4.2"
 
 # Hard findings are structural facts or direct contradictions: missing/invalid structure, impossible cast
 # state, the dead acting, an unresolved ending. Findings that only compare the *wording* of two free-text fields
@@ -257,12 +257,17 @@ def content_tokens(value: str) -> set[str]:
 
 _LOCATION_GENERIC_WORDS = {
     "the", "a", "an", "inside", "interior", "outside", "exterior", "room", "corridor",
-    "entrance", "exit", "control", "lower", "upper", "main", "central", "north", "south",
+    "entrance", "exit", "lower", "upper", "main", "central", "north", "south",
     "east", "west", "area", "sector", "point", "platform", "level", "floor",
+    # Site descriptors are shared by every room in a facility; they are not proof
+    # that the EVENT names the actual destination. Keep room identifiers such as
+    # "control", "archive" and "hidden" as destination anchors.
+    "abandoned", "research", "station",
 }
 
 _SCENE_LOCAL_MOVE_RE = re.compile(
     r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|move\s+through|"
+    r"navigat\w*|reach\w*|transport\w*|escort\w*|transfer\w*|"
     r"descend\w*|climb\w*|open\w*|unlock\w*|bypass\w*|breach\w*|leave\w*|exit\w*|"
     r"depart\w*|return\w*|travel\w*|walk\w*|run\w*|flee\w*|escape\w*|emerge\w*|"
     r"evacuate\w*|withdraw\w*|head\s+(?:to|for|toward)|make\s+their\s+way)\b", re.I,
