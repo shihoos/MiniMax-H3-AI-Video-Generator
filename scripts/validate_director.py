@@ -1669,8 +1669,8 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
             and calls[0].get("top_p") == DIRECTOR_STORY_WRITER_TOP_P == 0.8,
             f"Writer sampler changed unexpectedly: {calls[0]}")
     expected = min(DIRECTOR_STORY_MAX_TOKENS, DIRECTOR_STORY_WRITER_MAX_TOKENS)
-    _assert(calls[0].get("max_completion") == expected and expected == 3800,
-            f"Writer must use the configured 3,800-token completion ceiling: {calls[0]}")
+    _assert(calls[0].get("max_completion") == expected and expected == 3000,
+            f"Writer must use the configured 3,000-token completion ceiling: {calls[0]}")
     _assert(DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS == 0,
             "Author must preserve natural EOS; minimum output tokens must remain 0")
     _assert(calls[0].get("minimum_output_tokens") == 0,
@@ -1708,12 +1708,12 @@ def test_author_min_tokens_zero_is_omitted_from_vllm_payload():
     director._model_path = None
     director._post_chat(
         messages=[{"role": "user", "content": "Write the story."}],
-        temperature=0.7, top_p=0.8, max_tokens=3800,
+        temperature=0.7, top_p=0.8, max_tokens=3000,
         min_tokens=0, creative=True, enable_thinking=False, n_samples=1,
     )
     payload = director._vllm_session.payload
     _assert(payload is not None, "the one Author request must be sent")
-    _assert(payload.get("max_tokens") == 3800, f"Author max_tokens changed: {payload!r}")
+    _assert(payload.get("max_tokens") == 3000, f"Author max_tokens changed: {payload!r}")
     _assert("min_tokens" not in payload,
             f"min_tokens=0 must be omitted from the vLLM payload, not converted into a positive floor: {payload!r}")
 
@@ -2026,12 +2026,12 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "diagnostics must preserve the complete warning list, not only console previews")
         _assert(report["generation_policy"] == {
             "architect_calls": 1, "author_calls": 1,
-            "architect_max_tokens": 5400, "author_max_tokens": 3800,
+            "architect_max_tokens": 5400, "author_max_tokens": 3000,
             "author_minimum_output_tokens": 0, "retries": 0, "repairs": 0,
         }, f"Author rejection must report the exact single-pass token/call policy: {report['generation_policy']!r}")
         _assert("scene 22 knowledge transition needs review" in text_path.read_text(encoding="utf-8"),
                 "human-readable trace log must retain the final warning, not truncate the list")
-        _assert("architect_calls=1; author_calls=1; architect_max_tokens=5400; author_max_tokens=3800; author_minimum_output_tokens=0; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
+        _assert("architect_calls=1; author_calls=1; architect_max_tokens=5400; author_max_tokens=3000; author_minimum_output_tokens=0; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
                 "diagnostic text must accurately state the actual single-pass call and token policy")
         _assert(attached["cleanup_events"] == director._last_story_cleanup_events,
                 "the Author trace JSON must carry deterministic cleanup and validation details")
