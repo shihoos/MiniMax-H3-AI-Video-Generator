@@ -94,6 +94,7 @@ TRAVEL_RE = re.compile(
     r"\b(arriv\w*|enter\w*|reach\w*|travel\w*|walk\w*|drive\w*|cross\w*|climb\w*|"
     r"descend\w*|return\w*|follow\w*|move\w*|head\w*|board\w*|sail\w*|ride\w*|"
     r"disappear\w*|withdraw\w*|vanish\w*|depart\w*|slip away|go\w*|separate\w*|"
+    r"take shelter|seek shelter|retreat\w*|duck inside|shelter\w* inside|"
     r"hours later|next morning|by dawn|after sunset|at daybreak|the following day)\b",
     re.I,
 )
@@ -152,14 +153,12 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.4.2"
+CONTRACTS_REVISION = "2026-11-14.5.0"
 
-# Hard findings are structural facts or direct contradictions: missing/invalid structure, impossible cast
-# state, the dead acting, an unresolved ending. Findings that only compare the *wording* of two free-text fields
-# (does this event repeat words from the previous NEXT_CAUSE, does the payoff reuse the plant's nouns, does a
-# verb from a list appear) are advisory: a 14B model paraphrases, and rejecting a sound story for paraphrase made
-# runs fail at random. Scene-boundary state (location, presence, knowledge, objects) is derived from the previous
-# scene's exit by the Architect schema, so those boundary findings cannot occur for structured plans.
+# Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
+# impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
+# custody/state changes that the EVENT does not perform. Purely lexical NEXT_CAUSE paraphrase checks remain
+# advisory; the validator must not confuse wording variation with a broken causal chain.
 HARD_FINDING_MARKERS = (
     "missing structured plot/continuity fields",
     "SETUP_PAYOFF_MAP must contain",
@@ -173,6 +172,7 @@ HARD_FINDING_MARKERS = (
     "has no planned on-screen scenes",
     "out-of-range",
     "repeats an on-screen scene",
+    "repeats the preceding scene beat",
     "unsupported fate metadata",
     "death scene must be included",
     "physical appearances after their planned death",
@@ -189,6 +189,13 @@ HARD_FINDING_MARKERS = (
     "drops terminal object identity",
     "key object is missing from scene inventory",
     "survivor fate is unresolved",
+    "CAST fate says",
+    "death of ",
+    "object inventory drops",
+    "object inventory introduces",
+    "object identity is not carried",
+    "object state change is not anchored",
+    "key-object state change is not anchored",
     "has no NEXT_CAUSE handoff",
     # These findings describe explicit structural contradictions, not stylistic wording preferences.
     "SETUP_PAYOFF_MAP plant in scene",
@@ -270,11 +277,13 @@ _SCENE_LOCAL_MOVE_RE = re.compile(
     r"navigat\w*|reach\w*|transport\w*|escort\w*|transfer\w*|"
     r"descend\w*|climb\w*|open\w*|unlock\w*|bypass\w*|breach\w*|leave\w*|exit\w*|"
     r"depart\w*|return\w*|travel\w*|walk\w*|run\w*|flee\w*|escape\w*|emerge\w*|"
-    r"evacuate\w*|withdraw\w*|head\s+(?:to|for|toward)|make\s+their\s+way)\b", re.I,
+    r"evacuate\w*|withdraw\w*|head\s+(?:to|for|toward)|make\s+their\s+way|"
+    r"take\s+shelter|seek\s+shelter|retreat\w*|duck\s+inside|shelter\w*\s+inside)\b", re.I,
 )
 _SCENE_LOCAL_ACCESS_RE = re.compile(
     r"\b(?:enter\w*|go\s+inside|step\s+inside|cross\w*|pass\s+through|"
-    r"open\w*|unlock\w*|bypass\w*|breach\w*|descend\w*|climb\w*)\b", re.I,
+    r"open\w*|unlock\w*|bypass\w*|breach\w*|descend\w*|climb\w*|"
+    r"take\s+shelter|seek\s+shelter|retreat\w*|duck\s+inside|shelter\w*\s+inside)\b", re.I,
 )
 
 
@@ -647,10 +656,154 @@ def _stemmed_content_tokens(value: str) -> set[str]:
     return result
 
 
-def _has_plot_anchor(field_value: str, prose: str, minimum: int = 2) -> bool:
-    planned = _stemmed_content_tokens(field_value)
-    actual = _stemmed_content_tokens(prose)
+_PLOT_GENERIC_ANCHORS = {
+    "scene", "plant", "payoff", "event", "story", "plot", "character", "person",
+    "find", "finds", "found", "discover", "discovers", "discovered", "locate", "locates",
+    "reveal", "reveals", "revealed", "show", "shows", "showed", "confirm", "confirms",
+    "confirmed", "use", "uses", "used", "attempt", "attempts", "attempted", "make", "makes",
+    "made", "must", "need", "needs", "needed", "because", "therefore", "warning", "warns",
+    "warned", "link", "links", "linked", "death", "dies", "died", "true", "nature",
+    "security", "protocol", "protocols", "contents", "access", "station", "vault", "room",
+    "control", "archive", "archives", "laboratory", "laboratories", "lab", "arctic",
+    "storm", "experiment", "instability", "unstable", "result", "results", "consequence",
+}
+
+
+def _distinctive_plot_tokens(value: str, cast: list[dict[str, Any]]) -> set[str]:
+    """Return evidence/object/rule anchors, excluding cast names and generic story verbs/nouns."""
+    stripped = _strip_cast_surfaces(str(value or ""), cast)
+    return {
+        token for token in _stemmed_content_tokens(stripped)
+        if token not in _PLOT_GENERIC_ANCHORS and len(token) >= 4
+    }
+
+
+def _has_plot_anchor(
+    field_value: str,
+    prose: str,
+    cast: list[dict[str, Any]] | int | None = None,
+    minimum: int = 2,
+) -> bool:
+    # Backward compatibility: the prose-audit caller historically passed minimum as arg 3.
+    if isinstance(cast, int):
+        minimum, cast = cast, None
+    cast = cast or []
+    planned = _distinctive_plot_tokens(field_value, cast)
+    actual = _distinctive_plot_tokens(prose, cast)
     return len(planned & actual) >= minimum
+
+
+_PLOT_EVIDENCE_ACTION_RE = re.compile(
+    r"\b(?:use\w*|apply\w*|activat\w*|open\w*|unlock\w*|break\w*|destroy\w*|"
+    r"take\w*|hand\w*|give\w*|steal\w*|drop\w*|carry\w*|hide\w*|recover\w*|"
+    r"retriev\w*|remove\w*|place\w*|find\w*|discover\w*|locat\w*|return\w*|"
+    r"seize\w*|lock\w*|burn\w*|read\w*|decipher\w*|interpret\w*|confirm\w*|"
+    r"prove\w*|reveal\w*|expos\w*|trigger\w*|explain\w*|identify\w*|recogniz\w*|"
+    r"demonstrat\w*|establish\w*|connect\w*|link\w*|trace\w*)\b", re.I,
+)
+
+
+def _plot_event_anchor_is_grounded(
+    field_value: str, event: str, cast: list[dict[str, Any]],
+) -> bool:
+    """Require the distinctive evidence/object and its actual use, discovery or interpretation in one EVENT sentence."""
+    anchors = _distinctive_plot_tokens(field_value, cast)
+    if not anchors:
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+", str(event or "")):
+        sentence_anchors = _distinctive_plot_tokens(sentence, cast)
+        if anchors & sentence_anchors and (
+            OBJECT_CHANGE_RE.search(sentence)
+            or KNOWLEDGE_RE.search(sentence)
+            or _PLOT_EVIDENCE_ACTION_RE.search(sentence)
+        ):
+            return True
+    return False
+
+
+_OBJECT_STATE_WORDS = {
+    "held", "holds", "holding", "owned", "owner", "control", "controlled", "carried",
+    "carry", "carrying", "found", "finds", "discovered", "discover", "retrieved", "recovered",
+    "activated", "deactivated", "opened", "closed", "sealed", "unsealed", "broken", "damaged",
+    "destroyed", "intact", "stabilized", "consumed", "dispersed", "released", "transferred",
+    "hidden", "exposed", "inside", "outside", "under", "near", "remains", "remained", "still",
+    "elena", "voss", "kael", "hale", "marcus", "dr", "by", "the", "with", "from",
+}
+_OBJECT_ENVIRONMENT_WORDS = {"storm", "weather", "wind", "snow", "ice", "darkness", "lightning", "thunder", "outside", "inside"}
+
+
+def _inventory_items(value: str) -> list[str]:
+    """Split the comma-delimited state ledger into individual physical-object entries."""
+    text = str(value or "").strip()
+    if text.casefold() in {"", "none", "n/a", "-", "no objects", "nobody"}:
+        return []
+    result = []
+    for raw in re.split(r",\s*", text):
+        item = raw.strip(" ;.")
+        if not item or item.casefold() in {"none", "n/a", "-", "no objects"}:
+            continue
+        # Weather and broad environmental conditions are not physical inventory items.
+        if content_tokens(item) and content_tokens(item).issubset(_OBJECT_ENVIRONMENT_WORDS):
+            continue
+        result.append(item)
+    return result
+
+
+def _object_identity_tokens(item: str) -> set[str]:
+    return {
+        token for token in _stemmed_content_tokens(item)
+        if token not in _OBJECT_STATE_WORDS and token not in _OBJECT_ENVIRONMENT_WORDS and len(token) >= 3
+    }
+
+
+def _same_inventory_object(left: str, right: str) -> bool:
+    a, b = _object_identity_tokens(left), _object_identity_tokens(right)
+    if not a or not b:
+        return False
+    shared = a & b
+    return bool(shared) and (len(shared) >= 2 or any(len(token) >= 5 for token in shared))
+
+
+def _object_action_is_anchored(item: str, event: str) -> bool:
+    """Require an object-specific action in the same sentence, not an unrelated verb elsewhere."""
+    anchors = _object_identity_tokens(item)
+    if not anchors:
+        anchors = _stemmed_content_tokens(item) - _OBJECT_STATE_WORDS
+    if not anchors:
+        return False
+    for sentence in re.split(r"(?<=[.!?])\s+", str(event or "")):
+        sentence_tokens = _stemmed_content_tokens(sentence)
+        if anchors & sentence_tokens and OBJECT_CHANGE_RE.search(sentence):
+            return True
+    return False
+
+
+def _object_state_signature(item: str) -> set[str]:
+    return _stemmed_content_tokens(item) & _OBJECT_STATE_WORDS
+
+
+_NONPORTABLE_KEY_OBJECTS = {
+    "sealed underground vault", "sealed vault", "vault", "station", "research station",
+    "lab", "laboratory", "archive", "station archives", "control room", "reactor chamber",
+}
+
+
+def _tracked_key_object_items(inventory: str, key_objects: str) -> list[str]:
+    """Restrict continuity enforcement to props explicitly declared as story key objects.
+
+    Scene ledgers may also mention weather, voices, debris, bodies, doors and fixed set pieces.
+    Those are not automatically portable plot props and should not trigger a false object-custody failure.
+    """
+    declared = _inventory_items(key_objects)
+    portable = [
+        item for item in declared
+        if re.sub(r"\s+", " ", item.casefold()).strip() not in _NONPORTABLE_KEY_OBJECTS
+        and not _object_identity_tokens(item).issubset({"vault", "station", "lab", "laboratory", "archive", "room", "chamber"})
+    ]
+    return [
+        item for item in _inventory_items(inventory)
+        if any(_same_inventory_object(item, key_item) for key_item in portable)
+    ]
 
 
 def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12) -> list[str]:
@@ -676,6 +829,10 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         errors.append(f"expected exactly {expected_scenes} scene-state beats")
         return errors
 
+    cast = parse_cast(blueprint)
+    if not cast:
+        errors.append("CAST contains no named core people")
+
     payoff_map = str(fields.get("SETUP_PAYOFF_MAP", "") or "").strip()
     payoff_pairs = re.findall(
         r"PLANT\s+Scene\s+(\d{1,2})\s*:\s*(.+?)\s*;\s*"
@@ -697,22 +854,21 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
             continue
         plant_event = parse_scene_state(beats[plant_scene]).get("EVENT", "")
         payoff_event = parse_scene_state(beats[payoff_scene]).get("EVENT", "")
-        if not _has_plot_anchor(plant_detail, plant_event, minimum=2):
+        # Character names, locations and generic verbs cannot prove that an object/evidence
+        # plant or payoff actually occurs. Require a distinctive planted anchor in the named EVENT.
+        if not _plot_event_anchor_is_grounded(plant_detail, plant_event, cast):
             errors.append(
                 f"SETUP_PAYOFF_MAP plant in scene {plant_scene:02d} is not grounded in that scene's EVENT"
             )
-        if not _has_plot_anchor(payoff_detail, payoff_event, minimum=2):
+        if not _plot_event_anchor_is_grounded(payoff_detail, payoff_event, cast):
             errors.append(
                 f"SETUP_PAYOFF_MAP payoff in scene {payoff_scene:02d} is not grounded in that scene's EVENT"
             )
-        if not _has_plot_anchor(plant_detail, payoff_event, minimum=2):
+        if not _plot_event_anchor_is_grounded(plant_detail, payoff_event, cast):
             errors.append(
                 f"SETUP_PAYOFF_MAP payoff scene {payoff_scene:02d} does not explicitly refer back to the planted evidence from scene {plant_scene:02d}"
             )
 
-    cast = parse_cast(blueprint)
-    if not cast:
-        errors.append("CAST contains no named core people")
     cast_names = [c["name"].casefold() for c in cast]
     if len(cast_names) != len(set(cast_names)):
         errors.append("CAST contains duplicate canonical character identities")
@@ -923,34 +1079,47 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
 
         prior_exit_text = str(prior.get("EXIT_OBJECTS", "") or "").strip()
         current_entry_text = str(current.get("ENTRY_OBJECTS", "") or "").strip()
-        before_objects = content_tokens(prior_exit_text)
-        after_objects = content_tokens(current_entry_text)
-        prior_is_empty = prior_exit_text.casefold() in {"none", "n/a", "-", "no objects"}
-        current_is_empty = current_entry_text.casefold() in {"none", "n/a", "-", "no objects"}
-        if not prior_is_empty and current_is_empty:
-            errors.append(
-                f"scene {number + 1:02d} drops terminal object identity from ENTRY_OBJECTS; carry its final state forward"
-            )
-        elif not prior_is_empty and not current_is_empty:
-            identity_tokens = before_objects & after_objects
-            if not identity_tokens:
+        key_objects = fields.get("KEY_OBJECTS", "")
+        prior_items = _tracked_key_object_items(prior_exit_text, key_objects)
+        entry_items = _tracked_key_object_items(current_entry_text, key_objects)
+        unmatched_entry = list(entry_items)
+        for prior_item in prior_items:
+            match_index = next((i for i, item in enumerate(unmatched_entry)
+                                if _same_inventory_object(prior_item, item)), None)
+            if match_index is None:
                 errors.append(
-                    f"scene {number + 1:02d} entry object inventory introduces or changes an object without a prior-scene physical action"
+                    f"scene {number + 1:02d} object inventory drops key object '{prior_item}' from prior EXIT_OBJECTS; "
+                    "carry its identity and terminal state forward or show the explicit physical disposition"
                 )
+            else:
+                unmatched_entry.pop(match_index)
+        if unmatched_entry:
+            errors.append(
+                f"scene {number + 1:02d} object inventory introduces key object '{unmatched_entry[0]}' in ENTRY_OBJECTS "
+                "without the object being present in the previous EXIT_OBJECTS"
+            )
 
-        # A same-scene state/custody change must name the affected object in EVENT
-        # and include an action verb; an unrelated action cannot explain it.
-        entry_object_text = str(current.get("ENTRY_OBJECTS", "") or "")
-        exit_object_text = str(current.get("EXIT_OBJECTS", "") or "")
-        entry_object_tokens = content_tokens(entry_object_text)
-        exit_object_tokens = content_tokens(exit_object_text)
-        if entry_object_tokens != exit_object_tokens:
-            event_tokens = content_tokens(current.get("EVENT", ""))
-            object_anchors = (entry_object_tokens | exit_object_tokens) & event_tokens
-            has_object_action = bool(OBJECT_CHANGE_RE.search(current.get("EVENT", "")))
-            if not object_anchors or not has_object_action:
+        # Validate only declared plot-critical props. Fixed set pieces, atmosphere, voices and debris
+        # may appear in the descriptive inventory without becoming portable custody-tracked objects.
+        entry_items = _tracked_key_object_items(current.get("ENTRY_OBJECTS", ""), key_objects)
+        exit_items = _tracked_key_object_items(current.get("EXIT_OBJECTS", ""), key_objects)
+        remaining_exit = list(exit_items)
+        changed_items: list[str] = []
+        for entry_item in entry_items:
+            match_index = next((i for i, item in enumerate(remaining_exit)
+                                if _same_inventory_object(entry_item, item)), None)
+            if match_index is None:
+                changed_items.append(entry_item)  # declared key object disappears from the scene ledger
+            else:
+                exit_item = remaining_exit.pop(match_index)
+                if _object_state_signature(entry_item) != _object_state_signature(exit_item):
+                    changed_items.append(exit_item)
+        changed_items.extend(remaining_exit)  # declared key objects newly appear in the scene ledger
+        for changed_item in changed_items:
+            if not _object_action_is_anchored(changed_item, current.get("EVENT", "")):
                 errors.append(
-                    f"scene {number + 1:02d} object state change is not anchored to the named object and a physical action"
+                    f"scene {number + 1:02d} key-object state change is not anchored to the named object and a physical action "
+                    f"('{changed_item}')"
                 )
 
     # KEY_OBJECTS may declare when a consequential state begins (e.g. "damaged in
