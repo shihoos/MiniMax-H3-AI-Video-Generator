@@ -1420,6 +1420,19 @@ def test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory():
     _assert(resolve_scenes(forgetful)[3]["on_screen_present"], "boundary presence must imply on-screen presence")
 
 
+def test_a_cut_off_draft_is_rewritten_with_pacing_not_expanded_as_if_complete():
+    from planner.qwen_director import QwenDirector
+    from planner.config import DIRECTOR_STORY_SCENES
+    # Three paragraphs per scene: four cut-off scenes look like twelve paragraphs, but they are not a short full story.
+    cut = "\n\n".join(
+        f"[[SCENE_{i:02d}]] " + "\n\n".join(" ".join(["word"] * 200) for _ in range(3)) for i in range(1, 5)
+    )
+    _assert(QwenDirector._story_expansion_user(cut) == "", "a draft missing scene markers must not be expanded")
+    system = " ".join(QwenDirector.__new__(QwenDirector)._story_text_system("ai_story").split()).lower()
+    _assert("no scene may run past" in system and "about 60 words per paragraph" in system,
+            "Author must be given a per-scene cap and a paragraph size so it cannot front-load the story")
+
+
 def test_story_minimum_is_a_hard_floor_without_retry():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
