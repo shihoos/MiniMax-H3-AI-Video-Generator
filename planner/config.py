@@ -176,7 +176,7 @@ DIRECTOR_SHOTS_PER_SCENE = int(_story_contract["shots_per_scene"])
 STORY_WORDS_PER_SCENE = int(_story_contract["words_per_scene"])
 STORY_TARGET_WORDS = int(_story_contract["target_words"])
 STORY_MIN_WORDS = int(_story_contract["minimum_words"])
-# Flexible stretch guidance for scenes that need more development; not a quota.
+# Writer target per scene; kept aligned with target_words so no stale stretch quota overrides it.
 STORY_WRITER_WORDS_PER_SCENE = int(
     _story_contract.get("writer_words_per_scene", STORY_WORDS_PER_SCENE)
 )
