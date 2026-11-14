@@ -302,6 +302,47 @@ def test_qwen_can_choose_any_cast_size():
     _assert(names == ["Elias Kade", "Lin Mei", "Mara", "Tomas"], f"Qwen-selected cast was constrained: {names}")
 
 
+def test_trace_sentient_ai_candidate_survives_normalization_and_reaches_roster():
+    """Regression for 2026-11-14: SENTIENT 'AI' was deleted as a generic placeholder."""
+    planner = _planner()
+    story = (
+        "Dr. Elara Voss reached the vault. The station's AI denied access over the terminal. "
+        "The AI triggered a lockdown, then spoke through the station speakers. "
+        "A holographic interface from the station's AI materialized before Elara."
+    )
+    extracted = {
+        "candidates": [
+            {"name": "Dr. Elara Voss", "entity_type": "PERSON", "is_character": True,
+             "aliases": ["Dr. Voss"], "identity_type": "named_character"},
+            {"name": "AI", "entity_type": "SENTIENT", "is_character": True,
+             "aliases": [], "identity_type": "named_character"},
+        ],
+        "quote_classifications": [],
+    }
+    characters = planner.create_characters(story, qwen_character_extractor=lambda *_: extracted)
+    names = [character.name for character in characters]
+    _assert(names == ["Elara Voss", "Station AI"],
+            f"Qwen's two grounded candidates must both survive into the canonical roster: {names!r}")
+    station_ai = characters[1]
+    _assert("AI" in station_ai.semantic_aliases,
+            f"the model's original spoken surface must remain a resolvable alias: {station_ai.semantic_aliases!r}")
+
+
+def test_sentient_ai_label_is_not_promoted_when_qwen_does_not_mark_it_sentient():
+    planner = _planner()
+    story = "Elara read the AI label on a damaged terminal."
+    extracted = {"candidates": [{
+        "name": "AI", "entity_type": "CHARACTER", "is_character": True,
+        "aliases": [], "identity_type": "named_character",
+    }]}
+    try:
+        planner.create_characters(story, qwen_character_extractor=lambda *_: extracted)
+    except RuntimeError as exc:
+        _assert("no valid production characters" in str(exc), f"unexpected rejection: {exc}")
+    else:
+        raise AssertionError("a generic AI label without Qwen's SENTIENT decision must not become a character")
+
+
 def test_qwen_negative_is_authoritative():
     planner = _planner()
     story = "Elias Kade entered the vault and Lin Mei followed him."
@@ -943,6 +984,9 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 f"{mode}: prose prompt must not impose a cast quota")
         _assert("not physically present" in low and "remote" in low,
                 f"{mode}: remote speakers must not be rendered as visible characters")
+        _assert("full canonical name" in low and "never depict it as a human" in low
+                and "visible nonhuman" in low,
+                f"{mode}: the Author must preserve canonical sentient-agent identity without humanizing it")
         _assert("three paragraphs" in low and "unfinished" in low,
                 f"{mode}: every scene must be asked for a multi-paragraph dramatized sequence")
         _assert("no more than two" in low and "nine words or fewer" in low,
@@ -956,8 +1000,29 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 and "source-preservation lock" in writer_prompt if mode == EXPAND_USER_STORY_MODE else "validated plot architecture" in writer_prompt,
                 f"{mode}: prose request must bind the plan and length target")
         blueprint = q._story_blueprint_system(mode).lower()
-        _assert("plot-driven" in blueprint and "do not target four people" in blueprint,
+        for structured in (False, True):
+            rendered_architect = " ".join(q._story_blueprint_system(mode, structured=structured).lower().split())
+            design_heading = ("cast design / ensemble decision" if mode == AI_STORY_MODE
+                              else "cast design / source fidelity")
+            _assert(design_heading in rendered_architect,
+                    f"{mode}: structured={structured} Architect must include the mode-appropriate cast-design instructions")
+            _assert("no fixed minimum, maximum, or target" in rendered_architect,
+                    f"{mode}: structured={structured} Architect must remain free of cast-count quotas")
+            if mode == AI_STORY_MODE:
+                _assert("1, 2, 3, 4, 5, or more active characters" in rendered_architect
+                        and "do not default to a one-person story" in rendered_architect,
+                        f"{mode}: structured={structured} Architect must evaluate a larger ensemble without forcing one")
+                _assert("independent goals" in rendered_architect and "consequential decision" in rendered_architect,
+                        f"{mode}: structured={structured} supporting characters must have independent agency")
+        _assert("plot-driven" in blueprint and "no fixed minimum, maximum, or target" in blueprint,
                 f"{mode}: Architect must not impose a numeric cast quota")
+        if mode == AI_STORY_MODE:
+            _assert("1, 2, 3, 4, 5, or more active characters" in blueprint
+                    and "deliberately compare" in blueprint
+                    and "do not default to a one-person story" in blueprint,
+                    "AI Story Architect must actively evaluate an ensemble without imposing a cast count")
+            _assert("independent goals" in blueprint and "consequential decision" in blueprint,
+                    "additional cast members must have distinct agency, not filler roles")
         _assert("continuity ledger" in blueprint and "costly climax choice" in blueprint,
                 f"{mode}: Architect must plan continuity and meaningful climax cost")
         _assert("create exactly 12 linked beats" in blueprint and "do not assign the same fixed function" in blueprint,
@@ -966,9 +1031,10 @@ def test_story_prompt_is_open_cast_and_fully_filled():
                 and "on_screen_present" in blueprint and "fate: survives or dies in scene nn" in blueprint,
                 f"{mode}: Architect must declare relationship/entity/fate/full-scene visibility contracts")
         blueprint_compact = " ".join(blueprint.split())
-        _assert("kind: person|animal|embodied agent" in blueprint_compact and "weather event" in blueprint_compact
-                and "put such opposition in opposition only" in blueprint_compact,
-                f"{mode}: the Architect must type physical cast separately from weather/environmental opposition")
+        _assert("kind: person|animal|embodied agent" in blueprint_compact and "weather" in blueprint_compact
+                and "remote-only voices" in blueprint_compact
+                and "visible nonhuman" in blueprint_compact,
+                f"{mode}: the Architect must distinguish physical cast, visible agents and remote opposition")
         _assert("each of the eleven transitions" in blueprint,
                 f"{mode}: Architect must explicitly link every scene transition")
 
@@ -1236,7 +1302,7 @@ def test_architect_scene_purpose_is_preserved_through_shot_director_metadata():
             "the actual Shot Director request payload must carry Architect PURPOSE")
 
 
-def test_story_architect_uses_native_bounded_thinking_and_no_retry():
+def test_successful_architect_plan_uses_one_native_bounded_thinking_call():
     from planner.qwen_director import QwenDirector
     from planner.config import (AI_STORY_MODE, DIRECTOR_STORY_PLAN_MAX_TOKENS, DIRECTOR_STORY_PLAN_THINKING_BUDGET,
                                 DIRECTOR_STORY_THINKING_TEMPERATURE, DIRECTOR_STORY_THINKING_TOP_P, DIRECTOR_STORY_SCENES)
@@ -1248,7 +1314,7 @@ def test_story_architect_uses_native_bounded_thinking_and_no_retry():
         return raw
     director._chat_text = fake_chat
     blueprint = director._generate_story_blueprint(AI_STORY_MODE, "A harbor-surveyor premise.")
-    _assert(len(calls) == 1, "Architect must be a single bounded reasoning call with no retry")
+    _assert(len(calls) == 1, "a valid first Architect plan must cost exactly one bounded reasoning call")
     _assert(calls[0].get("disable_thinking") is False, "Architect must use thinking mode")
     _assert(calls[0].get("thinking_token_budget") == DIRECTOR_STORY_PLAN_THINKING_BUDGET == 1280,
             f"Architect reasoning budget changed unexpectedly: {calls[0]}")
@@ -1317,6 +1383,8 @@ def test_structured_architect_json_round_trips_through_every_contract():
     schema = blueprint_json_schema(DIRECTOR_STORY_SCENES)
     _assert(schema["properties"]["scenes"]["minItems"] == schema["properties"]["scenes"]["maxItems"] == DIRECTOR_STORY_SCENES,
             "the schema must force exactly one object per scene")
+    _assert("maxItems" not in schema["properties"]["cast"],
+            "the structured Architect schema must not impose an upper cast-size limit")
     _assert(set(schema["required"]) == set(schema["properties"]), "every plan field must be required by the schema")
     member = schema["properties"]["cast"]["items"]
     _assert({"wants", "pressure", "voice"} <= set(member["required"]),
@@ -1345,46 +1413,102 @@ def test_structured_architect_json_round_trips_through_every_contract():
             f"Tomas gets only the scene that names him; Ines stays at both boundaries throughout: {twin_line}")
 
 
-def test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make_one_call():
+def test_architect_and_author_get_only_informed_hard_gate_revisions():
     import json
     from contextlib import redirect_stdout
     from io import StringIO
     from tempfile import TemporaryDirectory
-    from planner.config import AI_STORY_MODE
+    from planner.config import (
+        AI_STORY_MODE, STORY_ARCHITECT_REVISION_RETRIES, STORY_AUTHOR_REVISION_RETRIES,
+    )
     from planner.qwen_director import QwenDirector
+    from planner.qwen_director_runtime import StoryTruncated
+
     good = json.dumps(_blueprint_json_from_fixture())
+    _assert(STORY_ARCHITECT_REVISION_RETRIES == 1,
+            "production policy must retain exactly one conditional Architect revision")
+    _assert(STORY_AUTHOR_REVISION_RETRIES == 1,
+            "production policy must retain exactly one conditional Author revision")
 
-    def architect(replies):
-        director = QwenDirector.__new__(QwenDirector)
-        director.project_root = Path(tempfile_dir.name)
-        users = []
-        def fake_chat(system, user, **kwargs):
-            users.append((user, kwargs.get("response_format")))
-            return replies[min(len(users), len(replies)) - 1]
-        director._chat_text = fake_chat
-        with redirect_stdout(StringIO()):
-            try:
-                return director._generate_story_blueprint(AI_STORY_MODE, "A premise."), users
-            except RuntimeError as exc:
-                return exc, users
+    with TemporaryDirectory() as tmp:
+        def architect(replies):
+            director = QwenDirector.__new__(QwenDirector)
+            director.project_root = Path(tmp)
+            users = []
+            def fake_chat(system, user, **kwargs):
+                users.append((user, kwargs.get("response_format")))
+                if len(users) > len(replies):
+                    raise AssertionError("Architect exceeded its one-revision limit")
+                return replies[len(users) - 1]
+            director._chat_text = fake_chat
+            with redirect_stdout(StringIO()):
+                try:
+                    return director._generate_story_blueprint(AI_STORY_MODE, "A premise."), users
+                except RuntimeError as exc:
+                    return exc, users
 
-    tempfile_dir = TemporaryDirectory()
-    try:
         blueprint, users = architect([good])
-        _assert(isinstance(blueprint, str) and len(users) == 1, "a plan that passes costs exactly one Architect call")
+        _assert(isinstance(blueprint, str) and len(users) == 1,
+                "a valid first plan must cost exactly one Architect call")
         _assert(users[0][1] and users[0][1]["json_schema"]["name"] == "story_blueprint",
                 "the Architect request must carry the JSON schema")
+
         broken = json.loads(good)
-        broken["scenes"][2]["next_cause"] = ""   # an incomplete handoff the contract must reject
-        broken["scenes"][4]["entry_location"] = "orbital relay"  # and a location jump with no travel
-        blueprint, users = architect([json.dumps(broken), good])
-        _assert(isinstance(blueprint, str) and len(users) == 2, f"one revision must recover a rejected plan: {blueprint!r}")
-        _assert("REVISION" in users[1][0] and "rejected by the quality checker" in users[1][0],
-                "the revision must carry the checker's reasons")
-        result, users = architect([json.dumps(broken)])
-        _assert(isinstance(result, RuntimeError) and len(users) == 2, "a second rejection must fail, with no third attempt")
-    finally:
-        tempfile_dir.cleanup()
+        broken["scenes"][10]["next_cause"] = ""
+        rejected_then_fixed, users = architect([json.dumps(broken), good])
+        _assert(isinstance(rejected_then_fixed, str) and len(users) == 2,
+                "a returned plan rejected by a hard gate must receive exactly one Architect revision")
+        _assert("REVISION:" in users[1][0] and "NEXT_CAUSE" in users[1][0],
+                "the Architect revision must be informed by the exact failed handoff contract")
+
+        still_rejected, users = architect([json.dumps(broken), json.dumps(broken)])
+        _assert(isinstance(still_rejected, RuntimeError) and len(users) == 2,
+                "a second rejected plan must fail closed without a third Architect call")
+
+        # An Author draft rejected by a content contract may receive one informed revision.
+        author = QwenDirector.__new__(QwenDirector)
+        author.project_root = Path(tmp)
+        author._story_min_words = 1400
+        author._qwen_telemetry = {"calls": []}
+        author_calls = []
+        def reject_then_accept(mode, user_input, story_system, story_user, **kwargs):
+            author_calls.append(story_user)
+            author._qwen_telemetry["calls"].append({"call_name": "ai_story_text_pass"})
+            if len(author_calls) == 1:
+                author._last_story_raw_output = "First completion"
+                author._last_story_draft = "Returned draft rejected by a hard quality gate."
+                author._last_story_quality_errors = ["scene 11 has no required causal payoff"]
+                raise RuntimeError("hard story-contract rejection")
+            return "Revised story accepted", True
+        author._generate_story_once_impl = reject_then_accept
+        with redirect_stdout(StringIO()):
+            accepted, generated = author._run_author_with_one_revision(
+                AI_STORY_MODE, "premise", "system", "original prompt", temperature=0.7, top_p=0.8,
+            )
+        _assert(generated and accepted == "Revised story accepted" and len(author_calls) == 2,
+                "one returned rejected Author draft must receive exactly one conditional revision")
+        _assert("REVISION:" in author_calls[1] and "causal payoff" in author_calls[1],
+                "the Author revision must include the exact hard-gate feedback")
+
+        # Infrastructure truncation is not a content revision opportunity.
+        truncated = QwenDirector.__new__(QwenDirector)
+        truncated._last_story_draft = "partial draft"
+        truncation_calls = []
+        def fail_truncated(*args, **kwargs):
+            truncation_calls.append(1)
+            raise StoryTruncated("output ceiling", partial="partial draft")
+        truncated._generate_story_once_impl = fail_truncated
+        with redirect_stdout(StringIO()):
+            try:
+                truncated._run_author_with_one_revision(
+                    AI_STORY_MODE, "premise", "system", "prompt", temperature=0.7, top_p=0.8,
+                )
+            except StoryTruncated:
+                pass
+            else:
+                raise AssertionError("Author truncation must be propagated")
+        _assert(len(truncation_calls) == 1,
+                "a token-ceiling failure must not trigger a content revision")
 
 
 def test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory():
@@ -1433,7 +1557,7 @@ def test_a_cut_off_draft_is_rewritten_with_pacing_not_expanded_as_if_complete():
             "Author must be given a per-scene cap and a paragraph size so it cannot front-load the story")
 
 
-def test_story_minimum_is_a_hard_floor_without_retry():
+def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
     from contextlib import redirect_stdout
@@ -1466,10 +1590,11 @@ def test_story_minimum_is_a_hard_floor_without_retry():
             "accepted story must meet the 1,400-word boundary")
     short_result, short_generated, short_calls, short_error = run(65)
     _assert(not short_generated and short_result is None and len(short_calls) == 2,
-            "sub-1,400-word story must fail after the first draft plus exactly one revision")
-    _assert("REVISION TASK" in short_calls[1].get("_user", "") and "DRAFT:" in short_calls[1].get("_user", "")
+            "a returned sub-1,400-word draft must receive at most one conditional Author revision")
+    _assert("REVISION TASK" in short_calls[1].get("_user", "")
+            and "DRAFT:" in short_calls[1].get("_user", "")
             and "[[SCENE_01]]" in short_calls[1].get("_user", ""),
-            "a too-short draft must be expanded from its own text, not re-rolled from scratch")
+            "a too-short draft must be revised using its own content rather than re-rolled")
     _assert("below the configured minimum" in (short_error or "").lower(),
             f"sub-floor story should report the hard minimum: {short_error}")
     completion_probe = QwenDirector.__new__(QwenDirector)
@@ -1648,30 +1773,41 @@ def test_a_person_the_architect_named_but_never_put_on_screen_is_seeded():
     _assert(not issues, f"a person the Architect named is seeded: {issues!r}")
 
 
-def test_story_uses_one_architect_and_one_author_without_retry_or_repair():
+def test_story_pipeline_uses_two_bounded_stages_and_only_conditional_revisions():
+    from planner.config import STORY_ARCHITECT_REVISION_RETRIES, STORY_AUTHOR_REVISION_RETRIES
     source = (ROOT / "planner/qwen_director.py").read_text(encoding="utf-8")
     generate_start = source.index("story_blueprint = self._generate_story_blueprint(", source.index("def generate("))
     normal_path_end = source.index("# PASS 1B: deterministic production foundation", generate_start)
     normal_path = source[generate_start:normal_path_end]
     _assert(normal_path.count("self._generate_story_blueprint(") == 1,
-            "normal path must make one Architect request")
+            "the top-level path must enter the bounded Architect stage exactly once")
     _assert(normal_path.count("self._generate_story_once(") == 1,
-            "normal path must make one Author request")
+            "the top-level path must enter the bounded Author stage exactly once")
     _assert("story_blueprint=story_blueprint" in normal_path,
             "Author must receive the validated Architect blueprint and CAST line")
+    _assert(STORY_ARCHITECT_REVISION_RETRIES == 1 and STORY_AUTHOR_REVISION_RETRIES == 1,
+            "production policy must allow at most one conditional revision for each hard-gated stage")
+    architect_wrapper = source[source.index("def _generate_story_blueprint("):source.index("def _generate_story_blueprint_attempt(")]
+    author_wrapper = source[source.index("def _run_author_with_one_revision("):source.index("@staticmethod\n    def _story_expansion_user")]
+    _assert("range(int(STORY_ARCHITECT_REVISION_RETRIES) + 1)" in architect_wrapper
+            and "except self._BlueprintRejected" in architect_wrapper,
+            "Architect revision must be conditional on a returned blueprint being rejected by its hard gate")
+    _assert("STORY_AUTHOR_REVISION_RETRIES" in author_wrapper and "_last_story_draft" in author_wrapper
+            and "StoryTruncated" in author_wrapper and "vLLM request failed" in author_wrapper,
+            "Author revision must require a returned draft and exclude truncation/transport failures")
     _assert("_story_single_call_system" not in source and "single_call=True" not in source,
             "combined thinking/write call must not remain")
     _assert("_rescue_short_scenes" not in source, "no rescue calls may exist")
     _assert("_repair_story_if_needed(" not in normal_path and "story_repair_pass" not in normal_path,
-            "normal path must not retry or automatically repair the story")
+            "normal path must not perform a separate repair stage")
     _assert("_resample_for_audit(" not in normal_path and "_pairwise_story_judgment(" not in normal_path,
             "normal path must not add challenger or judge calls")
     runtime_source = (ROOT / "planner/qwen_director_runtime.py").read_text(encoding="utf-8")
     _assert("_h3_n = 1" in runtime_source and "H3_STORY_WRITER_SAMPLES" not in runtime_source
             and "_h3_pick_best_story" not in runtime_source,
-            "Writer must return one completion, not fan out and rank three full stories")
+            "each Author attempt must return one completion, not fan out and rank multiple stories")
     _assert("_revise_story_once" not in source and "story_revision_pass" not in source,
-            "revision model call and dead revision code must be removed")
+            "legacy unbounded revision paths must remain absent")
 
 
 def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
@@ -1770,14 +1906,15 @@ def test_rejected_author_draft_is_saved_for_diagnosis():
             word_count=1251,
         )
         saved = Path(tmp) / "story_author_last_failed.txt"
-        _assert(saved.is_file(), "a rejected single-pass Author draft must be preserved")
+        _assert(saved.is_file(), "a rejected primary Author draft must be preserved")
         contents = saved.read_text(encoding="utf-8")
         _assert("usable_words: 1251" in contents and raw_draft in contents and processed in contents,
                 "the diagnostic artifact must preserve both raw output and the processed candidate")
         _assert("stage: unit_test_rejection" in contents,
                 "the diagnostic artifact must identify the rejection stage")
-        _assert("zero retries" in contents and "zero repair calls" in contents,
-                "draft preservation must not imply a retry or repair call")
+        _assert("architect_revision_limit=1" in contents and "author_revision_limit=1" in contents
+                and "minimum_output_tokens=0" in contents and "repair_calls=0" in contents,
+                "draft preservation must report the configured conditional-revision policy and min_tokens=0")
 
 
 def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
@@ -1789,8 +1926,13 @@ def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
         director = QwenDirector.__new__(QwenDirector)
         director.project_root = Path(tmp)
         director._story_min_words = 1400
+        director._qwen_telemetry = {"calls": []}
         raw = "Raw Qwen completion with an unfinished tail"
+        calls = 0
         def reject(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            director._qwen_telemetry["calls"].append({"call_name": "ai_story_text_pass"})
             director._last_story_raw_output = raw
             director._last_story_draft = "Processed candidate with complete sentences."
             raise RuntimeError("post-generation quality gate rejected the draft")
@@ -1810,8 +1952,10 @@ def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
         contents = saved.read_text(encoding="utf-8")
         _assert(raw in contents and "Processed candidate with complete sentences." in contents,
                 "outer wrapper must preserve raw and processed drafts separately")
-        _assert("zero retries" in contents and "zero repair calls" in contents,
-                "draft preservation must never add another Author or repair call")
+        _assert("author_calls=2" in contents and "author_revisions=1" in contents
+                and "author_revision_limit=1" in contents and "repair_calls=0" in contents,
+                "draft preservation must report the failed primary call plus its single conditional revision")
+        _assert(calls == 2, "a returned rejected draft may receive one revision, never a third Author call")
 
 
 def test_scene_markers_preserve_one_to_one_scene_boundaries():
@@ -2033,6 +2177,13 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
         director._last_story_quality_warnings = ["exact sentence repeated in scenes 10 and 11"]
         director._last_story_quality_errors = ["synthetic hard-gate failure"]
         director._last_story_cleanup_events = ["removed exact copied block of 5 sentences/64 words from scene 11"]
+        director._qwen_telemetry = {"calls": [
+            {"call_name": "ai_story_architecture_pass"},
+            {"call_name": "ai_story_architecture_pass"},
+            {"call_name": "ai_story_text_pass"},
+            {"call_name": "character_entity_extraction"},
+            {"call_name": "shot_batch:scene_001_scene_002"},
+        ]}
         author_trace = trace / "ai_story_text_pass_test.json"
         author_trace.write_text(json.dumps({"call_name": "ai_story_text_pass", "raw_content": "draft"}), encoding="utf-8")
         director._save_failed_story_draft(
@@ -2057,15 +2208,27 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "diagnostics must preserve all quality warnings, even on rejection")
         _assert(len(report["blueprint_warnings"]) == 22,
                 "diagnostics must preserve the complete warning list, not only console previews")
-        _assert(report["generation_policy"] == {
-            "architect_calls": 1, "author_calls": 1,
-            "architect_max_tokens": 5400, "author_max_tokens": 3000,
-            "author_minimum_output_tokens": 0, "retries": 0, "repairs": 0,
-        }, f"Author rejection must report the exact single-pass token/call policy: {report['generation_policy']!r}")
+        policy = report["generation_policy"]
+        _assert(policy["architect_calls"] == 2 and policy["author_calls"] == 1,
+                f"diagnostics must count actual story model calls, not hard-code one each: {policy!r}")
+        _assert(policy["architect_revisions"] == 1 and policy["author_revisions"] == 0
+                and policy["architect_revision_limit"] == 1 and policy["author_revision_limit"] == 1,
+                f"diagnostics must report actual revisions separately from configured limits: {policy!r}")
+        _assert(policy["architect_max_tokens"] == 5400 and policy["author_max_tokens"] == 3000
+                and policy["author_minimum_output_tokens"] == 0
+                and policy["total_story_revisions"] == 1 and policy["runtime_retry_calls"] == 0
+                and policy["repair_calls"] == 0,
+                f"diagnostics must retain the token contract and distinguish revisions from infrastructure retries: {policy!r}")
+        _assert(policy["architect_call_sequence"] == ["ai_story_architecture_pass"] * 2
+                and policy["author_call_sequence"] == ["ai_story_text_pass"],
+                f"diagnostics must retain the exact story generation call sequence: {policy!r}")
         _assert("scene 22 knowledge transition needs review" in text_path.read_text(encoding="utf-8"),
                 "human-readable trace log must retain the final warning, not truncate the list")
-        _assert("architect_calls=1; author_calls=1; architect_max_tokens=5400; author_max_tokens=3000; author_minimum_output_tokens=0; retries=0; repairs=0" in text_path.read_text(encoding="utf-8"),
-                "diagnostic text must accurately state the actual single-pass call and token policy")
+        diagnostic_text = text_path.read_text(encoding="utf-8")
+        _assert("architect_calls=2; author_calls=1; architect_revisions=1; author_revisions=0; architect_revision_limit=1; author_revision_limit=1; architect_max_tokens=5400; author_max_tokens=3000; author_minimum_output_tokens=0; total_story_revisions=1; runtime_retry_calls=0; repair_calls=0" in diagnostic_text,
+                "diagnostic text must accurately state actual calls, revisions, limits, and token policy")
+        _assert(report["rejected_draft_artifact"] == "story_author_last_failed.txt",
+                "diagnostics must point to the preserved rejected first draft")
         _assert(attached["cleanup_events"] == director._last_story_cleanup_events,
                 "the Author trace JSON must carry deterministic cleanup and validation details")
         _assert("[BLUEPRINT WARNINGS]" in json.loads(author_trace.read_text(encoding="utf-8"))["post_generation_validation_text"],
@@ -2074,6 +2237,20 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "the Author trace JSON must embed the processed rejected draft for JSON-only trace ZIPs")
         _assert("cleaned model draft" in failed_draft.read_text(encoding="utf-8"),
                 "the rejected processed story must be available as a separate trace artifact too")
+        director._save_story_run_diagnostics(
+            status="passed", stage="ai_story_author_validation", word_count=1624,
+        )
+        recovered = json.loads(report_path.read_text(encoding="utf-8"))
+        _assert(recovered["recovered_after_architect_revision"] is True
+                and recovered["recovered_after_author_revision"] is False,
+                "final diagnostics must explicitly show the Architect recovered from its first rejected plan")
+        director._qwen_telemetry["calls"].append({"call_name": "ai_story_text_pass"})
+        director._save_story_run_diagnostics(
+            status="passed", stage="ai_story_author_validation", word_count=1624,
+        )
+        author_recovered = json.loads(report_path.read_text(encoding="utf-8"))
+        _assert(author_recovered["recovered_after_author_revision"] is True,
+                "a passing Author run after one rejected draft must explicitly record its recovery")
 
         # A subsequent fresh Architect run must not attach the previous Author failure to its log.
         from planner.config import AI_STORY_MODE
@@ -2086,14 +2263,16 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
         director._last_story_quality_errors = ["stale quality error"]
         director._last_story_cleanup_events = ["stale cleanup"]
         director._last_story_word_counts = {"stale": 1}
+        director._qwen_telemetry = {"calls": []}  # a new generate() session resets per-run telemetry
         director._validate_story_blueprint_contract(AI_STORY_MODE, _story_blueprint_fixture(), "new premise")
         fresh = json.loads(report_path.read_text(encoding="utf-8"))
         _assert(not (root / "story_author_last_failed.txt").exists()
                 and not (root / "story_architect_last_failure.txt").exists()
                 and not (trace / "story_author_last_failed.txt").exists(),
                 "a fresh Architect pass must remove stale failure artifacts")
-        _assert(fresh["generation_policy"]["author_calls"] == 0,
-                "an Architect-stage report must not claim the Author has already run")
+        _assert(fresh["generation_policy"]["architect_calls"] == 0
+                and fresh["generation_policy"]["author_calls"] == 0,
+                "a fresh Architect-stage report must count only this new telemetry session")
         _assert(not fresh["prose_audit_warnings"] and not fresh["quality_errors"],
                 "a new story run must not inherit previous run's warnings or errors")
 
@@ -2512,6 +2691,8 @@ def main():
         test_character_schema_does_not_silently_cap_qwen_cast_at_32,
         test_character_semantic_schema_includes_spoken_dialogue,
         test_qwen_can_choose_any_cast_size,
+        test_trace_sentient_ai_candidate_survives_normalization_and_reaches_roster,
+        test_sentient_ai_label_is_not_promoted_when_qwen_does_not_mark_it_sentient,
         test_qwen_negative_is_authoritative,
         test_deterministic_detection_never_adds_missing_qwen_character,
         test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue,
@@ -2559,11 +2740,11 @@ def main():
         test_prose_presence_audit_accepts_common_departure_and_behavior_cues,
         test_duplicate_adjacent_scene_block_is_cleaned_without_retry_and_isolated_repetition_is_advisory,
         test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle,
-        test_story_architect_uses_native_bounded_thinking_and_no_retry,
+        test_successful_architect_plan_uses_one_native_bounded_thinking_call,
         test_structured_architect_json_round_trips_through_every_contract,
-        test_architect_and_author_each_get_one_informed_revision_and_clean_runs_make_one_call,
+        test_architect_and_author_get_only_informed_hard_gate_revisions,
         test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory,
-        test_story_minimum_is_a_hard_floor_without_retry,
+        test_story_minimum_is_a_hard_floor_with_one_conditional_revision,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
         test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal,
         test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_post_death_presence,
@@ -2572,7 +2753,7 @@ def main():
         test_a_person_the_architect_named_but_never_put_on_screen_is_seeded,
         test_story_cinematic_coverage_enforces_unique_framing_without_camera_motion_quota,
         test_story_completion_contract_reports_an_unresolved_final_hook_as_a_warning,
-        test_story_uses_one_architect_and_one_author_without_retry_or_repair,
+        test_story_pipeline_uses_two_bounded_stages_and_only_conditional_revisions,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_author_min_tokens_zero_is_omitted_from_vllm_payload,
         test_rejected_author_draft_is_saved_for_diagnosis,
