@@ -152,7 +152,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.1"
+CONTRACTS_REVISION = "2026-11-14.4"
 
 # Hard findings are structural facts or direct contradictions: missing/invalid structure, impossible cast
 # state, the dead acting, an unresolved ending. Findings that only compare the *wording* of two free-text fields
@@ -190,6 +190,12 @@ HARD_FINDING_MARKERS = (
     "key object is missing from scene inventory",
     "survivor fate is unresolved",
     "has no NEXT_CAUSE handoff",
+    # These findings describe explicit structural contradictions, not stylistic wording preferences.
+    "SETUP_PAYOFF_MAP plant in scene",
+    "SETUP_PAYOFF_MAP payoff in scene",
+    "SETUP_PAYOFF_MAP payoff scene",
+    "changes its physical location without an explicit transition",
+    "object state change is not anchored to the named object and a physical action",
 )
 # Prose findings that may stop a run: invented people/organisations/relationships and the dead acting.
 HARD_PROSE_MARKERS = (
