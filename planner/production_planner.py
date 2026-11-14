@@ -2944,16 +2944,53 @@ class ProductionPlanner:
         if not isinstance(candidates, list):
             return result
         copied = [dict(item) if isinstance(item, dict) else item for item in candidates]
-        _placeholder_names = {"unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified", "speaker", "narrator", "voice", "someone", "stranger", "person", "character", "same", "other", "unspecified", "ai", "stationai", "theai", "computer", "system", "machine", "robot", "mainframe", "shipai", "creature", "monster", "beast", "entity", "thing", "hybrid", "figure", "hologram", "projection", "ghost", "specimen", "subject", "clone"}
-        copied = [
-            item for item in copied
-            if not (isinstance(item, dict) and re.sub(r"[^a-z]+", "", str(item.get("name", "") or "").lower()) in _placeholder_names)
-        ]
-        _placeholder_names = {"unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified", "speaker", "narrator", "voice", "someone", "stranger", "person", "character", "same", "other", "unspecified", "ai", "stationai", "theai", "computer", "system", "machine", "robot", "mainframe", "shipai", "creature", "monster", "beast", "entity", "thing", "hybrid", "figure", "hologram", "projection", "ghost", "specimen", "subject", "clone"}
-        copied = [
-            item for item in copied
-            if not (isinstance(item, dict) and re.sub(r"[^a-z]+", "", str(item.get("name", "") or "").lower()) in _placeholder_names)
-        ]
+        _placeholder_names = {
+            "unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified",
+            "speaker", "narrator", "voice", "someone", "stranger", "person", "character",
+            "same", "other", "unspecified", "ai", "stationai", "theai", "computer",
+            "system", "machine", "robot", "mainframe", "shipai", "creature", "monster",
+            "beast", "entity", "thing", "hybrid", "figure", "hologram", "projection",
+            "ghost", "specimen", "subject", "clone",
+        }
+        normalized_candidates = []
+        for item in copied:
+            if not isinstance(item, dict):
+                normalized_candidates.append(item)
+                continue
+            name = str(item.get("name", "") or "").strip()
+            compact_name = re.sub(r"[^a-z]+", "", name.lower())
+            entity_type = str(item.get("entity_type", "") or "").strip().upper()
+            is_character = bool(item.get("is_character", False))
+
+            # A bare AI label is not an empty placeholder when Qwen explicitly
+            # classifies it as a SENTIENT character and the story gives it live,
+            # causal agency. Preserve that semantic decision. Where the prose
+            # grounds a host (e.g. "the station's AI"), use that grounded label
+            # as the canonical display name and retain Qwen's original surface.
+            if compact_name in {"ai", "stationai", "theai"} and entity_type == "SENTIENT" and is_character:
+                canonical = "AI"
+                host_match = re.search(
+                    r"\b([A-Za-z][A-Za-z0-9-]{2,})[’']s\s+AI\b",
+                    str(story or ""),
+                    flags=re.IGNORECASE,
+                )
+                if host_match:
+                    host = host_match.group(1).strip()
+                    canonical = f"{host[:1].upper()}{host[1:]} AI"
+                aliases = [str(value).strip() for value in (item.get("aliases", []) or []) if str(value or "").strip()]
+                if name and EntityResolver.normalize(name) != EntityResolver.normalize(canonical):
+                    aliases.insert(0, name)
+                if canonical.casefold().endswith(" ai") and re.search(r"\bAI\b", str(story or ""), flags=re.IGNORECASE):
+                    aliases.append("AI")
+                item["name"] = canonical
+                item["aliases"] = list(dict.fromkeys(aliases))
+                normalized_candidates.append(item)
+                continue
+
+            if compact_name in _placeholder_names:
+                continue
+            normalized_candidates.append(item)
+        copied = normalized_candidates
 
         named_owners = []
         for item in copied:
