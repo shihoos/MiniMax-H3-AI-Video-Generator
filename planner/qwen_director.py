@@ -2559,6 +2559,16 @@ class QwenDirector(
                 print("[QWEN] story_author revision=1/1 mode=expand_draft", flush=True)
             else:
                 revision_user = story_user + self._revision_feedback(problems, "story")
+                found = [int(m) for m in re.findall(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\]", draft)]
+                if found and found != list(range(1, DIRECTOR_STORY_SCENES + 1)):
+                    spent = len(re.findall(r"\b[\w'’-]+\b", draft)) // max(1, len(found))
+                    per_scene = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) // DIRECTOR_STORY_SCENES
+                    revision_user += (
+                        f"\nPACING: the previous draft ran out of output space after scene {found[-1]:02d} because it spent "
+                        f"about {spent} words per scene. Write every one of the {DIRECTOR_STORY_SCENES} scenes at about "
+                        f"{per_scene} words (three paragraphs of three sentences) so that Scene "
+                        f"{DIRECTOR_STORY_SCENES:02d} is finished."
+                    )
                 print(f"[QWEN] story_author revision=1/1 mode=rewrite reason_count={len(problems)}", flush=True)
             self._last_story_raw_output = ""
             self._last_story_draft = ""
@@ -2571,6 +2581,9 @@ class QwenDirector(
     @staticmethod
     def _story_expansion_user(draft: str) -> str:
         """User prompt that asks for the same story at full length; empty when length is not the problem."""
+        markers = [int(m) for m in re.findall(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\]", str(draft or ""))]
+        if markers and markers != list(range(1, DIRECTOR_STORY_SCENES + 1)):
+            return ""
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(draft or "")) if part.strip()]
         if len(paragraphs) != DIRECTOR_STORY_SCENES:
             return ""
