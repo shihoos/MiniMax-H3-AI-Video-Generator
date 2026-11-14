@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import random
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 import re
 
 from planner.cinematic_compiler import CinematicCompiler
@@ -34,6 +35,7 @@ from planner.config import (
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
     STORY_WRITER_WORDS_PER_SCENE,
+    STORY_TARGET_WORDS,
     STORY_ACCEPT_MIN_WORDS,
     STORY_ARCHITECT_REVISION_RETRIES,
     STORY_SCENE_HARD_FLOOR_WORDS,
@@ -1582,8 +1584,12 @@ class QwenDirector(
                 "scene_word_counts": dict(getattr(self, "_last_story_scene_word_counts", {}) or {}),
                 "final_word_count": word_count,
                 "required_minimum_words": int(getattr(self, "_story_min_words", STORY_ACCEPT_MIN_WORDS)),
-                "required_scene_minimum_words": 100,
-                "required_scenes_at_least_120_words": max(0, DIRECTOR_STORY_SCENES - 2),
+                "required_scene_minimum_words": int(STORY_SCENE_HARD_FLOOR_WORDS),
+                "scene_guidance_range_words": [120, 140],
+                "scenes_at_least_120_words": sum(
+                    1 for value in (getattr(self, "_last_story_scene_word_counts", {}) or {}).values()
+                    if int(value) >= 120
+                ),
                 "scene_count": DIRECTOR_STORY_SCENES,
                 "generation_policy": {
                     **accounting,
@@ -1626,7 +1632,8 @@ class QwenDirector(
                 f"final_word_count: {report['final_word_count']}",
                 f"required_minimum_words: {report['required_minimum_words']}",
                 f"required_scene_minimum_words: {report['required_scene_minimum_words']}",
-                f"required_scenes_at_least_120_words: {report['required_scenes_at_least_120_words']}",
+                f"scene_guidance_range_words: {report['scene_guidance_range_words']}",
+                f"scenes_at_least_120_words: {report['scenes_at_least_120_words']}/{report['scene_count']}",
                 (
                     "generation_policy: "
                     f"architect_calls={report['generation_policy']['architect_calls']}; "
@@ -1962,10 +1969,12 @@ class QwenDirector(
         return "\n\n".join(paragraphs), events
 
     def _normalize_story_quotes(self, story: str) -> str:
-        """Deterministic, no-model cleanup so at most two concise spoken lines remain per scene.
+        """Normalize quote marks without deleting dialogue, speaker attribution, or story content.
 
-        Written text loses quotation marks. Surplus quoted speech is stripped conservatively;
-        no new words or dialogue are invented and no model call is made.
+        The former overflow handler removed complete dialogue clauses and adjacent attribution when a scene
+        exceeded two short quoted lines. In the supplied trace this discarded 197 words before validation.
+        Keep at most two concise spoken quote pairs per scene, but unquote overflow/long lines instead of
+        deleting their words. Written/displayed text is also unquoted without content loss.
         """
         written_before = re.compile(
             r"(?:timestamp|label(?:ed|led)?|marked|sign|reads?|word|words|displaying|displays?|shows?|showing|"
@@ -1976,208 +1985,62 @@ class QwenDirector(
         speech_verb = re.compile(
             r"\b(?:said|says|asked|asks|shouted|muttered|whispered|replied|demanded|growled|hissed|warned|snapped|called|"
             r"cried|yelled|barked|sneered|laughed|murmured|answered|added|insisted|declared|announced|explained|"
-            r"exclaimed|breathed|sighed|screamed|urged|ordered|began|continued|stated|muttering|whispering|shouting|saying|asking|"
-            r"replying|demanding|growling|hissing|warning|snapping|yelling|crying|barking|insisting|declaring|announcing|explaining|"
-            r"exclaiming|murmuring|answering|adding|ordering|urging|screaming|sighing|laughing|stating|continuing|calling|whispers|mutters|"
-            r"shouts|replies|demands|warns|insists|spat|spoke|snarled|grunted|gasped|pleaded|begged|agreed|chuckled|scoffed|retorted|"
-            r"countered|offered|suggested|conceded|stammered|thundered|whimpered|spits|snarls)\b",
+            r"exclaimed|breathed|sighed|screamed|urged|ordered|began|continued|stated|spoke|snarled|grunted|gasped|"
+            r"pleaded|begged|agreed|chuckled|scoffed|retorted|countered|offered|suggested|conceded|stammered|thundered|"
+            r"whimpered|radioed|transmitted)\b",
             re.IGNORECASE,
         )
         pair = re.compile(r"\u201c([^\u201c\u201d]*)\u201d|\"([^\"]*)\"")
 
-        def _is_written(inner: str, before: str, after: str = "") -> bool:
-            text = inner.strip()
-            if not text:
+        def is_written(inner: str, before: str, after: str) -> bool:
+            value = inner.strip()
+            if not value or not any(ch.islower() for ch in value if ch.isalpha()):
                 return True
-            letters = [c for c in text if c.isalpha()]
-            if not letters:
+            if re.fullmatch(r"[\d:.,\s/-]+", value):
                 return True
-            if not any(c.islower() for c in letters):
+            if (len(re.findall(r"[\w'’-]+", value)) <= 4
+                    and not re.search(r"[.!?…—]$", value)
+                    and not speech_verb.search(before[-50:])
+                    and not speech_verb.search(after[:40])):
                 return True
-            if re.fullmatch(r"[\d:.,\s/-]+", text):
-                return True
-            # A short phrase with no sentence punctuation is a label or scare quote, not speech.
-            if (
-                len(re.findall(r"[\w'\u2019-]+", text)) <= 4
-                and not re.search(r"[.!?\u2026\u2014]$", text)
-                and not speech_verb.search(before[-45:])
-                and not speech_verb.search(after[:35])
-                and not re.match(r"\s*,?\s*(?:[A-Z][\w\u2019'-]*|he|she|they|I|we)\s+[a-z]+", after[:40])
-            ):
-                return True
-            # An unnamed voice cannot be a rostered speaker, so its line is narration.
-            tail = before[-70:]
-            if (
-                re.search(r"\b(?:an?|the)\s+(?:[a-z-]+\s+){0,2}voices?\b[^.!?]{0,30}$", tail, re.IGNORECASE)
-                and not re.search(r"[A-Z][\w-]*[\u2019']s\s+(?:[a-z-]+\s+)?voice\b[^.!?]{0,30}$", tail)
-            ):
-                return True
-            # A machine, hologram, recording, or radio that is itself the speaker is never a cast speaker, so its line stays narration.
-            if re.search(
-                r"\b(?:the|a|an)\s+(?:[a-z-]+\s+){0,2}(?:hologram|holograph\w*|projection|recording|computer|machine|intercom|loudspeaker|"
-                r"AI|radio|transmission|broadcast)\s+(?:[a-z]+ly\s+)?(?:" + speech_verb.pattern + r")\s*[:,]?\s*$",
-                before[-60:], re.IGNORECASE,
-            ):
-                return True
-            return bool(written_before.search(before[-45:]))
+            return bool(written_before.search(before[-50:]))
 
-        # One utterance split around its attribution ("A," Eli said, "b.") becomes one quoted line, so no half-line is lost.
-        _merge = re.compile(
-            r"\u201c([^\u201c\u201d]+?)\u201d\s+([A-Z][\w\u2019'-]*|he|she|they|I|we)((?:\s+[\w\u2019'-]+){0,3}?\s+(?i:"
-            + speech_verb.pattern + r"))\s*,\s*\u201c([a-z][^\u201c\u201d]*)\u201d"
-        )
-
-        def _merge_split(m):
-            first = m.group(1).rstrip()
-            if first.endswith((".", "!", "?")):
-                return m.group(0)
-            first = first.rstrip(",;:\u2014\u2013 ")
-            subject = m.group(2)
-            if re.search(r"(?:^|[.!?\u201d\"]\s*)$", m.string[:m.start()]) and subject[:1].islower():
-                subject = subject[:1].upper() + subject[1:]
-            return subject + m.group(3) + ", \u201c" + first + ", " + m.group(4).strip() + "\u201d"
-
-        # A blueprint "(words to convey: ...)" marker the Writer copied literally becomes the words themselves
-        # (quoted when it follows a speech verb, plain otherwise), so no template text reaches the story.
-        def _unmark(m):
-            body = m.group(1).strip()
-            lead = m.string[max(0, m.start() - 40):m.start()]
-            if re.search(r"(?:" + speech_verb.pattern + r"|\b[A-Za-z]+(?:ed|ing))\s*,?\s*$", lead, re.IGNORECASE):
-                return "\u201c" + body[:1].upper() + body[1:] + "\u201d"
-            return body
-        story = re.sub(r"\(words to convey:\s*([^()]*?)\)", _unmark, str(story or ""))
-        story = _merge.sub(_merge_split, str(story or ""))
-        paragraphs = re.split(r"(\n\s*\n+)", story)
-        changed = 0
-        for index, part in enumerate(paragraphs):
-            if not part.strip() or re.fullmatch(r"\n\s*\n+", part):
+        value = re.sub(r"\(words to convey:\s*([^()]*?)\)", lambda m: m.group(1).strip(), str(story or ""))
+        chunks = re.split(r"(\n\s*\n+)", value)
+        total_normalized = 0
+        for index, chunk in enumerate(chunks):
+            if not chunk.strip() or re.fullmatch(r"\n\s*\n+", chunk):
                 continue
-            matches = list(pair.finditer(part))
+            matches = list(pair.finditer(chunk))
             if not matches:
                 continue
-            keep_speech = 0
+            spoken_kept = 0
             pieces = []
             cursor = 0
             for match in matches:
                 inner = match.group(1) if match.group(1) is not None else match.group(2)
-                before = part[:match.start()]
-                strip = False
-                if _is_written(inner, before, part[match.end():match.end() + 40]):
-                    strip = True
+                before = chunk[:match.start()]
+                after = chunk[match.end():]
+                words = len(re.findall(r"[\w'’-]+", inner))
+                written = is_written(inner, before, after)
+                keep_as_dialogue = not written and spoken_kept < 2 and words <= 9
+                pieces.append(chunk[cursor:match.start()])
+                # Preserve every word and its attribution. Only the quotation marks are normalized.
+                pieces.append(match.group(0) if keep_as_dialogue else inner)
+                if keep_as_dialogue:
+                    spoken_kept += 1
                 else:
-                    if keep_speech >= 2:
-                        # Surplus spoken line: remove the words cleanly instead of leaving a bare fragment.
-                        seg = part[cursor:match.start()]
-                        tail = part[match.end():]
-                        rest = tail.lstrip(" ,")
-                        mname = re.match(r"[A-Z][\w\u2019'-]*\s+", rest)
-                        lead_in = bool(
-                            re.search(r"(?:" + speech_verb.pattern + r")\s*[,:]\s*$", seg, re.IGNORECASE)
-                            or re.search(r"\b[A-Za-z]+(?:ed|ing)\s*[,:]\s*$", seg)
-                        )
-                        mpro = re.match(
-                            r"\s*,?\s*(?:he|she|they|it|I|we)\s+(?:" + speech_verb.pattern + r")[^.!?\n]{0,70}[.!?]",
-                            tail, re.IGNORECASE,
-                        )
-                        if mpro and re.search(r"(?:[.!?]\s*|^)$", seg):
-                            pieces.append(seg)
-                            cursor = match.end() + mpro.end()
-                            cursor += len(part[cursor:]) - len(part[cursor:].lstrip(" "))
-                            changed += 1
-                            continue
-                        if mname and speech_verb.match(rest[mname.end():]) and re.search(r"(?:[.!?]\s*|^)$", seg):
-                            pieces.append(seg)
-                            cursor = match.end() + (len(tail) - len(rest))
-                            changed += 1
-                            continue
-                        if not lead_in:
-                            seg2 = re.sub(r"\s*[,:]\s*$", "", seg) if re.search(r"[,:]\s*$", seg) else seg
-                            if seg2 != seg and (not tail.strip() or re.match(r"\s*[A-Z]", tail)):
-                                seg2 += "."
-                            pieces.append(seg2)
-                            cursor = match.end() + (1 if (seg2 == seg and seg.endswith(" ") and tail.startswith(" ")) else 0)
-                            changed += 1
-                            continue
-                        if lead_in:
-                            seg = re.sub(r"\s*[,:]\s*$", "", seg)
-                            if inner.rstrip().endswith((".", "!", "?")) and (not tail.strip() or re.match(r"\s*[A-Z]", tail)):
-                                seg += "."
-                            pieces.append(seg)
-                            cursor = match.end()
-                            changed += 1
-                            continue
-                        strip = True
-                    elif len(re.findall(r"[\w'\u2019-]+", inner)) > 9:
-                        # Keep the leading sentence(s) that fit one shot as speech; the rest becomes narration.
-                        sentences = re.split(r"(?<=[.!?])\s+", inner.strip())
-                        lead, used = [], 0
-                        for sentence in sentences:
-                            n_words = len(re.findall(r"[\w'\u2019-]+", sentence))
-                            if used + n_words <= 9:
-                                lead.append(sentence)
-                                used += n_words
-                            else:
-                                break
-                        if lead and len(lead) < len(sentences):
-                            # The remainder of an over-long line is dropped, not narrated (bare second-person speech reads as a glitch).
-                            lead_text = " ".join(lead)
-                            if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]):
-                                lead_text = re.sub(r"[.!?]+$", ",", lead_text)
-                            opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
-                            pieces.append(part[cursor:match.start()])
-                            pieces.append(opener + lead_text + closer)
-                            cursor = match.end()
-                            keep_speech += 1
-                            changed += 1
-                            continue
-                        # No whole sentence fits one shot: quote the first clause (3-9 words, ending at a comma/dash)
-                        # and leave the remainder as plain narration, so the spoken line is not lost.
-                        best = None
-                        for cm in re.finditer(r"[,;:\u2014\u2013\u2026]|\.\.\.|\s-\s", inner):
-                            n_pre = len(re.findall(r"[\w'\u2019-]+", inner[:cm.start()]))
-                            if 3 <= n_pre <= 9:
-                                best = cm
-                        if best is not None:
-                            prefix = inner[:best.start()].strip()
-                            remainder = inner[best.end():].strip(" \u2014\u2013-,;:")
-                            if prefix and remainder:
-                                opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
-                                pieces.append(part[cursor:match.start()])
-                                _endp = "," if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]) else "."
-                                pieces.append(opener + prefix + _endp + closer)
-                                cursor = match.end()
-                                keep_speech += 1
-                                changed += 1
-                                continue
-                        # No comma either: cut at the last natural connector so the line stays dialogue (4-9 words kept).
-                        _cut = None
-                        for cm in re.finditer(r"\s(?:to|and|but|because|before|so|while|until|if|when|or)\s", inner):
-                            n_pre = len(re.findall(r"[\w'\u2019-]+", inner[:cm.start()]))
-                            if 4 <= n_pre <= 9:
-                                _cut = cm
-                        if _cut is not None:
-                            prefix = inner[:_cut.start()].strip(" ,;:")
-                            if prefix:
-                                opener, closer = (("\u201c", "\u201d") if match.group(1) is not None else ('"', '"'))
-                                pieces.append(part[cursor:match.start()])
-                                _endp = "," if re.match(r"\s*[a-z]", part[match.end():match.end() + 3]) else "."
-                                pieces.append(opener + prefix + _endp + closer)
-                                cursor = match.end()
-                                keep_speech += 1
-                                changed += 1
-                                continue
-                        strip = True
-                    else:
-                        keep_speech += 1
-                pieces.append(part[cursor:match.start()])
-                pieces.append(inner if strip else match.group(0))
+                    total_normalized += 1
                 cursor = match.end()
-                changed += 1 if strip else 0
-            pieces.append(part[cursor:])
-            paragraphs[index] = "".join(pieces)
-        if changed:
-            print(f"[QWEN] story_cleanup=unquoted {changed} written/overflow quotation pair(s); no model call", flush=True)
-        return "".join(paragraphs)
+            pieces.append(chunk[cursor:])
+            chunks[index] = "".join(pieces)
+        if total_normalized:
+            print(
+                f"[QWEN] story_cleanup=normalized quote marks on {total_normalized} written/overflow spans; "
+                "preserved all dialogue text; no model call",
+                flush=True,
+            )
+        return "".join(chunks)
 
     def _story_quality_issues(self, story: str) -> list[str]:
         """Log-only structural craft diagnostics; never fail or rewrite the story."""
@@ -2324,6 +2187,61 @@ class QwenDirector(
                 "\nDo not remove a valid CAST member or their planned scene merely to silence this error. "
                 "Reconcile ENTRY_PRESENT, ON_SCREEN_PRESENT, EXIT_PRESENT, and EVENT for each affected person."
             )
+        # Blueprint quality failures need field-level repairs, not a vague request to improve the plan.
+        structural_repairs: list[str] = []
+        for problem in cleaned:
+            match = re.search(
+                r"SETUP_PAYOFF_MAP plant in scene (\d+) is not grounded in that scene's EVENT", problem, re.I
+            )
+            if match:
+                scene = int(match.group(1))
+                structural_repairs.append(
+                    f"SETUP/PAYOFF PLANT: correct the plant_scene or rewrite Scene {scene:02d} EVENT so it visibly "
+                    "contains the exact observable evidence/rule/object/behavior named in the plant. Use the same "
+                    "distinctive noun phrase in both the EVENT and map; do not claim a clue was planted if it is absent."
+                )
+            match = re.search(
+                r"SETUP_PAYOFF_MAP payoff in scene (\d+) is not grounded in that scene's EVENT", problem, re.I
+            )
+            if match:
+                scene = int(match.group(1))
+                structural_repairs.append(
+                    f"SETUP/PAYOFF PAYOFF: correct the payoff_scene or rewrite Scene {scene:02d} EVENT so the action "
+                    "actually uses/reinterprets the planted detail. Name the same distinctive evidence/object/rule; "
+                    "do not substitute a thematically similar but unrelated action."
+                )
+            match = re.search(
+                r"SETUP_PAYOFF_MAP payoff scene (\d+) does not explicitly refer back to the planted evidence from scene (\d+)",
+                problem, re.I,
+            )
+            if match:
+                payoff_scene, plant_scene = map(int, match.groups())
+                structural_repairs.append(
+                    f"SETUP/PAYOFF LINK: Scene {payoff_scene:02d} EVENT must explicitly use the distinctive detail "
+                    f"planted in Scene {plant_scene:02d}; repeat its concrete noun/feature and show how its meaning "
+                    "changes the current plan. If no such payoff belongs there, change the map to the actual payoff scene."
+                )
+            match = re.search(
+                r"scene (\d+) changes its physical location without an explicit transition \('([^']*)' to '([^']*)'\)",
+                problem, re.I,
+            )
+            if match:
+                scene, origin, destination = match.groups()
+                structural_repairs.append(
+                    f"LOCATION CONTINUITY: Scene {int(scene):02d} currently exits {destination!r} after entering "
+                    f"{origin!r}. Either add a concrete physical route/action in that scene's EVENT showing the named "
+                    "character(s) reach the destination, or keep EXIT_LOCATION at the entry location. No teleporting."
+                )
+            match = re.search(r"scene (\d+) object state change is not anchored to the named object and a physical action", problem, re.I)
+            if match:
+                scene = int(match.group(1))
+                structural_repairs.append(
+                    f"OBJECT STATE: in Scene {scene:02d}, name the exact object whose state/owner/location changes "
+                    "and describe the physical action causing it. If no state change occurs, keep ENTRY_OBJECTS and "
+                    "EXIT_OBJECTS consistent instead of inventing an unshown change."
+                )
+        if structural_repairs:
+            feedback += "\n\nMANDATORY STORY-STRUCTURE REPAIR (edit the actual JSON fields/events):\n- " + "\n- ".join(dict.fromkeys(structural_repairs))
         feedback += f"\nWrite a complete new {subject} that fixes every one of them. Do not mention this note."
         return feedback
 
@@ -2674,22 +2592,21 @@ class QwenDirector(
                 word_count=len(re.findall(r"\b[\w'’-]+\b", draft)),
                 stage="author_first_draft_rejected",
             )
-            revision_user = self._story_expansion_user(draft)
+            revision_user = self._story_expansion_user(draft, base_user=story_user)
             if revision_user:
-                # Too short: expand the draft Qwen already wrote. A fresh re-roll was measured to come out
-                # shorter, because it has the same target and no draft to build on.
-                print("[QWEN] story_author revision=1/1 mode=expand_draft", flush=True)
+                # Rebuild from the validated Architect plan. Do not lock the revision to a defective draft's
+                # duplicated/unfinished events; use the failed prose only to target thin or repeated scenes.
+                print("[QWEN] story_author revision=1/1 mode=rebuild_from_validated_architecture", flush=True)
             else:
                 revision_user = story_user + self._revision_feedback(problems, "story")
                 found = [int(m) for m in re.findall(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\]", draft)]
                 if found and found != list(range(1, DIRECTOR_STORY_SCENES + 1)):
                     spent = len(re.findall(r"\b[\w'’-]+\b", draft)) // max(1, len(found))
-                    per_scene = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) // DIRECTOR_STORY_SCENES
+                    per_scene = int(STORY_WRITER_WORDS_PER_SCENE)
                     revision_user += (
-                        f"\nPACING: the previous draft ran out of output space after scene {found[-1]:02d} because it spent "
-                        f"about {spent} words per scene. Write every one of the {DIRECTOR_STORY_SCENES} scenes at about "
-                        f"{per_scene} words (three paragraphs of three sentences) so that Scene "
-                        f"{DIRECTOR_STORY_SCENES:02d} is finished."
+                        f"\nPACING: the previous draft contained only {len(found)} complete scene markers and averaged "
+                        f"about {spent} words per scene. Return all {DIRECTOR_STORY_SCENES} scenes at about "
+                        f"{per_scene} words each, with a complete final resolution."
                     )
                 print(f"[QWEN] story_author revision=1/1 mode=rewrite reason_count={len(problems)}", flush=True)
             self._last_story_raw_output = ""
@@ -2701,31 +2618,51 @@ class QwenDirector(
             )
 
     @staticmethod
-    def _story_expansion_user(draft: str) -> str:
-        """User prompt that asks for the same story at full length; empty when length is not the problem."""
+    def _story_expansion_user(draft: str, *, base_user: str = "") -> str:
+        """Build one targeted revision from the validated architecture, not from defective prose."""
         markers = [int(m) for m in re.findall(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\]", str(draft or ""))]
         if markers and markers != list(range(1, DIRECTOR_STORY_SCENES + 1)):
             return ""
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(draft or "")) if part.strip()]
-        if len(paragraphs) != DIRECTOR_STORY_SCENES:
+        if len(paragraphs) != DIRECTOR_STORY_SCENES or not base_user.strip():
             return ""
         counts = [len(re.findall(r"\b[\w'’-]+\b", part)) for part in paragraphs]
-        if sum(counts) >= STORY_ACCEPT_MIN_WORDS and min(counts) >= STORY_SCENE_HARD_FLOOR_WORDS:
+        normalized = [re.sub(r"[^a-z0-9]+", " ", part.casefold()).strip() for part in paragraphs]
+        duplicate_pairs = []
+        for left in range(len(normalized)):
+            for right in range(left + 1, len(normalized)):
+                if min(counts[left], counts[right]) < 45:
+                    continue
+                similarity = SequenceMatcher(None, normalized[left], normalized[right]).ratio()
+                if similarity >= 0.90:
+                    duplicate_pairs.append((left + 1, right + 1, similarity))
+        if (sum(counts) >= STORY_ACCEPT_MIN_WORDS
+                and min(counts) >= STORY_SCENE_HARD_FLOOR_WORDS
+                and not duplicate_pairs):
             return ""
-        writer_total = int(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE)
-        per_scene = writer_total // DIRECTOR_STORY_SCENES
-        listing = "; ".join(f"scene {i:02d} = {c} words" for i, c in enumerate(counts, 1))
-        blocks = "\n\n".join(f"[[SCENE_{i:02d}]] {part}" for i, part in enumerate(paragraphs, 1))
+        thin = [f"Scene {i:02d}: {count} words" for i, count in enumerate(counts, 1) if count < 115]
+        listing = "; ".join(f"{i:02d}={count}" for i, count in enumerate(counts, 1))
+        duplicates = (
+            "; ".join(f"Scenes {a:02d} and {b:02d} are near-duplicates ({ratio:.0%} similarity)"
+                       for a, b, ratio in duplicate_pairs)
+            if duplicate_pairs else "none detected"
+        )
+        thin_text = "; ".join(thin) if thin else "none"
         return (
-            "REVISION TASK: the draft below is the right story, but it is too short "
-            f"({sum(counts)} words; at least {STORY_ACCEPT_MIN_WORDS} are required and about {writer_total} are wanted). "
-            f"Current lengths: {listing}.\n"
-            "Write the complete story again in the same [[SCENE_01]] to "
-            f"[[SCENE_{DIRECTOR_STORY_SCENES:02d}]] format. Keep every event, name, location, object, decision, outcome and the "
-            "order of scenes exactly; add no new characters, twists or a different ending. Develop each scene to roughly "
-            f"{per_scene} words by dramatizing what already happens in more physical detail: the action step by step, the "
-            "obstacle, how the character decides, and what visibly changes. Do not add filler or repeat earlier wording. "
-            "Do not shorten any scene. Return only the scene blocks.\n\nDRAFT:\n" + blocks
+            base_user.rstrip()
+            + "\n\nAUTHOR REVISION — REBUILD FROM THE VALIDATED ARCHITECTURE. The previous prose draft failed its "
+            + f"length/scene-depth contract: {sum(counts)} words after normalization; the required floor is "
+            + f"{STORY_ACCEPT_MIN_WORDS}. Scene lengths (01-12): {listing}. Underdeveloped scenes: {thin_text}. "
+            + f"Repeated-scene check: {duplicates}.\n"
+            + f"Return a complete new version of all {DIRECTOR_STORY_SCENES} scenes using the VALIDATED PLOT ARCHITECTURE "
+            + "above as the authority for cast, events, scene order, locations, object states, climax, and resolution. "
+            + f"Target {STORY_TARGET_WORDS} words overall, roughly {STORY_WRITER_WORDS_PER_SCENE} per scene; never fall "
+            + f"below {STORY_ACCEPT_MIN_WORDS} words overall. Give every scene enough room for its full event and handoff; "
+            + "prioritize the underdeveloped scenes and rewrite any repeated scene as its own distinct planned event. "
+            + "Do not pad, duplicate paragraphs, repeat the same unresolved action, or compress Scenes 08-12. Preserve "
+            + "every Architect-approved cast member and give each visible character a concrete action or reaction in "
+            + "their listed scenes. Do not add new characters beyond the validated CAST. Keep the source's defining "
+            + "facts and outcome. Return only the twelve scene markers and finished prose."
         )
 
     def _author_write_part(
@@ -2956,6 +2893,20 @@ class QwenDirector(
         advisories: list[str] = []
         if len(paragraphs) != DIRECTOR_STORY_SCENES:
             return [f"expected {DIRECTOR_STORY_SCENES} scene paragraphs, got {len(paragraphs)}"]
+
+        # A scene copied into another numbered slot is a structural failure, not a stylistic motif.
+        scene_norms = [re.sub(r"[^a-z0-9]+", " ", p.casefold()).strip() for p in paragraphs]
+        scene_counts = [len(re.findall(r"\b[\w'’-]+\b", p)) for p in paragraphs]
+        for left in range(len(scene_norms)):
+            for right in range(left + 1, len(scene_norms)):
+                if min(scene_counts[left], scene_counts[right]) < 60:
+                    continue
+                similarity = SequenceMatcher(None, scene_norms[left], scene_norms[right]).ratio()
+                if similarity >= 0.90:
+                    errors.append(
+                        f"scenes {left + 1:02d} and {right + 1:02d} are near-duplicate scene blocks "
+                        f"({similarity:.0%} similarity); each scene must dramatize its own planned event"
+                    )
 
         # Exact stock phrasing is permitted once; repeated use is a hard failure.
         stock_phrases = (
