@@ -1679,10 +1679,13 @@ class QwenDirectorSanitizeMixin:
                     f"{len(starved)} scenes below the {STORY_SCENE_HARD_FLOOR_WORDS}-word hard floor ({', '.join(starved)})."
                 )
 
+        # A phrase list cannot tell a sequel hook from a resolved ending that mentions the future, and the pipeline
+        # makes one Author call, so this is reported as a warning. The Author prompt and the Architect's RESOLUTION
+        # field are what drive a completed ending.
         if self._story_has_open_ended_finale(result):
-            errors.append(
-                "Generated story ends on an unresolved future hook rather than a completed consequence."
-            )
+            warnings = list(getattr(self, "_last_story_quality_warnings", []) or [])
+            warnings.append("ending may read as an open future hook (advisory)")
+            self._last_story_quality_warnings = list(dict.fromkeys(warnings))
 
         # The final scene must resolve the story; do not impose a numeric paragraph quota.
 
