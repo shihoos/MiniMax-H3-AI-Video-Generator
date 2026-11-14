@@ -2271,11 +2271,61 @@ class QwenDirector(
                     cleaned.append(part[:260])
         if not cleaned:
             return ""
-        return (
+        feedback = (
             f"\n\nREVISION: your previous {subject} was rejected by the quality checker for exactly these problems:\n"
             + "\n".join(f"- {item}" for item in cleaned[:12])
-            + f"\nWrite a complete new {subject} that fixes every one of them. Do not mention this note."
         )
+        # Presence-ledger failures need a concrete reconciliation instruction. Merely repeating the
+        # validator message has proved insufficient: the model can preserve the inconsistent lists.
+        transitions: dict[tuple[str, str], set[str]] = {}
+        for problem in cleaned:
+            match = re.search(
+                r"scene\s+(\d+)\s+mid-scene\s+(entry|exit)\s+for\s+['\"]([^'\"]+)['\"]\s+has no character-specific EVENT anchor",
+                problem,
+                re.I,
+            )
+            if match:
+                scene, transition, character = match.groups()
+                transitions.setdefault((scene, character), set()).add(transition.casefold())
+        if transitions:
+            feedback += (
+                "\n\nMANDATORY PRESENCE-LEDGER REPAIR (do this before finalizing the revised JSON):"
+            )
+            for (scene, character), missing in sorted(transitions.items()):
+                actions = []
+                if "entry" in missing:
+                    previous_scene = int(scene) - 1
+                    boundary_target = (
+                        f"Scene {previous_scene:02d} exit_present (the source of this scene's ENTRY_PRESENT)"
+                        if previous_scene >= 1
+                        else "the opening-state present list"
+                    )
+                    actions.append(
+                        f"For {character} at the opening instant of Scene {int(scene):02d}, either include them in "
+                        f"{boundary_target} if physically present at the start, OR keep them absent there and make "
+                        "the current scene's EVENT explicitly name them performing their physical entrance/joining. "
+                        "Do not invent an ENTRY_PRESENT JSON field; entry state is inherited from the previous scene."
+                    )
+                if "exit" in missing:
+                    actions.append(
+                        f"For {character} at the final instant of Scene {int(scene):02d}, either include them in "
+                        "this scene's exit_present if physically present at the end, OR keep them absent there and "
+                        "make this scene's EVENT explicitly name them performing their physical departure/withdrawal."
+                    )
+                if {"entry", "exit"}.issubset(missing):
+                    actions.append(
+                        "Because both transitions failed, if the character truly appears only mid-scene, EVENT must "
+                        "name the exact canonical character and depict BOTH arrival and later departure; otherwise "
+                        "correct the prior scene's exit_present and/or this scene's exit_present to show where the "
+                        "character is actually present at the boundaries."
+                    )
+                feedback += "\n- " + " ".join(actions)
+            feedback += (
+                "\nDo not remove a valid CAST member or their planned scene merely to silence this error. "
+                "Reconcile ENTRY_PRESENT, ON_SCREEN_PRESENT, EXIT_PRESENT, and EVENT for each affected person."
+            )
+        feedback += f"\nWrite a complete new {subject} that fixes every one of them. Do not mention this note."
+        return feedback
 
     def _generate_story_blueprint(
         self,
