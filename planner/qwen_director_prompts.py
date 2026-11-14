@@ -350,7 +350,7 @@ class QwenDirectorPromptMixin:
 
             STORY LENGTH: produce exactly {n} scene blocks. Write about {target} words in total; this is a drafting
             quota, and {minimum} is only the rejection floor. Per-scene quota (sums to {target}): {scene_allocation}.
-            Every scene is a fully dramatized sequence of THREE paragraphs of three to four sentences each:
+            Every scene is a fully dramatized sequence of THREE paragraphs of three to four sentences each, one paragraph per beat of the scene's EVENT:
             (1) establish the place, the pressure and the character's immediate objective through concrete action and
             perception; (2) play out the resistance, with specific dialogue or physical struggle and at least one
             discovery or complication; (3) show the decision, its cost, and the changed situation, and end on the
@@ -586,7 +586,7 @@ class QwenDirectorPromptMixin:
             ENTRY_LOCATION=[one physical location]; ENTRY_PRESENT=[people physically present at scene start];
             ON_SCREEN_PRESENT=[every canonical cast member physically visible at any point during this scene];
             ENTRY_KNOWS=[what present people know at entry]; ENTRY_OBJECTS=[important objects and their owner/state or none];
-            EVENT=[the specific action, resistance, decision, changed situation, and explicit physical transitions];
+            EVENT=[three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions];
             EXIT_LOCATION=[location at scene end]; EXIT_PRESENT=[people physically present at scene end];
             EXIT_KNOWS=[what has changed in what people know]; EXIT_OBJECTS=[important objects and their owner/state or none];
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
@@ -705,7 +705,7 @@ class QwenDirectorPromptMixin:
             r"SCENE BEATS: output exactly .*?NEXT_CAUSE=\[[^\]]*\]\.",
             f"SCENE BEATS: `opening` gives the starting state of scene 1 (location, present people, what they know, objects). "
             f"`scenes` then holds exactly {n} objects in story order, each {beat_min}-{beat_max} words across its fields. "
-            "Keys: purpose, on_screen_present (array of names), event, exit_location, exit_present (array of names), "
+            "Keys: purpose, on_screen_present (array of names), event (three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions), exit_location, exit_present (array of names), "
             "exit_knows, exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the "
             "final scene). Entry state is not written: each scene begins exactly where the previous one ended. The rules "
             "below name these same fields in UPPERCASE, and ENTRY_* means the previous scene's exit. Do not use "
