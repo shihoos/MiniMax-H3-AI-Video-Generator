@@ -1598,7 +1598,7 @@ class QwenDirector(
                     "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
                     "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
                     "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-                    "story_revision_policy": "up to one conditional revision per stage: after a returned artifact fails a hard gate, or (Author only) as a fall-back-protected tail rebalance of a passing draft whose ending is starved",
+                    "story_revision_policy": "up to one conditional revision per stage after a returned artifact fails a hard gate",
                     "runtime_retry_calls": accounting["runtime_retry_calls"],
                     "repair_calls": accounting["repair_calls"],
                 },
@@ -2110,7 +2110,11 @@ class QwenDirector(
         return issues
 
     class _BlueprintRejected(RuntimeError):
-        """The Architect answered, but the plan failed a hard contract (as opposed to a server/ceiling failure)."""
+        """A returned Architect plan failed a hard contract; retain the candidate for a targeted revision."""
+
+        def __init__(self, message: str, blueprint: str = "") -> None:
+            super().__init__(message)
+            self.blueprint = str(blueprint or "")
 
     @staticmethod
     def _blueprint_json_to_text(raw: str) -> str:
@@ -2125,45 +2129,246 @@ class QwenDirector(
         return text
 
     @staticmethod
-    def _revision_feedback(problems: list[str], subject: str) -> str:
-        """Tell the model exactly why its last attempt was rejected; Qwen, not new regexes, does the fixing."""
+    def _story_blueprint_revision_context(blueprint: str, problems: list[str]) -> str:
+        """Return small, exact excerpts so a rejected Architect plan is repaired, not replaced."""
+        fields: dict[str, str] = {}
+        beats: dict[int, str] = {}
+        for line in str(blueprint or "").splitlines():
+            field_match = re.match(
+                r"^(CAST|CLIMAX_CHOICE|RESOLUTION|SETUP_PAYOFF_MAP):\s*(.+)$", line,
+            )
+            if field_match:
+                fields[field_match.group(1)] = field_match.group(2).strip()
+                continue
+            scene_match = re.match(r"^SCENE\s+(\d{2}):\s*(.+)$", line)
+            if scene_match:
+                beats[int(scene_match.group(1))] = scene_match.group(2).strip()
+        if not beats:
+            return ""
+
+        selected: set[int] = set()
+        requested_fields: dict[int, set[str]] = {}
+        relevant_pairs: set[tuple[int, int]] = set()
+
+        def require(number: int, *names: str) -> None:
+            if 1 <= number <= DIRECTOR_STORY_SCENES and number in beats:
+                selected.add(number)
+                requested_fields.setdefault(number, set()).update(names)
+
+        has_map_findings = any("SETUP_PAYOFF_MAP" in item for item in problems)
+        for problem in problems:
+            link = re.search(
+                r"payoff scene\s+(\d+)\s+does not explicitly refer back to the planted evidence from scene\s+(\d+)",
+                problem, re.I,
+            )
+            if link:
+                payoff_scene, plant_scene = map(int, link.groups())
+                relevant_pairs.add((plant_scene, payoff_scene))
+                require(plant_scene, "EVENT")
+                require(payoff_scene, "EVENT")
+            payoff_event = re.search(r"SETUP_PAYOFF_MAP payoff in scene (\d+)", problem, re.I)
+            if payoff_event:
+                require(int(payoff_event.group(1)), "EVENT")
+            plant_event = re.search(r"SETUP_PAYOFF_MAP plant in scene (\d+)", problem, re.I)
+            if plant_event:
+                require(int(plant_event.group(1)), "EVENT")
+            location_error = re.search(r"scene (\d+) changes its physical location", problem, re.I)
+            if location_error:
+                require(int(location_error.group(1)), "ENTRY_LOCATION", "EVENT", "EXIT_LOCATION")
+            object_error = re.search(r"scene (\d+) object state change", problem, re.I)
+            if object_error:
+                number = int(object_error.group(1))
+                require(number, "ENTRY_OBJECTS", "EVENT", "EXIT_OBJECTS")
+                # Include the prior scene's resulting inventory too: an object may
+                # have been incorrectly marked completed before the reported delta.
+                require(number - 1, "EVENT", "ENTRY_OBJECTS", "EXIT_OBJECTS")
+            missing_handoff = re.search(r"scene\s+(\d+)\s+has no NEXT_CAUSE handoff", problem, re.I)
+            if missing_handoff:
+                number = int(missing_handoff.group(1))
+                require(number, "PURPOSE", "EVENT", "NEXT_CAUSE")
+                require(number + 1, "PURPOSE", "EVENT")
+
+        map_pairs = re.findall(
+            r"PLANT\s+Scene\s+(\d{1,2})\s*:\s*(.+?)\s*;\s*"
+            r"PAYOFF\s+Scene\s+(\d{1,2})\s*:\s*(.+?)"
+            r"(?=\s*\|\s*PLANT\s+Scene\s+|$)",
+            fields.get("SETUP_PAYOFF_MAP", ""), re.I,
+        )
+        if has_map_findings and not relevant_pairs:
+            relevant_pairs = {
+                (int(plant), int(payoff)) for plant, _, payoff, _ in map_pairs
+                if int(plant) in selected or int(payoff) in selected
+            }
+        map_lines = []
+        for plant, plant_detail, payoff, payoff_detail in map_pairs:
+            pair = (int(plant), int(payoff))
+            if has_map_findings and pair in relevant_pairs:
+                plant_excerpt = str(plant_detail).strip()[:220]
+                payoff_excerpt = str(payoff_detail).strip()[:220]
+                map_lines.append(
+                    f"S{pair[0]:02d} PLANT: {plant_excerpt} -> S{pair[1]:02d} PAYOFF: {payoff_excerpt}"
+                )
+                require(pair[0], "EVENT")
+                require(pair[1], "EVENT")
+
+        def object_delta(state: dict[str, str]) -> str:
+            def items(value: str) -> dict[str, str]:
+                found: dict[str, str] = {}
+                for raw in re.split(r",\s*(?=[A-Z])", str(value or "")):
+                    item = raw.strip()
+                    if not item:
+                        continue
+                    label = re.sub(r"\s*\([^)]*\)\s*$", "", item).strip()
+                    if label:
+                        found[label.casefold()] = item
+                return found
+            before = items(state.get("ENTRY_OBJECTS", ""))
+            after = items(state.get("EXIT_OBJECTS", ""))
+            changes = []
+            for key in sorted(set(before) | set(after)):
+                if before.get(key) != after.get(key):
+                    changes.append(f"{before.get(key, '[absent]')} -> {after.get(key, '[absent]')}")
+            return "; ".join(changes) or "no listed inventory delta"
+
+        lines = [
+            "PREVIOUS PLAN EXCERPTS — repair this plan; do not restart.",
+        ]
+        cast_names = [item.get("name", "").strip() for item in parse_cast(blueprint) if item.get("name")]
+        if cast_names:
+            lines.append("CAST TO PRESERVE: " + ", ".join(cast_names))
+        resolution = fields.get("RESOLUTION", "")
+        if resolution:
+            lines.append("EXISTING ENDING: " + resolution[:220])
+        if map_lines:
+            lines.append("FAILED MAP PAIRS: " + " | ".join(map_lines))
+
+        for number in sorted(selected):
+            state = parse_scene_state(beats[number])
+            names = requested_fields.get(number, {"EVENT"})
+            parts = []
+            if "ENTRY_LOCATION" in names and state.get("ENTRY_LOCATION"):
+                location = state["ENTRY_LOCATION"].replace("Abandoned Arctic Research Station, ", "")
+                parts.append("FROM=" + location)
+            if "EVENT" in names and state.get("EVENT"):
+                parts.append("EVENT=" + state["EVENT"][:175])
+            if "EXIT_LOCATION" in names and state.get("EXIT_LOCATION"):
+                location = state["EXIT_LOCATION"].replace("Abandoned Arctic Research Station, ", "")
+                parts.append("TO=" + location)
+            if "NEXT_CAUSE" in names and state.get("NEXT_CAUSE"):
+                parts.append("NEXT_CAUSE=" + state["NEXT_CAUSE"][:125])
+            if "ENTRY_OBJECTS" in names or "EXIT_OBJECTS" in names:
+                parts.append("OBJECT_DELTA=" + object_delta(state))
+            if parts:
+                lines.append(f"S{number:02d}: " + "; ".join(parts))
+
+        lines.append(
+            "Repair only implicated fields. Payoffs must reuse the planted evidence in the mapped EVENT; "
+            "each non-final cause must force the next EVENT. State only completed object actions."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _revision_feedback(
+        problems: list[str],
+        subject: str,
+        *,
+        previous_plan_context: str = "",
+        advisory_findings: list[str] | None = None,
+    ) -> str:
+        """Build a compact, actionable revision note without starving JSON completion tokens."""
         cleaned: list[str] = []
         for item in problems:
-            text = re.sub(r"\s+", " ", str(item or "")).strip()
-            text = re.sub(r"^(?:AI|Expand) Story generation failed validation:\s*", "", text)
-            for part in re.split(r"\s+\|\s+", text):
+            value = re.sub(r"\s+", " ", str(item or "")).strip()
+            value = re.sub(r"^(?:AI|Expand) Story generation failed validation:\s*", "", value)
+            for part in re.split(r"\s+\|\s+", value):
                 if part and part not in cleaned:
-                    cleaned.append(part[:260])
+                    cleaned.append(part[:240])
         if not cleaned:
             return ""
+
+        # Condense repetitive validator messages by contract. The exact affected scenes and
+        # transitions remain visible, but the revision context supplies the original events.
+        map_pairs: set[tuple[int, int]] = set()
+        payoff_scenes: set[int] = set()
+        location_details: list[str] = []
+        object_scenes: set[int] = set()
+        handoff_scenes: set[int] = set()
+        other_findings: list[str] = []
+        for problem in cleaned:
+            link = re.search(
+                r"payoff scene\s+(\d+)\s+does not explicitly refer back to the planted evidence from scene\s+(\d+)",
+                problem, re.I,
+            )
+            if link:
+                payoff_scene, plant_scene = map(int, link.groups())
+                map_pairs.add((plant_scene, payoff_scene))
+                continue
+            payoff = re.search(r"SETUP_PAYOFF_MAP payoff in scene (\d+)", problem, re.I)
+            if payoff:
+                payoff_scenes.add(int(payoff.group(1)))
+                continue
+            plant = re.search(r"SETUP_PAYOFF_MAP plant in scene (\d+)", problem, re.I)
+            if plant:
+                other_findings.append(f"plant in Scene {int(plant.group(1)):02d} is not grounded in its EVENT")
+                continue
+            location = re.search(
+                r"scene (\d+) changes its physical location without an explicit transition \('([^']*)' to '([^']*)'\)",
+                problem, re.I,
+            )
+            if location:
+                number, origin, destination = location.groups()
+                short = lambda value: value.rsplit(",", 1)[-1].strip()
+                location_details.append(f"S{int(number):02d} {short(origin)} -> {short(destination)}")
+                continue
+            obj = re.search(r"scene (\d+) object state change", problem, re.I)
+            if obj:
+                object_scenes.add(int(obj.group(1)))
+                continue
+            handoff = re.search(r"scene\s+(\d+)\s+has no NEXT_CAUSE handoff", problem, re.I)
+            if handoff:
+                handoff_scenes.add(int(handoff.group(1)))
+                continue
+            if "SETUP_PAYOFF_MAP" in problem:
+                other_findings.append(problem)
+            else:
+                other_findings.append(problem)
+
+        finding_lines = []
+        if map_pairs or payoff_scenes:
+            pairs = ", ".join(f"S{plant:02d}->S{payoff:02d}" for plant, payoff in sorted(map_pairs))
+            payoff_text = ", ".join(f"S{number:02d}" for number in sorted(payoff_scenes))
+            detail = f"; also ungrounded payoff event(s): {payoff_text}" if payoff_text else ""
+            finding_lines.append("SETUP/PAYOFF: " + (pairs or "review the listed map pair(s)") + detail)
+        if location_details:
+            finding_lines.append("LOCATION TRANSITIONS: " + "; ".join(location_details))
+        if object_scenes:
+            finding_lines.append("OBJECT INVENTORY/ACTION mismatch: " + ", ".join(f"S{n:02d}" for n in sorted(object_scenes)))
+        if handoff_scenes:
+            finding_lines.append("Missing non-final NEXT_CAUSE: " + ", ".join(f"S{n:02d}" for n in sorted(handoff_scenes)))
+        finding_lines.extend(other_findings[:4])
         feedback = (
-            f"\n\nREVISION: your previous {subject} was rejected by the quality checker for exactly these problems:\n"
-            + "\n".join(f"- {item}" for item in cleaned[:12])
+            f"\n\nREVISION: the previous {subject} failed these hard checks:\n"
+            + "\n".join(f"- {item}" for item in finding_lines[:10])
         )
-        # Presence-ledger failures need a concrete reconciliation instruction. Merely repeating the
-        # validator message has proved insufficient: the model can preserve the inconsistent lists.
+
         transitions: dict[tuple[str, str], set[str]] = {}
         for problem in cleaned:
             match = re.search(
                 r"scene\s+(\d+)\s+mid-scene\s+(entry|exit)\s+for\s+['\"]([^'\"]+)['\"]\s+has no character-specific EVENT anchor",
-                problem,
-                re.I,
+                problem, re.I,
             )
             if match:
                 scene, transition, character = match.groups()
                 transitions.setdefault((scene, character), set()).add(transition.casefold())
         if transitions:
-            feedback += (
-                "\n\nMANDATORY PRESENCE-LEDGER REPAIR (do this before finalizing the revised JSON):"
-            )
+            feedback += "\n\nMANDATORY PRESENCE-LEDGER REPAIR (do this before finalizing the revised JSON):"
             for (scene, character), missing in sorted(transitions.items()):
                 actions = []
                 if "entry" in missing:
                     previous_scene = int(scene) - 1
                     boundary_target = (
                         f"Scene {previous_scene:02d} exit_present (the source of this scene's ENTRY_PRESENT)"
-                        if previous_scene >= 1
-                        else "the opening-state present list"
+                        if previous_scene >= 1 else "the opening-state present list"
                     )
                     actions.append(
                         f"For {character} at the opening instant of Scene {int(scene):02d}, either include them in "
@@ -2189,62 +2394,49 @@ class QwenDirector(
                 "\nDo not remove a valid CAST member or their planned scene merely to silence this error. "
                 "Reconcile ENTRY_PRESENT, ON_SCREEN_PRESENT, EXIT_PRESENT, and EVENT for each affected person."
             )
-        # Blueprint quality failures need field-level repairs, not a vague request to improve the plan.
-        structural_repairs: list[str] = []
-        for problem in cleaned:
-            match = re.search(
-                r"SETUP_PAYOFF_MAP plant in scene (\d+) is not grounded in that scene's EVENT", problem, re.I
+
+        repairs = []
+        map_problems = [item for item in cleaned if "SETUP_PAYOFF_MAP" in item]
+        if map_problems:
+            if any(" plant in scene " in item for item in map_problems):
+                repairs.append(
+                    "SETUP/PAYOFF PLANT: the named evidence/object/rule must visibly appear in that plant scene's EVENT; otherwise correct the map or add the actual planting action."
+                )
+            if any(" payoff in scene " in item for item in map_problems):
+                repairs.append(
+                    "SETUP/PAYOFF PAYOFF: the mapped payoff scene's EVENT must perform the listed action and reuse the same distinctive planted evidence; move the map entry if it happens elsewhere."
+                )
+            if map_pairs or any("does not explicitly refer back" in item for item in map_problems):
+                repairs.append(
+                    "SETUP/PAYOFF LINK: repeat the plant's concrete noun/feature in the payoff EVENT and show how it changes the plan."
+                )
+        if location_details:
+            repairs.append(
+                "LOCATION CONTINUITY: name a canonical character physically reaching the destination in EVENT; otherwise keep EXIT_LOCATION at ENTRY_LOCATION."
             )
-            if match:
-                scene = int(match.group(1))
-                structural_repairs.append(
-                    f"SETUP/PAYOFF PLANT: correct the plant_scene or rewrite Scene {scene:02d} EVENT so it visibly "
-                    "contains the exact observable evidence/rule/object/behavior named in the plant. Use the same "
-                    "distinctive noun phrase in both the EVENT and map; do not claim a clue was planted if it is absent."
-                )
-            match = re.search(
-                r"SETUP_PAYOFF_MAP payoff in scene (\d+) is not grounded in that scene's EVENT", problem, re.I
+        if object_scenes:
+            repairs.append(
+                "OBJECT STATE: name the exact object and completed physical action in EVENT; requirements are not completed states, and unchanged objects must carry forward."
             )
-            if match:
-                scene = int(match.group(1))
-                structural_repairs.append(
-                    f"SETUP/PAYOFF PAYOFF: correct the payoff_scene or rewrite Scene {scene:02d} EVENT so the action "
-                    "actually uses/reinterprets the planted detail. Name the same distinctive evidence/object/rule; "
-                    "do not substitute a thematically similar but unrelated action."
-                )
-            match = re.search(
-                r"SETUP_PAYOFF_MAP payoff scene (\d+) does not explicitly refer back to the planted evidence from scene (\d+)",
-                problem, re.I,
+        if handoff_scenes:
+            repairs.append(
+                f"NEXT_CAUSE: each listed non-final scene needs a concrete cause that makes the following EVENT necessary; only Scene {DIRECTOR_STORY_SCENES:02d} may end with none."
             )
-            if match:
-                payoff_scene, plant_scene = map(int, match.groups())
-                structural_repairs.append(
-                    f"SETUP/PAYOFF LINK: Scene {payoff_scene:02d} EVENT must explicitly use the distinctive detail "
-                    f"planted in Scene {plant_scene:02d}; repeat its concrete noun/feature and show how its meaning "
-                    "changes the current plan. If no such payoff belongs there, change the map to the actual payoff scene."
-                )
-            match = re.search(
-                r"scene (\d+) changes its physical location without an explicit transition \('([^']*)' to '([^']*)'\)",
-                problem, re.I,
-            )
-            if match:
-                scene, origin, destination = match.groups()
-                structural_repairs.append(
-                    f"LOCATION CONTINUITY: Scene {int(scene):02d} currently exits {destination!r} after entering "
-                    f"{origin!r}. Either add a concrete physical route/action in that scene's EVENT showing the named "
-                    "character(s) reach the destination, or keep EXIT_LOCATION at the entry location. No teleporting."
-                )
-            match = re.search(r"scene (\d+) object state change is not anchored to the named object and a physical action", problem, re.I)
-            if match:
-                scene = int(match.group(1))
-                structural_repairs.append(
-                    f"OBJECT STATE: in Scene {scene:02d}, name the exact object whose state/owner/location changes "
-                    "and describe the physical action causing it. If no state change occurs, keep ENTRY_OBJECTS and "
-                    "EXIT_OBJECTS consistent instead of inventing an unshown change."
-                )
-        if structural_repairs:
-            feedback += "\n\nMANDATORY STORY-STRUCTURE REPAIR (edit the actual JSON fields/events):\n- " + "\n- ".join(dict.fromkeys(structural_repairs))
-        feedback += f"\nWrite a complete new {subject} that fixes every one of them. Do not mention this note."
+        if repairs:
+            feedback += "\nMANDATORY REPAIRS: " + " ".join(repairs)
+
+        advisory_scenes = sorted({
+            int(match.group(1))
+            for item in (advisory_findings or [])
+            if (match := re.search(r"scene (\d+) event is not anchored to the previous scene's NEXT_CAUSE", item, re.I))
+        })
+        if advisory_scenes:
+            feedback += "\nADVISORY handoffs to review: " + ", ".join(f"S{n:02d}" for n in advisory_scenes) + ". Each next EVENT should enact the previous NEXT_CAUSE."
+
+        if previous_plan_context:
+            feedback += "\n\n" + previous_plan_context
+            feedback += "\nSCOPE: minimally repair the excerpts. Preserve premise, cast and unaffected events; do not invent a new plot or move the climax earlier."
+        feedback += f"\nReturn the complete revised {subject} in the required JSON schema only."
         return feedback
 
     def _generate_story_blueprint(
@@ -2265,7 +2457,14 @@ class QwenDirector(
                 if attempt >= int(STORY_ARCHITECT_REVISION_RETRIES):
                     raise
                 problems = list(getattr(self, "_last_story_quality_errors", None) or []) or [str(rejection)]
-                feedback = self._revision_feedback(problems, "story plan")
+                previous_context = self._story_blueprint_revision_context(rejection.blueprint, problems)
+                advisory_findings = list(getattr(self, "_last_story_blueprint_warnings", None) or [])
+                feedback = self._revision_feedback(
+                    problems,
+                    "story plan",
+                    previous_plan_context=previous_context,
+                    advisory_findings=advisory_findings,
+                )
                 print(
                     f"[QWEN] story_architecture revision={attempt + 1}/{int(STORY_ARCHITECT_REVISION_RETRIES)} "
                     f"reason_count={len(problems)}",
@@ -2357,6 +2556,7 @@ class QwenDirector(
                     pass
                 self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=reason)
                 raise RuntimeError(reason) from plan_error
+        blueprint = ""
         try:
             blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
             self._validate_story_blueprint_contract(
@@ -2379,7 +2579,7 @@ class QwenDirector(
             self._save_story_run_diagnostics(
                 status="failed", stage="ai_story_architect_validation", reason=str(rejection),
             )
-            raise self._BlueprintRejected(str(rejection)) from rejection
+            raise self._BlueprintRejected(str(rejection), blueprint=blueprint) from rejection
         return blueprint
 
     def _validate_story_blueprint_contract(
@@ -2511,7 +2711,7 @@ class QwenDirector(
         source_character_names: list[str],
         story_blueprint: str | None = None,
     ) -> tuple[str, bool]:
-        """Run one primary Author pass, with one conditional revision (hard-gate rejection, or a fall-back-protected rebalance of a starved ending) and draft preservation."""
+        """Run one primary Author pass, with one conditional hard-gate revision and draft preservation."""
         self._last_story_raw_output = ""
         self._last_story_draft = ""
         self._last_story_quality_errors = []
@@ -2691,31 +2891,6 @@ class QwenDirector(
     def _maybe_rebalance_starved_tail(
         self, result: tuple[str, bool], mode: str, user_input: str, story_system: str, story_user: str, **kwargs,
     ) -> tuple[str, bool]:
-        """Run the optional tail rebalance without ever endangering an already-passing story.
-
-        Any ordinary Exception from the optional attempt (validation, transport, runtime, or a bug in the
-        optional logic itself) restores the first draft's state and returns it. BaseException subclasses
-        (KeyboardInterrupt, SystemExit) are deliberately not caught.
-        """
-        snapshot = {
-            name: deepcopy(value) for name, value in vars(self).items() if name.startswith("_last_story_")
-        }
-        try:
-            return self._rebalance_starved_tail_attempt(
-                result, mode, user_input, story_system, story_user, **kwargs,
-            )
-        except Exception as exc:  # noqa: BLE001 - the optional step must never destroy a passing draft
-            for name, value in snapshot.items():
-                setattr(self, name, value)
-            print(
-                f"[QWEN] story_author tail_rebalance=failed ({type(exc).__name__}: {str(exc)[:160]}); keeping first draft",
-                flush=True,
-            )
-            return result
-
-    def _rebalance_starved_tail_attempt(
-        self, result: tuple[str, bool], mode: str, user_input: str, story_system: str, story_user: str, **kwargs,
-    ) -> tuple[str, bool]:
         """Optionally spend the one allowed revision on a passing draft whose ending is starved.
 
         Safe by construction: the first draft already passed every hard gate and is kept unless the
@@ -2805,7 +2980,7 @@ class QwenDirector(
         remaining = total_scenes - split
         # Ask for the configured allocation, kept close to the locked half's own pace (so the tail is not
         # starved) and large enough to clear the floor with margin for under-delivery. The writer soft
-        # maximum caps the request unless the floor margin needs more; it is not a mandatory per-scene target.
+        # maximum caps the request; it is not a mandatory per-scene target.
         head_avg = locked_words / split
         per_scene = max(int(STORY_WORDS_PER_SCENE), int(0.85 * head_avg + 0.999))
         needed = int(STORY_ACCEPT_MIN_WORDS) + 250 - locked_words
@@ -2826,8 +3001,7 @@ class QwenDirector(
             + f"directly from the final situation of Scene {split:02d} and follow the VALIDATED PLOT ARCHITECTURE "
             + f"for scenes {split + 1:02d}-{total_scenes:02d} as the authority for events, order, locations, object "
             + f"states, climax and resolution. Write about {per_scene} words per scene "
-            + f"(up to {int(STORY_WRITER_WORDS_PER_SCENE)} when a scene needs more room; exceed that only if "
-            + "the overall minimum length requires it). Every scene dramatizes its "
+            + f"(up to {int(STORY_WRITER_WORDS_PER_SCENE)} when a scene needs more room). Every scene dramatizes its "
             + "own planned event with new action, evidence and consequence; never reuse a sentence, action, "
             + "countdown reading or setup from any earlier scene, and keep any timer, count or damage state "
             + f"moving in one consistent direction. Give Scenes {total_scenes - 4:02d}-{total_scenes:02d} the same "
@@ -2958,7 +3132,7 @@ class QwenDirector(
             f"[QWEN] story_writer=nonthinking max_tokens={story_budget} temperature={temperature:.2f} "
             f"top_p={top_p:.2f} min_tokens={story_min_output_tokens} "
             f"request_mode=single_completion author_revision_limit={STORY_AUTHOR_REVISION_RETRIES} "
-            "revision=conditional_on_draft_rejection_or_starved_tail infrastructure_retries=0 repairs=0",
+            "revision=conditional_on_returned_draft_rejection infrastructure_retries=0 repairs=0",
             flush=True,
         )
         part_kwargs = dict(
