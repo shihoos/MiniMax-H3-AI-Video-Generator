@@ -628,7 +628,12 @@ class QwenDirectorPromptMixin:
 
             DISTINCT-BEAT / STATE-CHANGE AUDIT: before returning the JSON, compare all twelve EVENTs as a sequence.
             Each scene must contribute a new decision, discovery, reversal, loss, tactical move, or irreversible
-            consequence. Do not repeat a completed action as if it were still pending (for example, do not open a vault
+            consequence. The EVENT text of any two adjacent scenes must not be identical or paraphrase the same completed
+            action. Scenes 10, 11 and 12 must be three different events: Scene 10 enacts the costly climax choice;
+            Scene 11 shows a new immediate physical consequence caused by that choice; Scene 12 resolves the central
+            question with a distinct completed action/outcome. Do not repeat the explosion, presumed-death beat, or
+            aftermath as a substitute for a new Scene 11 or Scene 12 event. Do not repeat a completed action as if it
+            were still pending (for example, do not open a vault
             in one scene and later make opening that same already-open vault the climax again). Once an object, door,
             system, or relationship changes state, carry that state forward and make later actions operate on the new
             state. A repeated attempt is allowed only when the first attempt visibly failed or the object was explicitly
@@ -676,7 +681,9 @@ class QwenDirectorPromptMixin:
             NEXT_CAUSE=[the concrete result that makes the next scene necessary; use none for scene {n:02d}].
             PHYSICAL LOCATION RULE: ENTRY_LOCATION and EXIT_LOCATION are literal boundary locations. If they differ,
             EVENT must name the character(s) who physically move and describe the actual passage (enter, unlock/open,
-            cross, descend, leave, flee, return, or another explicit action). A door being detected, a storm moving,
+            cross, descend, leave, flee, return, take shelter inside, retreat into, or another explicit action) AND
+            name the destination. "Finds/locates the vault/lab/archive" is not the same as physically entering it.
+            A door being detected, a storm moving,
             or an object escaping does not move the human cast. Do not place a character at a destination that EVENT
             never shows them reaching. Between scenes, the previous EXIT_LOCATION is the next ENTRY_LOCATION unless
             NEXT_CAUSE and the next EVENT explicitly describe the route or time transition. Broad site labels such as
