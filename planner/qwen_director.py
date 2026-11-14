@@ -34,6 +34,7 @@ from planner.config import (
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
+    STORY_WORDS_PER_SCENE,
     STORY_WRITER_WORDS_PER_SCENE,
     STORY_TARGET_WORDS,
     STORY_ACCEPT_MIN_WORDS,
@@ -2602,7 +2603,7 @@ class QwenDirector(
                 found = [int(m) for m in re.findall(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\]", draft)]
                 if found and found != list(range(1, DIRECTOR_STORY_SCENES + 1)):
                     spent = len(re.findall(r"\b[\w'’-]+\b", draft)) // max(1, len(found))
-                    per_scene = int(STORY_WRITER_WORDS_PER_SCENE)
+                    per_scene = int(STORY_WORDS_PER_SCENE)
                     revision_user += (
                         f"\nPACING: the previous draft contained only {len(found)} complete scene markers and averaged "
                         f"about {spent} words per scene. Return all {DIRECTOR_STORY_SCENES} scenes at about "
@@ -2656,7 +2657,8 @@ class QwenDirector(
             + f"Repeated-scene check: {duplicates}.\n"
             + f"Return a complete new version of all {DIRECTOR_STORY_SCENES} scenes using the VALIDATED PLOT ARCHITECTURE "
             + "above as the authority for cast, events, scene order, locations, object states, climax, and resolution. "
-            + f"Target {STORY_TARGET_WORDS} words overall, roughly {STORY_WRITER_WORDS_PER_SCENE} per scene; never fall "
+            + f"Target {STORY_TARGET_WORDS} words overall, roughly {STORY_WORDS_PER_SCENE} per scene on average "
+            + f"(up to {STORY_WRITER_WORDS_PER_SCENE} when a scene needs more room); never fall "
             + f"below {STORY_ACCEPT_MIN_WORDS} words overall. Give every scene enough room for its full event and handoff; "
             + "prioritize the underdeveloped scenes and rewrite any repeated scene as its own distinct planned event. "
             + "Do not pad, duplicate paragraphs, repeat the same unresolved action, or compress Scenes 08-12. Preserve "
@@ -2780,8 +2782,9 @@ class QwenDirector(
         }
         print(
             f"[QWEN] story_length words={usable_words} "
-            f"target_guidance={DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE} "
-            f"stretch_guidance={DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE}",
+            f"target_guidance={STORY_TARGET_WORDS} "
+            f"average_scene_guidance={STORY_WORDS_PER_SCENE} "
+            f"scene_soft_max={STORY_WRITER_WORDS_PER_SCENE}",
             flush=True,
         )
         # One paragraph per configured scene is enforced before quality checks. The
