@@ -190,6 +190,7 @@ def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | Non
             f"Story Architect returned {len(scenes)} scenes; exactly {scene_count} are required."
         )
     entries: list[str] = []
+    gone: list[str] = []
     cast = [m for m in (data.get("cast") or []) if isinstance(m, dict)]
     part_owners: dict[str, int] = {}
     for member in cast:
@@ -201,6 +202,7 @@ def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | Non
         aliases = [_clean(a) for a in (member.get("aliases") or []) if _clean(a)]
         scene_numbers = derive_on_screen_scenes(name, aliases, scenes, shared)
         if not scene_numbers:
+            gone.append(name)
             if dropped is not None:
                 dropped.append(name)
             continue
@@ -220,6 +222,11 @@ def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | Non
             f"on-screen scenes: {', '.join(f'{v:02d}' for v in scene_numbers)}; fate: {fate})"
         )
     lines = ["CAST: " + " | ".join(entries)]
+    if gone:
+        # The Architect named these people, so the story may refer to them even though no scene shows them.
+        relationships = _clean(data.get("relationships"))
+        prefix = "" if not relationships or relationships.casefold() == "none" else relationships + ". "
+        data = dict(data, relationships=prefix + "Named but never on screen: " + ", ".join(gone))
 
     def field(label: str, key: str) -> str:
         return f"{label}: {_clean(data.get(key)) or 'none'}"
