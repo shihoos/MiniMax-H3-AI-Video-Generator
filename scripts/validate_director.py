@@ -2194,25 +2194,29 @@ def test_architect_revision_context_preserves_the_failed_plan_and_compacts_findi
         "scene 11 has no NEXT_CAUSE handoff",
     ]
     context = QwenDirector._story_blueprint_revision_context(blueprint, problems)
-    _assert("CAST TO PRESERVE: Elena Voss" in context, "revision context must preserve the prior canonical cast")
-    _assert(context.index("S02 PLANT:") < context.index("S09 PAYOFF:"),
+    original_cast = next(line for line in blueprint.splitlines() if line.startswith("CAST:"))
+    _assert("IDENTITY LOCK:" in context and original_cast in context,
+            "revision context must preserve the exact canonical CAST line")
+    _assert("FULL ORIGINAL BLUEPRINT" in context and "SCENE 02:" in context and "SCENE 10:" in context,
+            "revision context must contain the full rejected plan, not only selected excerpts")
+    _assert(context.index("PLANT Scene 02") < context.index("PAYOFF Scene 09"),
             "the plant scene must not be reversed with the payoff scene in revision context")
-    _assert(context.index("S04 PLANT:") < context.index("S10 PAYOFF:"),
+    _assert(context.index("PLANT Scene 04") < context.index("PAYOFF Scene 10"),
             "the second plant/payoff pair must preserve its scene order")
-    _assert("S02: EVENT=" in context and "Control Panel (activated)" in context,
-            "revision context must expose that scene 02 marked a PIN-gated panel as already activated")
-    _assert("S03: FROM=control room" in context and "TO=archive room" in context,
-            "revision context must retain the exact location transition and its event")
-    _assert("S10: EVENT=" in context and "NEXT_CAUSE=none" in context,
+    _assert("Control Panel (activated)" in context and "navigates through a hidden maintenance corridor" in context,
+            "revision context must preserve object states and the exact movement event")
+    _assert("NEXT_CAUSE=none" in context,
             "revision context must retain the missing handoff location")
-    _assert(len(context) < 3200, f"revision context must stay compact for the bounded Architect window: {len(context)} chars")
+    _assert(len(context) < 10000,
+            f"full-plan revision context must remain bounded: {len(context)} chars")
     warnings = [f"scene {n} event is not anchored to the previous scene's NEXT_CAUSE" for n in (10, 11, 12)]
     feedback = QwenDirector._revision_feedback(
         problems, "story plan", previous_plan_context=context, advisory_findings=warnings,
     )
-    for phrase in ("SETUP/PAYOFF", "LOCATION CONTINUITY", "OBJECT STATE", "NEXT_CAUSE", "PREVIOUS PLAN EXCERPTS"):
+    for phrase in ("SETUP/PAYOFF", "LOCATION CONTINUITY", "OBJECT STATE", "NEXT_CAUSE", "FULL ORIGINAL BLUEPRINT"):
         _assert(phrase in feedback, f"revised Architect feedback must preserve {phrase} repair guidance")
-    _assert(len(feedback) < 4500, f"revision feedback must not consume excessive output budget: {len(feedback)} chars")
+    _assert(len(feedback) < 13000,
+            f"revision feedback must stay bounded despite carrying the full original plan: {len(feedback)} chars")
 
 
 def test_architect_revision_retry_receives_the_actual_rejected_blueprint():
@@ -2224,19 +2228,27 @@ def test_architect_revision_retry_receives_the_actual_rejected_blueprint():
     ]
     director._last_story_blueprint_warnings = []
     candidate = _architect_repair_fixture()
-    prompts = []
-    def fake_attempt(mode, user_input, *, source_character_names=None, feedback=""):
-        prompts.append(feedback)
-        if len(prompts) == 1:
+    calls = []
+    def fake_attempt(mode, user_input, *, source_character_names=None, feedback="", revision_base=None,
+                     revision_problems=None, revision_advisories=None):
+        calls.append({
+            "feedback": feedback,
+            "revision_base": revision_base,
+            "revision_problems": revision_problems,
+            "revision_advisories": revision_advisories,
+        })
+        if len(calls) == 1:
             raise QwenDirector._BlueprintRejected("test rejection", blueprint=candidate)
         return "repaired blueprint"
     director._generate_story_blueprint_attempt = fake_attempt
     result = QwenDirector._generate_story_blueprint(director, "ai_story", "A polar engineer finds a vault.")
-    _assert(result == "repaired blueprint" and len(prompts) == 2,
+    _assert(result == "repaired blueprint" and len(calls) == 2,
             "the Architect should retain one conditional revision and no extra call")
-    _assert("PREVIOUS PLAN EXCERPTS" in prompts[1] and "Elena Voss" in prompts[1]
-            and "S10: EVENT=" in prompts[1] and "S11: EVENT=" in prompts[1],
-            "the revision request must contain the exact rejected candidate's affected scene excerpts")
+    _assert("FULL ORIGINAL BLUEPRINT" in calls[1]["feedback"] and "Elena Voss" in calls[1]["feedback"]
+            and "SCENE 10:" in calls[1]["feedback"] and "SCENE 11:" in calls[1]["feedback"],
+            "the revision request must include the complete exact rejected blueprint")
+    _assert(calls[1]["revision_base"] == candidate and calls[1]["revision_problems"] == director._last_story_quality_errors,
+            "the retry must also pass the rejected blueprint and its scoped failures to the deterministic merger")
 
 
 def test_camera_vocabulary_is_enforced_and_aliases_are_normalized():
@@ -2906,6 +2918,161 @@ def test_third_real_failure_semantic_handoffs_block_and_death_scene_is_kept():
             f"literal connector wording must not create false warnings: {soft!r}")
 
 
+def test_setup_payoff_requires_distinctive_evidence_in_the_declared_event():
+    from planner.story_contracts import validate_blueprint_state_contract
+    text = _story_blueprint_fixture()
+    # A character/location/topic overlap must not satisfy a planted object that is absent from EVENT.
+    text = text.replace(
+        "PAYOFF Scene 08: Ines uses that same shifted pressure seal notch to prove her correction changed the rescue route.",
+        "PAYOFF Scene 08: Ines uses the brass access keycard to override the station security protocol.",
+    )
+    issues = validate_blueprint_state_contract(text)
+    _assert(any("SETUP_PAYOFF_MAP payoff in scene 08" in item for item in issues),
+            f"an unrelated payoff must not pass through generic character/location overlap: {issues!r}")
+
+
+def test_object_inventory_is_checked_per_item_and_cannot_drop_a_keycard():
+    from planner.story_contracts import validate_blueprint_state_contract
+    text = _story_blueprint_fixture()
+    lines = text.splitlines()
+    key_line = next(i for i, line in enumerate(lines) if line.startswith("KEY_OBJECTS:"))
+    lines[key_line] = lines[key_line].replace("KEY_OBJECTS:", "KEY_OBJECTS: brass keycard,", 1)
+    s2 = next(i for i, line in enumerate(lines) if line.startswith("SCENE 02:"))
+    lines[s2] = lines[s2].replace(
+        "EVENT=", "EVENT=Ines finds and lifts the brass keycard from the desk. ", 1,
+    )
+    lines[s2] = lines[s2].replace(
+        "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control",
+        "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard held by Ines",
+    )
+    s3 = next(i for i, line in enumerate(lines) if line.startswith("SCENE 03:"))
+    lines[s3] = lines[s3].replace(
+        "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control",
+        "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard held by Ines",
+    )
+    lines[s3] = lines[s3].replace(
+        "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control",
+        "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard held by Ines",
+    )
+    s4 = next(i for i, line in enumerate(lines) if line.startswith("SCENE 04:"))
+    lines[s4] = lines[s4].replace(
+        "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard held by Ines",
+        "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control",
+    )
+    issues = validate_blueprint_state_contract("\n".join(lines))
+    _assert(any("object inventory drops key object '" in item and "brass keycard" in item for item in issues),
+            f"one surviving object must not be masked by other matching inventory tokens: {issues!r}")
+
+
+def test_architect_revision_merge_preserves_cast_and_unaffected_scenes():
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_scene_state
+    original_lines = _story_blueprint_fixture().splitlines()
+    # The original Scene 04 already contains an explicit return from the annex to the archive.
+    scene4_index = next(i for i, line in enumerate(original_lines) if line.startswith("SCENE 04:"))
+    original_lines[scene4_index] = original_lines[scene4_index].replace(
+        "EVENT=Ines examines transfer stage 4,",
+        "EVENT=Ines descends from the archive annex into the harbor archive, then examines transfer stage 4,",
+    )
+    original = "\n".join(original_lines)
+
+    revised_lines = original.splitlines()
+    revised_lines[0] = revised_lines[0].replace("Ines Vale", "Ines Nova").replace("kind: person", "kind: embodied agent")
+    scene3_index = next(i for i, line in enumerate(revised_lines) if line.startswith("SCENE 03:"))
+    revised_lines[scene3_index] = revised_lines[scene3_index].replace(
+        "EVENT=Ines examines transfer stage 3,",
+        "EVENT=Ines unlocks the service hatch, climbs the ladder, and enters the archive annex to examine transfer stage 3,",
+    ).replace("EXIT_LOCATION=harbor archive", "EXIT_LOCATION=archive annex")
+    revised_lines[scene4_index] = revised_lines[scene4_index].replace(
+        "ENTRY_LOCATION=harbor archive", "ENTRY_LOCATION=archive annex",
+    )
+    revised = "\n".join(revised_lines)
+    problems = ["scene 03 changes its physical location without an explicit transition ('harbor archive' to 'archive annex')"]
+    merged = QwenDirector._merge_story_blueprint_revision(original, revised, problems)
+    _assert(merged.splitlines()[0] == original.splitlines()[0],
+            "a revision must preserve the complete original canonical CAST line")
+    original_scenes = {line[:9]: line for line in original.splitlines() if line.startswith("SCENE ")}
+    merged_scenes = {line[:9]: line for line in merged.splitlines() if line.startswith("SCENE ")}
+    _assert(merged_scenes["SCENE 12:"] == original_scenes["SCENE 12:"],
+            "an unrelated scene must remain byte-for-byte unchanged")
+    scene3 = parse_scene_state(merged_scenes["SCENE 03:"])
+    scene4 = parse_scene_state(merged_scenes["SCENE 04:"])
+    _assert(scene3["EXIT_LOCATION"] == scene4["ENTRY_LOCATION"] == "archive annex",
+            "a repaired exit location must be merged with the next scene's inherited entry location")
+
+
+def test_architect_revision_merge_preserves_object_boundary_and_rejects_duplicate_patch():
+    from planner.qwen_director import QwenDirector
+    from planner.story_contracts import parse_scene_state
+    original_lines = _story_blueprint_fixture().splitlines()
+    key_line = next(i for i, line in enumerate(original_lines) if line.startswith("KEY_OBJECTS:"))
+    original_lines[key_line] = original_lines[key_line] + ", brass keycard"
+    ledger_line = next(i for i, line in enumerate(original_lines) if line.startswith("CONTINUITY_LEDGER:"))
+    original_lines[ledger_line] += " The brass keycard remains tracked as a critical prop."
+    for i, line in enumerate(original_lines):
+        if not line.startswith("SCENE "):
+            continue
+        scene_number = int(line[6:8])
+        entry_state = "intact" if scene_number <= 2 else "broken"
+        exit_state = "broken" if scene_number >= 2 else "intact"
+        line = line.replace(
+            "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control;",
+            f"ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard {entry_state};",
+        )
+        line = line.replace(
+            "EXIT_OBJECTS=original ledger and tide chart remain under Ines's control;",
+            f"EXIT_OBJECTS=original ledger and tide chart remain under Ines's control, brass keycard {exit_state};",
+        )
+        original_lines[i] = line
+    original = "\n".join(original_lines)
+    from planner.story_contracts import validate_blueprint_state_contract
+    object_findings = validate_blueprint_state_contract(original)
+    target = next((item for item in object_findings if "scene 02 key-object state change" in item), None)
+    _assert(target is not None, f"fixture must expose a Scene 02 keycard action gap: {object_findings!r}")
+
+    revised_lines = original.splitlines()
+    scene2_index = next(i for i, line in enumerate(revised_lines) if line.startswith("SCENE 02:"))
+    revised_lines[scene2_index] = revised_lines[scene2_index].replace(
+        "EVENT=Ines examines transfer stage 2,",
+        "EVENT=Ines breaks the brass keycard against the iron console while examining transfer stage 2,",
+    )
+    revised = "\n".join(revised_lines)
+    merged = QwenDirector._merge_story_blueprint_revision(original, revised, [target])
+    scene2 = parse_scene_state(next(line for line in merged.splitlines() if line.startswith("SCENE 02:")))
+    scene3 = parse_scene_state(next(line for line in merged.splitlines() if line.startswith("SCENE 03:")))
+    _assert("breaks the brass keycard" in scene2["EVENT"],
+            "a key-object revision finding must be recognized and its corrected physical action merged")
+    _assert(scene2["EXIT_OBJECTS"] == scene3["ENTRY_OBJECTS"],
+            "an accepted object-state repair must keep the prior exit and next entry inventories synchronized")
+
+    duplicate_lines = _story_blueprint_fixture().splitlines()
+    scene11 = next(line for line in duplicate_lines if line.startswith("SCENE 11:"))
+    scene12_index = next(i for i, line in enumerate(duplicate_lines) if line.startswith("SCENE 12:"))
+    scene11_event = scene11.split("EVENT=", 1)[1].split("; EXIT_LOCATION=", 1)[0]
+    duplicate_lines[scene12_index] = re.sub(
+        r"EVENT=.*?; EXIT_LOCATION=", "EVENT=" + scene11_event + "; EXIT_LOCATION=",
+        duplicate_lines[scene12_index], count=1,
+    )
+    duplicate_candidate = "\n".join(duplicate_lines)
+    preserved = QwenDirector._merge_story_blueprint_revision(
+        _story_blueprint_fixture(), duplicate_candidate,
+        ["scene 12 changes its physical location without an explicit transition ('harbor archive' to 'coast')"],
+    )
+    source12 = parse_scene_state(next(line for line in _story_blueprint_fixture().splitlines() if line.startswith("SCENE 12:")))
+    merged12 = parse_scene_state(next(line for line in preserved.splitlines() if line.startswith("SCENE 12:")))
+    _assert(merged12["EVENT"] == source12["EVENT"],
+            "the merge must not import a candidate event that duplicates the preceding scene")
+
+
+def test_scene_local_location_validator_accepts_explicit_shelter_entry():
+    from planner.story_contracts import _scene_local_transition_is_explained
+    cast = [{"name": "Elena Voss", "aliases": ["Elena"]}]
+    _assert(_scene_local_transition_is_explained(
+        "Arctic station exterior during a storm", "Station interior",
+        "Elena Voss takes shelter inside the station after crossing the broken threshold.", cast,
+    ), "an explicit physical retreat inside must satisfy the location transition")
+
+
 # ── Runner ────────────────────────────────────────────────────────────────
 
 def main():
@@ -2993,6 +3160,11 @@ def main():
         test_architect_repair_recognizes_logged_location_and_object_verbs,
         test_architect_revision_context_preserves_the_failed_plan_and_compacts_findings,
         test_architect_revision_retry_receives_the_actual_rejected_blueprint,
+        test_setup_payoff_requires_distinctive_evidence_in_the_declared_event,
+        test_object_inventory_is_checked_per_item_and_cannot_drop_a_keycard,
+        test_architect_revision_merge_preserves_cast_and_unaffected_scenes,
+        test_architect_revision_merge_preserves_object_boundary_and_rejects_duplicate_patch,
+        test_scene_local_location_validator_accepts_explicit_shelter_entry,
         test_camera_vocabulary_is_enforced_and_aliases_are_normalized,
     ]
     import contextlib
