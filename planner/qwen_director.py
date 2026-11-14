@@ -2647,6 +2647,28 @@ class QwenDirector(
             )
 
     @staticmethod
+    def _splice_locked_prefix(locked_text: str, model_text: str) -> str:
+        """Combine locked scenes with the model's continuation, guaranteeing the locked scenes are untouched.
+
+        The model must return exactly the continuation markers. If it ignores the instruction and returns
+        every scene, its versions of the locked scenes are discarded; only the continuation scenes are kept.
+        """
+        marker = re.compile(r"(?im)^[ \t]*\[\[SCENE_(\d{2})\]\][ \t]*(?:\n|[ \t]+|$)")
+        total = int(DIRECTOR_STORY_SCENES)
+        locked_count = len(marker.findall(locked_text))
+        wanted = list(range(locked_count + 1, total + 1))
+        found = [int(m.group(1)) for m in marker.finditer(model_text)]
+        if found == list(range(1, total + 1)):
+            cut = list(marker.finditer(model_text))[locked_count].start()
+            model_text = model_text[cut:]
+        elif found != wanted:
+            raise ValueError(
+                f"Continuation must contain exactly scene markers {wanted[0]:02d}-{wanted[-1]:02d} "
+                f"(found {found}). The locked scenes were not changed and nothing was repaired locally."
+            )
+        return locked_text.strip() + "\n\n" + model_text.lstrip()
+
+    @staticmethod
     def _tail_starvation(story: str) -> tuple[bool, int, list[int]]:
         """Return (starved, tail_words, scene_counts) for a story that already passed every hard gate.
 
@@ -2703,11 +2725,20 @@ class QwenDirector(
                 setattr(self, name, value)
             print(f"[QWEN] story_author tail_rebalance=rejected; keeping first draft ({str(exc)[:120]})", flush=True)
             return result
-        _, new_tail_words, _ = self._tail_starvation(str(revised[0] or ""))
-        if new_tail_words <= tail_words:
+        revised_story = str(revised[0] or "")
+        still_starved, new_tail_words, _ = self._tail_starvation(revised_story)
+        split = int(DIRECTOR_STORY_SCENES) // 2
+        norm = lambda text: [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\n\s*\n+", text) if part.strip()]
+        locked_intact = norm(story)[:split] == norm(revised_story)[:split]
+        meaningful = new_tail_words >= tail_words + max(60, int(0.10 * tail_words))
+        if not (locked_intact and not still_starved and meaningful):
             for name, value in snapshot.items():
                 setattr(self, name, value)
-            print("[QWEN] story_author tail_rebalance=no_gain; keeping first draft", flush=True)
+            why = (
+                "locked_scenes_changed" if not locked_intact
+                else "tail_still_starved" if still_starved else "gain_too_small"
+            )
+            print(f"[QWEN] story_author tail_rebalance=rejected reason={why}; keeping first draft", flush=True)
             return result
         print(f"[QWEN] story_author tail_rebalance=accepted tail_words={tail_words}->{new_tail_words}", flush=True)
         return revised
@@ -2747,10 +2778,14 @@ class QwenDirector(
                     return None
         locked_words = sum(counts[:split])
         remaining = total_scenes - split
-        per_scene = max(int(STORY_WRITER_WORDS_PER_SCENE), int(STORY_WORDS_PER_SCENE))
-        # Make sure a delivered tail of this size clears the floor with margin for model under-delivery.
-        needed = int(STORY_ACCEPT_MIN_WORDS) + 150 - locked_words
+        # Ask for the configured allocation, kept close to the locked half's own pace (so the tail is not
+        # starved) and large enough to clear the floor with margin for under-delivery. The writer soft
+        # maximum caps the request; it is not a mandatory per-scene target.
+        head_avg = locked_words / split
+        per_scene = max(int(STORY_WORDS_PER_SCENE), int(0.85 * head_avg + 0.999))
+        needed = int(STORY_ACCEPT_MIN_WORDS) + 250 - locked_words
         per_scene = max(per_scene, -(-needed // remaining))
+        per_scene = min(per_scene, max(int(STORY_WRITER_WORDS_PER_SCENE), -(-needed // remaining)))
         locked_blocks = "\n\n".join(
             f"[[SCENE_{index:02d}]] {text}" for index, text in enumerate(paragraphs[:split], 1)
         )
@@ -2765,7 +2800,8 @@ class QwenDirector(
             + f"\n\nWrite ONLY [[SCENE_{split + 1:02d}]] through {last_marker} ({remaining} blocks). Continue "
             + f"directly from the final situation of Scene {split:02d} and follow the VALIDATED PLOT ARCHITECTURE "
             + f"for scenes {split + 1:02d}-{total_scenes:02d} as the authority for events, order, locations, object "
-            + f"states, climax and resolution. Write about {per_scene} words per scene. Every scene dramatizes its "
+            + f"states, climax and resolution. Write about {per_scene} words per scene "
+            + f"(up to {int(STORY_WRITER_WORDS_PER_SCENE)} when a scene needs more room). Every scene dramatizes its "
             + "own planned event with new action, evidence and consequence; never reuse a sentence, action, "
             + "countdown reading or setup from any earlier scene, and keep any timer, count or damage state "
             + f"moving in one consistent direction. Give Scenes {total_scenes - 4:02d}-{total_scenes:02d} the same "
@@ -2915,9 +2951,14 @@ class QwenDirector(
             self._last_story_cleanup_events.append(cleanup_reason)
             print(f"[QWEN] story_cleanup={cleanup_reason}", flush=True)
         raw = self._reflow_story_paragraphs(raw)
-        if locked_text and not re.search(r"(?im)^[ \t]*\[\[SCENE_01\]\]", str(raw or "")):
-            # Continuation revision: re-attach the approved first half verbatim (no model call).
-            raw = locked_text + "\n\n" + str(raw or "").lstrip()
+        if locked_text:
+            # Continuation revision: accept ONLY the continuation scenes from the model and re-attach the
+            # approved first half verbatim, locally (no model call).
+            try:
+                raw = self._splice_locked_prefix(locked_text, str(raw or ""))
+            except ValueError as exc:
+                self._last_story_draft = str(raw or "")
+                raise RuntimeError(failure_prefix + str(exc)) from exc
         self._last_story_draft = str(raw or "")
         try:
             raw = self._coerce_story_to_scene_paragraphs(raw)
@@ -3107,19 +3148,27 @@ class QwenDirector(
                 else:
                     sentence_scene[key] = scene_index
 
-        # A countdown/timer that moves the wrong way is a continuity error (advisory only).
-        readings: list[tuple[int, int]] = []
+        # An explicitly named countdown/timer that rises is a continuity error (advisory only). Readings are
+        # compared per timer (identified by the word before "countdown"/"timer"), never across different
+        # timers or ordinary clock times, and a scene that explains a reset/extension is skipped.
+        reset_words = re.compile(r"\b(?:reset|resets|restart|restarted|rewound|rewind|extended|extends|added|bonus|reboot|rebooted|new\s+(?:countdown|timer))\b", re.I)
+        timer_pattern = re.compile(
+            r"(?:\b([A-Za-z][\w'’-]*)\s+)?\b(?:countdown|timer)\b[^.!?\n]{0,40}?\b(\d{1,2}):(\d{2})\b", re.I,
+        )
+        generic_labels = {"the", "a", "an", "its", "his", "her", "their", "new", "second", "another", "final", "digital", "red", "glowing"}
+        last_by_timer: dict[str, tuple[int, int]] = {}
         for scene_index, paragraph in enumerate(paragraphs, 1):
-            for match in re.finditer(
-                r"(?:countdown|timer|clock|ticked|ticking|remaining)\D{0,40}?\b(\d{1,2}):(\d{2})\b", paragraph, re.I,
-            ):
-                readings.append((scene_index, int(match.group(1)) * 60 + int(match.group(2))))
-        for (prev_scene, prev_value), (scene_index, value) in zip(readings, readings[1:]):
-            if value > prev_value:
-                advisories.append(
-                    f"countdown reading rises between scenes {prev_scene:02d} and {scene_index:02d}; keep timers monotonic"
-                )
-                break
+            explained = bool(reset_words.search(paragraph))
+            for match in timer_pattern.finditer(paragraph):
+                label = (match.group(1) or "").casefold()
+                label = "" if label in generic_labels else label
+                value = int(match.group(2)) * 60 + int(match.group(3))
+                previous = last_by_timer.get(label)
+                if previous and value > previous[1] and not explained:
+                    advisories.append(
+                        f"countdown reading rises between scenes {previous[0]:02d} and {scene_index:02d}; keep a timer monotonic or explain the reset"
+                    )
+                last_by_timer[label] = (scene_index, value)
 
         # A 3+ consecutive opener run is templated prose; it is reported, but a wording pattern never discards the draft.
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(story or "")) if s.strip()]
