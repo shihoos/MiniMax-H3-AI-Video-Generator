@@ -842,7 +842,13 @@ class QwenDirectorPromptMixin:
             "object escaping does not move the human cast, and no character is placed at a destination the event never "
             "shows them reaching. exit_present are the people physically present at scene end. on_screen_present is the "
             "full-scene visibility record and includes anyone who enters or leaves mid-scene; it never includes a remote "
-            "voice, recording, written mention, or person merely discussed. KEY_OBJECTS must name the exact scene of each "
+            "voice, recording, written mention, or person merely discussed. OBJECT INVENTORY IS CUMULATIVE: in exit_objects "
+            "record every portable plot-critical object's owner, location and condition in EVERY scene, even while it is "
+            "off-screen or unused, and carry each one into the next scene unchanged; an object may be acquired, lost, "
+            "handed over, hidden, recovered, damaged or destroyed only through a sentence in that scene's event that shows "
+            "the action, and may never vanish from or reappear in exit_objects without one. A requirement, intention, "
+            "warning or future possibility is not a completed object-state change. exit_knows is cumulative too: keep every "
+            "earlier fact and add only what this event discloses or discovers. KEY_OBJECTS must name the exact scene of each "
             "first state change; no earlier event may already depict that change. ",
             text,
         )
