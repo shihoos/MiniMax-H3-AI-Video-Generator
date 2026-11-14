@@ -995,8 +995,10 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         writer_prompt = q._story_text_user(
             mode, "premise", story_blueprint=_story_blueprint_fixture()
         ).lower()
-        _assert(str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in writer_prompt
-                and str(DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE) in low
+        _assert(str(STORY_TARGET_WORDS) in writer_prompt
+                and str(STORY_TARGET_WORDS) in low
+                and f"{STORY_WRITER_WORDS_PER_SCENE} words" in writer_prompt
+                and f"{STORY_WRITER_WORDS_PER_SCENE} words" in low
                 and "validated plot architecture" in writer_prompt
                 and "source-preservation lock" in writer_prompt if mode == EXPAND_USER_STORY_MODE else "validated plot architecture" in writer_prompt,
                 f"{mode}: prose request must bind the plan and length target")
@@ -1050,22 +1052,25 @@ def test_story_prompt_is_open_cast_and_fully_filled():
 
 def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS, STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_MIN_WORDS, STORY_TARGET_WORDS, STORY_WORDS_PER_SCENE, STORY_WRITER_WORDS_PER_SCENE
     director = QwenDirector.__new__(QwenDirector)
     system = director._story_text_system(AI_STORY_MODE)
     blueprint = director._story_blueprint_system(AI_STORY_MODE).lower()
     writer = director._story_text_user(AI_STORY_MODE, "premise", story_blueprint=_story_blueprint_fixture()).lower()
-    stretch = DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE
+    scene_cap = STORY_WRITER_WORDS_PER_SCENE
     for rendered in (system, blueprint, writer):
         _assert(not re.search(r"__[A-Z0-9_]+__", rendered), "rendered prompt has unresolved placeholders")
     _assert(str(STORY_MIN_WORDS) in system and str(STORY_MIN_WORDS) in writer and STORY_MIN_WORDS >= 1400,
             "1,400-word minimum must be explicit to both system and user prompts")
-    # Both prompts must give the model the same single length instruction: the writer budget, with the
-    # acceptance floor stated only as a rejection line.
-    _assert(str(stretch) in system and str(stretch) in writer and stretch == STORY_TARGET_WORDS == 1560,
-            "system and user prompts must agree on the configured 1,560-word drafting target")
+    # The 1,560-word overall target and 190-word per-scene soft maximum are separate controls.
+    _assert(str(STORY_TARGET_WORDS) in system and str(STORY_TARGET_WORDS) in writer
+            and STORY_TARGET_WORDS == DIRECTOR_STORY_SCENES * STORY_WORDS_PER_SCENE == 1560,
+            "system and user prompts must agree on the configured 1,560-word overall target")
+    _assert(f"per-scene soft maximum is {scene_cap} words" in system.lower()
+            and f"soft maximum of {scene_cap} words" in writer.lower() and scene_cap == 190,
+            "190 must be available as the per-scene soft maximum, not multiplied into a 2,280-word quota")
     _assert("2280" not in system and "2280" not in writer,
-            "the stale 2,280-word stretch quota must not override the 1,560-word target")
+            "the per-scene maximum must not become an overall 2,280-word drafting quota")
     _assert("only the rejection floor" in " ".join(system.split()) and "only the rejection floor" in " ".join(writer.split()),
             "both prompts must call the minimum a rejection floor, not a goal")
     system_flat = " ".join(system.lower().split())
@@ -1087,8 +1092,8 @@ def test_story_prompt_values_and_dialogue_exchange_contract_are_consistent():
         r"per-scene quota \(sums to \d+\):\s*(.*?)\. every scene must contain", system_flat, re.S
     )
     allocations = [int(value) for value in re.findall(r"scene \d{2}: (\d+) words", allocation_match.group(1))] if allocation_match else []
-    _assert(len(allocations) == 12 and sum(allocations) == DIRECTOR_STORY_SCENES * STORY_WRITER_WORDS_PER_SCENE,
-            "Author must receive one explicit twelve-scene allocation that sums to the writer drafting budget")
+    _assert(len(allocations) == 12 and sum(allocations) == STORY_TARGET_WORDS,
+            "Author must receive one explicit twelve-scene allocation that sums to the overall drafting target")
     _assert("a scene must be complete, not a fragment" in system_flat
             and "scenes 08-12 receive the same causal and dramatic care" in system_flat,
             "Author must be told the per-scene completeness and final-third depth guidance")
@@ -1250,7 +1255,7 @@ def test_scene_purpose_survives_scene_sanitizer_and_scene_floor_is_enforced():
 
 def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpose():
     from planner.qwen_director import QwenDirector
-    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS, STORY_WRITER_WORDS_PER_SCENE
+    from planner.config import AI_STORY_MODE, DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS, STORY_TARGET_WORDS, STORY_WRITER_WORDS_PER_SCENE
     from planner.qwen_director_prompts import SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
 
     director = QwenDirector.__new__(QwenDirector)
@@ -1272,11 +1277,13 @@ def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpo
     _assert("Architect-authored `dramatic_purpose`" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
             and "copy it verbatim" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT,
             "Shot Director must consume, not reinvent, Architect dramatic purpose")
-    allocation_match = re.search(r"Per-scene quota \(sums to \d+\):\s*(.*?)\. Every scene is", " ".join(author.split()), re.S)
+    allocation_match = re.search(r"Per-scene quota \(sums to \d+\):\s*(.*?)\. Every scene must contain", " ".join(author.split()), re.S)
     _assert(allocation_match is not None, "Author needs one explicit per-scene allocation schedule")
     allocated = [int(value) for value in re.findall(r"SCENE \d{2}: (\d+) words", allocation_match.group(1))]
-    _assert(len(allocated) == 12 and sum(allocated) == 12 * STORY_WRITER_WORDS_PER_SCENE >= 1560,
-            f"Author allocation must cover twelve scenes and total the writer budget: {allocated!r}")
+    _assert(len(allocated) == 12 and sum(allocated) == STORY_TARGET_WORDS == 1560,
+            f"Author allocation must cover twelve scenes and total the overall target: {allocated!r}")
+    _assert(f"per-scene soft maximum is {STORY_WRITER_WORDS_PER_SCENE} words" in author.lower(),
+            "Author system prompt must expose the 190-word per-scene soft maximum")
     _assert("minimum_output_tokens" not in author and "min_tokens" not in author,
             "Prompt improvement must not change the runtime min_tokens setting")
     _assert(DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS == 0,
@@ -1586,8 +1593,8 @@ def test_a_cut_off_draft_is_rewritten_with_pacing_not_expanded_as_if_complete():
     _assert(QwenDirector._story_expansion_user(cut) == "", "a draft missing scene markers must not be expanded")
     system = " ".join(QwenDirector.__new__(QwenDirector)._story_text_system("ai_story").split()).lower()
     _assert("soft scene cap" in system and "natural sentence lengths" in system
-            and "120-140 words per scene" in system,
-            "Author must be given a realistic per-scene range and cap so it cannot front-load the story")
+            and "120-140 words per scene" in system and "190 words" in system,
+            "Author must be given a realistic average and 190-word per-scene soft cap so it cannot front-load the story")
 
 
 def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
@@ -2827,6 +2834,7 @@ def main():
         test_dialogue_reconciliation_preserves_remote_audio_without_visible_binding,
         test_story_prompt_is_open_cast_and_fully_filled,
         test_story_prompt_values_and_dialogue_exchange_contract_are_consistent,
+        test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpose,
         test_generated_story_cast_contract_is_plot_driven_without_a_numeric_quota,
         test_story_blueprint_normalization_requires_ordered_scene_beats,
         test_story_blueprint_accepts_wrapped_cast_formats,
