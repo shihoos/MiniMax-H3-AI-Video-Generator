@@ -644,12 +644,25 @@ class QwenDirectorPromptMixin:
             the previous scene's EVENT and EXIT_OBJECTS establish it. If an object is destroyed, consumed, or dispersed,
             record that terminal state rather than silently forgetting its identity. KEY_OBJECTS must name the exact
             scene of each first state change; no earlier EVENT may already depict that change.
-            Mid-scene arrivals and departures are derived mechanically from these three presence lists; do NOT output
-            separate MID_SCENE_ENTRIES or MID_SCENE_EXITS fields. For every person in ON_SCREEN_PRESENT but not
-            ENTRY_PRESENT, EVENT must name that person and describe their actual physical arrival, entry, joining, or meeting.
-            For every person in ON_SCREEN_PRESENT but not EXIT_PRESENT, EVENT must name that person and describe their actual
-            physical departure, withdrawal, capture, or death. If both conditions apply, describe both transitions.
-            Mentioning or discussing a person is not the same as showing them physically enter or leave.
+            MID-SCENE PRESENCE CONTRACT (apply separately to every named cast member in every scene):
+            ENTRY_PRESENT means physically present at the first instant of the scene; EXIT_PRESENT means physically
+            present at the final instant; ON_SCREEN_PRESENT means visibly present at any point in between. Keep these
+            three lists mutually consistent with the actual event, not with a character's general scene assignment.
+            - Present for the whole scene: include the person in ENTRY_PRESENT, ON_SCREEN_PRESENT, and EXIT_PRESENT.
+            - Enters during the scene and remains at the end: omit from ENTRY_PRESENT; include in ON_SCREEN_PRESENT
+              and EXIT_PRESENT; EVENT must name the person and show the physical entrance/joining.
+            - Present at the start and leaves during the scene: include in ENTRY_PRESENT and ON_SCREEN_PRESENT; omit
+              from EXIT_PRESENT; EVENT must name the person and show the physical departure/withdrawal.
+            - Both enters and leaves during the scene: omit from ENTRY_PRESENT and EXIT_PRESENT but include in
+              ON_SCREEN_PRESENT; EVENT must name the person and explicitly show BOTH the physical arrival and departure.
+            Do not create a mid-scene entrance or exit merely because a person is listed in CAST for that scene. If the
+            person is already present at the scene boundary, put them in the corresponding boundary list instead.
+            For every actual mid-scene transition, EVENT must use that person's exact canonical CAST name (not only a
+            pronoun, job title, group label, or ambiguous alias) and state the physical action. A name mention alone is
+            insufficient. Mentioning or discussing a person is not the same as showing them physically enter or leave.
+            Before output, audit each CAST name against ENTRY_PRESENT, ON_SCREEN_PRESENT, EXIT_PRESENT, and EVENT. If a
+            person is absent from both boundary lists but present on screen, EVENT must explicitly show that person
+            entering and later leaving during that same scene.
             CAST fate is authoritative: use 'dies in scene NN' only for the person who actually dies, not the person who
             causes, witnesses, reports, or discusses another character's death. A character who dies must be on screen in
             that death scene and must not appear in EXIT_PRESENT or any later scene. A survivor may kill another person
@@ -742,7 +755,7 @@ class QwenDirectorPromptMixin:
             text,
         )
         text = swap(
-            r"PHYSICAL LOCATION RULE:.*?(?=Mid-scene arrivals and departures)",
+            r"PHYSICAL LOCATION RULE:.*?(?=MID-SCENE PRESENCE CONTRACT)",
             "STATE CARRIES FORWARD AUTOMATICALLY: exit_location, exit_present, exit_knows and exit_objects are complete "
             "snapshots after the scene's event. Keep earlier facts and object states unless this event changes them, and add "
             "a new fact or object change only when the event shows how it was discovered, disclosed, or physically done. "
