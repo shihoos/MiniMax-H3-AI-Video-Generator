@@ -2570,13 +2570,17 @@ class QwenDirector(
     def _run_author_with_one_revision(self, mode, user_input, story_system, story_user, **kwargs):
         """One primary Author pass; after a returned draft fails validation, allow one informed revision.
 
-        A first draft that passes costs exactly one model call. Infrastructure failures (HTTP errors, a hit
+        A first draft that passes with a healthy ending costs exactly one model call (a passing draft with a
+        starved ending may spend the one revision on a safe, fall-back-protected tail rebalance). Infrastructure failures (HTTP errors, a hit
         token ceiling, no draft at all) are never retried, because a revision would not change them.
         """
         from planner.qwen_director_runtime import StoryTruncated
 
         try:
-            return self._generate_story_once_impl(mode, user_input, story_system, story_user, **kwargs)
+            result = self._generate_story_once_impl(mode, user_input, story_system, story_user, **kwargs)
+            return self._maybe_rebalance_starved_tail(
+                result, mode, user_input, story_system, story_user, **kwargs,
+            )
         except RuntimeError as first:
             draft = str(getattr(self, "_last_story_draft", "") or "").strip()
             if (
@@ -2643,8 +2647,74 @@ class QwenDirector(
             )
 
     @staticmethod
+    def _tail_starvation(story: str) -> tuple[bool, int, list[int]]:
+        """Return (starved, tail_words, scene_counts) for a story that already passed every hard gate.
+
+        The Author model tends to front-load: scenes shrink as the story proceeds, so the climax and
+        resolution get the least room. A tail is starved when its average is under 75% of the first
+        half's average, or any of the last four scenes is under 100 words.
+        """
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(story or "")) if part.strip()]
+        total = int(DIRECTOR_STORY_SCENES)
+        if len(paragraphs) != total or total < 4:
+            return False, 0, []
+        counts = [len(re.findall(r"\b[\w'’-]+\b", part)) for part in paragraphs]
+        split = total // 2
+        head_avg = sum(counts[:split]) / split
+        tail_words = sum(counts[split:])
+        tail_avg = tail_words / (total - split)
+        starved = tail_avg < 0.75 * head_avg or min(counts[-4:]) < 100
+        return starved, tail_words, counts
+
+    def _maybe_rebalance_starved_tail(
+        self, result: tuple[str, bool], mode: str, user_input: str, story_system: str, story_user: str, **kwargs,
+    ) -> tuple[str, bool]:
+        """Optionally spend the one allowed revision on a passing draft whose ending is starved.
+
+        Safe by construction: the first draft already passed every hard gate and is kept unless the
+        continuation both succeeds and gives the tail more room. Any failure restores the first draft.
+        A draft with a healthy ending still costs exactly one model call.
+        """
+        if int(STORY_AUTHOR_REVISION_RETRIES) < 1 or not str(story_user or "").strip():
+            return result
+        story = str(result[0] or "")
+        starved, tail_words, counts = self._tail_starvation(story)
+        if not starved:
+            return result
+        plan = self._story_continuation_plan(story, [], base_user=story_user, force=True)
+        if not plan:
+            return result
+        revision_user, locked_prefix = plan
+        snapshot = {
+            name: deepcopy(value) for name, value in vars(self).items() if name.startswith("_last_story_")
+        }
+        print(
+            "[QWEN] story_author tail_rebalance=1/1 "
+            f"reason=starved_ending scene_words={'/'.join(str(c) for c in counts)}; first draft kept as fallback",
+            flush=True,
+        )
+        try:
+            revised = self._generate_story_once_impl(
+                mode, user_input, story_system, revision_user,
+                **{**kwargs, "locked_prefix": locked_prefix},
+            )
+        except RuntimeError as exc:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+            print(f"[QWEN] story_author tail_rebalance=rejected; keeping first draft ({str(exc)[:120]})", flush=True)
+            return result
+        _, new_tail_words, _ = self._tail_starvation(str(revised[0] or ""))
+        if new_tail_words <= tail_words:
+            for name, value in snapshot.items():
+                setattr(self, name, value)
+            print("[QWEN] story_author tail_rebalance=no_gain; keeping first draft", flush=True)
+            return result
+        print(f"[QWEN] story_author tail_rebalance=accepted tail_words={tail_words}->{new_tail_words}", flush=True)
+        return revised
+
+    @staticmethod
     def _story_continuation_plan(
-        draft: str, problems: list[str], *, base_user: str,
+        draft: str, problems: list[str], *, base_user: str, force: bool = False,
     ) -> tuple[str, str] | None:
         """Plan a revision that keeps a healthy first half and rewrites only the collapsed second half.
 
@@ -2657,10 +2727,10 @@ class QwenDirector(
         if not base_user.strip():
             return None
         # Only length/duplication failures are safe to carry a locked first half through.
-        if not problems or not all(
+        if not force and (not problems or not all(
             re.search(r"below the (?:configured )?minimum|minimum accepted length|near-duplicate", str(p), re.I)
             for p in problems
-        ):
+        )):
             return None
         paragraphs = [part.strip() for part in re.split(r"\n\s*\n+", str(draft or "")) if part.strip()]
         total_scenes = int(DIRECTOR_STORY_SCENES)
@@ -3036,6 +3106,20 @@ class QwenDirector(
                     advisories.append(f"exact sentence repeated in scenes {previous:02d} and {scene_index:02d}")
                 else:
                     sentence_scene[key] = scene_index
+
+        # A countdown/timer that moves the wrong way is a continuity error (advisory only).
+        readings: list[tuple[int, int]] = []
+        for scene_index, paragraph in enumerate(paragraphs, 1):
+            for match in re.finditer(
+                r"(?:countdown|timer|clock|ticked|ticking|remaining)\D{0,40}?\b(\d{1,2}):(\d{2})\b", paragraph, re.I,
+            ):
+                readings.append((scene_index, int(match.group(1)) * 60 + int(match.group(2))))
+        for (prev_scene, prev_value), (scene_index, value) in zip(readings, readings[1:]):
+            if value > prev_value:
+                advisories.append(
+                    f"countdown reading rises between scenes {prev_scene:02d} and {scene_index:02d}; keep timers monotonic"
+                )
+                break
 
         # A 3+ consecutive opener run is templated prose; it is reported, but a wording pattern never discards the draft.
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", str(story or "")) if s.strip()]
