@@ -2725,19 +2725,36 @@ class QwenDirector(
             "SCENES TO REWRITE (return exactly these scene numbers, in order: "
             + ", ".join(str(n) for n in affected) + "):\n\n" + "\n\n".join(blocks)
         )
-        prompt_tokens = 0
         try:
-            prompt_tokens = int(self._count_tokens(system_prompt + "\n\n" + user_prompt))
-        except Exception:
-            prompt_tokens = int(len(system_prompt + user_prompt) / 2.6)
-        room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+            prompt_tokens, _effective = self._available_output_tokens(
+                system_prompt,
+                user_prompt,
+                minimum_completion=400,
+                enable_thinking=True,
+            )
+            room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+        except RuntimeError as exc:
+            reason = f"{call_name} scene-patch exact token preflight failed: {exc}"
+            self._last_story_quality_errors = [reason]
+            self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_budget", reason=reason)
+            raise RuntimeError(reason) from exc
+        # Each patched scene returns event + location/presence/knowledge/object snapshots + handoff.
+        # Reserve proportionally so a 10-12-scene repair is not sent with a 1,200-token reply budget.
+        required_completion = min(
+            int(DIRECTOR_STORY_PLAN_MAX_TOKENS),
+            max(1200, 320 * len(affected)),
+        )
         print(
             f"[QWEN] story_architecture scene_patch scenes={affected} context={int(DIRECTOR_N_CTX)} "
-            f"prompt_tokens={prompt_tokens} completion_room={room}",
+            f"prompt_tokens={prompt_tokens} completion_room={room} required_completion={required_completion}",
             flush=True,
         )
-        if room < 1200:
-            reason = f"{call_name} scene-patch prompt is {prompt_tokens} tokens and leaves only {room} for the reply."
+        if room < required_completion:
+            reason = (
+                f"{call_name} scene-patch prompt is {prompt_tokens} exact chat-template tokens and leaves only "
+                f"{room} completion tokens; {len(affected)} affected scenes require a conservative "
+                f"{required_completion}-token patch budget. Refusing a predictably truncated repair."
+            )
             self._last_story_quality_errors = [reason]
             self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_budget", reason=reason)
             raise RuntimeError(reason)
@@ -2860,7 +2877,7 @@ class QwenDirector(
         revision_advisories: list[str] | None = None,
     ) -> str:
         """Create one compact 12-scene plan with a hard Qwen reasoning-token budget."""
-        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, StoryTruncated
+        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED, NO_THINK_SUFFIX, StoryTruncated
 
         call_name = (
             "ai_story_architecture_pass"
@@ -2886,27 +2903,31 @@ class QwenDirector(
             # The revision must still fit a complete 12-scene JSON reply in the context window.
             # Log the exact budget and shed optional text before the call rather than being truncated mid-JSON.
             needed = 3600
-            def _tokens() -> int:
-                try:
-                    return int(self._count_tokens(system_prompt + "\n\n" + user_prompt))
-                except Exception:  # tokenizer unreachable: conservative character estimate
-                    return int(len(system_prompt + user_prompt) / 2.6)
-            prompt_tokens = _tokens()
-            room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+            def _budget() -> tuple[int, int]:
+                # This text-mode compatibility path disables thinking on revision, so count the exact
+                # no-think user suffix and the same chat template that _post_chat will send.
+                counted_user = user_prompt.rstrip() + NO_THINK_SUFFIX
+                prompt_count, _effective = self._available_output_tokens(
+                    system_prompt,
+                    counted_user,
+                    minimum_completion=400,
+                    enable_thinking=False,
+                )
+                return prompt_count, int(DIRECTOR_N_CTX) - prompt_count - 128
+            prompt_tokens, room = _budget()
             if room < needed:
                 user_prompt = re.sub(r"\nADVISORY handoffs to review:[^\n]*", "", user_prompt)
-                prompt_tokens = _tokens()
-                room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+                prompt_tokens, room = _budget()
             print(
                 f"[QWEN] story_architecture revision_budget context={int(DIRECTOR_N_CTX)} "
-                f"prompt_tokens={prompt_tokens} completion_room={room} needed~{needed}",
+                f"prompt_tokens={prompt_tokens} completion_room={room} needed_minimum={needed} thinking=False",
                 flush=True,
             )
-            if room < 1500:
+            if room < needed:
                 reason = (
-                    f"{call_name} revision prompt is {prompt_tokens} tokens and leaves only {room} for the "
-                    f"completion in a {int(DIRECTOR_N_CTX)}-token context; a 12-scene revision cannot fit. "
-                    "Raise the vLLM context (H3_DIRECTOR_CONTEXT / director.context) or shorten the plan."
+                    f"{call_name} revision prompt is {prompt_tokens} exact chat-template tokens and leaves only {room} "
+                    f"for the completion in a {int(DIRECTOR_N_CTX)}-token context; the complete 12-scene revision "
+                    f"requires approximately {needed}. Refusing a revision that would be predictably truncated."
                 )
                 self._last_story_quality_errors = [reason]
                 self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_budget", reason=reason)
