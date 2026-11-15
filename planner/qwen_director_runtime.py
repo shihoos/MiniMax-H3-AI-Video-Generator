@@ -1852,12 +1852,34 @@ class QwenDirectorRuntimeMixin:
             {"role": "user", "content": str(user_prompt or "")},
         ]
         try:
-            prompt_ids = tokenizer.apply_chat_template(
+            encoded = tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
                 add_generation_prompt=True,
                 enable_thinking=bool(enable_thinking),
             )
+            # Some tokenizer versions return a plain list[int]; others return a BatchEncoding
+            # mapping with input_ids and attention_mask. len(BatchEncoding) counts mapping keys
+            # (often 2), not tokens. Always count the actual input_ids payload.
+            if hasattr(encoded, "input_ids"):
+                prompt_ids = encoded.input_ids
+            elif isinstance(encoded, dict):
+                prompt_ids = encoded.get("input_ids")
+            else:
+                prompt_ids = encoded
+            if prompt_ids is None:
+                raise TypeError("chat-template tokenizer result has no input_ids")
+            if hasattr(prompt_ids, "tolist"):
+                prompt_ids = prompt_ids.tolist()
+            if isinstance(prompt_ids, tuple):
+                prompt_ids = list(prompt_ids)
+            if not isinstance(prompt_ids, (list, tuple)):
+                raise TypeError(f"unsupported input_ids type: {type(prompt_ids).__name__}")
+            # A single prompt may be wrapped as batch shape [1, sequence].
+            while len(prompt_ids) == 1 and isinstance(prompt_ids[0], (list, tuple)):
+                prompt_ids = prompt_ids[0]
+            if prompt_ids and isinstance(prompt_ids[0], (list, tuple)):
+                raise ValueError("unexpected multi-row batch in single-prompt chat template")
             prompt_tokens = int(len(prompt_ids))
         except Exception as exc:
             raise RuntimeError(
@@ -2090,6 +2112,7 @@ class QwenDirectorRuntimeMixin:
             minimum_completion=minimum_completion,
             enable_thinking=not disable_thinking,
         )
+        preflight_prompt_tokens = prompt_tokens
 
         if max_completion is not None:
             max_tokens = min(
@@ -2206,6 +2229,13 @@ class QwenDirectorRuntimeMixin:
             prompt_tokens = int(
                 usage.get("prompt_tokens", 0) or 0
             )
+            if prompt_tokens and prompt_tokens != preflight_prompt_tokens:
+                print(
+                    f"[QWEN] token_budget_warning call={call_name} "
+                    f"preflight_prompt_tokens={preflight_prompt_tokens} server_prompt_tokens={prompt_tokens} "
+                    "(chat-template/tokenizer mismatch; inspect tokenizer and server model revision)",
+                    flush=True,
+                )
             completion_tokens = int(
                 usage.get("completion_tokens", 0) or 0
             )
@@ -2330,6 +2360,7 @@ class QwenDirectorRuntimeMixin:
             minimum_completion=minimum_completion,
             enable_thinking=not disable_thinking,
         )
+        preflight_prompt_tokens = prompt_tokens
 
         if max_completion is not None:
             max_tokens = min(
@@ -2407,6 +2438,13 @@ class QwenDirectorRuntimeMixin:
             )
 
             prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            if prompt_tokens and prompt_tokens != preflight_prompt_tokens:
+                print(
+                    f"[QWEN] token_budget_warning call={call_name} "
+                    f"preflight_prompt_tokens={preflight_prompt_tokens} server_prompt_tokens={prompt_tokens} "
+                    "(chat-template/tokenizer mismatch; inspect tokenizer and server model revision)",
+                    flush=True,
+                )
             completion_tokens = int(usage.get("completion_tokens", 0) or 0)
             completion_details = usage.get("completion_tokens_details", {}) or {}
             reasoning_tokens = int(
