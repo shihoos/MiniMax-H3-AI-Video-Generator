@@ -107,7 +107,6 @@ def blueprint_json_schema(scene_count: int) -> dict:
     for key in PLOT_TEXT_FIELDS:
         properties[key] = text(plot_text_limits.get(key, 420))
     properties["setup_payoff_map"] = {"type": "array", "minItems": 1, "items": payoff_item}
-    properties["continuity_ledger"] = text(600)
     properties["opening"] = opening
     properties["scenes"] = {"type": "array", "minItems": scene_count, "maxItems": scene_count, "items": scene_item}
     return {
@@ -198,6 +197,77 @@ def resolve_scenes(data: dict) -> list[dict]:
     return resolved
 
 
+def derive_continuity_ledger(data: dict, scenes: list[dict] | None = None) -> str:
+    """Derive the redundant global continuity summary from canonical scene state.
+
+    The model must not spend output tokens inventing a second continuity ledger. The opening,
+    CAST, KEY_OBJECTS and per-scene snapshots are authoritative; this compact summary is rendered
+    deterministically after JSON decoding and always stays within the prompt's 35-70 word contract.
+    """
+    opening = data.get("opening") if isinstance(data.get("opening"), dict) else {}
+    resolved = scenes if scenes is not None else resolve_scenes(data)
+    first = resolved[0] if resolved else {}
+    last = resolved[-1] if resolved else {}
+
+    def clean(value: object, fallback: str) -> str:
+        result = _clean(value)
+        return result if result and result.casefold() not in {"none", "n/a", "-"} else fallback
+
+    def clip_words(value: object, maximum: int, fallback: str) -> str:
+        text = clean(value, fallback)
+        matches = list(re.finditer(r"\b[\w'’-]+\b", text))
+        if len(matches) <= maximum:
+            return text
+        return text[:matches[maximum - 1].end()].rstrip(" ,;:.") + "…"
+
+    opening_present = _as_list(opening.get("present"))
+    if not opening_present and first:
+        opening_present = _as_list(first.get("on_screen_present"))
+    lead = clip_words(opening_present[0] if opening_present else "The protagonist", 2, "The protagonist")
+    start_location = clip_words(
+        opening.get("location") or first.get("entry_location"), 4, "the opening location",
+    )
+    end_location = clip_words(last.get("exit_location"), 4, "the final location")
+    def first_clause(value: object, fallback: str, maximum: int) -> str:
+        text = clean(value, fallback)
+        # Keep the first complete proposition rather than truncating in the middle of a clause.
+        text = re.split(r"[;.]|,\s+(?:but|yet|while|whereas)\b", text, maxsplit=1, flags=re.I)[0].strip()
+        return clip_words(text, maximum, fallback)
+
+    opening_knows = first_clause(opening.get("knows"), "no additional facts at the opening", 7)
+    final_knows = first_clause(last.get("exit_knows"), "no additional facts at the ending", 7)
+    key_objects = clip_words(data.get("key_objects"), 18, "none declared")
+
+    # Record the protagonist's declared fate without trying to infer whether a death happened.
+    # Detailed CAST and per-scene state remain authoritative for every individual character.
+    lead_fate = "survives"
+    for member in data.get("cast") or []:
+        if not isinstance(member, dict):
+            continue
+        if str(member.get("name", "")).casefold() == str(opening_present[0] if opening_present else "").casefold():
+            lead_fate = "dies" if str(member.get("fate", "survives")).casefold() == "dies" else "survives"
+            break
+
+    summary = (
+        f"{lead} begins at {start_location} and ends at {end_location}. "
+        f"Opening knowledge: {opening_knows}. Ending knowledge: {final_knows}. "
+        f"Key objects: {key_objects}. {lead} {lead_fate}. "
+        "Scene snapshots govern object ownership, location, condition, injuries and presence; CAST governs character fate, "
+        "and numbered scenes preserve chronology."
+    )
+    summary = re.sub(r"\s+", " ", summary).strip()
+    # Defensive trim for unusually long names/locations while retaining all authoritative detail elsewhere.
+    words = list(re.finditer(r"\b[\w'’-]+\b", summary))
+    if len(words) > 70:
+        summary = summary[:words[69].end()].rstrip(" ,;:.") + "."
+    if len(re.findall(r"\b[\w'’-]+\b", summary)) < 35:
+        summary = (
+            f"{summary} Each scene records the inherited starting state and completed ending state, including who is present, "
+            "what is known, and where every portable plot-critical object remains."
+        )
+    return summary
+
+
 def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | None = None) -> str:
     """Serialise the validated JSON plan into the text blueprint the rest of the pipeline consumes.
 
@@ -266,7 +336,8 @@ def render_blueprint_text(data: dict, scene_count: int, dropped: list[str] | Non
             f"PAYOFF Scene {int(item.get('payoff_scene', 0)):02d}: {_clean(item.get('payoff'))}"
         )
     lines.append("SETUP_PAYOFF_MAP: " + " | ".join(pairs))
-    lines.append(field("CONTINUITY_LEDGER", "continuity_ledger"))
+    ledger = derive_continuity_ledger(data, scenes)
+    lines.append("CONTINUITY_LEDGER: " + ledger)
     for number, scene in enumerate(scenes, 1):
         parts = []
         for key in SCENE_ORDER:
