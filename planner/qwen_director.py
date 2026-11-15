@@ -2564,6 +2564,237 @@ class QwenDirector(
         feedback += f"\nReturn the complete revised {subject} in the required JSON schema only."
         return feedback
 
+    _PATCH_SCENE_FIELDS = ("event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause")
+
+    @staticmethod
+    def _patch_affected_scenes(problems: list[str], data: dict) -> list[int]:
+        total = int(DIRECTOR_STORY_SCENES)
+        affected: set[int] = set()
+        for problem in problems:
+            for value in re.findall(r"\bscenes?\s+0*(\d+)", str(problem), re.I):
+                affected.add(int(value))
+            for value in re.findall(r"\bS0*(\d+)\b", str(problem)):
+                affected.add(int(value))
+            if re.search(r"NEXT_CAUSE|anchored", str(problem), re.I):
+                for value in re.findall(r"\bscenes?\s+0*(\d+)", str(problem), re.I):
+                    affected.add(max(1, int(value) - 1))
+        for pair in data.get("setup_payoff_map") or []:
+            if any("SETUP_PAYOFF_MAP" in str(p) for p in problems) and isinstance(pair, dict):
+                for key in ("plant_scene", "payoff_scene"):
+                    try:
+                        affected.add(int(pair.get(key)))
+                    except (TypeError, ValueError):
+                        pass
+        return sorted(n for n in affected if 1 <= n <= total)
+
+    @staticmethod
+    def _patch_response_format(scene_numbers: list[int]) -> dict:
+        text = {"type": "string", "minLength": 1}
+        names = {"type": "array", "items": text}
+        scene = {
+            "type": "object",
+            "properties": {
+                "scene": {"type": "integer", "enum": list(scene_numbers)},
+                "event": text, "exit_location": text, "exit_present": names,
+                "exit_knows": text, "exit_objects": text, "next_cause": text,
+            },
+            "required": ["scene", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause"],
+            "additionalProperties": False,
+        }
+        pair = {
+            "type": "object",
+            "properties": {
+                "plant_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
+                "plant": text,
+                "payoff_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
+                "payoff": text,
+            },
+            "required": ["plant_scene", "plant", "payoff_scene", "payoff"],
+            "additionalProperties": False,
+        }
+        schema = {
+            "type": "object",
+            "properties": {
+                "scenes": {"type": "array", "minItems": len(scene_numbers), "maxItems": len(scene_numbers), "items": scene},
+                "setup_payoff_map": {"type": "array", "items": pair},
+            },
+            "required": ["scenes", "setup_payoff_map"],
+            "additionalProperties": False,
+        }
+        return {"type": "json_schema", "json_schema": {"name": "story_scene_patch", "strict": True, "schema": schema}}
+
+    def _patch_story_blueprint(
+        self,
+        mode: str,
+        user_input: str,
+        base_data: dict,
+        problems: list[str],
+        *,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        """The single Architect revision: rewrite only the scenes that failed, then splice them into the plan.
+
+        Asking the model to re-emit the whole 12-scene plan made it return an identical copy (the findings were
+        ignored), so nothing was ever repaired. Here it receives only the failing scenes, must return new text for
+        exactly those scenes, and the application splices them in. Cast, plot fields and untouched scenes are
+        never re-emitted, so they cannot drift, and entry state is re-derived from each previous exit.
+        """
+        import copy
+        from planner.qwen_director_runtime import DIRECTOR_VLLM_SEED
+        from planner.story_blueprint_schema import resolve_scenes
+
+        call_name = "ai_story_architecture_pass" if mode == AI_STORY_MODE else "expand_story_architecture_pass"
+        total = int(DIRECTOR_STORY_SCENES)
+        data = copy.deepcopy(base_data)
+        scenes = resolve_scenes(data)
+        if len(scenes) != total:
+            raise RuntimeError("Cannot patch Architect plan: it does not contain every scene.")
+        affected = self._patch_affected_scenes(problems, data)
+        if not affected:
+            raise RuntimeError("Cannot patch Architect plan: the findings name no scene.")
+
+        cleaned = []
+        for item in problems:
+            for part in re.split(r"\s+\|\s+", re.sub(r"\s+", " ", str(item or "")).strip()):
+                if part and part not in cleaned:
+                    cleaned.append(part[:260])
+        dying: dict[int, list[str]] = {}
+        for member in data.get("cast") or []:
+            if isinstance(member, dict) and str(member.get("fate", "")).casefold() == "dies":
+                try:
+                    dying.setdefault(int(member.get("death_scene") or 0), []).append(str(member.get("name", "")))
+                except (TypeError, ValueError):
+                    pass
+        cast_names = ", ".join(str(m.get("name", "")) for m in (data.get("cast") or []) if isinstance(m, dict))
+
+        def as_text(value: object) -> str:
+            if isinstance(value, (list, tuple)):
+                return ", ".join(str(v) for v in value)
+            return str(value or "")
+
+        blocks = []
+        for number in affected:
+            scene = scenes[number - 1]
+            lines = [
+                f"SCENE {number:02d} (currently starts in: {as_text(scene.get('entry_location'))}; "
+                f"present at start: {as_text(scene.get('entry_present'))})",
+                f"  purpose: {as_text(scene.get('purpose'))}",
+                f"  event: {as_text(scene.get('event'))}",
+                f"  exit_location: {as_text(scene.get('exit_location'))}",
+                f"  exit_present: {as_text(scene.get('exit_present'))}",
+                f"  exit_knows: {as_text(scene.get('exit_knows'))}",
+                f"  exit_objects: {as_text(scene.get('exit_objects'))}",
+                f"  next_cause: {as_text(scene.get('next_cause'))}",
+            ]
+            if dying.get(number):
+                lines.append(
+                    f"  DEATH SCENE: {', '.join(dying[number])} die(s) here. The event must show the death and "
+                    "exit_present must NOT list them."
+                )
+            blocks.append("\n".join(lines))
+        map_text = " | ".join(
+            f"PLANT S{int(x.get('plant_scene', 0)):02d}: {x.get('plant')}; PAYOFF S{int(x.get('payoff_scene', 0)):02d}: {x.get('payoff')}"
+            for x in (data.get("setup_payoff_map") or []) if isinstance(x, dict)
+        )
+        system_prompt = (
+            f"You are the Story Architect repairing a rejected {total}-scene short-film plan. You are given ONLY the scenes "
+            "that failed validation. Return the JSON object for exactly those scenes; the application keeps every other "
+            "scene, the cast and all plot fields unchanged.\n"
+            "You MUST rewrite the `event` of every listed scene so it fixes the findings that name it. Returning an event "
+            "unchanged is a failure. Keep the same characters, premise and story direction; keep each event 45-90 words.\n"
+            "RULES: (1) If exit_location differs from where the scene starts, the event must name the cast member who "
+            "physically moves, describe the actual passage (enter, cross, climb down, leave, flee, return) and name the "
+            "destination place in that same movement sentence; opening a door or finding a place is not entering it. "
+            "Otherwise set exit_location equal to where the scene starts. (2) exit_present lists only people physically "
+            "present at the end of the scene; a character who dies in the scene is shown dying and is removed. "
+            "(3) exit_objects lists every plot-critical object with owner, location and condition; an object changes state "
+            "only through a completed action in the event that names that exact object. (4) next_cause is a concrete "
+            "result that forces the next scene (only scene 12 may be 'none'); the following scene's event must act on it. (5) For a setup/payoff finding, "
+            "the plant scene's event must visibly show the planted object/fact, and the payoff scene's event must repeat that "
+            "same noun and use it to change the plan; if it cannot, return a corrected `setup_payoff_map` (otherwise return "
+            "an empty array).\n"
+            "Do not use semicolons or pipe characters inside values. JSON only."
+        )
+        user_prompt = (
+            "PREMISE: " + self._compact_story_context(user_input, 600) + "\n"
+            f"CAST (canonical names only): {cast_names}\n"
+            f"STORY ENGINE: {as_text(data.get('story_engine'))}\n"
+            f"CLIMAX CHOICE: {as_text(data.get('climax_choice'))}\n"
+            f"SETUP_PAYOFF_MAP: {map_text}\n\n"
+            "VALIDATION FINDINGS TO FIX:\n- " + "\n- ".join(cleaned) + "\n\n"
+            "SCENES TO REWRITE (return exactly these scene numbers, in order: "
+            + ", ".join(str(n) for n in affected) + "):\n\n" + "\n\n".join(blocks)
+        )
+        prompt_tokens = 0
+        try:
+            prompt_tokens = int(self._count_tokens(system_prompt + "\n\n" + user_prompt))
+        except Exception:
+            prompt_tokens = int(len(system_prompt + user_prompt) / 2.6)
+        room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+        print(
+            f"[QWEN] story_architecture scene_patch scenes={affected} context={int(DIRECTOR_N_CTX)} "
+            f"prompt_tokens={prompt_tokens} completion_room={room}",
+            flush=True,
+        )
+        if room < 1200:
+            reason = f"{call_name} scene-patch prompt is {prompt_tokens} tokens and leaves only {room} for the reply."
+            self._last_story_quality_errors = [reason]
+            self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_budget", reason=reason)
+            raise RuntimeError(reason)
+
+        raw = self._chat_text(
+            system_prompt,
+            user_prompt,
+            minimum_completion=400,
+            temperature=float(DIRECTOR_STORY_THINKING_TEMPERATURE),
+            top_p=float(DIRECTOR_STORY_THINKING_TOP_P),
+            call_name=call_name,
+            max_completion=min(int(DIRECTOR_STORY_PLAN_MAX_TOKENS), int(DIRECTOR_STORY_MAX_TOKENS)),
+            disable_thinking=False,
+            seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
+            creative=False,
+            thinking_token_budget=min(int(DIRECTOR_STORY_PLAN_THINKING_BUDGET), 800),
+            response_format=self._patch_response_format(affected),
+        )
+        try:
+            patch = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError as exc:
+            raise RuntimeError(f"Scene patch returned malformed JSON ({exc}).") from exc
+        patched = {int(item.get("scene", 0)): item for item in (patch or {}).get("scenes", []) if isinstance(item, dict)}
+        if set(patched) != set(affected):
+            raise RuntimeError(f"Scene patch covered scenes {sorted(patched)}; expected {affected}.")
+        unchanged = [n for n in affected if as_text(patched[n].get("event")).strip() == as_text(scenes[n - 1].get("event")).strip()]
+        if unchanged:
+            print(f"[QWEN] story_architecture scene_patch warning=event_unchanged scenes={unchanged}", flush=True)
+        for number in affected:
+            target = data["scenes"][number - 1]
+            for key in self._PATCH_SCENE_FIELDS:
+                value = patched[number].get(key)
+                if key == "exit_present":
+                    target[key] = [str(v).strip() for v in (value or []) if str(v).strip()]
+                elif str(value or "").strip():
+                    target[key] = str(value).strip()
+        new_map = [x for x in (patch or {}).get("setup_payoff_map", []) if isinstance(x, dict)]
+        if new_map and any("SETUP_PAYOFF_MAP" in str(p) for p in problems):
+            data["setup_payoff_map"] = new_map
+        # Earlier boundaries are re-derived: drop any explicit entry_* so every scene starts where the previous ended.
+        for scene in data["scenes"]:
+            for key in ("entry_location", "entry_present", "entry_knows", "entry_objects"):
+                scene.pop(key, None)
+        blueprint = self._normalize_story_blueprint(
+            render_blueprint_text(data, total, []), total,
+        )
+        try:
+            self._validate_story_blueprint_contract(
+                mode, blueprint, user_input, source_character_names=source_character_names,
+            )
+        except RuntimeError as rejection:
+            if not getattr(self, "_last_story_quality_errors", None):
+                self._last_story_quality_errors = [str(rejection)]
+            self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=str(rejection))
+            raise self._BlueprintRejected(str(rejection), blueprint=blueprint) from rejection
+        return blueprint
+
     def _generate_story_blueprint(
         self,
         mode: str,
@@ -2593,6 +2824,17 @@ class QwenDirector(
                 revision_base = rejection.blueprint
                 revision_problems = problems
                 revision_advisories = advisory_findings
+                base_data = getattr(self, "_last_blueprint_data", None)
+                if STORY_ARCHITECT_STRUCTURED_OUTPUT and isinstance(base_data, dict):
+                    print(
+                        f"[QWEN] story_architecture revision={attempt + 1}/{int(STORY_ARCHITECT_REVISION_RETRIES)} "
+                        f"reason_count={len(problems)} mode=scene_patch",
+                        flush=True,
+                    )
+                    return self._patch_story_blueprint(
+                        mode, user_input, base_data, problems,
+                        source_character_names=source_character_names,
+                    )
                 feedback = self._revision_feedback(
                     problems,
                     "story plan",
@@ -2731,6 +2973,8 @@ class QwenDirector(
                 self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=reason)
                 raise RuntimeError(reason) from plan_error
         blueprint = ""
+        if not is_revision:
+            self._last_blueprint_data = parse_blueprint_json(raw) if structured else None
         try:
             blueprint = self._normalize_story_blueprint(self._blueprint_json_to_text(raw), DIRECTOR_STORY_SCENES)
             if revision_base:
