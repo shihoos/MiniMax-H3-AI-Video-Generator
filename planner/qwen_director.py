@@ -2564,7 +2564,7 @@ class QwenDirector(
         feedback += f"\nReturn the complete revised {subject} in the required JSON schema only."
         return feedback
 
-    _PATCH_SCENE_FIELDS = ("event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause")
+    _PATCH_SCENE_FIELDS = ("purpose", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause")
 
     @staticmethod
     def _patch_affected_scenes(problems: list[str], data: dict) -> list[int]:
@@ -2588,37 +2588,104 @@ class QwenDirector(
         return sorted(n for n in affected if 1 <= n <= total)
 
     @staticmethod
-    def _patch_response_format(scene_numbers: list[int]) -> dict:
+    def _patch_affected_plot_fields(problems: list[str]) -> list[str]:
+        """Select only global fields explicitly reported as missing or underdeveloped.
+
+        A contract finding can mention CLIMAX_CHOICE while describing a Scene 10 EVENT
+        defect. That does not mean the global choice field itself should be rewritten.
+        CONTINUITY_LEDGER is application-derived and is never sent back to Qwen.
+        """
+        mapping = (
+            ("LOGLINE", "logline"), ("PROTAGONIST_GOAL", "protagonist_goal"),
+            ("OPPOSITION", "opposition"), ("PRESSURE", "pressure"),
+            ("STORY_ENGINE", "story_engine"), ("REVERSAL", "reversal"),
+            ("CLIMAX_CHOICE", "climax_choice"), ("RESOLUTION", "resolution"),
+            ("RELATIONSHIPS", "relationships"), ("NAMED_ENTITIES", "named_entities"),
+            ("KEY_OBJECTS", "key_objects"),
+        )
+        requested: set[str] = set()
+        for problem in (str(value or "") for value in problems):
+            upper = problem.upper()
+            # Normalizer findings name one field directly.
+            match = re.search(
+                r"\bSTORY ARCHITECT FIELD\s+(LOGLINE|PROTAGONIST_GOAL|OPPOSITION|PRESSURE|"
+                r"STORY_ENGINE|REVERSAL|CLIMAX_CHOICE|RESOLUTION|RELATIONSHIPS|NAMED_ENTITIES|KEY_OBJECTS)\b"
+                r".{0,100}\b(?:UNDERDEVELOPED|MISSING|INVALID|TOO SHORT)\b",
+                upper,
+            )
+            if match:
+                requested.add(match.group(1))
+            # Contract validators report genuinely absent global fields as a named list.
+            for prefix in ("MISSING PLOT ARCHITECTURE FIELDS:", "MISSING STRUCTURED PLOT/CONTINUITY FIELDS:"):
+                position = upper.find(prefix)
+                if position >= 0:
+                    tail = upper[position + len(prefix):].split(".", 1)[0]
+                    for label, _key in mapping:
+                        if re.search(rf"\b{re.escape(label)}\b", tail):
+                            requested.add(label)
+            # Older normalizer wording: FIELD is underdeveloped (...).
+            for label, _key in mapping:
+                if re.search(rf"\b{re.escape(label)}\s+IS\s+(?:UNDERDEVELOPED|MISSING|INVALID|TOO SHORT)\b", upper):
+                    requested.add(label)
+        return [key for label, key in mapping if label in requested]
+
+    @staticmethod
+    def _patch_response_format(
+        scene_numbers: list[int],
+        plot_fields: list[str] | None = None,
+        *,
+        include_setup_payoff_map: bool = False,
+    ) -> dict:
+        """Build a strict schema for scene-only, field-only, or combined bounded repairs."""
         text = {"type": "string", "minLength": 1}
         names = {"type": "array", "items": text}
+        scene_properties = {
+            "scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
+            "purpose": text, "event": text, "exit_location": text, "exit_present": names,
+            "exit_knows": text, "exit_objects": text, "next_cause": text,
+        }
+        scene_required = [
+            "scene", "purpose", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause",
+        ]
+        if scene_numbers:
+            scene_properties["scene"] = {"type": "integer", "enum": list(scene_numbers)}
         scene = {
-            "type": "object",
-            "properties": {
-                "scene": {"type": "integer", "enum": list(scene_numbers)},
-                "event": text, "exit_location": text, "exit_present": names,
-                "exit_knows": text, "exit_objects": text, "next_cause": text,
-            },
-            "required": ["scene", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause"],
+            "type": "object", "properties": scene_properties, "required": scene_required,
             "additionalProperties": False,
         }
-        pair = {
-            "type": "object",
-            "properties": {
-                "plant_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
-                "plant": text,
-                "payoff_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
-                "payoff": text,
+        properties = {
+            # With no scene failures this must be exactly [], and its item schema remains valid JSON Schema
+            # (never emit an invalid enum: []).
+            "scenes": {
+                "type": "array", "minItems": len(scene_numbers), "maxItems": len(scene_numbers), "items": scene,
             },
-            "required": ["plant_scene", "plant", "payoff_scene", "payoff"],
-            "additionalProperties": False,
         }
+        required = ["scenes"]
+        selected_plot_fields = list(plot_fields or [])
+        if selected_plot_fields:
+            properties["plot_fields"] = {
+                "type": "object",
+                "properties": {key: text for key in selected_plot_fields},
+                "required": selected_plot_fields,
+                "additionalProperties": False,
+            }
+            required.append("plot_fields")
+        if include_setup_payoff_map:
+            pair = {
+                "type": "object",
+                "properties": {
+                    "plant_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
+                    "plant": text,
+                    "payoff_scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
+                    "payoff": text,
+                },
+                "required": ["plant_scene", "plant", "payoff_scene", "payoff"],
+                "additionalProperties": False,
+            }
+            properties["setup_payoff_map"] = {"type": "array", "minItems": 1, "items": pair}
+            required.append("setup_payoff_map")
         schema = {
-            "type": "object",
-            "properties": {
-                "scenes": {"type": "array", "minItems": len(scene_numbers), "maxItems": len(scene_numbers), "items": scene},
-                "setup_payoff_map": {"type": "array", "items": pair},
-            },
-            "required": ["scenes", "setup_payoff_map"],
+            "type": "object", "properties": properties, "required": required,
             "additionalProperties": False,
         }
         return {"type": "json_schema", "json_schema": {"name": "story_scene_patch", "strict": True, "schema": schema}}
@@ -2650,8 +2717,13 @@ class QwenDirector(
         if len(scenes) != total:
             raise RuntimeError("Cannot patch Architect plan: it does not contain every scene.")
         affected = self._patch_affected_scenes(problems, data)
-        if not affected:
-            raise RuntimeError("Cannot patch Architect plan: the findings name no scene.")
+        plot_fields = self._patch_affected_plot_fields(problems)
+        map_needs_patch = any("SETUP_PAYOFF_MAP" in str(problem) for problem in problems)
+        if not affected and not plot_fields and not map_needs_patch:
+            raise RuntimeError(
+                "Cannot patch Architect plan: findings identify neither a scene nor a supported global field: "
+                + "; ".join(str(problem) for problem in problems[:4])
+            )
 
         cleaned = []
         for item in problems:
@@ -2697,11 +2769,13 @@ class QwenDirector(
             for x in (data.get("setup_payoff_map") or []) if isinstance(x, dict)
         )
         system_prompt = (
-            f"You are the Story Architect repairing a rejected {total}-scene short-film plan. You are given ONLY the scenes "
-            "that failed validation. Return the JSON object for exactly those scenes; the application keeps every other "
-            "scene, the cast and all plot fields unchanged.\n"
-            "You MUST rewrite the `event` of every listed scene so it fixes the findings that name it. Returning an event "
-            "unchanged is a failure. Keep the same characters, premise and story direction; keep each event 45-90 words.\n"
+            f"You are the Story Architect repairing a rejected {total}-scene short-film plan. Return only the requested "
+            "scene patches and/or global plot-field patches. The application preserves the original CAST and every "
+            "unrequested scene/field unchanged.\n"
+            "For each requested scene, correct every named finding. Rewrite PURPOSE when it is named as vague; PURPOSE "
+            "must state one specific scene-caused change in exactly 7-12 words, not a generic label. Rewrite EVENT when continuity, object action, "
+            "causal handoff, death or setup/payoff findings require it. Returning a failing field unchanged is a failure. "
+            "Keep the same characters, premise and story direction; keep each event 25-45 words.\n"
             "RULES: (1) If exit_location differs from where the scene starts, the event must name the cast member who "
             "physically moves, describe the actual passage (enter, cross, climb down, leave, flee, return) and name the "
             "destination place in that same movement sentence; opening a door or finding a place is not entering it. "
@@ -2711,10 +2785,13 @@ class QwenDirector(
             "only through a completed action in the event that names that exact object. (4) next_cause is a concrete "
             "result that forces the next scene (only scene 12 may be 'none'); the following scene's event must act on it. (5) For a setup/payoff finding, "
             "the plant scene's event must visibly show the planted object/fact, and the payoff scene's event must repeat that "
-            "same noun and use it to change the plan; if it cannot, return a corrected `setup_payoff_map` (otherwise return "
-            "an empty array).\n"
-            "Do not use semicolons or pipe characters inside values. JSON only."
+            "same noun and use it to change the plan. When a map correction is requested, return the complete corrected "
+            "non-empty `setup_payoff_map`; otherwise omit that key entirely.\n"
+            "If no scenes are requested, return scenes as []. If no setup/payoff correction is requested, omit that key. "
+            "Return setup_payoff_map only when the map itself is named in the findings. Do not use semicolons or pipe "
+            "characters inside values. JSON only."
         )
+        field_lines = [f"{key}: {as_text(data.get(key))}" for key in plot_fields]
         user_prompt = (
             "PREMISE: " + self._compact_story_context(user_input, 600) + "\n"
             f"CAST (canonical names only): {cast_names}\n"
@@ -2722,8 +2799,11 @@ class QwenDirector(
             f"CLIMAX CHOICE: {as_text(data.get('climax_choice'))}\n"
             f"SETUP_PAYOFF_MAP: {map_text}\n\n"
             "VALIDATION FINDINGS TO FIX:\n- " + "\n- ".join(cleaned) + "\n\n"
+            "GLOBAL PLOT FIELDS TO REWRITE (return only these exact keys):\n"
+            + ("\n".join(field_lines) if field_lines else "none") + "\n\n"
             "SCENES TO REWRITE (return exactly these scene numbers, in order: "
-            + ", ".join(str(n) for n in affected) + "):\n\n" + "\n\n".join(blocks)
+            + (", ".join(str(n) for n in affected) if affected else "none") + "):\n\n"
+            + "\n\n".join(blocks)
         )
         try:
             prompt_tokens, _effective = self._available_output_tokens(
@@ -2740,13 +2820,24 @@ class QwenDirector(
             raise RuntimeError(reason) from exc
         # Each patched scene returns event + location/presence/knowledge/object snapshots + handoff.
         # Reserve proportionally so a 10-12-scene repair is not sent with a 1,200-token reply budget.
+        # This completion budget includes reasoning tokens. Reserve the configured bounded
+        # patch thinking allowance first, then enough visible JSON for each requested scene,
+        # selected global field, and optional replacement map.
+        patch_thinking_reserve = min(int(DIRECTOR_STORY_PLAN_THINKING_BUDGET), 800)
         required_completion = min(
             int(DIRECTOR_STORY_PLAN_MAX_TOKENS),
-            max(1200, 320 * len(affected)),
+            max(
+                1200,
+                patch_thinking_reserve
+                + 250 * len(affected)
+                + 250 * len(plot_fields)
+                + (450 if map_needs_patch else 0),
+            ),
         )
         print(
             f"[QWEN] story_architecture scene_patch scenes={affected} context={int(DIRECTOR_N_CTX)} "
-            f"prompt_tokens={prompt_tokens} completion_room={room} required_completion={required_completion}",
+            f"prompt_tokens={prompt_tokens} completion_room={room} required_completion={required_completion} "
+            f"thinking_reserve={patch_thinking_reserve}",
             flush=True,
         )
         if room < required_completion:
@@ -2771,7 +2862,7 @@ class QwenDirector(
             seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
             creative=False,
             thinking_token_budget=min(int(DIRECTOR_STORY_PLAN_THINKING_BUDGET), 800),
-            response_format=self._patch_response_format(affected),
+            response_format=self._patch_response_format(affected, plot_fields, include_setup_payoff_map=map_needs_patch),
         )
         try:
             patch = json.loads(raw) if isinstance(raw, str) else raw
@@ -2780,6 +2871,9 @@ class QwenDirector(
         patched = {int(item.get("scene", 0)): item for item in (patch or {}).get("scenes", []) if isinstance(item, dict)}
         if set(patched) != set(affected):
             raise RuntimeError(f"Scene patch covered scenes {sorted(patched)}; expected {affected}.")
+        returned_fields = (patch or {}).get("plot_fields") or {}
+        if set(returned_fields) != set(plot_fields):
+            raise RuntimeError(f"Global field patch covered {sorted(returned_fields)}; expected {sorted(plot_fields)}.")
         unchanged = [n for n in affected if as_text(patched[n].get("event")).strip() == as_text(scenes[n - 1].get("event")).strip()]
         if unchanged:
             print(f"[QWEN] story_architecture scene_patch warning=event_unchanged scenes={unchanged}", flush=True)
@@ -2791,8 +2885,13 @@ class QwenDirector(
                     target[key] = [str(v).strip() for v in (value or []) if str(v).strip()]
                 elif str(value or "").strip():
                     target[key] = str(value).strip()
+        for key, value in ((patch or {}).get("plot_fields") or {}).items():
+            if key in plot_fields and str(value or "").strip():
+                data[key] = str(value).strip()
         new_map = [x for x in (patch or {}).get("setup_payoff_map", []) if isinstance(x, dict)]
-        if new_map and any("SETUP_PAYOFF_MAP" in str(p) for p in problems):
+        if map_needs_patch:
+            if not new_map:
+                raise RuntimeError("Setup/payoff repair was requested, but the Architect returned no replacement map.")
             data["setup_payoff_map"] = new_map
         # Earlier boundaries are re-derived: drop any explicit entry_* so every scene starts where the previous ended.
         for scene in data["scenes"]:
@@ -2843,9 +2942,20 @@ class QwenDirector(
                 revision_advisories = advisory_findings
                 base_data = getattr(self, "_last_blueprint_data", None)
                 if STORY_ARCHITECT_STRUCTURED_OUTPUT and isinstance(base_data, dict):
+                    affected = self._patch_affected_scenes(problems, base_data)
+                    plot_fields = self._patch_affected_plot_fields(problems)
+                    revision_mode = (
+                        "scene_field_map_patch" if affected and plot_fields and any("SETUP_PAYOFF_MAP" in str(p) for p in problems)
+                        else "scene_and_field_patch" if affected and plot_fields
+                        else "scene_map_patch" if affected and any("SETUP_PAYOFF_MAP" in str(p) for p in problems)
+                        else "scene_patch" if affected
+                        else "field_map_patch" if plot_fields and any("SETUP_PAYOFF_MAP" in str(p) for p in problems)
+                        else "field_patch" if plot_fields
+                        else "map_patch"
+                    )
                     print(
                         f"[QWEN] story_architecture revision={attempt + 1}/{int(STORY_ARCHITECT_REVISION_RETRIES)} "
-                        f"reason_count={len(problems)} mode=scene_patch",
+                        f"reason_count={len(problems)} mode={revision_mode} scenes={affected} fields={plot_fields}",
                         flush=True,
                     )
                     return self._patch_story_blueprint(
