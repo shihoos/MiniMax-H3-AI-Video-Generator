@@ -1477,11 +1477,24 @@ def test_architect_and_author_get_only_informed_hard_gate_revisions():
 
         broken = json.loads(good)
         broken["scenes"][10]["next_cause"] = ""
-        rejected_then_fixed, users = architect([json.dumps(broken), good])
+        good_data = json.loads(good)
+        patch_reply = json.dumps({
+            "scenes": [
+                {"scene": n, **{k: good_data["scenes"][n - 1][k] for k in (
+                    "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause")}}
+                for n in (10, 11)
+            ],
+            "setup_payoff_map": [],
+        })
+        rejected_then_fixed, users = architect([json.dumps(broken), patch_reply])
         _assert(isinstance(rejected_then_fixed, str) and len(users) == 2,
                 "a returned plan rejected by a hard gate must receive exactly one Architect revision")
-        _assert("REVISION:" in users[1][0] and "NEXT_CAUSE" in users[1][0],
+        _assert("VALIDATION FINDINGS TO FIX" in users[1][0] and "NEXT_CAUSE" in users[1][0],
                 "the Architect revision must be informed by the exact failed handoff contract")
+        _assert(users[1][1]["json_schema"]["name"] == "story_scene_patch",
+                "the Architect revision must ask only for the failing scenes (scene patch), not a full copy")
+        _assert("SCENE 11" in users[1][0] and "SCENE 03" not in users[1][0],
+                "the scene patch must contain only the failing scene(s) and their handoff predecessor")
 
         presence_feedback = QwenDirector._revision_feedback(
             [
