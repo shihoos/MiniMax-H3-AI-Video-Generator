@@ -45,7 +45,12 @@ def _story_blueprint_fixture(scene_count=12):
             f"SCENE {i:02d}: PURPOSE=The surveyor loses another viable way to verify cargo transfer stage {i}; ENTRY_LOCATION=harbor archive; ENTRY_PRESENT=Ines Vale; ON_SCREEN_PRESENT=Ines Vale; "
             "ENTRY_KNOWS=Ines knows the duplicate ledger conceals the missing relief cargo route; "
             "ENTRY_OBJECTS=original ledger and tide chart remain under Ines's control; "
-            f"EVENT=Ines examines transfer stage {i}, compares the physical pressure mark with the approved cargo seal, "
+            f"EVENT=" + (
+                "Ines releases the complete ledger's contents to the harbor council, exposes her own signature, "
+                "and accepts responsibility rather than hiding it; she records transfer clue 10 by comparing "
+                "the pressure-mark discrepancy before the clerk can remove the evidence. " if i == 10 else
+                f"Ines examines transfer stage {i}, compares the physical pressure mark with the approved cargo seal, "
+            )
             + ("finds the duplicate manifest's pressure seal with a shifted notch, and records it; " if i == 2 else "")
             + ("uses that same shifted pressure seal notch to prove her correction changed the rescue route; " if i == 8 else "")
             + ("and records the discrepancy before the clerk can remove the evidence; " if i not in (2, 8) else "")
@@ -1453,8 +1458,8 @@ def test_structured_architect_json_round_trips_through_every_contract():
     _assert("a sealed place, mystery or storm does not" in compact_lower
             and "do not invent project/protocol codenames" in compact_lower,
             "the Architect must not add generic pathogen/project twists without premise support")
-    _assert("scene 10 performs the final irreversible choice" in compact_lower
-            and "scene 11 shows a distinct immediate consequence" in compact_lower
+    _assert("scene 10 event must enact the selected final irreversible choice itself" in compact_lower
+            and "scene 11 shows a distinct immediate physical consequence" in compact_lower
             and "scene 12 completes the resolution" in compact_lower,
             "the final three scenes must have distinct completed dramatic functions")
     _assert("injuries, damage, access restrictions, depleted resources" in compact_lower
@@ -2630,6 +2635,210 @@ def test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle():
                 "a new story run must not inherit previous run's warnings or errors")
 
 
+
+def test_continuity_ledger_is_derived_from_authoritative_json_state():
+    import json
+    from planner.config import DIRECTOR_STORY_SCENES
+    from planner.qwen_director import QwenDirector
+    from planner.story_blueprint_schema import blueprint_json_schema, derive_continuity_ledger, render_blueprint_text
+    data = _blueprint_json_from_fixture()
+    data["continuity_ledger"] = "none"
+    ledger = derive_continuity_ledger(data)
+    words = re.findall(r"\b[\w'’-]+\b", ledger)
+    _assert(35 <= len(words) <= 70, f"derived continuity ledger must satisfy the 35-70 word range: {len(words)} {ledger!r}")
+    _assert("Ines Vale" in ledger and "original shipping ledger" in ledger.lower(),
+            f"derived ledger must include protagonist and declared plot-critical objects: {ledger!r}")
+    import json
+    from planner.qwen_director import QwenDirector
+    text = QwenDirector._blueprint_json_to_text(json.dumps(data))
+    rendered = next(line for line in text.splitlines() if line.startswith("CONTINUITY_LEDGER:"))
+    _assert(rendered.split(":", 1)[1].strip() == ledger,
+            "renderer must ignore the model's empty/duplicate ledger and derive one from authoritative states")
+    schema = blueprint_json_schema(DIRECTOR_STORY_SCENES)
+    _assert("continuity_ledger" not in schema["properties"] and "continuity_ledger" not in schema["required"],
+            "the model must not be asked to emit a redundant global ledger")
+    normalized = QwenDirector._normalize_story_blueprint(text, DIRECTOR_STORY_SCENES)
+    _assert("CONTINUITY_LEDGER:" in normalized and len(normalized.split("CONTINUITY_LEDGER:", 1)[1].splitlines()[0].split()) >= 35,
+            "normalization must receive the derived ledger and avoid spending an Architect revision")
+
+
+def test_structured_architect_prompt_marks_ledger_as_application_derived():
+    from planner.config import AI_STORY_MODE
+    from planner.qwen_director import QwenDirector
+    prompt = QwenDirector.__new__(QwenDirector)._story_blueprint_system(AI_STORY_MODE, structured=True).lower()
+    _assert("do not emit `continuity_ledger`" in prompt and "application derives" in prompt,
+            "live JSON-mode prompt must tell Qwen that the application owns the derived ledger")
+    _assert("specific change this scene causes in 7-12 words" in prompt,
+            "live JSON prompt must retain the consequential 7-12-word scene-purpose contract")
+    compact = " ".join(prompt.split())
+    _assert("scene 10 event must enact the selected final irreversible choice itself" in compact
+            and "scene 11 shows a distinct immediate physical consequence" in compact
+            and "scene 12 completes the resolution" in compact,
+            "live prompt must preserve three distinct ending functions")
+
+
+def test_global_field_patch_schema_supports_field_only_and_combined_repairs():
+    from planner.qwen_director import QwenDirector
+    field_only = QwenDirector._patch_response_format([], ["story_engine"])["json_schema"]["schema"]
+    scenes = field_only["properties"]["scenes"]
+    _assert(scenes["minItems"] == scenes["maxItems"] == 0,
+            "field-only revision must require an empty scenes array")
+    _assert("enum" not in scenes["items"]["properties"]["scene"],
+            "field-only schema must not emit an invalid empty scene enum")
+    _assert("plot_fields" in field_only["required"] and "setup_payoff_map" not in field_only["properties"],
+            "field-only schema must request only the named global fields")
+    map_only = QwenDirector._patch_response_format([], [], include_setup_payoff_map=True)["json_schema"]["schema"]
+    _assert("setup_payoff_map" in map_only["required"] and map_only["properties"]["scenes"]["maxItems"] == 0,
+            "map-only repair must not require a scene patch")
+    combined = QwenDirector._patch_response_format([2, 5], ["resolution"], include_setup_payoff_map=True)["json_schema"]["schema"]
+    _assert(combined["properties"]["scenes"]["items"]["properties"]["scene"]["enum"] == [2, 5]
+            and "resolution" in combined["properties"]["plot_fields"]["required"]
+            and "setup_payoff_map" in combined["required"],
+            "combined scene/global/map repair must request exactly its selected components")
+
+
+def test_global_validation_findings_are_routed_to_plot_field_patches():
+    from planner.qwen_director import QwenDirector
+    fields = QwenDirector._patch_affected_plot_fields([
+        "Story Architect field STORY_ENGINE is underdeveloped (2 words; minimum 6).",
+        "scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE; show the irreversible action.",
+        "CONTINUITY_LEDGER is underdeveloped (1 words; minimum 21).",
+    ])
+    _assert(fields == ["story_engine"],
+            f"only explicitly underdeveloped global fields should be patched; scene references and derived ledger are excluded: {fields!r}")
+    missing = QwenDirector._patch_affected_plot_fields([
+        "missing plot architecture fields: STORY_ENGINE, RESOLUTION."
+    ])
+    _assert(missing == ["story_engine", "resolution"],
+            f"genuinely missing global fields must be routed to a field-only patch: {missing!r}")
+
+
+def test_batch_encoding_token_preflight_counts_input_ids_not_mapping_keys():
+    from planner.config import DIRECTOR_VLLM_MAX_MODEL_LEN
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+
+    class FakeBatchEncoding(dict):
+        pass
+
+    class FakeTokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            return FakeBatchEncoding(
+                input_ids=list(range(2284)),
+                attention_mask=[1] * 2284,
+            )
+
+    director = QwenDirectorRuntimeMixin.__new__(QwenDirectorRuntimeMixin)
+    director._tokenizer = FakeTokenizer()
+    prompt_tokens, effective = director._available_output_tokens(
+        "SYSTEM", "USER", minimum_completion=400, enable_thinking=True,
+    )
+    _assert(prompt_tokens == 2284,
+            f"BatchEncoding must count input_ids length rather than its two mapping keys: {prompt_tokens}")
+    _assert(effective == min(7000, DIRECTOR_VLLM_MAX_MODEL_LEN - 2284 - 128),
+            f"effective completion must use actual prompt token count: {effective}")
+
+
+def test_story_purpose_contract_enforces_the_prompted_consequential_length():
+    from planner.story_contracts import validate_blueprint_state_contract
+    text = _story_blueprint_fixture()
+    lines = text.splitlines()
+    scene = next(i for i, line in enumerate(lines) if line.startswith("SCENE 04:"))
+    lines[scene] = lines[scene].replace(
+        "PURPOSE=The surveyor loses another viable way to verify cargo transfer stage 4",
+        "PURPOSE=Reveal the log",
+    )
+    findings = validate_blueprint_state_contract("\n".join(lines))
+    _assert(any("scene 04 PURPOSE is too vague" in item for item in findings),
+            f"a generic short purpose must be rejected in agreement with the 7-12-word prompt: {findings!r}")
+
+
+def test_scene10_must_enact_one_of_the_actual_climax_options():
+    from planner.story_contracts import _scene10_enacts_climax_choice, validate_blueprint_state_contract
+    cast = [{"name": "Elena Voss", "aliases": ["Elena"]}]
+    choice = "Destroy the vault risking pathogen release or leave it sealed risking a future outbreak."
+    _assert(not _scene10_enacts_climax_choice(
+        choice, "Elena reads Dr. Hale's final note and learns the pathogen may be a cure.", cast,
+    ), "a reveal that only discusses the threat must not count as the final irreversible choice")
+    _assert(_scene10_enacts_climax_choice(
+        choice, "Elena triggers the vault's self-destruct, destroying the chamber while its sealed capsule remains intact.", cast,
+    ), "an event that enacts the declared destroy option must pass")
+    text = _story_blueprint_fixture()
+    good_issues = validate_blueprint_state_contract(text)
+    _assert(not any("scene 10 EVENT does not enact" in issue for issue in good_issues),
+            f"a fixture that releases the ledger contents and accepts responsibility must satisfy the climax contract: {good_issues!r}")
+    lines = text.splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith("SCENE 10:"))
+    lines[index] = re.sub(
+        r"EVENT=.*?; EXIT_LOCATION=",
+        "EVENT=Ines reads the pressure seal and notes the clerk's hesitation; EXIT_LOCATION=",
+        lines[index], count=1,
+    )
+    issues = validate_blueprint_state_contract("\n".join(lines))
+    _assert(any("scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE" in issue for issue in issues),
+            f"a scene 10 reveal without a selected option must fail: {issues!r}")
+
+
+def test_legacy_none_ledger_is_replaced_before_normalization_and_does_not_trigger_revision():
+    import json
+    from planner.config import DIRECTOR_STORY_SCENES
+    from planner.qwen_director import QwenDirector
+    from planner.story_blueprint_schema import blueprint_json_schema, render_blueprint_text
+    data = _blueprint_json_from_fixture()
+    data["continuity_ledger"] = "none"  # exact failure mode from the 2026-11-15 trace
+    schema = blueprint_json_schema(DIRECTOR_STORY_SCENES)
+    _assert("continuity_ledger" not in schema["properties"] and "continuity_ledger" not in schema["required"],
+            "Qwen schema must not require or accept a model-authored redundant ledger")
+    blueprint = QwenDirector._blueprint_json_to_text(json.dumps(data))
+    ledger = next(line.split(":", 1)[1].strip() for line in blueprint.splitlines() if line.startswith("CONTINUITY_LEDGER:"))
+    _assert(len(re.findall(r"\b[\w'’-]+\b", ledger)) >= 35 and ledger.casefold() != "none",
+            f"renderer must derive a meaningful ledger even when an old/raw response says none: {ledger!r}")
+    normalized = QwenDirector._normalize_story_blueprint(blueprint, DIRECTOR_STORY_SCENES)
+    _assert("CONTINUITY_LEDGER: none" not in normalized,
+            "the exact traced one-word ledger must be replaced before the normalization floor runs")
+    fields = QwenDirector._patch_affected_plot_fields([
+        "Story Architect field CONTINUITY_LEDGER is underdeveloped (1 words; minimum 21)."
+    ])
+    _assert(fields == [], "a derived ledger failure must not be sent to a Qwen scene patch")
+
+
+def test_scene10_climax_reference_does_not_request_global_choice_rewrite():
+    from planner.qwen_director import QwenDirector
+    finding = "scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE; show the protagonist's action."
+    _assert(QwenDirector._patch_affected_plot_fields([finding]) == [],
+            "a Scene 10 execution defect must patch Scene 10, not rewrite the global CLIMAX_CHOICE")
+    _assert(QwenDirector._patch_affected_scenes([finding], {}) == [10],
+            "the corresponding scene finding must route to Scene 10")
+
+
+def test_global_field_only_revision_does_not_require_a_scene_number():
+    import json
+    from tempfile import TemporaryDirectory
+    from planner.config import AI_STORY_MODE, DIRECTOR_N_CTX
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    with TemporaryDirectory() as tmp:
+        director.project_root = Path(tmp)
+        director._available_output_tokens = lambda *args, **kwargs: (300, 5000)
+        director._save_story_run_diagnostics = lambda **kwargs: None
+        director._chat_text = lambda *args, **kwargs: json.dumps({
+            "scenes": [],
+            "plot_fields": {
+                "story_engine": "The harbor tide clock and paper cargo chain reveal the altered rescue route."
+            },
+        })
+        data = _blueprint_json_from_fixture()
+        result = director._patch_story_blueprint(
+            AI_STORY_MODE,
+            "A harbor surveyor must recover the original shipping ledger before the flood.",
+            data,
+            ["Story Architect field STORY_ENGINE is underdeveloped (2 words; minimum 6)."],
+        )
+        _assert("STORY_ENGINE: The harbor tide clock and paper cargo chain" in result,
+                "a global-field-only rejection must be repaired without requiring a scene identifier")
+        _assert("CONTINUITY_LEDGER: none" not in result,
+                "global-field patching must continue to derive the application-owned continuity ledger")
+
 # ── Runner ────────────────────────────────────────────────────────────────
 
 def test_director_checkpoint_is_accepted_by_orchestrator_resume():
@@ -3189,6 +3398,68 @@ def test_scene_local_location_validator_accepts_explicit_shelter_entry():
     ), "an explicit physical retreat inside must satisfy the location transition")
 
 
+
+def test_legacy_none_ledger_is_replaced_before_normalization_and_does_not_trigger_revision():
+    import json
+    from planner.config import DIRECTOR_STORY_SCENES
+    from planner.qwen_director import QwenDirector
+    from planner.story_blueprint_schema import blueprint_json_schema, render_blueprint_text
+    data = _blueprint_json_from_fixture()
+    data["continuity_ledger"] = "none"  # exact failure mode from the 2026-11-15 trace
+    schema = blueprint_json_schema(DIRECTOR_STORY_SCENES)
+    _assert("continuity_ledger" not in schema["properties"] and "continuity_ledger" not in schema["required"],
+            "Qwen schema must not require or accept a model-authored redundant ledger")
+    blueprint = QwenDirector._blueprint_json_to_text(json.dumps(data))
+    ledger = next(line.split(":", 1)[1].strip() for line in blueprint.splitlines() if line.startswith("CONTINUITY_LEDGER:"))
+    _assert(len(re.findall(r"\b[\w'’-]+\b", ledger)) >= 35 and ledger.casefold() != "none",
+            f"renderer must derive a meaningful ledger even when an old/raw response says none: {ledger!r}")
+    normalized = QwenDirector._normalize_story_blueprint(blueprint, DIRECTOR_STORY_SCENES)
+    _assert("CONTINUITY_LEDGER: none" not in normalized,
+            "the exact traced one-word ledger must be replaced before the normalization floor runs")
+    fields = QwenDirector._patch_affected_plot_fields([
+        "Story Architect field CONTINUITY_LEDGER is underdeveloped (1 words; minimum 21)."
+    ])
+    _assert(fields == [], "a derived ledger failure must not be sent to a Qwen scene patch")
+
+
+def test_scene10_climax_reference_does_not_request_global_choice_rewrite():
+    from planner.qwen_director import QwenDirector
+    finding = "scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE; show the protagonist's action."
+    _assert(QwenDirector._patch_affected_plot_fields([finding]) == [],
+            "a Scene 10 execution defect must patch Scene 10, not rewrite the global CLIMAX_CHOICE")
+    _assert(QwenDirector._patch_affected_scenes([finding], {}) == [10],
+            "the corresponding scene finding must route to Scene 10")
+
+
+def test_global_field_only_revision_does_not_require_a_scene_number():
+    import json
+    from tempfile import TemporaryDirectory
+    from planner.config import AI_STORY_MODE, DIRECTOR_N_CTX
+    from planner.qwen_director import QwenDirector
+
+    director = QwenDirector.__new__(QwenDirector)
+    with TemporaryDirectory() as tmp:
+        director.project_root = Path(tmp)
+        director._available_output_tokens = lambda *args, **kwargs: (300, 5000)
+        director._save_story_run_diagnostics = lambda **kwargs: None
+        director._chat_text = lambda *args, **kwargs: json.dumps({
+            "scenes": [],
+            "plot_fields": {
+                "story_engine": "The harbor tide clock and paper cargo chain reveal the altered rescue route."
+            },
+        })
+        data = _blueprint_json_from_fixture()
+        result = director._patch_story_blueprint(
+            AI_STORY_MODE,
+            "A harbor surveyor must recover the original shipping ledger before the flood.",
+            data,
+            ["Story Architect field STORY_ENGINE is underdeveloped (2 words; minimum 6)."],
+        )
+        _assert("STORY_ENGINE: The harbor tide clock and paper cargo chain" in result,
+                "a global-field-only rejection must be repaired without requiring a scene identifier")
+        _assert("CONTINUITY_LEDGER: none" not in result,
+                "global-field patching must continue to derive the application-owned continuity ledger")
+
 # ── Runner ────────────────────────────────────────────────────────────────
 
 def main():
@@ -3251,6 +3522,15 @@ def main():
         test_story_run_diagnostics_and_rejected_draft_are_in_trace_bundle,
         test_successful_architect_plan_uses_one_native_bounded_thinking_call,
         test_structured_architect_json_round_trips_through_every_contract,
+        test_continuity_ledger_is_derived_from_authoritative_json_state,
+        test_structured_architect_prompt_marks_ledger_as_application_derived,
+        test_global_field_patch_schema_supports_field_only_and_combined_repairs,
+        test_global_field_only_revision_does_not_require_a_scene_number,
+        test_global_validation_findings_are_routed_to_plot_field_patches,
+        test_legacy_none_ledger_is_replaced_before_normalization_and_does_not_trigger_revision,
+        test_scene10_climax_reference_does_not_request_global_choice_rewrite,
+        test_story_purpose_contract_enforces_the_prompted_consequential_length,
+        test_scene10_must_enact_one_of_the_actual_climax_options,
         test_architect_and_author_get_only_informed_hard_gate_revisions,
         test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory,
         test_story_minimum_is_a_hard_floor_with_one_conditional_revision,
@@ -3265,6 +3545,7 @@ def main():
         test_story_pipeline_uses_two_bounded_stages_and_only_conditional_revisions,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
         test_available_output_budget_counts_exact_chat_template_with_thinking_mode,
+        test_batch_encoding_token_preflight_counts_input_ids_not_mapping_keys,
         test_author_min_tokens_zero_is_omitted_from_vllm_payload,
         test_rejected_author_draft_is_saved_for_diagnosis,
         test_author_wrapper_preserves_draft_when_pipeline_rejects_it,
