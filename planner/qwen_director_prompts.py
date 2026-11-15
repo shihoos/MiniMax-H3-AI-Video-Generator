@@ -457,6 +457,38 @@ class QwenDirectorPromptMixin:
             The final sentence describes a completed, observable consequence in the present story world, not a future hook.
         """).strip()
 
+    def _story_blueprint_revision_system(self, mode: str) -> str:
+        """Short system prompt for the single Architect revision.
+
+        The design-only guidance (cast design, genre choice, examples) is already baked into the rejected plan,
+        so a revision needs only the field contract and the story-state rules the validators enforce. This keeps
+        the revision prompt small enough for the 10,240-token context to leave room for a full 12-scene JSON reply.
+        """
+        n = int(DIRECTOR_STORY_SCENES)
+        beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
+        beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
+        return (
+            f"You are the Story Architect revising ONE rejected {n}-scene short-film blueprint. Return the complete "
+            "revised blueprint as the supplied JSON schema only: no preamble, markdown or commentary.\n"
+            f"Each scene is {beat_min}-{beat_max} words across its fields. Keys per scene: purpose, on_screen_present, event, "
+            "exit_location, exit_present, exit_knows, exit_objects, next_cause ('none' for the last scene). Entry state is "
+            "not written: each scene begins exactly where the previous one ended. Use no semicolons or pipe characters inside values.\n"
+            "STATE RULES (hard validators): exit_* fields are complete snapshots after the event; carry earlier facts and "
+            "object states forward unchanged unless the event shows the change. If exit_location differs from where the scene "
+            "began, the event must name the character who physically moves, describe the actual passage (enter, cross, "
+            "descend, leave, flee, return) and name the destination in that same movement clause; opening a door is only access, "
+            "and finding a place is not entering it. exit_objects lists every portable plot-critical object's owner, location "
+            "and condition in every scene; an object may be acquired, lost, handed over, hidden, recovered, damaged or destroyed "
+            "only through a sentence in that scene's event that shows the action. exit_knows is cumulative. A person who "
+            "enters or leaves mid-scene must be shown doing so and appears in on_screen_present; remote voices, recordings "
+            "and merely discussed people are not present. A dead character stays dead and absent after their death scene. "
+            "Every next_cause names the concrete result that makes the next scene necessary, and the next event must act on it. "
+            "Never repeat the preceding scene's event. setup_payoff_map entries need plant_scene before payoff_scene, and the "
+            "named scenes' events must visibly contain the plant and the payoff.\n"
+            "REVISION DISCIPLINE: copy the cast and every field you were not told to change verbatim; change only what the "
+            "listed findings require."
+        )
+
     def _story_blueprint_system(self, mode: str, structured: bool = False) -> str:
         """Create a premise-specific dramatic engine and 12 causal scene beats, without a template plot."""
         n = int(DIRECTOR_STORY_SCENES)
