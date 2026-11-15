@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-14.5.2"
+CONTRACTS_REVISION = "2026-11-15.5.3"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -203,6 +203,7 @@ HARD_FINDING_MARKERS = (
     "SETUP_PAYOFF_MAP payoff scene",
     "changes its physical location without an explicit transition",
     "object state change is not anchored to the named object and a physical action",
+    "scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE",
 )
 # Prose findings that may stop a run: invented people/organisations/relationships and the dead acting.
 HARD_PROSE_MARKERS = (
@@ -784,6 +785,36 @@ _PLOT_EVIDENCE_ACTION_RE = re.compile(
 )
 
 
+_CLIMAX_GENERIC_TOKENS = {
+    "risk", "risky", "risking", "future", "consequence", "consequences", "option", "options",
+    "either", "choice", "choose", "chooses", "choosing", "force", "forces", "forced", "irreversible",
+    "because", "must", "decision", "decides", "decide", "deciding", "final", "last", "only", "world",
+}
+_CLIMAX_ACTION_RE = re.compile(
+    r"\b(?:choos\w*|decid\w*|commit\w*|activat\w*|initiat\w*|trigger\w*|destroy\w*|"
+    r"releas\w*|seal\w*|leav\w*|preserv\w*|hid\w*|accept\w*|reject\w*|refus\w*|"
+    r"sacrific\w*|publish\w*|send\w*|transmit\w*|break\w*|open\w*|shut\w*|disabl\w*|"
+    r"surrender\w*|confess\w*|expos\w*|stay\w*|remain\w*|sign\w*|withhold\w*|"
+    r"abandon\w*|overload\w*|cut\w*|disconnect\w*|lock\w*|unlock\w*)\b", re.I,
+)
+
+
+def _scene10_enacts_climax_choice(choice: str, event: str, cast: list[dict[str, Any]]) -> bool:
+    """Require Scene 10 to enact one of the concrete alternatives stated in CLIMAX_CHOICE."""
+    raw = _strip_cast_surfaces(str(choice or ""), cast)
+    alternatives = re.split(r"\bor\b|\brather than\b|\binstead of\b", raw, maxsplit=1, flags=re.I)
+    if len(alternatives) < 2 or not _CLIMAX_ACTION_RE.search(str(event or "")):
+        return False
+    event_anchors = _stemmed_content_tokens(_strip_cast_surfaces(str(event or ""), cast)) - _CLIMAX_GENERIC_TOKENS
+    for alternative in alternatives[:2]:
+        # Parenthetical text normally states cost/risk; match the selected action, not its consequence label.
+        action_text = re.sub(r"\([^)]*\)", " ", alternative)
+        anchors = _stemmed_content_tokens(action_text) - _CLIMAX_GENERIC_TOKENS
+        if anchors and anchors & event_anchors:
+            return True
+    return False
+
+
 def _plot_event_anchor_is_grounded(
     field_value: str, event: str, cast: list[dict[str, Any]],
 ) -> bool:
@@ -977,8 +1008,11 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         if missing_state:
             errors.append(f"scene {number:02d} missing state fields: {', '.join(missing_state)}")
             continue
-        if len(word_tokens(state["PURPOSE"])) < 5:
-            errors.append(f"scene {number:02d} PURPOSE is too vague; provide a scene-specific dramatic change")
+        purpose_words = len(word_tokens(state["PURPOSE"]))
+        if purpose_words < 7:
+            errors.append(
+                f"scene {number:02d} PURPOSE is too vague; provide a concrete 7-12-word scene-specific consequential change"
+            )
         if len(word_tokens(state["EVENT"])) < 6:
             errors.append(f"scene {number:02d} event is too thin to dramatize")
         normalized_cause = re.sub(r"[\W_]+", " ", state["NEXT_CAUSE"].casefold()).strip()
@@ -1252,6 +1286,16 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
             errors.append(
                 f"scene {scene_number:02d} key object is missing from scene inventory: "
                 f"{object_match.group('label').strip()}"
+            )
+
+    # Scene 10 must enact one of the actual alternatives, not merely reveal information or announce intent.
+    if 10 in beats:
+        climax_choice = fields.get("CLIMAX_CHOICE", "")
+        scene10_event = parse_scene_state(beats[10]).get("EVENT", "")
+        if not _scene10_enacts_climax_choice(climax_choice, scene10_event, cast):
+            errors.append(
+                "scene 10 EVENT does not enact a distinctive option from CLIMAX_CHOICE; show the protagonist's "
+                "irreversible action in Scene 10 rather than only discovering evidence or stating an intention"
             )
 
     return list(dict.fromkeys(errors))
