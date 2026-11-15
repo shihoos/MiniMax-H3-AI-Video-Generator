@@ -82,6 +82,20 @@ from planner.qwen_director_scene import QwenDirectorSceneMixin
 from planner.qwen_director_sanitize import QwenDirectorSanitizeMixin
 
 
+_ENTRY_FIELD_RE = re.compile(r"\s*ENTRY_(?:LOCATION|PRESENT|KNOWS|OBJECTS)=.*?;(?=\s*[A-Z_]+=)", re.S)
+
+
+def _strip_redundant_entry_fields(blueprint: str) -> str:
+    """Drop ENTRY_* fields of scenes 2+ (identical to the previous EXIT_*) to shrink the revision prompt."""
+    lines = []
+    for line in str(blueprint or "").splitlines():
+        match = re.match(r"\s*SCENE\s+(\d+)\s*:", line, re.I)
+        if match and int(match.group(1)) > 1:
+            line = _ENTRY_FIELD_RE.sub("", line)
+        lines.append(line)
+    return "\n".join(lines)
+
+
 class QwenDirector(
     QwenDirectorRuntimeMixin,
     QwenDirectorPromptMixin,
@@ -2181,7 +2195,8 @@ class QwenDirector(
             "SCENE LOCK: keep every scene and every field unchanged unless it is explicitly listed below as affected. "
             "Do not move the climax, renumber scenes, merge scenes, or repeat a preceding EVENT.\n"
             "AFFECTED SCENES / ALLOWED PATCH SCOPE:\n" + notes + "\n\n"
-            "FULL ORIGINAL BLUEPRINT (copy all unlisted lines/values verbatim):\n" + original
+            "FULL ORIGINAL BLUEPRINT (copy all unlisted lines/values verbatim; each scene's entry state equals the "
+            "previous scene's exit state and is omitted):\n" + _strip_redundant_entry_fields(original)
         )
 
     @staticmethod
@@ -2615,12 +2630,45 @@ class QwenDirector(
         except OSError:
             pass
         structured = bool(STORY_ARCHITECT_STRUCTURED_OUTPUT)
-        system_prompt = self._story_blueprint_system(mode, structured=structured)
+        is_revision = bool(revision_base)
+        if is_revision and structured:
+            system_prompt = self._story_blueprint_revision_system(mode)
+        else:
+            system_prompt = self._story_blueprint_system(mode, structured=structured)
         user_prompt = self._story_blueprint_user(
             mode,
             user_input,
             source_character_names=source_character_names,
         ) + feedback
+        if is_revision:
+            # The revision must still fit a complete 12-scene JSON reply in the context window.
+            # Log the exact budget and shed optional text before the call rather than being truncated mid-JSON.
+            needed = 3600
+            def _tokens() -> int:
+                try:
+                    return int(self._count_tokens(system_prompt + "\n\n" + user_prompt))
+                except Exception:  # tokenizer unreachable: conservative character estimate
+                    return int(len(system_prompt + user_prompt) / 2.6)
+            prompt_tokens = _tokens()
+            room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+            if room < needed:
+                user_prompt = re.sub(r"\nADVISORY handoffs to review:[^\n]*", "", user_prompt)
+                prompt_tokens = _tokens()
+                room = int(DIRECTOR_N_CTX) - prompt_tokens - 128
+            print(
+                f"[QWEN] story_architecture revision_budget context={int(DIRECTOR_N_CTX)} "
+                f"prompt_tokens={prompt_tokens} completion_room={room} needed~{needed}",
+                flush=True,
+            )
+            if room < 1500:
+                reason = (
+                    f"{call_name} revision prompt is {prompt_tokens} tokens and leaves only {room} for the "
+                    f"completion in a {int(DIRECTOR_N_CTX)}-token context; a 12-scene revision cannot fit. "
+                    "Raise the vLLM context (H3_DIRECTOR_CONTEXT / director.context) or shorten the plan."
+                )
+                self._last_story_quality_errors = [reason]
+                self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_budget", reason=reason)
+                raise RuntimeError(reason)
         print(
             f"[QWEN] story_architecture=bounded thinking_budget={DIRECTOR_STORY_PLAN_THINKING_BUDGET} "
             f"max_tokens={DIRECTOR_STORY_PLAN_MAX_TOKENS} "
@@ -2640,7 +2688,7 @@ class QwenDirector(
                     int(DIRECTOR_STORY_PLAN_MAX_TOKENS),
                     int(DIRECTOR_STORY_MAX_TOKENS),
                 ),
-                disable_thinking=False,
+                disable_thinking=is_revision,
                 seed=(
                     DIRECTOR_VLLM_SEED
                     if mode == EXPAND_USER_STORY_MODE
