@@ -1834,26 +1834,37 @@ class QwenDirectorRuntimeMixin:
         system_prompt: str,
         user_prompt: str,
         minimum_completion: int = 512,
+        *,
+        enable_thinking: bool = False,
     ) -> tuple[int, int]:
-        context = int(
-            DIRECTOR_N_CTX
-        )
+        """Compute the completion budget from the exact chat-template tokenization sent to vLLM.
 
+        Counting the raw concatenated system/user strings undercounts the rendered ChatML prompt. The
+        request path uses apply_chat_template, so the preflight must use the same method and thinking flag.
+        """
+        context = int(DIRECTOR_VLLM_MAX_MODEL_LEN)
         safety = 128
-
-        prompt_tokens = (
-            self._count_tokens(
-                system_prompt
-                + "\n\n"
-                + user_prompt
+        tokenizer = getattr(self, "_tokenizer", None)
+        if tokenizer is None:
+            raise RuntimeError("Qwen director tokenizer is not loaded for context validation.")
+        messages = [
+            {"role": "system", "content": str(system_prompt or "")},
+            {"role": "user", "content": str(user_prompt or "")},
+        ]
+        try:
+            prompt_ids = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+                enable_thinking=bool(enable_thinking),
             )
-        )
+            prompt_tokens = int(len(prompt_ids))
+        except Exception as exc:
+            raise RuntimeError(
+                "Unable to count the exact Qwen chat-template prompt before selecting a completion budget."
+            ) from exc
 
-        available = (
-            context
-            - prompt_tokens
-            - safety
-        )
+        available = context - prompt_tokens - safety
 
         if available < minimum_completion:
             raise RuntimeError(
@@ -2073,10 +2084,11 @@ class QwenDirectorRuntimeMixin:
         if disable_thinking:
             user_prompt = user_prompt.rstrip() + NO_THINK_SUFFIX
 
-        _, max_tokens = self._available_output_tokens(
+        prompt_tokens, max_tokens = self._available_output_tokens(
             system_prompt,
             user_prompt,
             minimum_completion=minimum_completion,
+            enable_thinking=not disable_thinking,
         )
 
         if max_completion is not None:
@@ -2089,6 +2101,14 @@ class QwenDirectorRuntimeMixin:
             raise RuntimeError(
                 f"No completion budget remains for {call_name}."
             )
+
+        print(
+            f"[QWEN] token_budget call={call_name} context={int(DIRECTOR_VLLM_MAX_MODEL_LEN)} "
+            f"prompt_tokens={prompt_tokens} configured_completion_cap="
+            f"{int(max_completion) if max_completion is not None else int(DIRECTOR_MAX_TOKENS)} "
+            f"effective_completion={max_tokens} safety_tokens=128 thinking={not disable_thinking}",
+            flush=True,
+        )
 
         cache_key = None
         if self._cache_dir is not None:
@@ -2304,12 +2324,11 @@ class QwenDirectorRuntimeMixin:
         if disable_thinking:
             user_prompt = user_prompt.rstrip() + NO_THINK_SUFFIX
 
-        _, max_tokens = (
-            self._available_output_tokens(
-                system_prompt,
-                user_prompt,
-                minimum_completion=minimum_completion,
-            )
+        prompt_tokens, max_tokens = self._available_output_tokens(
+            system_prompt,
+            user_prompt,
+            minimum_completion=minimum_completion,
+            enable_thinking=not disable_thinking,
         )
 
         if max_completion is not None:
@@ -2318,6 +2337,13 @@ class QwenDirectorRuntimeMixin:
                 int(max_completion),
             )
 
+        print(
+            f"[QWEN] token_budget call={call_name} context={int(DIRECTOR_VLLM_MAX_MODEL_LEN)} "
+            f"prompt_tokens={prompt_tokens} configured_completion_cap="
+            f"{int(max_completion) if max_completion is not None else int(DIRECTOR_MAX_TOKENS)} "
+            f"effective_completion={max_tokens} safety_tokens=128 thinking={not disable_thinking}",
+            flush=True,
+        )
         minimum_output_tokens = max(0, int(minimum_output_tokens or 0))
         if minimum_output_tokens > max_tokens:
             raise RuntimeError(
@@ -2408,7 +2434,7 @@ class QwenDirectorRuntimeMixin:
                 min_tokens=minimum_output_tokens,
                 temperature=temperature,
                 top_p=top_p,
-                response_format=None,
+                response_format=response_format,
                 finish_reason=finish_reason,
                 stop_reason=stop_reason,
                 thinking_enabled=not disable_thinking,
@@ -2424,7 +2450,7 @@ class QwenDirectorRuntimeMixin:
                 response,
                 elapsed,
                 error_text,
-                None,
+                response_format,
             )
 
         try:
