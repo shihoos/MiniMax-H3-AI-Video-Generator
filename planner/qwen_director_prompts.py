@@ -502,8 +502,7 @@ class QwenDirectorPromptMixin:
         beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
         if mode == AI_STORY_MODE:
             source_rule = (
-                "Create an original story from the user's premise. Preserve its defining facts and emotional promise; "
-                "do not replace the premise with a familiar genre template."
+                "Create an original story grounded in the premise; preserve its defining facts and emotional promise."
             )
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
@@ -529,12 +528,18 @@ class QwenDirectorPromptMixin:
               timing or risk when the premise makes it relevant; do not use weather as decoration. If the same plot
               would work unchanged with a generic protagonist in a generic location, redesign the story engine.
             - Use a specific, understandable mechanism rooted in the premise. A sealed place, mystery or storm does NOT
-              by itself imply a pathogen, experiment, conspiracy, secret project, AI villain, countdown or hidden relative.
-              Add such elements only when the premise specifically supports them and the story demonstrates their actual
-              mechanism. Do not invent project/protocol codenames or named entities just to make the plot feel important.
-              Avoid stock reveal shortcuts such as simulation/dream/memory, protagonist-was-dead, secret mentor/partner
-              villain, one-last-job, chosen-one, symbolic monster, or rogue sentient AI unless the premise seeds the
-              mechanism early and the story earns it through observable evidence.
+              by itself imply a pathogen, cure, biological experiment, weapon, conspiracy, secret project, AI villain,
+              countdown or hidden relative. A sealed vault is not evidence of a pathogen. Do not introduce a biological
+              threat or world-scale outbreak unless the source premise supplies biological evidence or the early scenes
+              establish at least two concrete, independent clues that make that mechanism necessary. Keep the stakes at
+              the scale the premise can support; do not manufacture a world-saving crisis from an isolated facility.
+              Add high-concept mechanisms only when the premise specifically supports them and the story demonstrates
+              their physical operation. Do not invent project/protocol codenames or named entities just to make the plot
+              feel important. Avoid stock reveal shortcuts such as simulation/dream/memory, protagonist-was-dead, secret
+              mentor/partner villain, one-last-job, chosen-one, symbolic monster, or rogue sentient AI unless the premise
+              seeds the mechanism early and the story earns it through observable evidence. Do not invent a deceased
+              researcher/mentor and a journal as a shortcut for exposition unless the premise establishes that person
+              or document and the story visibly earns its discovery.
             - CAST DESIGN: use a plot-driven, premise-necessary cast. Prefer the smallest cast that can make the required
               decisions; there is no preferred cast size, numeric minimum, maximum or ensemble target. CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
@@ -550,6 +555,8 @@ class QwenDirectorPromptMixin:
               countdowns and obstacles; each new pressure must force a different response or change the available plan.
             - The protagonist must make consequential decisions. Events should not be a chain of arrivals, accidents,
               warnings or convenient failures. Escalation may be physical, temporal, procedural, relational or moral.
+              The protagonist's role-specific skill must materially change the available options in more than a cosmetic
+              way and must contribute to the prepared solution or climax; using a tool merely to open a door is not enough.
 
             CAUSAL DESIGN AND DRAMATIC QUALITY:
             - Build one clear dramatic question and a causal chain of exactly {n} scenes. Each scene must change the
@@ -570,10 +577,12 @@ class QwenDirectorPromptMixin:
               makes each costly, the deliberate choice, and its irreversible consequence. The physical mechanism must
               make sense: do not claim an action releases and destroys the same object unless the sequence explains how.
               Do not invent a last-minute ability, rule, helper or technology to solve the climax.
-            - For 12 scenes, Scene 10 performs the final irreversible choice, Scene 11 shows a distinct immediate
-              consequence caused by it, and Scene 12 completes the resolution and lasting cost. These must be three
-              different completed events, not repeated explosion/death/aftermath beats. Do not resolve the central
-              question before Scene 12. Scene 12 next_cause is exactly 'none'.
+            - For 12 scenes, Scene 10 EVENT must enact the selected final irreversible choice itself, not merely
+              discover evidence, discuss alternatives or announce an intention. Scene 11 shows a distinct immediate
+              physical consequence caused by that completed choice. Scene 12 completes the resolution and lasting cost
+              through a different completed action/outcome. These are three different events, not repeated
+              explosion/death/aftermath beats. Do not resolve the central question before Scene 12. Scene 12 next_cause
+              is exactly 'none'. The scene 10 action must match the mechanism and selected option in CLIMAX_CHOICE.
             - Do not force a midpoint at Scene 06, a death, a twist, a countdown, a rescue or a sequel hook. Use the
               premise's natural dramatic rhythm. The ending must close the central question on screen.
 
@@ -608,14 +617,18 @@ class QwenDirectorPromptMixin:
               On-screen scene numbers are derived from `on_screen_present`. Weather, remote-only voices and non-embodied
               systems are not physical cast.
             - Required plot strings: logline, protagonist_goal, opposition, pressure, story_engine, reversal,
-              climax_choice, resolution, relationships, named_entities, key_objects and continuity_ledger.
-              Use 'none' for empty relationships, named_entities or key_objects. Do not add names not used in the story.
+              climax_choice, resolution, relationships, named_entities and key_objects.
+              Use 'none' only for empty relationships, named_entities or key_objects. Do not add names not used in the story.
+            - Do NOT emit `continuity_ledger`. The application derives that redundant 35-70-word summary after JSON decoding
+              from opening, CAST, KEY_OBJECTS and the twelve authoritative scene snapshots. Do not spend output tokens on
+              a duplicate ledger and do not add a schema property for it.
             - `setup_payoff_map`: one item for each major clue/rule/object/behavior used by the reversal or climax.
               Each item has plant_scene, plant, payoff_scene and payoff. Plant must precede payoff, and both scene
               EVENTS must explicitly enact the corresponding detail.
             - `opening`: location, present (array), knows and objects.
             - `scenes`: exactly {n} objects in order. Each has purpose, on_screen_present (array), event,
-              exit_location, exit_present (array), exit_knows, exit_objects and next_cause.
+              exit_location, exit_present (array), exit_knows, exit_objects and next_cause. `purpose` must state the
+              specific change this scene causes in 7-12 words, not a generic label such as 'introduce the vault'.
             - Keep each scene's combined field content to {beat_min}-{beat_max} words. Make EVENT concise but specific:
               protagonist action, concrete resistance/discovery, then decision/result. Keep inventories and knowledge
               snapshots compact but cumulative. Avoid narration, camera language, mood-only events and dialogue filler.
