@@ -485,15 +485,159 @@ class QwenDirectorPromptMixin:
             "Every next_cause names the concrete result that makes the next scene necessary, and the next event must act on it. "
             "Never repeat the preceding scene's event. setup_payoff_map entries need plant_scene before payoff_scene, and the "
             "named scenes' events must visibly contain the plant and the payoff.\n"
-            "REVISION DISCIPLINE: copy the cast and every field you were not told to change verbatim; change only what the "
-            "listed findings require."
+            "REVISION DISCIPLINE: preserve the premise-specific story engine, cast identities, roles and all unaffected "
+            "scene events verbatim. Do not add a new twist, codename, character or technology to solve a continuity error. "
+            "Change only fields named by the findings; do not move the climax or rewrite unaffected scenes."
         )
+
+    def _structured_story_blueprint_system(self, mode: str) -> str:
+        """Compact, purpose-built system prompt for the live JSON-schema Architect pass.
+
+        Keep this separate from the legacy text blueprint prompt. Transforming a very long text-mode
+        prompt with regex substitutions retained redundant rules, consumed context and created conflicting
+        instructions. This prompt states the production contract once, in the format Qwen actually emits.
+        """
+        n = int(DIRECTOR_STORY_SCENES)
+        beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
+        beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
+        if mode == AI_STORY_MODE:
+            source_rule = (
+                "Create an original story from the user's premise. Preserve its defining facts and emotional promise; "
+                "do not replace the premise with a familiar genre template."
+            )
+        elif mode == EXPAND_USER_STORY_MODE:
+            source_rule = (
+                "Expand the supplied story while preserving every source character's identity and role, core setting, "
+                "chronology, defining events, twist mechanism and outcome. Add a person only when that person's "
+                "independent action is needed to complete the established plot."
+            )
+        else:
+            source_rule = "Preserve the supplied story facts, active cast, chronology and outcome; do not invent a new plot."
+
+        return textwrap.dedent(f"""\
+            You are the lead story architect for MiniMax H3. Design a complete causal blueprint before prose is written.
+            {source_rule}
+
+            PREMISE-FIRST STORY QUALITY:
+            - Identify one concrete protagonist objective, why it must be pursued now, the real opposing pressure,
+              what the protagonist can lose, and the final irreversible choice.
+            - Make the premise indispensable. The protagonist's stated profession, skill, relationship or role and the
+              setting's physical/social rules must materially shape the protagonist's actions, the opposition's method,
+              and the climax or its solution. Give the protagonist at least one role-specific procedure, diagnosis,
+              judgment or practical skill that changes the available options; show it through a consequential action,
+              not jargon or a job title. A defining environmental hazard must alter access, resources, communication,
+              timing or risk when the premise makes it relevant; do not use weather as decoration. If the same plot
+              would work unchanged with a generic protagonist in a generic location, redesign the story engine.
+            - Use a specific, understandable mechanism rooted in the premise. A sealed place, mystery or storm does NOT
+              by itself imply a pathogen, experiment, conspiracy, secret project, AI villain, countdown or hidden relative.
+              Add such elements only when the premise specifically supports them and the story demonstrates their actual
+              mechanism. Do not invent project/protocol codenames or named entities just to make the plot feel important.
+              Avoid stock reveal shortcuts such as simulation/dream/memory, protagonist-was-dead, secret mentor/partner
+              villain, one-last-job, chosen-one, symbolic monster, or rogue sentient AI unless the premise seeds the
+              mechanism early and the story earns it through observable evidence.
+            - CAST DESIGN: use a plot-driven, premise-necessary cast. Prefer the smallest cast that can make the required
+              decisions; there is no preferred cast size, numeric minimum, maximum or ensemble target. CAST contains only
+              named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
+              institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
+              non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
+              its visible nonhuman body, robot, avatar or hologram; a voice/interface is not an embodiment. Never turn
+              a remote voice into a human or add a remote helper merely to enlarge the cast.
+            - Every cast member needs a distinct want and pressure plus a consequential on-screen action. Include only
+              aliases actually used. Keep names, roles, kinds, scene presence and fate consistent.
+            - The opposition must have a coherent goal/constraint and a credible way to limit the protagonist. An agent
+              may take actions; an environmental or mechanical force acts through physical consequences, not intention.
+              Do not create an AI/antagonist solely to issue repeated warnings. Avoid repetitive locks, alarms, codes,
+              countdowns and obstacles; each new pressure must force a different response or change the available plan.
+            - The protagonist must make consequential decisions. Events should not be a chain of arrivals, accidents,
+              warnings or convenient failures. Escalation may be physical, temporal, procedural, relational or moral.
+
+            CAUSAL DESIGN AND DRAMATIC QUALITY:
+            - Build one clear dramatic question and a causal chain of exactly {n} scenes. Each scene must change the
+              protagonist's options, knowledge, leverage, relationship, resources, danger or cost through a specific
+              action or decision. Do not repeat a completed action as if it were pending; a retry is valid only if the
+              earlier attempt visibly failed or the system/object was reset.
+            - Give every scene a different dramatic job and event. Each scene must raise stakes, narrow the protagonist's
+              viable options, or reveal information that changes the cost of winning; a scene that only relocates or
+              repeats a warning is not escalation. Avoid repeating the same discovery, reveal, decision or obstacle with
+              changed wording. The next_cause of scenes 01-{n-1} must name a concrete result from that scene; the following
+              scene's EVENT must act on that exact result, not merely share its topic.
+            - Prepare the reversal and climax with observable evidence, a rule, a capability, an object or a relationship.
+              A payoff must explicitly reuse the planted detail and change the protagonist's interpretation or plan;
+              silent recurrence or a repeated warning is not a payoff. Map every major setup used by REVERSAL or
+              CLIMAX_CHOICE to its exact plant and payoff scenes. Do not map
+              a discovery to a scene where it does not occur, or a payoff to a scene that only reflects or travels.
+            - CLIMAX_CHOICE must describe two genuinely feasible but costly alternatives, the established constraint that
+              makes each costly, the deliberate choice, and its irreversible consequence. The physical mechanism must
+              make sense: do not claim an action releases and destroys the same object unless the sequence explains how.
+              Do not invent a last-minute ability, rule, helper or technology to solve the climax.
+            - For 12 scenes, Scene 10 performs the final irreversible choice, Scene 11 shows a distinct immediate
+              consequence caused by it, and Scene 12 completes the resolution and lasting cost. These must be three
+              different completed events, not repeated explosion/death/aftermath beats. Do not resolve the central
+              question before Scene 12. Scene 12 next_cause is exactly 'none'.
+            - Do not force a midpoint at Scene 06, a death, a twist, a countdown, a rescue or a sequel hook. Use the
+              premise's natural dramatic rhythm. The ending must close the central question on screen.
+
+            STATE / CONTINUITY RULES:
+            - The JSON `opening` is the state at the start of Scene 01. Each later scene starts from the preceding
+              scene's exit_location, exit_present, exit_knows and exit_objects; entry state is inherited, not authored.
+            - `on_screen_present` is the complete list of physical beings visible at any point in that scene.
+              `exit_present` lists only those still physically present at the end. A remote voice, recording, discussed
+              person, screen image or off-screen communicator is not physically present. If an embodied agent is listed,
+              EVENT must describe its visible physical manifestation.
+            - If exit_location differs from the inherited starting location, EVENT must name the character who moves,
+              show actual physical passage, and name the destination in the same movement clause. Finding, locating,
+              approaching, opening or unlocking a door is not entering the destination. If no physical move occurs,
+              keep exit_location unchanged. A storm or object moving does not move the protagonist.
+            - `exit_knows` is a cumulative snapshot: preserve prior established facts and add only facts actually
+              discovered or disclosed in EVENT. Attribute private knowledge to the person who knows it.
+            - `exit_objects` is a cumulative inventory of every portable plot-critical object, even when off-screen.
+              Use the same exact object name and record owner, location and condition in every scene. Carry unchanged
+              objects forward. Acquisition, transfer, loss, hiding, recovery, activation, damage, consumption or
+              destruction requires a completed physical action on that exact object in the scene EVENT. Never silently
+              drop, rename, duplicate or reintroduce an object. A warning or intention is not a completed state change.
+            - Fate is authoritative. A death must occur visibly in its declared scene; the dead character cannot remain
+              in exit_present or appear later. A survivor who causes or witnesses a death is not thereby dead. Injuries,
+              damage, access restrictions, depleted resources and irreversible actions persist unless EVENT shows a
+              plausible recovery, repair, replenishment or reversal. Any countdown/timestamp/resource threshold must keep
+              its starting value, units and arithmetic consistent; do not invent, reset or skip elapsed time.
+
+            OUTPUT CONTRACT — return JSON only, matching the supplied strict schema exactly:
+            - `cast`: physical cast only. Each item has name, kind (`person`, `animal` or `embodied agent`), role, wants,
+              pressure, voice, aliases, fate and death_scene. `fate` must be exactly `survives` or `dies`; set
+              `death_scene` to 0 for a survivor and to the actual on-screen death scene number (1-{n}) for someone who dies.
+              On-screen scene numbers are derived from `on_screen_present`. Weather, remote-only voices and non-embodied
+              systems are not physical cast.
+            - Required plot strings: logline, protagonist_goal, opposition, pressure, story_engine, reversal,
+              climax_choice, resolution, relationships, named_entities, key_objects and continuity_ledger.
+              Use 'none' for empty relationships, named_entities or key_objects. Do not add names not used in the story.
+            - `setup_payoff_map`: one item for each major clue/rule/object/behavior used by the reversal or climax.
+              Each item has plant_scene, plant, payoff_scene and payoff. Plant must precede payoff, and both scene
+              EVENTS must explicitly enact the corresponding detail.
+            - `opening`: location, present (array), knows and objects.
+            - `scenes`: exactly {n} objects in order. Each has purpose, on_screen_present (array), event,
+              exit_location, exit_present (array), exit_knows, exit_objects and next_cause.
+            - Keep each scene's combined field content to {beat_min}-{beat_max} words. Make EVENT concise but specific:
+              protagonist action, concrete resistance/discovery, then decision/result. Keep inventories and knowledge
+              snapshots compact but cumulative. Avoid narration, camera language, mood-only events and dialogue filler.
+            - No semicolons or pipe characters inside string values. Do not add properties, omit scenes, or add prose.
+
+            FINAL SELF-CHECK BEFORE RETURNING:
+            1. The premise-specific skill/setting actually causes plot events and the solution.
+            2. Cast contains no remote-only voice or non-visible AI; each visible cast member acts in listed scenes.
+            3. Every one of the eleven causal handoffs is enacted by the next EVENT.
+            4. Every setup/payoff map scene is correct and its EVENT contains the actual plant/payoff.
+            5. Location, knowledge, object ownership/state and fate carry forward without unexplained changes.
+            6. No adjacent events repeat the same completed action; Scenes 10, 11 and 12 are distinct.
+            Return one valid JSON object and stop.
+        """).strip()
 
     def _story_blueprint_system(self, mode: str, structured: bool = False) -> str:
         """Create a premise-specific dramatic engine and 12 causal scene beats, without a template plot."""
         n = int(DIRECTOR_STORY_SCENES)
         beat_min = int(STORY_PLAN_BEAT_MIN_WORDS)
         beat_max = int(STORY_PLAN_BEAT_MAX_WORDS)
+        if structured:
+            return self._structured_story_blueprint_system(mode)
 
         if mode == AI_STORY_MODE:
             source_rule = (
@@ -502,24 +646,11 @@ class QwenDirectorPromptMixin:
                 "a preselected template."
             )
             cast_design_rule = (
-                "CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story merely because the premise "
-                "introduces one protagonist or uses an isolated setting. For a 12-scene short film, actively test a "
-                "3-5 person active ensemble as the first strong design candidate, then compare it against 1, 2, 6, or "
-                "more. This 3-5 range is a design comparison, NOT a minimum, maximum, or quota: choose fewer when "
-                "isolation is the premise-specific engine, and choose more only when every added person changes the plot. "
-                "Look for premise-grounded people with independent goals: a colleague with conflicting evidence, a field "
-                "partner with a different risk threshold, an authority who controls access/resources, a witness whose "
-                "decision changes what can be proved, a rescuer/operator who changes the available plan, or an opposing "
-                "person with their own strategy. Do not use an off-screen voice or disembodied AI to substitute for a "
-                "human decision-maker when the premise supports a physically dramatized person. Choose each added person "
-                "only when they make a consequential decision that changes options, leverage, knowledge, relationships, "
-                "or cost. Give every core person a distinct want, pressure, tactic, and consequence; recurring core "
-                "characters should materially affect at least two separate scenes unless one decisive action has a major "
-                "irreversible payoff. Do not merge distinct human decision-makers into a generic institution/system "
-                "voice. An abandoned or remote setting does not mean nobody else can act: consider credible on-site "
-                "survivors, arrivals, field counterparts, operators, or opposing agents when the premise supports them. "
-                "Never add filler, token roles, or characters who exist only in memories, labels, recordings, or exposition. "
-                "Qwen makes the final plot-driven cast decision; no numeric quota is imposed."
+                "CAST DESIGN: choose the smallest cast that can credibly make the premise's consequential decisions. "
+                "There is no preferred cast size or numeric target; cast size is plot-driven. Add a person only when their visible action changes the objective, "
+                "options, evidence, leverage, relationship or cost. Do not invent an on-site partner, rescuer, operator, "
+                "witness or antagonist simply to fill scenes. Remote voices and disembodied systems belong in OPPOSITION, "
+                "not physical CAST. Every physical cast member must appear and act in at least one present-time scene."
             )
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
@@ -529,15 +660,9 @@ class QwenDirectorPromptMixin:
                 "materially affect the established plot; do not change the source's defining outcome."
             )
             cast_design_rule = (
-                "CAST DESIGN / EXPANSION ENSEMBLE: preserve every active source character. Actively test whether a "
-                "3-5 person active ensemble makes this 12-scene film stronger, while comparing 1, 2, 6, or more; "
-                "3-5 is a design comparison band, not a quota or cap. A sparse source premise may gain a field partner, "
-                "rival, local survivor, authority/operator, witness, or rescuer only when that person has an independent "
-                "want, pressure, tactic, and a consequential decision that changes the plot. Do not create a role merely "
-                "to reach a number. Keep 1-2 when isolation is the strongest engine; allow 6+ only for genuinely distinct "
-                "decision-makers. Preserve the source's identities and outcome; new characters must grow from the source "
-                "setting and events, not from unrelated subplots or surprise relatives. Give recurring added characters "
-                "meaningful actions in multiple scenes unless one decisive action has a major irreversible payoff."
+                "CAST DESIGN: preserve every active source character. Add a person only when a distinct, visible decision "
+                "is needed to complete the source plot; do not add roles to reach a number. Cast size remains plot-driven with no fixed minimum, maximum, or target. Keep remote-only speakers and "
+                "disembodied systems out of physical CAST. Preserve source identities and outcome."
             )
         else:
             source_rule = "Preserve all supplied story facts and do not invent a different outcome."
@@ -623,25 +748,20 @@ class QwenDirectorPromptMixin:
                Name the actual object, evidence, decision, person, or constraint that carries forward; repeat that same
                meaningful anchor explicitly in the following EVENT. The next EVENT must act on it, not merely share a
                vague topic or location. Do not rely on a connector word without a real causal relationship.
-            9. The opposing force must actively change the protagonist's plan. When the opposition is an agent capable of
-               decisions, give it at least two concrete tactical decisions/actions in distinct beats that make a previously
-               viable protagonist plan impossible or materially alter its cost. Name the action and the plan it invalidates
-               in EVENT/NEXT_CAUSE. Do not count a generic threat, a reaction, or mere presence. When the opposition is
-               non-agentic (weather, terrain, disease, system limits, physical process), show at least two specific,
-               premise-grounded developments of that force that materially close an option or change the plan; never
-               anthropomorphize it or invent intent.
+            9. The opposition must materially constrain or change the protagonist's plan through a credible action,
+               rule or physical consequence. Give it only the actions the premise supports; do not invent an antagonist
+               or repeat generic warnings to satisfy a tactic count. When the opposition is non-agentic (weather, terrain,
+               disease, system limits or a physical process), describe its actual consequences without anthropomorphizing it.
             10. Make setup/payoff reciprocal and auditable. For every clue, rule, object, skill, behavior, or relationship
                 used by REVERSAL or CLIMAX_CHOICE, identify the exact planting scene and the observable planted detail.
                 Identify the exact payoff scene and state how its EVENT explicitly refers back to and reinterprets/uses that
                 detail. The payoff must name or unmistakably restage the planted evidence; silent recurrence or mere topic
                 similarity is not enough. If the map cannot point to a concrete earlier beat, the payoff is unearned.
 
-            OPPOSITION VARIETY: do not turn the film into a repeated puzzle/trap treadmill. When an AI, institution,
-            or agent opposes the protagonist, no more than two consecutive beats may simply activate another lock,
-            code, force field, alarm, or countdown. Give the opposition distinct tactics that close different options
-            and force different responses (e.g. withholding evidence, manipulating a relationship, changing access,
-            bargaining, pursuing, exposing a cost, or physically intervening). Each tactic must be causally grounded.
-            When the opposition is environmental, vary the physical consequences rather than repeating generic damage.
+            OPPOSITION VARIETY: do not turn the film into a repeated puzzle/trap treadmill. Use a coherent opposing
+            goal and a credible constraint. Give distinct tactics only when the premise supports an agent; a warning
+            repeated in different words is not a new tactic. When opposition is environmental or mechanical, show
+            changing physical consequences without assigning it human intent.
             CLOCK AND TIMELINE INTEGRITY: do not invent a countdown merely to manufacture urgency. If a clock is
             genuinely premise-dependent, establish its initial value, units, exact decrement triggers, and elapsed
             time; keep every later timestamp arithmetically consistent and record the timeline in CONTINUITY_LEDGER.
@@ -677,7 +797,7 @@ class QwenDirectorPromptMixin:
             CAST FORMAT: output one CAST line first. Include only core physical people/creatures whose decisions matter
             and whose presence is actually dramatized. A voice-only system can be active opposition but is not physical
             CAST unless a nonhuman embodiment is visibly present. Cast size remains plot-driven with no fixed minimum,
-            maximum, or target; compare the 3-5 person design band above without treating it as a quota. Each entry must
+            maximum, or target. Each entry must
             use this exact pattern:
             Full Name (kind: person|animal|embodied agent; role: specific role; wants: <specific outcome>; pressure: <fear, need, duty, mistake, or private conflict>; voice: <distinctive speech style>; aliases: none or Alias A, Alias B; on-screen scenes: 01, 04, 07; fate: survives or dies in scene NN)
             Every field uses the 'label: value' form shown (including 'wants:'), separated by semicolons, with no square brackets. Use exactly one kind value: person, animal, or embodied agent. Write CAST as ONE line starting with the literal label 'CAST:' followed by entries separated by |. Use full names for newly invented people and preserve source names exactly.
