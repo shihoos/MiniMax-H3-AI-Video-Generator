@@ -1005,47 +1005,56 @@ def test_story_prompt_is_open_cast_and_fully_filled():
         blueprint = " ".join(q._story_blueprint_system(mode).lower().split())
         for structured in (False, True):
             rendered_architect = " ".join(q._story_blueprint_system(mode, structured=structured).lower().split())
-            design_heading = ("cast design / ensemble decision" if mode == AI_STORY_MODE
-                              else "cast design / expansion ensemble")
-            _assert(design_heading in rendered_architect,
-                    f"{mode}: structured={structured} Architect must include the mode-appropriate cast-design instructions")
-            _assert("no fixed minimum, maximum, or target" in rendered_architect,
+            _assert("cast design" in rendered_architect or "smallest cast" in rendered_architect,
+                    f"{mode}: structured={structured} Architect must include premise-driven cast guidance")
+            _assert("no preferred cast size" in rendered_architect or "no fixed minimum, maximum, or target" in rendered_architect,
                     f"{mode}: structured={structured} Architect must remain free of cast-count quotas")
+            _assert("remote-only" in rendered_architect or "remote-only voices" in rendered_architect,
+                    f"{mode}: structured={structured} remote speakers must not be promoted into physical cast")
             if mode == AI_STORY_MODE:
-                _assert("3-5 person active ensemble" in rendered_architect
-                        and "compare it against 1, 2, 6, or more" in rendered_architect
-                        and "do not default to a one-person story" in rendered_architect,
-                        f"{mode}: structured={structured} Architect must compare an ensemble without forcing a cast quota")
-                _assert("independent goals" in rendered_architect and "consequential decision" in rendered_architect,
-                        f"{mode}: structured={structured} supporting characters must have independent agency")
-        _assert("plot-driven" in blueprint and "no fixed minimum, maximum, or target" in blueprint,
+                _assert("smallest cast" in rendered_architect
+                        and ("no preferred cast size" in rendered_architect
+                             or "no fixed minimum, maximum, or target" in rendered_architect),
+                        f"{mode}: structured={structured} cast must be selected from actual plot necessity")
+                if structured:
+                    _assert("distinct want" in rendered_architect and "consequential on-screen action" in rendered_architect,
+                            f"{mode}: structured Architect supporting characters must have independent agency")
+                else:
+                    _assert("independent want" in rendered_architect and "consequential action/decision" in rendered_architect,
+                            f"{mode}: text Architect supporting characters must have independent agency")
+                _assert("3-5 person active ensemble" not in rendered_architect,
+                        f"{mode}: structured={structured} must not bias Qwen toward a 3-5 person ensemble")
+                if not structured:
+                    _assert("do not invent an on-site partner" in rendered_architect,
+                            f"{mode}: text-mode Architect must not invent an on-site partner to fill the cast")
+        _assert("plot-driven" in blueprint and ("no preferred cast size" in blueprint or "no fixed minimum, maximum, or target" in blueprint),
                 f"{mode}: Architect must not impose a numeric cast quota")
         if mode == EXPAND_USER_STORY_MODE:
-            _assert("source's original cast size is not a limit" in blueprint
-                    and "3-5 person active ensemble" in blueprint
-                    and "do not create a role merely to reach a number" in blueprint,
-                    "Expand mode must preserve source anchors while considering purposeful ensemble additions")
+            _assert("preserve every active source character" in blueprint
+                    and "do not add roles to reach a number" in blueprint,
+                    "Expand mode must preserve source anchors without an artificial ensemble target")
             _assert("architect's approved cast may include new premise-grounded people" in low,
                     "Expand Author must honor new characters approved by the Architect")
         if mode == AI_STORY_MODE:
-            _assert("3-5 person active ensemble" in blueprint
-                    and "compare it against 1, 2, 6, or more" in blueprint
-                    and "do not default to a one-person story" in blueprint,
-                    "AI Story Architect must actively evaluate an ensemble without imposing a cast count")
-            _assert("independent goals" in blueprint and "consequential decision" in blueprint,
+            _assert("smallest cast" in blueprint and "no preferred cast size" in blueprint
+                    and "do not invent an on-site partner" in blueprint,
+                    "AI Story Architect must choose cast size from premise and plot necessity")
+            _assert("independent want" in blueprint and "consequential action/decision" in blueprint,
                     "additional cast members must have distinct agency, not filler roles")
         _assert("continuity ledger" in blueprint and "costly climax choice" in blueprint,
                 f"{mode}: Architect must plan continuity and meaningful climax cost")
-        _assert("create exactly 12 linked beats" in blueprint and "do not assign the same fixed function" in blueprint,
+        _assert(("create exactly 12 linked beats" in blueprint and "do not assign the same fixed function" in blueprint)
+                or ("causal chain of exactly 12 scenes" in blueprint and "different dramatic job and event" in blueprint),
                 f"{mode}: Architect must avoid fixed scene-function and sentence templates")
         _assert("relationships" in blueprint and "named_entities" in blueprint and "entry_present" in blueprint
                 and "on_screen_present" in blueprint and "fate: survives or dies in scene nn" in blueprint,
                 f"{mode}: Architect must declare relationship/entity/fate/full-scene visibility contracts")
         blueprint_compact = " ".join(blueprint.split())
-        _assert("kind: person|animal|embodied agent" in blueprint_compact and "weather" in blueprint_compact
-                and "remote-only voices" in blueprint_compact
-                and "visible nonhuman" in blueprint_compact,
-                f"{mode}: the Architect must distinguish physical cast, visible agents and remote opposition")
+        structured_blueprint = " ".join(q._story_blueprint_system(mode, structured=True).lower().split())
+        _assert("kind (`person`, `animal` or `embodied agent`)" in structured_blueprint and "weather" in structured_blueprint
+                and "remote-only voices" in structured_blueprint
+                and "visible" in structured_blueprint,
+                f"{mode}: the structured Architect must distinguish physical cast, visible agents and remote opposition")
         _assert("each of the eleven transitions" in blueprint,
                 f"{mode}: Architect must explicitly link every scene transition")
 
@@ -1259,21 +1268,24 @@ def test_story_prompts_encode_escalation_opposition_setup_payoff_and_scene_purpo
     from planner.qwen_director_prompts import SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
 
     director = QwenDirector.__new__(QwenDirector)
-    architect = " ".join(director._story_blueprint_system(AI_STORY_MODE).split())  # prompt is hard-wrapped
+    architect = " ".join(director._story_blueprint_system(AI_STORY_MODE, structured=True).split())
+    architect_lower = architect.lower()
     author = director._story_text_system_raw(AI_STORY_MODE)
-    _assert("raises the stakes, narrows the protagonist's viable options" in architect,
-            "Architect RULE 2 must explicitly demand escalation")
-    _assert("at least two concrete tactical decisions/actions" in architect,
-            "Architect must require consequential opposition actions")
-    _assert("SETUP_PAYOFF_MAP" in architect and "silent recurrence" in architect,
+    _assert("raise stakes, narrow the protagonist's" in architect
+            and "a scene that only relocates" in architect,
+            "Structured Architect must distinguish escalation from repeated warnings or movement")
+    _assert("do not create an ai/antagonist solely to issue repeated warnings" in architect_lower
+            and "tactic count" not in architect_lower,
+            "Architect opposition must be premise-grounded, not a quota-driven warning source")
+    _assert("setup_payoff_map" in architect_lower and "silent recurrence" in architect_lower,
             "Architect must explicitly map plants to visible payoffs")
-    _assert("CLIMAX CHOICE" in architect and "physical, procedural, or moral constraint" in architect,
-            "Architect must define both constraints in the climax dilemma")
-    for banned in ("simulation/dream/memory", "protagonist-was-dead", "becomes sentient and turns against its creators",
-                   "one-last-job", "chosen-one prophecy", "only a symbol for grief or trauma"):
-        _assert(banned in architect, f"Architect anti-cliche list missing {banned!r}")
-    _assert("PURPOSE=[" in architect and "PURPOSE" in author,
-            "Architect scene PURPOSE must be passed as a required Author contract")
+    _assert("climax_choice" in architect and "two genuinely feasible but costly alternatives" in architect,
+            "Architect must define physically feasible and costly climax alternatives")
+    for banned in ("simulation/dream/memory", "protagonist-was-dead", "secret mentor/partner",
+                   "one-last-job", "chosen-one", "symbolic monster", "rogue sentient ai"):
+        _assert(banned in architect_lower, f"Structured Architect anti-cliche guard missing {banned!r}")
+    _assert("purpose" in architect_lower and "PURPOSE" in author,
+            "JSON Architect scene purpose must be passed as a required Author contract")
     _assert("Architect-authored `dramatic_purpose`" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT
             and "copy it verbatim" in SHOT_DIRECTOR_BATCH_SYSTEM_PROMPT,
             "Shot Director must consume, not reinvent, Architect dramatic purpose")
@@ -1411,6 +1423,46 @@ def test_structured_architect_json_round_trips_through_every_contract():
     member = schema["properties"]["cast"]["items"]
     _assert({"wants", "pressure", "voice"} <= set(member["required"]),
             "wants/pressure/voice are schema keys, so a goal can no longer be mis-labelled or omitted")
+    _assert(member["properties"]["fate"]["enum"] == ["survives", "dies"]
+            and member["properties"]["death_scene"]["minimum"] == 0
+            and member["properties"]["death_scene"]["maximum"] == DIRECTOR_STORY_SCENES,
+            "structured cast fate must use the exact enum and a bounded death_scene integer")
+    scene_schema = schema["properties"]["scenes"]["items"]["properties"]
+    _assert(scene_schema["event"].get("maxLength", 0) >= 400
+            and scene_schema["event"].get("maxLength", 0) <= 600
+            and scene_schema["exit_objects"].get("maxLength", 0) >= 400,
+            "structured schema must bound verbose fields without truncating substantive events or object inventories")
+    from planner.qwen_director import QwenDirector
+    compact_prompt = QwenDirector.__new__(QwenDirector)._story_blueprint_system(AI_STORY_MODE, structured=True)
+    _assert(len(compact_prompt) < 12000,
+            f"live structured Architect prompt regressed in size ({len(compact_prompt)} chars)")
+    compact_lower = " ".join(compact_prompt.lower().split())
+    _assert("premise indispensable" in compact_lower
+            and "profession, skill" in compact_lower
+            and "smallest cast" in compact_lower
+            and "cumulative inventory" in compact_lower and "exit_objects" in compact_lower,
+            "live structured prompt must prioritize premise-specific plot, necessary cast and cumulative objects")
+    _assert("materially shape" in compact_lower and "if the same plot would work unchanged" in compact_lower,
+            "the protagonist's profession and setting must be causally necessary, not decorative")
+    _assert("role-specific procedure" in compact_lower and "not jargon or a job title" in compact_lower
+            and "weather as decoration" in compact_lower,
+            "the protagonist's actual skill and premise-specific environment must drive the plot")
+    _assert("fate` must be exactly `survives` or `dies`" in compact_lower
+            and "death_scene` to 0 for a survivor" in compact_lower,
+            "the structured prompt must match the JSON schema's exact fate and death_scene representation")
+    _assert("a sealed place, mystery or storm does not" in compact_lower
+            and "do not invent project/protocol codenames" in compact_lower,
+            "the Architect must not add generic pathogen/project twists without premise support")
+    _assert("scene 10 performs the final irreversible choice" in compact_lower
+            and "scene 11 shows a distinct immediate consequence" in compact_lower
+            and "scene 12 completes the resolution" in compact_lower,
+            "the final three scenes must have distinct completed dramatic functions")
+    _assert("injuries, damage, access restrictions, depleted resources" in compact_lower
+            and "starting value, units and arithmetic consistent" in compact_lower,
+            "persistent physical damage and any premise-grounded timeline must remain consistent")
+    _assert("exit_objects" in compact_lower and "owner, location and condition" in compact_lower
+            and "never silently drop, rename, duplicate or reintroduce an object" in compact_lower,
+            "the live JSON prompt must preserve cumulative object custody and condition")
     # Regression (Kaggle run): the model listed "The Storm" as cast; it is never on screen, so it must be
     # removed (and reported) rather than failing the whole plan with an empty on-screen scene list.
     storm = json.loads(json.dumps(data))
@@ -1456,6 +1508,9 @@ def test_architect_and_author_get_only_informed_hard_gate_revisions():
         def architect(replies):
             director = QwenDirector.__new__(QwenDirector)
             director.project_root = Path(tmp)
+            # The production patch preflights the exact chat template; provide a deterministic
+            # tokenizer-budget stub here so this orchestration test remains offline.
+            director._available_output_tokens = lambda system, user, minimum_completion=512, *, enable_thinking=False: (1000, 5400)
             users = []
             def fake_chat(system, user, **kwargs):
                 users.append((user, kwargs.get("response_format")))
@@ -1903,6 +1958,54 @@ def test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling():
             f"Writer must preserve min_tokens=0: {calls[0]}")
     _assert(STORY_MIN_WORDS == 1400, "minimum accepted story length must be 1,400 words")
     _assert(count == DIRECTOR_STORY_SCENES, "story must preserve twelve scene paragraphs")
+
+
+def test_available_output_budget_counts_exact_chat_template_with_thinking_mode():
+    from planner.qwen_director_runtime import QwenDirectorRuntimeMixin
+    from planner.config import DIRECTOR_VLLM_MAX_MODEL_LEN
+
+    class FakeTokenizer:
+        def __init__(self):
+            self.calls = []
+        def apply_chat_template(self, messages, **kwargs):
+            self.calls.append((messages, kwargs))
+            # Deliberately include ChatML overhead that raw system+user token counting would miss.
+            return list(range(6100 if kwargs.get("enable_thinking") else 6000))
+
+    director = QwenDirectorRuntimeMixin.__new__(QwenDirectorRuntimeMixin)
+    director._tokenizer = FakeTokenizer()
+    prompt_tokens, effective = director._available_output_tokens(
+        "SYSTEM", "USER", minimum_completion=400, enable_thinking=True
+    )
+    _assert(prompt_tokens == 6100, f"prompt count must use rendered chat-template token IDs, got {prompt_tokens}")
+    _assert(effective == min(7000, DIRECTOR_VLLM_MAX_MODEL_LEN - 6100 - 128),
+            f"effective completion must reserve exact prompt and safety tokens, got {effective}")
+    _assert(director._tokenizer.calls[-1][1].get("enable_thinking") is True,
+            "the budget counter must use the same thinking-mode template as the request")
+
+    # JSON calls must count the same thinking-mode template they later send to _post_chat.
+    json_director = QwenDirectorRuntimeMixin.__new__(QwenDirectorRuntimeMixin)
+    json_director._vllm_session = object()
+    budget_modes = []
+    request_modes = []
+    def fake_budget(system, user, minimum_completion=512, *, enable_thinking=False):
+        budget_modes.append(bool(enable_thinking))
+        return 100, 500
+    def fake_post(**kwargs):
+        request_modes.append(bool(kwargs.get("enable_thinking")))
+        return {"choices": [{"message": {"content": '{"ok": true}'}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 5}}
+    json_director._available_output_tokens = fake_budget
+    json_director._post_chat = fake_post
+    json_director._record_qwen_call = lambda **kwargs: None
+    json_director._trace_call = lambda *args, **kwargs: None
+    json_director._cache_dir = None
+    result = json_director._chat_json(
+        "SYSTEM", "USER", call_name="thinking_json", max_completion=400,
+        json_mode=False, disable_thinking=False,
+    )
+    _assert(result == {"ok": True} and budget_modes == [True] and request_modes == [True],
+            "JSON budget preflight and request must use the same enabled-thinking chat template")
 
 
 def test_author_min_tokens_zero_is_omitted_from_vllm_payload():
@@ -3161,6 +3264,7 @@ def main():
         test_story_completion_contract_reports_an_unresolved_final_hook_as_a_warning,
         test_story_pipeline_uses_two_bounded_stages_and_only_conditional_revisions,
         test_story_writer_is_one_qwen3_nonthinking_call_with_configured_ceiling,
+        test_available_output_budget_counts_exact_chat_template_with_thinking_mode,
         test_author_min_tokens_zero_is_omitted_from_vllm_payload,
         test_rejected_author_draft_is_saved_for_diagnosis,
         test_author_wrapper_preserves_draft_when_pipeline_rejects_it,
