@@ -40,17 +40,22 @@ KINDS = ("person", "animal", "embodied agent")
 
 
 def blueprint_json_schema(scene_count: int) -> dict:
-    text = {"type": "string", "minLength": 1}
-    names = {"type": "array", "items": text}
+    def text(max_length: int | None = None) -> dict:
+        value = {"type": "string", "minLength": 1}
+        if max_length is not None:
+            value["maxLength"] = int(max_length)
+        return value
+
+    names = {"type": "array", "items": text(80)}
     cast_item = {
         "type": "object",
         "properties": {
-            "name": text,
+            "name": text(80),
             "kind": {"type": "string", "enum": list(KINDS)},
-            "role": text,
-            "wants": text,
-            "pressure": text,
-            "voice": text,
+            "role": text(100),
+            "wants": text(200),
+            "pressure": text(200),
+            "voice": text(100),
             "aliases": names,
             "fate": {"type": "string", "enum": ["survives", "dies"]},
             "death_scene": {"type": "integer", "minimum": 0, "maximum": scene_count},
@@ -58,7 +63,18 @@ def blueprint_json_schema(scene_count: int) -> dict:
         "required": ["name", "kind", "role", "wants", "pressure", "voice", "aliases", "fate", "death_scene"],
         "additionalProperties": False,
     }
-    scene_props = {k: (names if k in SCENE_LIST_FIELDS else text) for k in AUTHORED_SCENE_FIELDS}
+    scene_text_limits = {
+        "purpose": 180,
+        "event": 520,
+        "exit_location": 120,
+        "exit_knows": 600,
+        "exit_objects": 480,
+        "next_cause": 280,
+    }
+    scene_props = {
+        key: (names if key in SCENE_LIST_FIELDS else text(scene_text_limits.get(key, 320)))
+        for key in AUTHORED_SCENE_FIELDS
+    }
     scene_item = {
         "type": "object",
         "properties": scene_props,
@@ -67,7 +83,7 @@ def blueprint_json_schema(scene_count: int) -> dict:
     }
     opening = {
         "type": "object",
-        "properties": {"location": text, "present": names, "knows": text, "objects": text},
+        "properties": {"location": text(120), "present": names, "knows": text(600), "objects": text(480)},
         "required": list(OPENING_FIELDS),
         "additionalProperties": False,
     }
@@ -75,18 +91,23 @@ def blueprint_json_schema(scene_count: int) -> dict:
         "type": "object",
         "properties": {
             "plant_scene": {"type": "integer", "minimum": 1, "maximum": scene_count},
-            "plant": text,
+            "plant": text(260),
             "payoff_scene": {"type": "integer", "minimum": 1, "maximum": scene_count},
-            "payoff": text,
+            "payoff": text(260),
         },
         "required": ["plant_scene", "plant", "payoff_scene", "payoff"],
         "additionalProperties": False,
     }
     properties = {"cast": {"type": "array", "minItems": 1, "items": cast_item}}
+    plot_text_limits = {
+        "logline": 320, "protagonist_goal": 240, "opposition": 420, "pressure": 360,
+        "story_engine": 420, "reversal": 360, "climax_choice": 480, "resolution": 360,
+        "relationships": 300, "named_entities": 300, "key_objects": 360,
+    }
     for key in PLOT_TEXT_FIELDS:
-        properties[key] = text
+        properties[key] = text(plot_text_limits.get(key, 420))
     properties["setup_payoff_map"] = {"type": "array", "minItems": 1, "items": payoff_item}
-    properties["continuity_ledger"] = text
+    properties["continuity_ledger"] = text(600)
     properties["opening"] = opening
     properties["scenes"] = {"type": "array", "minItems": scene_count, "maxItems": scene_count, "items": scene_item}
     return {
