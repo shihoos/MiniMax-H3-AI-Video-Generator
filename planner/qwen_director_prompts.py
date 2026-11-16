@@ -990,7 +990,7 @@ class QwenDirectorPromptMixin:
             r"SCENE BEATS: output exactly .*?NEXT_CAUSE=\[[^\]]*\]\.",
             f"SCENE BEATS: `opening` gives the starting state of scene 1 (location, present people, what they know, objects). "
             f"`scenes` then holds exactly {n} objects in story order, each {beat_min}-{beat_max} words across its fields. "
-            "Keys: purpose, on_screen_present (array of names), event (three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions), exit_location, exit_present (array of names), "
+            "Keys: purpose (one concrete clause of 8-11 words naming what this scene changes; anything under 7 words is rejected), on_screen_present (array of names), event (three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions), exit_location, exit_present (array of names), "
             "exit_knows, exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the "
             "final scene). Entry state is not written: each scene begins exactly where the previous one ended. The rules "
             "below name these same fields in UPPERCASE, and ENTRY_* means the previous scene's exit. Do not use "
