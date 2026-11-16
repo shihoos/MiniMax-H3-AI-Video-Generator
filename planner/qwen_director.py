@@ -26,6 +26,7 @@ from planner.story_contracts import (
     validate_blueprint_state_contract,
     _scene_local_transition_is_explained,
     _distinctive_plot_tokens,
+    word_tokens,
     _inventory_items,
     _same_inventory_object,
     reconcile_cast_scenes,
@@ -2638,8 +2639,14 @@ class QwenDirector(
         plot_fields: list[str] | None = None,
         *,
         include_setup_payoff_map: bool = False,
+        extra_scenes: int = 0,
     ) -> dict:
-        """Build a strict schema for scene-only, field-only, or combined bounded repairs."""
+        """Build a strict schema for scene-only, field-only, or combined bounded repairs.
+
+        ``extra_scenes`` lets a setup/payoff map repair also return up to that many scenes beyond the failing ones
+        (a payoff that actually happens elsewhere). The application accepts an extra scene only when the returned
+        map names it, and then only its EVENT.
+        """
         text = {"type": "string", "minLength": 1}
         names = {"type": "array", "items": text}
         scene_properties = {
@@ -2650,8 +2657,12 @@ class QwenDirector(
         scene_required = [
             "scene", "purpose", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause",
         ]
+        extra_scenes = max(0, int(extra_scenes)) if scene_numbers else 0
         if scene_numbers:
-            scene_properties["scene"] = {"type": "integer", "enum": list(scene_numbers)}
+            allowed_numbers = (
+                list(range(1, int(DIRECTOR_STORY_SCENES) + 1)) if extra_scenes else list(scene_numbers)
+            )
+            scene_properties["scene"] = {"type": "integer", "enum": allowed_numbers}
         scene = {
             "type": "object", "properties": scene_properties, "required": scene_required,
             "additionalProperties": False,
@@ -2660,7 +2671,8 @@ class QwenDirector(
             # With no scene failures this must be exactly [], and its item schema remains valid JSON Schema
             # (never emit an invalid enum: []).
             "scenes": {
-                "type": "array", "minItems": len(scene_numbers), "maxItems": len(scene_numbers), "items": scene,
+                "type": "array", "minItems": len(scene_numbers),
+                "maxItems": min(int(DIRECTOR_STORY_SCENES), len(scene_numbers) + extra_scenes), "items": scene,
             },
         }
         required = ["scenes"]
@@ -2772,6 +2784,12 @@ class QwenDirector(
                     f"(for example: \"<Name> walks into the {as_text(scene.get('exit_location'))}.\"; pick the verb that fits the "
                     "direction: enters, climbs up to, descends into, flees to); or else set exit_location to where the scene starts."
                 )
+            if any("PURPOSE is too vague" in c for c in mentions):
+                words_now = len(word_tokens(as_text(scene.get("purpose"))))
+                notes.append(
+                    f"  FIX HOW: the purpose currently counts {words_now} words; write 8-11 words (the hard minimum is 7) "
+                    "naming the one concrete change this scene causes."
+                )
             for pair in data.get("setup_payoff_map") or []:
                 if not isinstance(pair, dict):
                     continue
@@ -2794,6 +2812,41 @@ class QwenDirector(
                     )
             return notes
 
+        allowed_by_scene: dict[int, set[str]] = {}
+        for item in cleaned:
+            low = item.casefold()
+            numbers = [int(v) for v in re.findall(r"\bscenes?\s+0*(\d+)", item, re.I)]
+            for number in numbers:
+                bucket = allowed_by_scene.setdefault(number, set())
+                if "changes its physical location" in low:
+                    bucket |= {"event", "exit_location", "exit_present"}
+                if "purpose is too vague" in low:
+                    bucket.add("purpose")
+                if "repeats the preceding" in low:
+                    bucket |= {"purpose", "event"}
+                if re.search(r"key-object|object state|object inventory|object identity|drops key object|introduces key object", low):
+                    bucket |= {"event", "exit_objects"}
+                if re.search(r"next_cause|handoff|anchored to the previous", low):
+                    bucket |= {"event", "next_cause"}
+                    if "anchored to the previous" in low and number > 1:
+                        allowed_by_scene.setdefault(number - 1, set()).update({"event", "next_cause"})
+                if re.search(r"cast fate|death of|dies here|mid-scene|presence|exit_present|physical appearances", low):
+                    bucket |= {"event", "exit_present"}
+                if re.search(r"knowledge|exit_knows", low):
+                    bucket |= {"event", "exit_knows"}
+                if "setup_payoff_map" in low:
+                    bucket.add("event")
+        for pair in data.get("setup_payoff_map") or []:
+            if map_needs_patch and isinstance(pair, dict):
+                for key in ("plant_scene", "payoff_scene"):
+                    try:
+                        allowed_by_scene.setdefault(int(pair.get(key)), set()).add("event")
+                    except (TypeError, ValueError):
+                        pass
+        for number in affected:
+            if not allowed_by_scene.get(number):
+                allowed_by_scene[number] = {"event", "next_cause"}
+
         blocks = []
         for number in affected:
             scene = scenes[number - 1]
@@ -2801,6 +2854,7 @@ class QwenDirector(
                 f"SCENE {number:02d} (currently starts in: {as_text(scene.get('entry_location'))}; "
                 f"present at start: {as_text(scene.get('entry_present'))})",
                 f"  purpose: {as_text(scene.get('purpose'))}",
+                f"  objects at start: {as_text(scene.get('entry_objects'))}",
                 f"  event: {as_text(scene.get('event'))}",
                 f"  exit_location: {as_text(scene.get('exit_location'))}",
                 f"  exit_present: {as_text(scene.get('exit_present'))}",
@@ -2814,6 +2868,10 @@ class QwenDirector(
                     "exit_present must NOT list them."
                 )
             lines.extend(scene_notes(number, scene))
+            lines.append(
+                "  ALLOWED TO CHANGE: " + ", ".join(sorted(allowed_by_scene.get(number, {"event"})))
+                + " (copy every other field exactly; unlisted fields are ignored)"
+            )
             blocks.append("\n".join(lines))
         map_text = " | ".join(
             f"PLANT S{int(x.get('plant_scene', 0)):02d}: {x.get('plant')}; PAYOFF S{int(x.get('payoff_scene', 0)):02d}: {x.get('payoff')}"
@@ -2823,7 +2881,7 @@ class QwenDirector(
             f"You are the Story Architect repairing a rejected {total}-scene short-film plan. Return only the requested "
             "scene patches and/or global plot-field patches. The application preserves the original CAST and every "
             "unrequested scene/field unchanged.\n"
-            "For each requested scene, correct every named finding. Rewrite PURPOSE when it is named as vague; PURPOSE "
+            "For each requested scene, correct every named finding, changing only the fields listed under ALLOWED TO CHANGE. Rewrite PURPOSE when it is named as vague; PURPOSE "
             "must state one specific scene-caused change in exactly 7-12 words, not a generic label. Rewrite EVENT when continuity, object action, "
             "causal handoff, death or setup/payoff findings require it. Returning a failing field unchanged is a failure. "
             "Keep the same characters, premise and story direction; keep each event 25-45 words.\n"
@@ -2836,14 +2894,32 @@ class QwenDirector(
             "only through a completed action in the event that names that exact object. (4) next_cause is a concrete "
             "result that forces the next scene (only scene 12 may be 'none'); the following scene's event must act on it. (5) For a setup/payoff finding, "
             "the plant scene's event must visibly show the planted object/fact, and the payoff scene's event must repeat that "
-            "same noun and use it to change the plan. Fix a setup/payoff finding by rewriting the PLANT/PAYOFF scene EVENT so it "
-            "performs the mapped action; never satisfy it by only editing exit_knows. When a map correction is requested, return the "
+            "same noun and use it to change the plan. Fix a setup/payoff finding with the smallest change that is true: if the planted item is already shown in a different "
+            "scene, correct the map's plant_scene/payoff_scene to that scene; otherwise rewrite the PLANT/PAYOFF scene EVENT so it "
+            "performs the mapped action. Never satisfy it by only editing exit_knows. When a map correction is requested, return the "
             "complete corrected non-empty `setup_payoff_map` with plain wording and no scene references such as (S03) inside the "
             "plant or payoff text; otherwise omit that key entirely.\n"
             "If no scenes are requested, return scenes as []. If no setup/payoff correction is requested, omit that key. "
+            "Keep every event sentence that already shows a tracked object being used, moved or changed unless a finding names it: "
+            "rewriting an event must not drop an object action that exit_objects or the next scene depends on. "
             "Return setup_payoff_map only when the map itself is named in the findings. Do not use semicolons or pipe "
             "characters inside values. JSON only."
         )
+        other_scenes_text = ""
+        if map_needs_patch:
+            def short(value: str, limit: int = 26) -> str:
+                words = str(value or "").split()
+                return " ".join(words[:limit]) + (" ..." if len(words) > limit else "")
+            others = [
+                f"  S{n:02d} (ends in {as_text(scenes[n - 1].get('exit_location'))}): {short(as_text(scenes[n - 1].get('event')))}"
+                for n in range(1, total + 1) if n not in affected
+            ]
+            if others:
+                other_scenes_text = (
+                    "OTHER SCENES (reference only, unchanged). If the planted evidence or its payoff actually happens "
+                    "in one of these, correct the map to that scene and ALSO return that scene (change only its event):\n"
+                    + "\n".join(others) + "\n\n"
+                )
         field_lines = [f"{key}: {as_text(data.get(key))}" for key in plot_fields]
         user_prompt = (
             "PREMISE: " + self._compact_story_context(user_input, 600) + "\n"
@@ -2854,6 +2930,7 @@ class QwenDirector(
             "VALIDATION FINDINGS TO FIX:\n- " + "\n- ".join(cleaned) + "\n\n"
             "GLOBAL PLOT FIELDS TO REWRITE (return only these exact keys):\n"
             + ("\n".join(field_lines) if field_lines else "none") + "\n\n"
+            + other_scenes_text +
             "SCENES TO REWRITE (return exactly these scene numbers, in order: "
             + (", ".join(str(n) for n in affected) if affected else "none") + "):\n\n"
             + "\n\n".join(blocks)
@@ -2915,24 +2992,47 @@ class QwenDirector(
             seed=(DIRECTOR_VLLM_SEED if mode == EXPAND_USER_STORY_MODE else random.randint(1, 2**31 - 1)),
             creative=False,
             thinking_token_budget=min(int(DIRECTOR_STORY_PLAN_THINKING_BUDGET), 800),
-            response_format=self._patch_response_format(affected, plot_fields, include_setup_payoff_map=map_needs_patch),
+            response_format=self._patch_response_format(
+                affected, plot_fields, include_setup_payoff_map=map_needs_patch,
+                extra_scenes=2 if map_needs_patch else 0,
+            ),
         )
         try:
             patch = json.loads(raw) if isinstance(raw, str) else raw
         except ValueError as exc:
             raise RuntimeError(f"Scene patch returned malformed JSON ({exc}).") from exc
         patched = {int(item.get("scene", 0)): item for item in (patch or {}).get("scenes", []) if isinstance(item, dict)}
-        if set(patched) != set(affected):
+        new_map = [x for x in (patch or {}).get("setup_payoff_map", []) if isinstance(x, dict)]
+        missing_scenes = sorted(set(affected) - set(patched))
+        extra_returned = sorted(set(patched) - set(affected))
+        if missing_scenes:
             raise RuntimeError(f"Scene patch covered scenes {sorted(patched)}; expected {affected}.")
+        map_scene_numbers: set[int] = set()
+        for item in new_map:
+            for key in ("plant_scene", "payoff_scene"):
+                try:
+                    map_scene_numbers.add(int(item.get(key)))
+                except (TypeError, ValueError):
+                    pass
+        # An extra scene is legitimate only when the corrected map now names it (a relocated plant/payoff).
+        if extra_returned and not (map_needs_patch and set(extra_returned) <= map_scene_numbers):
+            raise RuntimeError(
+                f"Scene patch returned scenes {extra_returned} that are neither failing nor named by a corrected map."
+            )
         returned_fields = (patch or {}).get("plot_fields") or {}
         if set(returned_fields) != set(plot_fields):
             raise RuntimeError(f"Global field patch covered {sorted(returned_fields)}; expected {sorted(plot_fields)}.")
         unchanged = [n for n in affected if as_text(patched[n].get("event")).strip() == as_text(scenes[n - 1].get("event")).strip()]
         if unchanged:
             print(f"[QWEN] story_architecture scene_patch warning=event_unchanged scenes={unchanged}", flush=True)
-        for number in affected:
+        if extra_returned:
+            print(f"[QWEN] story_architecture scene_patch relocated_map_scenes={extra_returned}", flush=True)
+        for number in sorted(patched):
             target = data["scenes"][number - 1]
+            allowed_fields = allowed_by_scene.get(number) or ({"event"} if number in extra_returned else set())
             for key in self._PATCH_SCENE_FIELDS:
+                if key not in allowed_fields:
+                    continue          # only fields the findings name may change; the rest stay as planned
                 value = patched[number].get(key)
                 if key == "exit_present":
                     target[key] = [str(v).strip() for v in (value or []) if str(v).strip()]
@@ -2941,7 +3041,6 @@ class QwenDirector(
         for key, value in ((patch or {}).get("plot_fields") or {}).items():
             if key in plot_fields and str(value or "").strip():
                 data[key] = str(value).strip()
-        new_map = [x for x in (patch or {}).get("setup_payoff_map", []) if isinstance(x, dict)]
         if map_needs_patch:
             if not new_map:
                 raise RuntimeError("Setup/payoff repair was requested, but the Architect returned no replacement map.")
@@ -2953,88 +3052,15 @@ class QwenDirector(
         for scene in data["scenes"]:
             for key in ("entry_location", "entry_present", "entry_knows", "entry_objects"):
                 scene.pop(key, None)
-        cast_names_list = [str(m.get("name", "")).strip() for m in (data.get("cast") or []) if isinstance(m, dict)]
-        repairs: list[str] = []
-
-        def rebuild() -> str:
-            return self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
-
-        def repair_boundaries(errors: list[str]) -> bool:
-            """Deterministic, story-neutral repairs of defects the model left behind. Returns True if anything changed."""
-            changed = False
-            # (a) A declared move that the patched event still does not narrate: state the passage the plan declares.
-            stuck = sorted({
-                int(m) for item in errors
-                for m in re.findall(r"scene\s+0*(\d+)\s+changes its physical location without an explicit transition", str(item), re.I)
-            } & set(affected))
-            for number in stuck:
-                target = data["scenes"][number - 1]
-                destination = re.sub(r"\s*\([^)]*\)", "", str(target.get("exit_location", ""))).strip().rstrip(".")
-                movers = [n for n in (target.get("exit_present") or []) if str(n).strip() in cast_names_list]
-                if not destination or not movers:
-                    continue
-                article = "" if re.match(r"(?i)(the|a|an)\s", destination) else "the "
-                target["event"] = (
-                    str(target.get("event", "")).rstrip() + f" {movers[0]} then enters {article}{destination}."
-                ).strip()
-                repairs.append(f"transition_clause:S{number:02d}")
-                changed = True
-            # (b) An object-state change no event performs (often a patched scene's inventory cascading into its
-            # neighbour): revert to the previous scene's inventory instead of keeping an unperformed change.
-            for item in errors:
-                match = re.search(
-                    r"scene\s+0*(\d+)\s+key-object state change is not anchored to the named object and a physical action \('(.*)'\)",
-                    str(item), re.I | re.S,
-                )
-                if not match:
-                    continue
-                number, changed_item = int(match.group(1)), match.group(2)
-                if not 1 <= number <= total:
-                    continue
-                scene_now = data["scenes"][number - 1]
-                previous = (
-                    data["scenes"][number - 2].get("exit_objects", "") if number > 1
-                    else (data.get("opening") or {}).get("objects", "")
-                )
-                entry_items = _inventory_items(as_text(previous))
-                exit_items = _inventory_items(as_text(scene_now.get("exit_objects", "")))
-                if changed_item in exit_items:
-                    index = exit_items.index(changed_item)
-                    earlier = next((e for e in entry_items if _same_inventory_object(changed_item, e)), None)
-                    if earlier is not None:
-                        exit_items[index] = earlier          # state change unperformed: keep the previous state
-                    else:
-                        del exit_items[index]                # object appearance unperformed: leave it out
-                elif changed_item in entry_items:
-                    exit_items.append(changed_item)          # object vanished unperformed: carry it forward
-                else:
-                    continue
-                scene_now["exit_objects"] = ", ".join(exit_items) if exit_items else "none"
-                repairs.append(f"object_carry_forward:S{number:02d}")
-                changed = True
-            return changed
-
-        blueprint = rebuild()
+        blueprint = ""
         try:
-            for _round in range(14):
-                try:
-                    self._validate_story_blueprint_contract(
-                        mode, blueprint, user_input, source_character_names=source_character_names,
-                    )
-                    break
-                except RuntimeError as rejection_now:
-                    errors_now = list(getattr(self, "_last_story_quality_errors", None) or [str(rejection_now)])
-                    if not repair_boundaries(errors_now):
-                        raise
-                    blueprint = rebuild()
-            else:
-                self._validate_story_blueprint_contract(
-                    mode, blueprint, user_input, source_character_names=source_character_names,
-                )
-            if repairs:
-                print(f"[QWEN] story_architecture scene_patch application_repairs={sorted(set(repairs))}", flush=True)
+            blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
+            self._validate_story_blueprint_contract(
+                mode, blueprint, user_input, source_character_names=source_character_names,
+            )
         except RuntimeError as rejection:
-            if not getattr(self, "_last_story_quality_errors", None):
+            # Nothing is invented or silently adjusted to satisfy a validator: a plan that still fails is rejected.
+            if not getattr(self, "_last_story_quality_errors", None) or not blueprint:
                 self._last_story_quality_errors = [str(rejection)]
             self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=str(rejection))
             raise self._BlueprintRejected(str(rejection), blueprint=blueprint) from rejection
