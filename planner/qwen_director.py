@@ -26,6 +26,8 @@ from planner.story_contracts import (
     validate_blueprint_state_contract,
     _scene_local_transition_is_explained,
     _distinctive_plot_tokens,
+    _inventory_items,
+    _same_inventory_object,
     reconcile_cast_scenes,
     _fields_and_beats,
     validate_cinematic_coverage,
@@ -2767,8 +2769,8 @@ class QwenDirector(
                 notes.append(
                     f"  FIX HOW: the event must contain one sentence in which a named cast member moves into the "
                     f"destination, using its name '{as_text(scene.get('exit_location'))}' "
-                    f"(for example: \"<Name> descends into the {as_text(scene.get('exit_location'))}.\"); "
-                    "or else set exit_location to where the scene starts."
+                    f"(for example: \"<Name> walks into the {as_text(scene.get('exit_location'))}.\"; pick the verb that fits the "
+                    "direction: enters, climbs up to, descends into, flees to); or else set exit_location to where the scene starts."
                 )
             for pair in data.get("setup_payoff_map") or []:
                 if not isinstance(pair, dict):
@@ -2951,42 +2953,86 @@ class QwenDirector(
         for scene in data["scenes"]:
             for key in ("entry_location", "entry_present", "entry_knows", "entry_objects"):
                 scene.pop(key, None)
-        blueprint = self._normalize_story_blueprint(
-            render_blueprint_text(data, total, []), total,
-        )
+        cast_names_list = [str(m.get("name", "")).strip() for m in (data.get("cast") or []) if isinstance(m, dict)]
+        repairs: list[str] = []
+
+        def rebuild() -> str:
+            return self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
+
+        def repair_boundaries(errors: list[str]) -> bool:
+            """Deterministic, story-neutral repairs of defects the model left behind. Returns True if anything changed."""
+            changed = False
+            # (a) A declared move that the patched event still does not narrate: state the passage the plan declares.
+            stuck = sorted({
+                int(m) for item in errors
+                for m in re.findall(r"scene\s+0*(\d+)\s+changes its physical location without an explicit transition", str(item), re.I)
+            } & set(affected))
+            for number in stuck:
+                target = data["scenes"][number - 1]
+                destination = re.sub(r"\s*\([^)]*\)", "", str(target.get("exit_location", ""))).strip().rstrip(".")
+                movers = [n for n in (target.get("exit_present") or []) if str(n).strip() in cast_names_list]
+                if not destination or not movers:
+                    continue
+                article = "" if re.match(r"(?i)(the|a|an)\s", destination) else "the "
+                target["event"] = (
+                    str(target.get("event", "")).rstrip() + f" {movers[0]} then enters {article}{destination}."
+                ).strip()
+                repairs.append(f"transition_clause:S{number:02d}")
+                changed = True
+            # (b) An object-state change no event performs (often a patched scene's inventory cascading into its
+            # neighbour): revert to the previous scene's inventory instead of keeping an unperformed change.
+            for item in errors:
+                match = re.search(
+                    r"scene\s+0*(\d+)\s+key-object state change is not anchored to the named object and a physical action \('(.*)'\)",
+                    str(item), re.I | re.S,
+                )
+                if not match:
+                    continue
+                number, changed_item = int(match.group(1)), match.group(2)
+                if not 1 <= number <= total:
+                    continue
+                scene_now = data["scenes"][number - 1]
+                previous = (
+                    data["scenes"][number - 2].get("exit_objects", "") if number > 1
+                    else (data.get("opening") or {}).get("objects", "")
+                )
+                entry_items = _inventory_items(as_text(previous))
+                exit_items = _inventory_items(as_text(scene_now.get("exit_objects", "")))
+                if changed_item in exit_items:
+                    index = exit_items.index(changed_item)
+                    earlier = next((e for e in entry_items if _same_inventory_object(changed_item, e)), None)
+                    if earlier is not None:
+                        exit_items[index] = earlier          # state change unperformed: keep the previous state
+                    else:
+                        del exit_items[index]                # object appearance unperformed: leave it out
+                elif changed_item in entry_items:
+                    exit_items.append(changed_item)          # object vanished unperformed: carry it forward
+                else:
+                    continue
+                scene_now["exit_objects"] = ", ".join(exit_items) if exit_items else "none"
+                repairs.append(f"object_carry_forward:S{number:02d}")
+                changed = True
+            return changed
+
+        blueprint = rebuild()
         try:
-            try:
+            for _round in range(14):
+                try:
+                    self._validate_story_blueprint_contract(
+                        mode, blueprint, user_input, source_character_names=source_character_names,
+                    )
+                    break
+                except RuntimeError as rejection_now:
+                    errors_now = list(getattr(self, "_last_story_quality_errors", None) or [str(rejection_now)])
+                    if not repair_boundaries(errors_now):
+                        raise
+                    blueprint = rebuild()
+            else:
                 self._validate_story_blueprint_contract(
                     mode, blueprint, user_input, source_character_names=source_character_names,
                 )
-            except RuntimeError as first_rejection:
-                # Last resort for a declared move the model still did not narrate: state the passage the plan
-                # itself already declares (a cast member present at the end enters the declared exit location).
-                # Only patched scenes are touched and every other contract stays hard.
-                stuck = sorted({
-                    int(m) for item in (getattr(self, "_last_story_quality_errors", None) or [str(first_rejection)])
-                    for m in re.findall(r"scene\s+0*(\d+)\s+changes its physical location without an explicit transition", str(item), re.I)
-                } & set(affected))
-                cast_names_list = [str(m.get("name", "")).strip() for m in (data.get("cast") or []) if isinstance(m, dict)]
-                added: list[int] = []
-                for number in stuck:
-                    target = data["scenes"][number - 1]
-                    destination = re.sub(r"\s*\([^)]*\)", "", str(target.get("exit_location", ""))).strip().rstrip(".")
-                    movers = [n for n in (target.get("exit_present") or []) if str(n).strip() in cast_names_list]
-                    if not destination or not movers:
-                        continue
-                    article = "" if re.match(r"(?i)(the|a|an)\s", destination) else "the "
-                    target["event"] = (
-                        str(target.get("event", "")).rstrip() + f" {movers[0]} then enters {article}{destination}."
-                    ).strip()
-                    added.append(number)
-                if not added:
-                    raise
-                print(f"[QWEN] story_architecture scene_patch transition_clause_added scenes={added}", flush=True)
-                blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
-                self._validate_story_blueprint_contract(
-                    mode, blueprint, user_input, source_character_names=source_character_names,
-                )
+            if repairs:
+                print(f"[QWEN] story_architecture scene_patch application_repairs={sorted(set(repairs))}", flush=True)
         except RuntimeError as rejection:
             if not getattr(self, "_last_story_quality_errors", None):
                 self._last_story_quality_errors = [str(rejection)]
