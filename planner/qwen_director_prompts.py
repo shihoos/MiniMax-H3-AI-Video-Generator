@@ -981,7 +981,9 @@ class QwenDirectorPromptMixin:
             "SETUP_PAYOFF_MAP (key setup_payoff_map): an array with one object per major plant used by REVERSAL or "
             "CLIMAX_CHOICE: plant_scene, plant (exact observable evidence/rule/object/behavior), payoff_scene, payoff "
             "(exact later action/reference that reinterprets or uses it). It cannot be empty, and plant_scene must "
-            "precede payoff_scene.\n",
+            "precede payoff_scene. Decide the map after the scene events: the plant text must reuse the exact distinctive nouns "
+            "that appear in the plant scene's event, and the payoff scene's event must itself repeat the plant's key noun and "
+            "show it being used, read, confirmed or triggered (a payoff stated only in exit_knows does not count).\n",
             text,
         )
         text = swap(
