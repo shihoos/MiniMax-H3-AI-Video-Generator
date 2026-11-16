@@ -2798,9 +2798,12 @@ class QwenDirector(
                 except (TypeError, ValueError):
                     continue
                 if number == plant_scene:
+                    plant_words = anchor_words(pair.get('plant'))
                     notes.append(
-                        "  PLANT REQUIREMENT: the event must show a character finding, reading or using the planted item "
-                        f"with at least one of these exact words: {', '.join(anchor_words(pair.get('plant'))) or 'the planted item'}."
+                        "  PLANT REQUIREMENT: the event must show a named character finding, noticing, reading or using the planted "
+                        f"item with at least one of these exact words: {', '.join(plant_words) or 'the planted item'}. "
+                        f"Shape: \"<Name> notices/finds/reads the {' '.join(plant_words[:2]) or 'planted item'} ...\" "
+                        "(a thing that merely happens, with no character acting, does not count)."
                     )
                 if number == payoff_scene:
                     notes.append(
@@ -2808,7 +2811,9 @@ class QwenDirector(
                         "contain a sentence with an action verb (use, find, read, confirm, reveal, activate, trigger) that "
                         f"uses at least one of these exact planted words: {', '.join(anchor_words(pair.get('plant'))) or 'the planted item'}; "
                         "and a sentence performing the payoff with at least one of these words: "
-                        f"{', '.join(anchor_words(pair.get('payoff'))) or 'the payoff action'}."
+                        f"{', '.join(anchor_words(pair.get('payoff'))) or 'the payoff action'}. "
+                        f"Shape: \"<Name> uses/reads/confirms the {' '.join(anchor_words(pair.get('plant'))[:2]) or 'planted item'} "
+                        "to ...\" (a payoff such as 'the timer reaches zero' only counts when a named character acts on it in that sentence)."
                     )
             return notes
 
