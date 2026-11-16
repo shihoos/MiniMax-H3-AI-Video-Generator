@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-16.5.4"
+CONTRACTS_REVISION = "2026-11-16.5.5"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -797,6 +797,18 @@ _PLOT_EVIDENCE_ACTION_RE = re.compile(
 )
 
 
+# Genuine evidence-handling verbs the contract's own wording accepts ("use, discovery or interpretation") that the
+# first list missed: perceiving or inspecting evidence, and operating/bypassing an item. A passive occurrence
+# ("the countdown reaches zero", "wind causes cracks") still has no verb here and stays ungrounded.
+_PLOT_PERCEPTION_RE = re.compile(
+    r"\b(?:notic\w*|spot\w*|sees?|saw|seen|hear\w*|heard|sens\w*|watch\w*|examin\w*|inspect\w*|"
+    r"stud(?:y|ies|ied|ying)|scan\w*|analy[sz]\w*|review\w*|check\w*|detect\w*|observ\w*|"
+    r"bypass\w*|overrid\w*|insert\w*|swipe\w*|operat\w*|deploy\w*|authori[sz]\w*|uncover\w*|glimps\w*)\b", re.I,
+)
+# An object shown for the first time ("revealing a canister") is a discovery, like find/locate.
+_OBJECT_DISCOVERY_RE = re.compile(r"\b(?:reveal\w*|uncover\w*|spot\w*|notic\w*|glimps\w*|expos\w*)\b", re.I)
+
+
 _CLIMAX_GENERIC_TOKENS = {
     "risk", "risky", "risking", "future", "consequence", "consequences", "option", "options",
     "either", "choice", "choose", "chooses", "choosing", "force", "forces", "forced", "irreversible",
@@ -840,6 +852,7 @@ def _plot_event_anchor_is_grounded(
             OBJECT_CHANGE_RE.search(sentence)
             or KNOWLEDGE_RE.search(sentence)
             or _PLOT_EVIDENCE_ACTION_RE.search(sentence)
+            or _PLOT_PERCEPTION_RE.search(sentence)
         ):
             return True
     return False
@@ -897,7 +910,7 @@ def _object_action_is_anchored(item: str, event: str) -> bool:
         return False
     for sentence in re.split(r"(?<=[.!?])\s+", str(event or "")):
         sentence_tokens = _stemmed_content_tokens(sentence)
-        if anchors & sentence_tokens and OBJECT_CHANGE_RE.search(sentence):
+        if anchors & sentence_tokens and (OBJECT_CHANGE_RE.search(sentence) or _OBJECT_DISCOVERY_RE.search(sentence)):
             return True
     return False
 
