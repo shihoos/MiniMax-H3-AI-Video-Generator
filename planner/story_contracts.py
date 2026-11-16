@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-15.5.3"
+CONTRACTS_REVISION = "2026-11-16.5.4"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -407,6 +407,18 @@ def _scene_local_transition_is_explained(
         return True
     # Title abbreviations ("Dr. Hale") must not be mistaken for sentence ends.
     event_text = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|St|Col|Gen|Capt|Lt|Sgt|Cmdr)\.", r"\1", str(event or ""))
+    # A canonical location name may itself contain a comma ("Abandoned Arctic research station, reactor
+    # chamber"). Clause splitting and the movement-phrase stopper must not cut the destination in half, or a
+    # sentence that plainly enters the room is judged as never naming it.
+    for location_name in sorted({str(entry_location or "").strip(), str(exit_location or "").strip()}, key=len, reverse=True):
+        if "," in location_name:
+            parts = [part.strip() for part in location_name.split(",") if part.strip()]
+            if len(parts) > 1:
+                event_text = re.sub(
+                    r"\s*,\s*".join(re.escape(part) for part in parts),
+                    lambda match: re.sub(r"\s*,\s*", " ", match.group(0)),
+                    event_text, flags=re.I,
+                )
     destination_tokens = _plural_variants(_location_tokens(exit_location))
     target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I))
     source_is_outside = bool(re.search(r"\b(?:tundra|exterior|outside|entrance)\b", old, re.I))
