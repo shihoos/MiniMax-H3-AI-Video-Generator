@@ -25,6 +25,7 @@ from planner.story_contracts import (
     ensure_cinematic_coverage,
     validate_blueprint_state_contract,
     _scene_local_transition_is_explained,
+    _distinctive_plot_tokens,
     reconcile_cast_scenes,
     _fields_and_beats,
     validate_cinematic_coverage,
@@ -2744,6 +2745,53 @@ class QwenDirector(
                 return ", ".join(str(v) for v in value)
             return str(value or "")
 
+        patch_cast = parse_cast(render_blueprint_text(data, total, []))
+
+        def anchor_words(detail: str) -> list[str]:
+            """Literal words of a plant/payoff text that the contract accepts as its distinctive anchors."""
+            words: list[str] = []
+            for word in re.findall(r"[A-Za-z][A-Za-z0-9'\-]{3,}", str(detail or "")):
+                if word.casefold() not in {w.casefold() for w in words} and _distinctive_plot_tokens(word, patch_cast):
+                    words.append(word)
+            return sorted(words, key=len, reverse=True)[:8]
+
+        def scene_notes(number: int, scene: dict) -> list[str]:
+            notes: list[str] = []
+            mentions = [
+                c for c in cleaned
+                if re.search(rf"\bscene\s+0*{number}\b", c, re.I) and "SETUP_PAYOFF_MAP" not in c
+            ]
+            for item in mentions:
+                notes.append(f"  FIX: {item}")
+            if any("changes its physical location" in c for c in mentions):
+                notes.append(
+                    f"  FIX HOW: the event must contain one sentence in which a named cast member moves into the "
+                    f"destination, using its name '{as_text(scene.get('exit_location'))}' "
+                    f"(for example: \"<Name> descends into the {as_text(scene.get('exit_location'))}.\"); "
+                    "or else set exit_location to where the scene starts."
+                )
+            for pair in data.get("setup_payoff_map") or []:
+                if not isinstance(pair, dict):
+                    continue
+                try:
+                    plant_scene, payoff_scene = int(pair.get("plant_scene")), int(pair.get("payoff_scene"))
+                except (TypeError, ValueError):
+                    continue
+                if number == plant_scene:
+                    notes.append(
+                        "  PLANT REQUIREMENT: the event must show a character finding, reading or using the planted item "
+                        f"with at least one of these exact words: {', '.join(anchor_words(pair.get('plant'))) or 'the planted item'}."
+                    )
+                if number == payoff_scene:
+                    notes.append(
+                        f"  PAYOFF REQUIREMENT (pays off scene {plant_scene:02d}): the EVENT itself (not exit_knows) must "
+                        "contain a sentence with an action verb (use, find, read, confirm, reveal, activate, trigger) that "
+                        f"uses at least one of these exact planted words: {', '.join(anchor_words(pair.get('plant'))) or 'the planted item'}; "
+                        "and a sentence performing the payoff with at least one of these words: "
+                        f"{', '.join(anchor_words(pair.get('payoff'))) or 'the payoff action'}."
+                    )
+            return notes
+
         blocks = []
         for number in affected:
             scene = scenes[number - 1]
@@ -2763,6 +2811,7 @@ class QwenDirector(
                     f"  DEATH SCENE: {', '.join(dying[number])} die(s) here. The event must show the death and "
                     "exit_present must NOT list them."
                 )
+            lines.extend(scene_notes(number, scene))
             blocks.append("\n".join(lines))
         map_text = " | ".join(
             f"PLANT S{int(x.get('plant_scene', 0)):02d}: {x.get('plant')}; PAYOFF S{int(x.get('payoff_scene', 0)):02d}: {x.get('payoff')}"
@@ -2785,8 +2834,10 @@ class QwenDirector(
             "only through a completed action in the event that names that exact object. (4) next_cause is a concrete "
             "result that forces the next scene (only scene 12 may be 'none'); the following scene's event must act on it. (5) For a setup/payoff finding, "
             "the plant scene's event must visibly show the planted object/fact, and the payoff scene's event must repeat that "
-            "same noun and use it to change the plan. When a map correction is requested, return the complete corrected "
-            "non-empty `setup_payoff_map`; otherwise omit that key entirely.\n"
+            "same noun and use it to change the plan. Fix a setup/payoff finding by rewriting the PLANT/PAYOFF scene EVENT so it "
+            "performs the mapped action; never satisfy it by only editing exit_knows. When a map correction is requested, return the "
+            "complete corrected non-empty `setup_payoff_map` with plain wording and no scene references such as (S03) inside the "
+            "plant or payoff text; otherwise omit that key entirely.\n"
             "If no scenes are requested, return scenes as []. If no setup/payoff correction is requested, omit that key. "
             "Return setup_payoff_map only when the map itself is named in the findings. Do not use semicolons or pipe "
             "characters inside values. JSON only."
@@ -2892,6 +2943,9 @@ class QwenDirector(
         if map_needs_patch:
             if not new_map:
                 raise RuntimeError("Setup/payoff repair was requested, but the Architect returned no replacement map.")
+            for item in new_map:
+                for key in ("plant", "payoff"):
+                    item[key] = re.sub(r"\s*\(\s*S\d{1,2}\s*\)", "", str(item.get(key, ""))).strip()
             data["setup_payoff_map"] = new_map
         # Earlier boundaries are re-derived: drop any explicit entry_* so every scene starts where the previous ended.
         for scene in data["scenes"]:
@@ -2901,9 +2955,38 @@ class QwenDirector(
             render_blueprint_text(data, total, []), total,
         )
         try:
-            self._validate_story_blueprint_contract(
-                mode, blueprint, user_input, source_character_names=source_character_names,
-            )
+            try:
+                self._validate_story_blueprint_contract(
+                    mode, blueprint, user_input, source_character_names=source_character_names,
+                )
+            except RuntimeError as first_rejection:
+                # Last resort for a declared move the model still did not narrate: state the passage the plan
+                # itself already declares (a cast member present at the end enters the declared exit location).
+                # Only patched scenes are touched and every other contract stays hard.
+                stuck = sorted({
+                    int(m) for item in (getattr(self, "_last_story_quality_errors", None) or [str(first_rejection)])
+                    for m in re.findall(r"scene\s+0*(\d+)\s+changes its physical location without an explicit transition", str(item), re.I)
+                } & set(affected))
+                cast_names_list = [str(m.get("name", "")).strip() for m in (data.get("cast") or []) if isinstance(m, dict)]
+                added: list[int] = []
+                for number in stuck:
+                    target = data["scenes"][number - 1]
+                    destination = re.sub(r"\s*\([^)]*\)", "", str(target.get("exit_location", ""))).strip().rstrip(".")
+                    movers = [n for n in (target.get("exit_present") or []) if str(n).strip() in cast_names_list]
+                    if not destination or not movers:
+                        continue
+                    article = "" if re.match(r"(?i)(the|a|an)\s", destination) else "the "
+                    target["event"] = (
+                        str(target.get("event", "")).rstrip() + f" {movers[0]} then enters {article}{destination}."
+                    ).strip()
+                    added.append(number)
+                if not added:
+                    raise
+                print(f"[QWEN] story_architecture scene_patch transition_clause_added scenes={added}", flush=True)
+                blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
+                self._validate_story_blueprint_contract(
+                    mode, blueprint, user_input, source_character_names=source_character_names,
+                )
         except RuntimeError as rejection:
             if not getattr(self, "_last_story_quality_errors", None):
                 self._last_story_quality_errors = [str(rejection)]
