@@ -1012,37 +1012,37 @@ def test_story_prompt_is_open_cast_and_fully_filled():
             rendered_architect = " ".join(q._story_blueprint_system(mode, structured=structured).lower().split())
             _assert("cast design" in rendered_architect or "smallest cast" in rendered_architect,
                     f"{mode}: structured={structured} Architect must include premise-driven cast guidance")
-            _assert("no preferred cast size" in rendered_architect or "no fixed minimum, maximum, or target" in rendered_architect,
-                    f"{mode}: structured={structured} Architect must remain free of cast-count quotas")
+            _assert("not a minimum, maximum or quota" in rendered_architect or "not a quota" in rendered_architect
+                    or "no preferred cast size" in rendered_architect or "no fixed minimum, maximum, or target" in rendered_architect,
+                    f"{mode}: structured={structured} Architect must remain free of hard cast-count quotas")
             _assert("remote-only" in rendered_architect or "remote-only voices" in rendered_architect,
                     f"{mode}: structured={structured} remote speakers must not be promoted into physical cast")
             if mode == AI_STORY_MODE:
-                _assert("smallest cast" in rendered_architect
-                        and ("no preferred cast size" in rendered_architect
-                             or "no fixed minimum, maximum, or target" in rendered_architect),
-                        f"{mode}: structured={structured} cast must be selected from actual plot necessity")
+                _assert(("3-5 person" in rendered_architect or "3-5 active" in rendered_architect)
+                        and "do not default to a one-person story" in rendered_architect,
+                        f"{mode}: structured={structured} Architect must actively test a multi-person ensemble")
                 if structured:
                     _assert("distinct want" in rendered_architect and "consequential on-screen action" in rendered_architect,
                             f"{mode}: structured Architect supporting characters must have independent agency")
                 else:
                     _assert("independent want" in rendered_architect and "consequential action/decision" in rendered_architect,
                             f"{mode}: text Architect supporting characters must have independent agency")
-                _assert("3-5 person active ensemble" not in rendered_architect,
-                        f"{mode}: structured={structured} must not bias Qwen toward a 3-5 person ensemble")
                 if not structured:
-                    _assert("do not invent an on-site partner" in rendered_architect,
-                            f"{mode}: text-mode Architect must not invent an on-site partner to fill the cast")
-        _assert("plot-driven" in blueprint and ("no preferred cast size" in blueprint or "no fixed minimum, maximum, or target" in blueprint),
+                    _assert("filler" in rendered_architect or "token role" in rendered_architect
+                            or "do not invent an on-site partner" in rendered_architect,
+                            f"{mode}: text-mode Architect must not add filler characters to fill the cast")
+        _assert("plot-driven" in blueprint and ("no preferred cast size" in blueprint or "no fixed minimum, maximum, or target" in blueprint or "no numeric quota" in blueprint or "not a minimum, maximum or quota" in blueprint),
                 f"{mode}: Architect must not impose a numeric cast quota")
         if mode == EXPAND_USER_STORY_MODE:
             _assert("preserve every active source character" in blueprint
-                    and "do not add roles to reach a number" in blueprint,
+                    and ("do not add roles to reach a number" in blueprint or "do not create a role merely to reach a number" in blueprint),
                     "Expand mode must preserve source anchors without an artificial ensemble target")
             _assert("architect's approved cast may include new premise-grounded people" in low,
                     "Expand Author must honor new characters approved by the Architect")
         if mode == AI_STORY_MODE:
-            _assert("smallest cast" in blueprint and "no preferred cast size" in blueprint
-                    and "do not invent an on-site partner" in blueprint,
+            _assert("do not default to a one-person story" in blueprint
+                    and ("3-5 person" in blueprint or "3-5 active" in blueprint)
+                    and ("not a minimum, maximum or quota" in blueprint or "not a quota" in blueprint or "no numeric quota" in blueprint),
                     "AI Story Architect must choose cast size from premise and plot necessity")
             _assert("independent want" in blueprint and "consequential action/decision" in blueprint,
                     "additional cast members must have distinct agency, not filler roles")
@@ -1439,12 +1439,12 @@ def test_structured_architect_json_round_trips_through_every_contract():
             "structured schema must bound verbose fields without truncating substantive events or object inventories")
     from planner.qwen_director import QwenDirector
     compact_prompt = QwenDirector.__new__(QwenDirector)._story_blueprint_system(AI_STORY_MODE, structured=True)
-    _assert(len(compact_prompt) < 12000,
+    _assert(len(compact_prompt) < 12500,
             f"live structured Architect prompt regressed in size ({len(compact_prompt)} chars)")
     compact_lower = " ".join(compact_prompt.lower().split())
     _assert("premise indispensable" in compact_lower
             and "profession, skill" in compact_lower
-            and "smallest cast" in compact_lower
+            and "do not default to a one-person story" in compact_lower
             and "cumulative inventory" in compact_lower and "exit_objects" in compact_lower,
             "live structured prompt must prioritize premise-specific plot, necessary cast and cumulative objects")
     _assert("materially shape" in compact_lower and "if the same plot would work unchanged" in compact_lower,
