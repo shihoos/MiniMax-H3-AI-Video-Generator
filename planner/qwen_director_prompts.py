@@ -507,8 +507,9 @@ class QwenDirectorPromptMixin:
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
                 "Expand the supplied story while preserving every source character's identity and role, core setting, "
-                "chronology, defining events, twist mechanism and outcome. Add a person only when that person's "
-                "independent action is needed to complete the established plot."
+                "chronology, defining events, twist mechanism and outcome. The source's original cast size is not a limit: "
+                "add premise-grounded people when distinct causal roles are missing and their decisions materially affect "
+                "the established plot."
             )
         else:
             source_rule = "Preserve the supplied story facts, active cast, chronology and outcome; do not invent a new plot."
@@ -540,8 +541,10 @@ class QwenDirectorPromptMixin:
               seeds the mechanism early and the story earns it through observable evidence. Do not invent a deceased
               researcher/mentor and a journal as a shortcut for exposition unless the premise establishes that person
               or document and the story visibly earns its discovery.
-            - CAST DESIGN: use a plot-driven, premise-necessary cast. Prefer the smallest cast that can make the required
-              decisions; there is no preferred cast size, numeric minimum, maximum or ensemble target. CAST contains only
+            - CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story just because the premise
+              names one protagonist or an isolated setting. Test a 3-5 person ensemble first (a comparison, not a quota);
+              keep fewer only when isolation is the engine. Each person needs an independent want and a decision that
+              changes options or cost; no filler. CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
               institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
               non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
@@ -659,11 +662,24 @@ class QwenDirectorPromptMixin:
                 "a preselected template."
             )
             cast_design_rule = (
-                "CAST DESIGN: choose the smallest cast that can credibly make the premise's consequential decisions. "
-                "There is no preferred cast size or numeric target; cast size is plot-driven. Add a person only when their visible action changes the objective, "
-                "options, evidence, leverage, relationship or cost. Do not invent an on-site partner, rescuer, operator, "
-                "witness or antagonist simply to fill scenes. Remote voices and disembodied systems belong in OPPOSITION, "
-                "not physical CAST. Every physical cast member must appear and act in at least one present-time scene."
+                "CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story merely because the premise "
+                "introduces one protagonist or uses an isolated setting. For a 12-scene short film, actively test a "
+                "3-5 person active ensemble as the first strong design candidate, then compare it against 1, 2, 6, or "
+                "more. This 3-5 range is a design comparison, NOT a minimum, maximum, or quota: choose fewer when "
+                "isolation is the premise-specific engine, and choose more only when every added person changes the plot. "
+                "Look for premise-grounded people with independent goals: a colleague with conflicting evidence, a field "
+                "partner with a different risk threshold, an authority who controls access/resources, a witness whose "
+                "decision changes what can be proved, a rescuer/operator who changes the available plan, or an opposing "
+                "person with their own strategy. Do not use an off-screen voice or disembodied AI to substitute for a "
+                "human decision-maker when the premise supports a physically dramatized person. Choose each added person "
+                "only when they make a consequential decision that changes options, leverage, knowledge, relationships, "
+                "or cost. Give every core person a distinct want, pressure, tactic, and consequence; recurring core "
+                "characters should materially affect at least two separate scenes unless one decisive action has a major "
+                "irreversible payoff. Do not merge distinct human decision-makers into a generic institution/system "
+                "voice. An abandoned or remote setting does not mean nobody else can act: consider credible on-site "
+                "survivors, arrivals, field counterparts, operators, or opposing agents when the premise supports them. "
+                "Never add filler, token roles, or characters who exist only in memories, labels, recordings, or exposition. "
+                "Qwen makes the final plot-driven cast decision; no numeric quota is imposed."
             )
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
@@ -673,9 +689,15 @@ class QwenDirectorPromptMixin:
                 "materially affect the established plot; do not change the source's defining outcome."
             )
             cast_design_rule = (
-                "CAST DESIGN: preserve every active source character. Add a person only when a distinct, visible decision "
-                "is needed to complete the source plot; do not add roles to reach a number. Cast size remains plot-driven with no fixed minimum, maximum, or target. Keep remote-only speakers and "
-                "disembodied systems out of physical CAST. Preserve source identities and outcome."
+                "CAST DESIGN / EXPANSION ENSEMBLE: preserve every active source character. Actively test whether a "
+                "3-5 person active ensemble makes this 12-scene film stronger, while comparing 1, 2, 6, or more; "
+                "3-5 is a design comparison band, not a quota or cap. A sparse source premise may gain a field partner, "
+                "rival, local survivor, authority/operator, witness, or rescuer only when that person has an independent "
+                "want, pressure, tactic, and a consequential decision that changes the plot. Do not create a role merely "
+                "to reach a number. Keep 1-2 when isolation is the strongest engine; allow 6+ only for genuinely distinct "
+                "decision-makers. Preserve the source's identities and outcome; new characters must grow from the source "
+                "setting and events, not from unrelated subplots or surprise relatives. Give recurring added characters "
+                "meaningful actions in multiple scenes unless one decisive action has a major irreversible payoff."
             )
         else:
             source_rule = "Preserve all supplied story facts and do not invent a different outcome."
