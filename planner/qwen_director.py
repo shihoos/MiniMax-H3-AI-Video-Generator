@@ -2784,6 +2784,51 @@ class QwenDirector(
                     f"(for example: \"<Name> walks into the {as_text(scene.get('exit_location'))}.\"; pick the verb that fits the "
                     "direction: enters, climbs up to, descends into, flees to); or else set exit_location to where the scene starts."
                 )
+            entry_names = as_text(scene.get("entry_present"))
+            for item in mentions:
+                presence = re.search(r"mid-scene (entry|exit) for '([^']+)'", item)
+                if presence:
+                    kind, name = presence.groups()
+                    if kind == "exit":
+                        notes.append(
+                            f"  FIX HOW: {name} is present at the start of this scene but missing from exit_present, so the "
+                            f"event must contain a sentence in which {name} (by name) leaves, withdraws, is carried away or dies; "
+                            f"or else keep {name} in exit_present."
+                        )
+                    else:
+                        notes.append(
+                            f"  FIX HOW: {name} is absent at the start of this scene (present at start: {entry_names}) but is in "
+                            f"exit_present, so the event must contain a sentence in which {name} (by name) arrives or enters; "
+                            f"or else remove {name} from exit_present."
+                        )
+                death = re.search(r"death of '([^']+)' is not anchored", item)
+                if death:
+                    notes.append(
+                        f"  FIX HOW: the event must contain a sentence naming {death.group(1)} and showing the death "
+                        f"(for example \"<cause> kills {death.group(1)}\" or \"{death.group(1)} dies ...\"); "
+                        f"{death.group(1)} must not be in exit_present."
+                    )
+                anchor = re.search(r"key-object state change is not anchored to the named object and a physical action \('([^']+)'\)", item)
+                if anchor:
+                    obj = anchor.group(1)
+                    start_items = _inventory_items(as_text(scene.get("entry_objects")))
+                    end_items = _inventory_items(as_text(scene.get("exit_objects")))
+                    if obj in start_items and obj not in end_items:
+                        notes.append(
+                            f"  FIX HOW: '{obj}' is in the objects at the start but missing from exit_objects. Put '{obj}' back "
+                            "into exit_objects exactly as written and keep every other entry, unless the event names the object "
+                            "and shows it being lost, destroyed, handed over or left behind."
+                        )
+                    elif obj in end_items and obj not in start_items:
+                        notes.append(
+                            f"  FIX HOW: '{obj}' appears in exit_objects but not at the start. Remove it from exit_objects, unless "
+                            "the event names the object and shows it being found, taken or created."
+                        )
+                    else:
+                        notes.append(
+                            f"  FIX HOW: the state of '{obj}' changes between start and end. The event must name the object and "
+                            "show the physical action that changes it; otherwise restore its starting state in exit_objects."
+                        )
             if any("PURPOSE is too vague" in c for c in mentions):
                 words_now = len(word_tokens(as_text(scene.get("purpose"))))
                 notes.append(
