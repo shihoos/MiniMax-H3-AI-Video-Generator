@@ -542,9 +542,12 @@ class QwenDirectorPromptMixin:
               researcher/mentor and a journal as a shortcut for exposition unless the premise establishes that person
               or document and the story visibly earns its discovery.
             - CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story just because the premise
-              names one protagonist or an isolated setting. Test a 3-5 person ensemble first (a comparison, not a quota);
-              keep fewer only when isolation is the engine. Each person needs an independent want and a decision that
-              changes options or cost; no filler. CAST contains only
+              names one protagonist or an isolated setting; an abandoned or remote setting does not mean nobody else can
+              act. Test a 3-5 person ensemble first (a comparison, not a quota): a colleague with conflicting evidence, a
+              field partner with a different risk threshold, an authority controlling access, a witness, a rescuer or an
+              opponent with their own strategy. Keep fewer only when isolation is the premise-specific engine. Each
+              person needs an independent want, pressure and tactic and a decision that changes options or cost; no
+              filler or memory-only roles. CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
               institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
               non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
@@ -631,7 +634,7 @@ class QwenDirectorPromptMixin:
             - `opening`: location, present (array), knows and objects.
             - `scenes`: exactly {n} objects in order. Each has purpose, on_screen_present (array), event,
               exit_location, exit_present (array), exit_knows, exit_objects and next_cause. `purpose` must state the
-              specific change this scene causes in 7-12 words, not a generic label such as 'introduce the vault'.
+              specific change this scene causes in 10-14 words (anything under 7 is rejected; count them), not a generic label such as 'introduce the vault'.
             - Keep each scene's combined field content to {beat_min}-{beat_max} words. Make EVENT concise but specific:
               protagonist action, concrete resistance/discovery, then decision/result. Keep inventories and knowledge
               snapshots compact but cumulative. Avoid narration, camera language, mood-only events and dialogue filler.
@@ -1012,7 +1015,7 @@ class QwenDirectorPromptMixin:
             r"SCENE BEATS: output exactly .*?NEXT_CAUSE=\[[^\]]*\]\.",
             f"SCENE BEATS: `opening` gives the starting state of scene 1 (location, present people, what they know, objects). "
             f"`scenes` then holds exactly {n} objects in story order, each {beat_min}-{beat_max} words across its fields. "
-            "Keys: purpose (one concrete clause of 8-11 words naming what this scene changes; anything under 7 words is rejected), on_screen_present (array of names), event (three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions), exit_location, exit_present (array of names), "
+            "Keys: purpose (one concrete clause of 10-14 words naming what this scene changes; anything under 7 words is rejected), on_screen_present (array of names), event (three concrete beats in order: what the character does to pursue the goal, the specific obstacle or discovery that resists, and the decision made with its cost; include explicit physical transitions), exit_location, exit_present (array of names), "
             "exit_knows, exit_objects, next_cause (the concrete result that makes the next scene necessary; 'none' for the "
             "final scene). Entry state is not written: each scene begins exactly where the previous one ended. The rules "
             "below name these same fields in UPPERCASE, and ENTRY_* means the previous scene's exit. Do not use "
