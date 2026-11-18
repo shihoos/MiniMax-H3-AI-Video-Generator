@@ -2651,7 +2651,7 @@ class QwenDirector(
         names = {"type": "array", "items": text}
         scene_properties = {
             "scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
-            "purpose": text, "event": text, "exit_location": text, "exit_present": names,
+            "purpose": {"type": "string", "minLength": 56}, "event": text, "exit_location": text, "exit_present": names,
             "exit_knows": text, "exit_objects": text, "next_cause": text,
         }
         scene_required = [
@@ -2832,8 +2832,9 @@ class QwenDirector(
             if any("PURPOSE is too vague" in c for c in mentions):
                 words_now = len(word_tokens(as_text(scene.get("purpose"))))
                 notes.append(
-                    f"  FIX HOW: the purpose currently counts {words_now} words; write 8-11 words (the hard minimum is 7) "
-                    "naming the one concrete change this scene causes."
+                    f"  FIX HOW: the purpose currently counts {words_now} words; write 10-14 words (anything under 7 is rejected; "
+                    "models usually undercount, so aim long) naming the one concrete change this scene causes, as "
+                    "'<Name> <verb> <object>, <consequence that changes the next scene>'."
                 )
             for pair in data.get("setup_payoff_map") or []:
                 if not isinstance(pair, dict):
@@ -2932,7 +2933,7 @@ class QwenDirector(
             "scene patches and/or global plot-field patches. The application preserves the original CAST and every "
             "unrequested scene/field unchanged.\n"
             "For each requested scene, correct every named finding, changing only the fields listed under ALLOWED TO CHANGE. Rewrite PURPOSE when it is named as vague; PURPOSE "
-            "must state one specific scene-caused change in exactly 7-12 words, not a generic label. Rewrite EVENT when continuity, object action, "
+            "must state one specific scene-caused change in 10-14 words (count them; anything under 7 is rejected), not a generic label. Rewrite EVENT when continuity, object action, "
             "causal handoff, death or setup/payoff findings require it. Returning a failing field unchanged is a failure. "
             "Keep the same characters, premise and story direction; keep each event 25-45 words.\n"
             "RULES: (1) If exit_location differs from where the scene starts, the event must name the cast member who "
