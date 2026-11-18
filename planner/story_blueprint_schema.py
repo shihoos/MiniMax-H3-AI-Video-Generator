@@ -75,6 +75,8 @@ def blueprint_json_schema(scene_count: int) -> dict:
         key: (names if key in SCENE_LIST_FIELDS else text(scene_text_limits.get(key, 320)))
         for key in AUTHORED_SCENE_FIELDS
     }
+    # A purpose under 7 words is rejected by the contracts; ~56 characters keeps the model above that line.
+    scene_props["purpose"]["minLength"] = 56
     scene_item = {
         "type": "object",
         "properties": scene_props,
