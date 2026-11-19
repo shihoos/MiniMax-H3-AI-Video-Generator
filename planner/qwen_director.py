@@ -38,7 +38,6 @@ from pipeline.dialogue_timeline import DialogueTimeline
 
 from planner.config import (
     AI_STORY_MODE,
-    DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
     DIRECTOR_MAX_TOKENS,
     DIRECTOR_SHOTS_PER_SCENE,
     DIRECTOR_STORY_SCENES,
@@ -111,11 +110,10 @@ class QwenDirector(
     # into dozens of scenes and therefore dozens of expensive Qwen calls.
     MAX_SCENES = DIRECTOR_STORY_SCENES
     SHOTS_PER_SCENE = DIRECTOR_SHOTS_PER_SCENE
-    # Creative shot batching may cover up to two fresh adjacent scenes.
-    # The runtime selects the largest batch that still fits the 8K context
-    # budget with a bounded completion reserve. Missing shots are deterministic
-    # fallbacks; no per-scene Qwen recovery is used.
-    MAX_SHOT_BATCH_SCENES = 2
+    # Creative shot batching may cover up to three fresh adjacent scenes.
+    # Exact chat-template preflight selects the largest safe batch; deterministic
+    # fallbacks complete missing fields without per-scene Qwen recovery calls.
+    MAX_SHOT_BATCH_SCENES = 3
 
     _MODE_LABELS = {
         AI_STORY_MODE: "AI STORY MODE",
@@ -701,7 +699,7 @@ class QwenDirector(
         # ----------------------------------------------------
         # PASS 2: cinematography
         #
-        # Fresh scenes are planned in bounded creative batches of up to two.
+        # Fresh scenes are planned in bounded creative batches of up to three.
         # Qwen supplies only
         # creative shot direction; deterministic compilation/rebinding
         # supplies all production identity and technical fields.
@@ -793,19 +791,19 @@ class QwenDirector(
                 # ------------------------------------------------
                 # CREATIVE SHOT PASS
                 # ------------------------------------------------
-                # One fresh batch call for 1–2 scenes. No per-scene retry
-                # or missing-shot Qwen recovery is performed.
+                # One fresh batch call for up to three adjacent scenes when exact
+                # context preflight fits. No per-scene retry or missing-shot recovery.
                 if existing_scene_shots:
                     generated_by_scene[scene_id] = list(
                         existing_scene_shots
                     )[: self.SHOTS_PER_SCENE]
 
                 else:
-                    # Fit the largest candidate batch first. When two scenes do
-                    # not fit, compact only the global story recap in stages; the
-                    # per-scene descriptions, dialogue whitelist, canonical cast,
-                    # and continuity evidence remain intact. Shrink to one scene
-                    # only if the smaller recap still cannot fit.
+                    # Fit the largest candidate batch first. If it does not fit,
+                    # compact only the global story recap in stages; the per-scene
+                    # descriptions, dialogue whitelist, canonical cast, and local
+                    # continuity evidence remain intact. Shrink the batch only
+                    # when the compact recap still cannot fit.
                     batch_context_fits = False
                     batch_user = ""
                     prompt_tokens = 0
@@ -1619,7 +1617,7 @@ class QwenDirector(
                     "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
                     "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
                     "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-                    "story_revision_policy": "up to one conditional revision per stage after a returned artifact fails a hard gate",
+                    "story_revision_policy": "one conditional Architect revision after a failed blueprint gate; up to one conditional Author revision after a rejected draft or starved ending; zero infrastructure retries and no separate repair stage",
                     "runtime_retry_calls": accounting["runtime_retry_calls"],
                     "repair_calls": accounting["repair_calls"],
                 },
@@ -3148,37 +3146,71 @@ class QwenDirector(
     _PATCH_BATCH_SCENES = 3
 
     def _patch_batches(self, problems: list[str], data: dict) -> list[tuple[list[int], bool]]:
-        """Split a repair into small batches: failing setup/payoff pairs first (two pairs at most), then other scenes."""
+        """Create disjoint scene scopes; merge overlapping payoff pairs and all co-located fixes."""
         total = int(DIRECTOR_STORY_SCENES)
         map_problems = [p for p in problems if "SETUP_PAYOFF_MAP" in str(p)]
         other_problems = [p for p in problems if "SETUP_PAYOFF_MAP" not in str(p)]
         batches: list[tuple[list[int], bool]] = []
-        in_map: set[int] = set()
-        if map_problems:
-            named = {int(v) for p in map_problems for v in re.findall(r"\bscenes?\s+0*(\d+)", str(p), re.I)}
-            pairs = []
-            for pair in data.get("setup_payoff_map") or []:
-                try:
-                    scenes_of_pair = [int(pair.get("plant_scene")), int(pair.get("payoff_scene"))]
-                except (AttributeError, TypeError, ValueError):
-                    continue
-                if not named or named & set(scenes_of_pair):
-                    pairs.append(scenes_of_pair)
-            for start in range(0, len(pairs), 2):
-                group = sorted({n for pair in pairs[start:start + 2] for n in pair if 1 <= n <= total})
-                if group:
-                    batches.append((group, True))
-                    in_map.update(group)
-        # Mechanical findings (moves, handoffs, objects) get their own calls, separate from the setup/payoff calls:
-        # when both kinds sit on one scene the model repeatedly dropped one of them.
-        rest = self._patch_affected_scenes(other_problems, data)
+        map_components: list[set[int]] = []
+        named = {int(v) for p in map_problems
+                 for v in re.findall(r"\bscenes?\s+0*(\d+)", str(p), re.I)}
+        pairs: list[set[int]] = []
+        for pair in data.get("setup_payoff_map") or []:
+            try:
+                component = {int(pair.get("plant_scene")), int(pair.get("payoff_scene"))}
+            except (AttributeError, TypeError, ValueError):
+                continue
+            component = {n for n in component if 1 <= n <= total}
+            if len(component) == 2 and (not named or component & named):
+                pairs.append(component)
+        # Connected components prevent a shared plant/payoff scene being patched in two calls.
+        while pairs:
+            group = set(pairs.pop(0))
+            changed = True
+            while changed:
+                changed = False
+                keep = []
+                for pair in pairs:
+                    if group & pair:
+                        group |= pair
+                        changed = True
+                    else:
+                        keep.append(pair)
+                pairs = keep
+            map_components.append(group)
+        assigned: set[int] = set()
+        for group in map_components:
+            scope = sorted(group - assigned)
+            if scope:
+                batches.append((scope, True))
+                assigned.update(scope)
+        # Every other finding on a map scene is included in that single map batch.
+        # Remaining mechanical/continuity scenes are chunked without overlap.
+        rest = [n for n in self._patch_affected_scenes(other_problems, data) if n not in assigned]
         for start in range(0, len(rest), self._PATCH_BATCH_SCENES):
-            batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
+            scope = rest[start:start + self._PATCH_BATCH_SCENES]
+            if scope:
+                batches.append((scope, False))
+                assigned.update(scope)
+        # A map finding without a parseable pair still gets a bounded, fail-closed scene scope.
+        unassigned = [n for n in self._patch_affected_scenes(map_problems, data) if n not in assigned]
+        for start in range(0, len(unassigned), self._PATCH_BATCH_SCENES):
+            scope = unassigned[start:start + self._PATCH_BATCH_SCENES]
+            if scope:
+                batches.append((scope, True))
+                assigned.update(scope)
         return batches
 
     def _knock_on_batches(self, current: list[str], data: dict, done: set[int]) -> list[tuple[list[int], bool]]:
-        fresh = [n for n in self._patch_affected_scenes([p for p in current if "SETUP_PAYOFF_MAP" not in str(p)], data) if n not in done]
-        return [(fresh[i:i + self._PATCH_BATCH_SCENES], False) for i in range(0, len(fresh), self._PATCH_BATCH_SCENES)]
+        """Schedule newly exposed fixes without reopening scenes already patched in this revision."""
+        fresh_batches = []
+        for scope, is_map in self._patch_batches(current, data):
+            if not scope or set(scope) & set(done):
+                # A repeated repair in the same scene is deliberately not attempted:
+                # the final deterministic gate reports the unresolved defect instead.
+                continue
+            fresh_batches.append((scope, is_map))
+        return fresh_batches
 
     def _blueprint_findings(self, mode: str, user_input: str, data: dict, source_character_names) -> list[str]:
         """Deterministic validation of the current plan (no model call). Empty when the plan passes."""
@@ -3202,8 +3234,9 @@ class QwenDirector(
     ) -> str:
         """The single Architect revision, done as small sequential batches.
 
-        Each batch is one short call for at most two setup/payoff pairs or three scenes, so the model can follow the
-        notes. A scene is corrected at most once. Between batches the plan is re-checked deterministically (no model
+        Each batch is one short call. Ordinary scene repairs cover at most three scenes; a connected
+        setup/payoff component stays together even when it spans more scenes, so a shared plant/payoff scene
+        is never patched by separate calls. A scene is corrected at most once. Between batches the plan is re-checked deterministically (no model
         call): findings that an earlier batch already removed are skipped, and new knock-on findings reach later
         scenes in the next batch. The application never writes story text; the plan is validated once at the end and
         rejected if it still fails.
@@ -3234,7 +3267,7 @@ class QwenDirector(
                 if "SETUP_PAYOFF_MAP" in str(finding):
                     if is_map and (not numbers or numbers & scope_set):
                         relevant.append(finding)
-                elif not is_map and (numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers)):
+                elif numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers):
                     relevant.append(finding)
             if not relevant:
                 print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} skipped=already_resolved", flush=True)
@@ -3250,8 +3283,8 @@ class QwenDirector(
             except RuntimeError as unusable:
                 # A malformed reply for one small batch leaves those scenes as planned; the final validation decides.
                 print(f"[QWEN] story_architecture batch={index} unusable: {str(unusable)[:160]}", flush=True)
-            if not is_map:
-                done |= scope_set
+            # Every scene is touched at most once, regardless of finding type.
+            done |= scope_set
             current = self._blueprint_findings(mode, user_input, data, source_character_names)
             if not current:
                 break
@@ -6833,7 +6866,7 @@ class QwenDirector(
 
     @staticmethod
     def _shot_batch_story_context_capacities(max_chars: int) -> list[int]:
-        """Largest-first global-story context caps for fitting two-scene batches.
+        """Largest-first global-story context caps for fitting multi-scene batches.
 
         Per-scene descriptions, canonical cast, source-dialogue spans and local
         continuity notes are never changed by this strategy. Only the redundant
@@ -6852,18 +6885,17 @@ class QwenDirector(
     def _shot_batch_completion_budget(scene_count: int) -> int:
         """Return the token cap for a batched shot request.
 
-        The 600-token per-shot reserve is multiplied by the configured
-        shots-per-scene and the number of scenes in this batch, then capped
-        by the global Director token ceiling. This estimate is calibrated
-        against the October 20 traces after compacting derived response fields;
-        it preserves headroom above observed compact-output estimates and frees
-        context capacity for effective two-scene batching. Live vLLM traces must
-        confirm the budget remains sufficient on the deployed model/runtime.
+        The 350-token per-shot reserve is multiplied by the configured
+        shots-per-scene and scene count. The November 19 traces show roughly
+        460-500 completion tokens per scene for the compact three-shot response;
+        350 per shot provides bounded headroom while allowing three-scene batches.
+        Exact chat-template preflight still decides whether a batch fits, and the
+        deterministic base-plan fallback remains responsible for missing fields.
         """
         count = max(1, int(scene_count))
         return min(
             int(DIRECTOR_MAX_TOKENS),
-            max(320, 600 * int(DIRECTOR_SHOTS_PER_SCENE) * count),
+            max(320, 350 * int(DIRECTOR_SHOTS_PER_SCENE) * count),
         )
 
     @_with_faulthandler_watchdog
@@ -6877,10 +6909,12 @@ class QwenDirector(
         if not isinstance(critique, dict):
             return critique
         findings = [str(f).strip() for f in (critique.get("findings") or []) if str(f).strip()]
+        model_findings = list(findings)
         shot_findings = [
             f for f in (critique.get("shot_findings") or [])
             if isinstance(f, dict) and str(f.get("finding", "")).strip()
         ]
+        model_shot_findings = list(shot_findings)
 
         shots = [s for s in (plan.get("shots") or []) if isinstance(s, dict)]
         by_scene: dict[str, list[dict]] = {}
@@ -6933,16 +6967,163 @@ class QwenDirector(
         def _is_unsupported_finding(finding: str) -> bool:
             return _is_case_only_roster_false_positive(finding) or _is_cross_scene_coverage_false_positive(finding)
 
-        original_finding_count = len(findings) + len(shot_findings)
-        findings = [item for item in findings if not _is_unsupported_finding(item)]
-        shot_findings = [
-            item for item in shot_findings
-            if not _is_unsupported_finding(str(item.get("finding", "") or ""))
+        story_evidence = str(plan.get("story", "") or "")
+        story_paragraphs = [
+            part.strip() for part in re.split(r"\n\s*\n+", story_evidence) if part.strip()
         ]
-        filtered_finding_count = original_finding_count - (len(findings) + len(shot_findings))
+        scene_by_id = {
+            str(scene.get("scene_id", "") or "").strip(): scene
+            for scene in (plan.get("scenes", []) or []) if isinstance(scene, dict)
+        }
+
+        def _scene_number(scene_id: str) -> int | None:
+            match = re.search(r"(\d+)$", str(scene_id or "").strip())
+            return int(match.group(1)) if match else None
+
+        def _story_for_scene_numbers(numbers: set[int]) -> str:
+            if not numbers:
+                return story_evidence
+            selected = [
+                story_paragraphs[number - 1]
+                for number in sorted(numbers)
+                if 1 <= number <= len(story_paragraphs)
+            ]
+            # If the source is not paragraph-aligned with scene IDs, do not silently
+            # discard the evidence; retain the full text and let the quote/target checks decide.
+            return "\n\n".join(selected) if selected else story_evidence
+
+        def _normalized_evidence(value: str) -> str:
+            return re.sub(r"\s+", " ", str(value or "")).strip().casefold()
+
+        def _quoted_spans(finding: str) -> list[tuple[str, str]]:
+            spans = []
+            pattern = r"""[“"]([^”"]{8,})[”"]|[‘']([^’']{8,})[’']"""
+            for match in re.finditer(pattern, str(finding or "")):
+                span = str(match.group(1) or match.group(2) or "").strip()
+                if len(span.split()) < 2:
+                    continue
+                clause_start = max(
+                    str(finding or "").rfind(";", 0, match.start()),
+                    str(finding or "").rfind(".", 0, match.start()),
+                    str(finding or "").rfind("\n", 0, match.start()),
+                ) + 1
+                prefix = str(finding or "")[clause_start:match.start()]
+                role = "target" if re.search(
+                    r"\b(?:current|plan/current|plan-side|existing)\b",
+                    prefix, re.I,
+                ) else "story"
+                spans.append((span, role))
+            return spans
+
+        def _finding_has_source_quote(finding: str, *, shot_id: str = "") -> bool:
+            spans = _quoted_spans(finding)
+            if not spans:
+                return False
+            shot = next((item for item in shots if str(item.get("shot_id", "") or "").strip() == shot_id), None)
+            target_parts = []
+            relevant_story = story_evidence
+            if shot is not None:
+                shot_scene_id = str(shot.get("scene_id", "") or "").strip()
+                shot_scene_number = _scene_number(shot_scene_id)
+                relevant_story = _story_for_scene_numbers({shot_scene_number} if shot_scene_number else set())
+                target_parts.extend(str(shot.get(field, "") or "") for field in (
+                    "action", "visual_prompt", "location", "lighting", "color_temperature", "mood",
+                ))
+                target_parts.extend(
+                    str(event.get("text", "") or "") for event in (shot.get("dialogue_events", []) or [])
+                    if isinstance(event, dict)
+                )
+                scene = scene_by_id.get(str(shot.get("scene_id", "") or "").strip())
+                if scene:
+                    target_parts.extend(str(scene.get(field, "") or "") for field in (
+                        "description", "scene_objective", "location",
+                    ))
+            else:
+                # Scope a scene-level finding to the named scene; a quote copied from a
+                # different scene must not validate a false omission/mismatch claim.
+                scene_numbers = {
+                    int(value) for value in re.findall(r"\bscene[_\s-]*0*(\d+)\b", str(finding or ""), re.I)
+                }
+                if scene_numbers:
+                    relevant_story = _story_for_scene_numbers(scene_numbers)
+                all_scenes = [
+                    scene for scene in (plan.get("scenes", []) or []) if isinstance(scene, dict)
+                ]
+                if scene_numbers:
+                    target_scenes = []
+                    for scene in all_scenes:
+                        scene_match = re.search(r"(\d+)$", str(scene.get("scene_id", "")))
+                        if scene_match and int(scene_match.group(1)) in scene_numbers:
+                            target_scenes.append(scene)
+                else:
+                    target_scenes = all_scenes
+                target_scene_ids = {str(scene.get("scene_id", "") or "").strip() for scene in target_scenes}
+                target_parts.extend(
+                    str(scene.get(field, "") or "")
+                    for scene in target_scenes
+                    for field in ("description", "scene_objective", "location")
+                )
+                target_parts.extend(
+                    str(shot_item.get(field, "") or "")
+                    for shot_item in shots
+                    if (
+                        str(shot_item.get("scene_id", "") or "").strip() in target_scene_ids
+                        if scene_numbers else True
+                    )
+                    for field in ("action", "visual_prompt", "location")
+                )
+            normalized_story = _normalized_evidence(relevant_story)
+            normalized_targets = [_normalized_evidence(part) for part in target_parts if part]
+            story_hit = any(
+                _normalized_evidence(span) in normalized_story
+                for span, role in spans if role == "story"
+            )
+            target_hit = any(
+                _normalized_evidence(span) in target
+                for span, role in spans if role == "target"
+                for target in normalized_targets
+            )
+            needs_both_sides = bool(re.search(
+                r"\b(?:omits?|omitted|missing|absent|not present|not in|does not|doesn't|never|"
+                r"contradicts?|inconsistent|inconsistency|mismatch(?:ed)?|differs?|conflict(?:s|ing)?|"
+                r"invented|unsupported|not grounded|not supported|unfaithful)\b",
+                str(finding or ""), re.I,
+            ))
+            # The critic's own contract says a mismatch needs evidence from both sides.
+            # A story quote alone must not be used to support a false claim that the story omits it.
+            if needs_both_sides:
+                return story_hit and target_hit
+            return story_hit or target_hit
+
+        verified_findings = [
+            item for item in model_findings
+            if not _is_unsupported_finding(item) and _finding_has_source_quote(item)
+        ]
+        valid_shot_ids = {
+            str(item.get("shot_id", "") or "").strip() for item in shots
+            if str(item.get("shot_id", "") or "").strip()
+        }
+        verified_model_shot_findings = [
+            item for item in model_shot_findings
+            if str(item.get("shot_id", "") or "").strip() in valid_shot_ids
+            and not _is_unsupported_finding(str(item.get("finding", "") or ""))
+            and _finding_has_source_quote(
+                str(item.get("finding", "") or ""),
+                shot_id=str(item.get("shot_id", "") or "").strip(),
+            )
+        ]
+        filtered_finding_count = (
+            len(model_findings) + len(model_shot_findings)
+            - len(verified_findings) - len(verified_model_shot_findings)
+        )
+        # Keep only exact-source-backed model findings. Deterministic checks added above remain
+        # because they are generated from plan fields directly, not unsupported model claims.
+        deterministic_shot_findings = shot_findings[len(model_shot_findings):]
+        findings = verified_findings
+        shot_findings = verified_model_shot_findings + deterministic_shot_findings
         if filtered_finding_count:
             print(
-                f"[DIRECTOR] critic post-filter removed {filtered_finding_count} unsupported case/cross-scene finding(s)",
+                f"[DIRECTOR] critic post-filter removed {filtered_finding_count} finding(s) without a valid exact source quote or target id",
                 flush=True,
             )
 
@@ -6958,6 +7139,10 @@ class QwenDirector(
             "action", "camera_shot", "camera_movement", "lens_and_depth_of_field",
             "composition_notes", "mood", "visual_prompt", "overall_soundscape", "non_diegetic_music",
         }
+        patchable_shot_ids = {
+            str(item.get("shot_id", "") or "").strip() for item in verified_model_shot_findings
+            if str(item.get("shot_id", "") or "").strip()
+        }
         filtered_patches = []
         for patch_item in critique.get("shot_patches", []) or []:
             if not isinstance(patch_item, dict):
@@ -6965,7 +7150,7 @@ class QwenDirector(
             shot_id = str(patch_item.get("shot_id", "") or "").strip()
             current_shot = shot_by_id.get(shot_id)
             patch = patch_item.get("patch", {})
-            if current_shot is None or not isinstance(patch, dict):
+            if current_shot is None or shot_id not in patchable_shot_ids or not isinstance(patch, dict):
                 continue
             changed = {}
             for field, raw_value in patch.items():
@@ -7031,7 +7216,8 @@ class QwenDirector(
 
     EVIDENCE RULES
     - Every finding must include a short verbatim quote from the story or the affected shot field.
-      For a mismatch, quote the relevant phrase from both sides. If exact support is unavailable, omit the finding.
+      For a mismatch, label two separate quotes as `story/source` and `plan/current` so each side can be checked
+      against its own evidence. If exact support is unavailable, omit the finding.
     - Compare character names case-insensitively for identity after trimming whitespace. Capitalization alone
       is not a roster defect; preserve canonical roster spelling in any patch.
     - A person mentioned only as a radio/intercom/recording voice is not necessarily visible in the shot.
@@ -7074,46 +7260,40 @@ class QwenDirector(
                 "scene_id": str(shot.get("scene_id", "") or ""),
                 "camera_shot": str(shot.get("camera_shot", "") or ""),
                 "camera_movement": str(shot.get("camera_movement", "") or ""),
-                "lens_and_depth_of_field": str(shot.get("lens_and_depth_of_field", "") or ""),
                 "lighting": str(shot.get("lighting", "") or ""),
                 "color_temperature": str(shot.get("color_temperature", "") or ""),
                 "location": str(shot.get("location", "") or ""),
                 "mood": str(shot.get("mood", "") or ""),
                 "characters": shot.get("characters", []) or [],
-                "visual_prompt": str(shot.get("visual_prompt", "") or "")[:400],
-                "action": str(shot.get("action", "") or "")[:300],
+                "visual_prompt": str(shot.get("visual_prompt", "") or "")[:180],
+                "action": str(shot.get("action", "") or "")[:180],
                 "dialogue_events": [
-                    {
-                        "speaker": str(event.get("speaker", "") or ""),
-                        "text": str(event.get("text", "") or "")[:240],
-                    }
+                    {"speaker": str(event.get("speaker", "") or ""),
+                     "text": str(event.get("text", "") or "")[:100]}
                     for event in (shot.get("dialogue_events", []) or [])
                     if isinstance(event, dict)
-                ][:4],
+                ][:1],
             }
 
         def _slim_scene(scene: dict) -> dict:
             return {
                 "scene_id": str(scene.get("scene_id", "") or ""),
                 "title": str(scene.get("title", "") or ""),
-                "description": str(scene.get("description", "") or "")[:500],
-                "scene_objective": str(scene.get("scene_objective", "") or "")[:300],
+                "description": str(scene.get("description", "") or "")[:160],
+                "scene_objective": str(scene.get("scene_objective", "") or "")[:100],
                 "location": str(scene.get("location", "") or ""),
                 "characters": scene.get("characters", []) or [],
             }
 
+        # The entire source story is mandatory evidence. Only derived shot metadata is compacted.
         compact = {
             "mode": mode,
-            "story": self._compact_story_context(
-                str(plan.get("story", user_input) or ""),
-                DIRECTOR_CRITIC_STORY_CONTEXT_CHARS,
-            ),
+            "story": str(plan.get("story", user_input) or ""),
             "roster": [
                 str(c.get("name", "") or "").strip()
                 for c in (plan.get("characters", []) or [])
                 if isinstance(c, dict) and str(c.get("name", "") or "").strip()
             ],
-            "visual_language": plan.get("visual_language", {}) or {},
             "scenes": [
                 _slim_scene(scene)
                 for scene in (plan.get("scenes", []) or [])
@@ -7125,6 +7305,24 @@ class QwenDirector(
                 if isinstance(shot, dict)
             ],
         }
+        user_payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        # Use the same rendered chat-template token counter as generation. If needed, compact
+        # only derived metadata; never truncate, summarize, or drop the source story.
+        prompt_tokens, available_completion = self._available_output_tokens(
+            system_prompt, user_payload, minimum_completion=700, enable_thinking=False,
+        )
+        critic_completion = min(1400, int(available_completion))
+        if critic_completion < 700:
+            raise RuntimeError(
+                "Director critic cannot fit the full unabridged story plus the minimum safe completion "
+                f"in the {int(DIRECTOR_N_CTX)}-token context (prompt={prompt_tokens}, available={available_completion})."
+            )
+        print(
+            f"[DIRECTOR] critic_context full_story_chars={len(compact['story'])} "
+            f"prompt_tokens={prompt_tokens}/{int(DIRECTOR_N_CTX)} completion={critic_completion}; "
+            "shot metadata compacted, story preserved",
+            flush=True,
+        )
         from planner.qwen_director_prompts import CAMERA_MOVEMENT_OPTIONS, CAMERA_SHOT_OPTIONS
         schema = {
             "type": "object",
@@ -7186,7 +7384,7 @@ class QwenDirector(
                 temperature=0.10,
                 top_p=0.75,
                 call_name="director_critique",
-                max_completion=1400,
+                max_completion=critic_completion,
                 json_mode=True,
                 disable_thinking=True,
                 response_schema=schema,
