@@ -1617,7 +1617,7 @@ class QwenDirector(
                     "architect_max_tokens": DIRECTOR_STORY_PLAN_MAX_TOKENS,
                     "author_max_tokens": DIRECTOR_STORY_WRITER_MAX_TOKENS,
                     "author_minimum_output_tokens": DIRECTOR_STORY_WRITER_MIN_OUTPUT_TOKENS,
-                    "story_revision_policy": "one conditional Architect revision after a failed blueprint gate; up to one conditional Author revision after a rejected draft or starved ending; zero infrastructure retries and no separate repair stage",
+                    "story_revision_policy": "up to one conditional revision per stage after a returned artifact fails a hard gate",
                     "runtime_retry_calls": accounting["runtime_retry_calls"],
                     "repair_calls": accounting["repair_calls"],
                 },
@@ -2936,6 +2936,12 @@ class QwenDirector(
                     "exit_present must NOT list them."
                 )
             lines.extend(scene_notes(number, scene))
+            if "exit_objects" in allowed_by_scene.get(number, set()):
+                lines.append(
+                    "  EXIT_OBJECTS RULE: write exit_objects by starting from 'objects at start' above, adding only what the "
+                    "event shows being gained and removing only what the event shows being lost; keep every other entry "
+                    "with its exact text. Never replace the list with just the one item you are fixing."
+                )
             lines.append(
                 "  ALLOWED TO CHANGE: " + ", ".join(sorted(allowed_by_scene.get(number, {"event"})))
                 + " (copy every other field exactly; unlisted fields are ignored)"
@@ -3143,74 +3149,40 @@ class QwenDirector(
         return blueprint
 
     _PATCH_SINGLE_CALL_SCENES = 5
-    _PATCH_BATCH_SCENES = 3
+    _PATCH_BATCH_SCENES = 12  # all mechanical findings in ONE call
 
     def _patch_batches(self, problems: list[str], data: dict) -> list[tuple[list[int], bool]]:
-        """Create disjoint scene scopes; merge overlapping payoff pairs and all co-located fixes."""
+        """Split a repair into small batches: failing setup/payoff pairs first (two pairs at most), then other scenes."""
         total = int(DIRECTOR_STORY_SCENES)
         map_problems = [p for p in problems if "SETUP_PAYOFF_MAP" in str(p)]
         other_problems = [p for p in problems if "SETUP_PAYOFF_MAP" not in str(p)]
         batches: list[tuple[list[int], bool]] = []
-        map_components: list[set[int]] = []
-        named = {int(v) for p in map_problems
-                 for v in re.findall(r"\bscenes?\s+0*(\d+)", str(p), re.I)}
-        pairs: list[set[int]] = []
-        for pair in data.get("setup_payoff_map") or []:
-            try:
-                component = {int(pair.get("plant_scene")), int(pair.get("payoff_scene"))}
-            except (AttributeError, TypeError, ValueError):
-                continue
-            component = {n for n in component if 1 <= n <= total}
-            if len(component) == 2 and (not named or component & named):
-                pairs.append(component)
-        # Connected components prevent a shared plant/payoff scene being patched in two calls.
-        while pairs:
-            group = set(pairs.pop(0))
-            changed = True
-            while changed:
-                changed = False
-                keep = []
-                for pair in pairs:
-                    if group & pair:
-                        group |= pair
-                        changed = True
-                    else:
-                        keep.append(pair)
-                pairs = keep
-            map_components.append(group)
-        assigned: set[int] = set()
-        for group in map_components:
-            scope = sorted(group - assigned)
-            if scope:
-                batches.append((scope, True))
-                assigned.update(scope)
-        # Every other finding on a map scene is included in that single map batch.
-        # Remaining mechanical/continuity scenes are chunked without overlap.
-        rest = [n for n in self._patch_affected_scenes(other_problems, data) if n not in assigned]
+        in_map: set[int] = set()
+        if map_problems:
+            named = {int(v) for p in map_problems for v in re.findall(r"\bscenes?\s+0*(\d+)", str(p), re.I)}
+            pairs = []
+            for pair in data.get("setup_payoff_map") or []:
+                try:
+                    scenes_of_pair = [int(pair.get("plant_scene")), int(pair.get("payoff_scene"))]
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if not named or named & set(scenes_of_pair):
+                    pairs.append(scenes_of_pair)
+            for start in range(0, len(pairs), 2):
+                group = sorted({n for pair in pairs[start:start + 2] for n in pair if 1 <= n <= total})
+                if group:
+                    batches.append((group, True))
+                    in_map.update(group)
+        # Mechanical findings (moves, handoffs, objects) get their own calls, separate from the setup/payoff calls:
+        # when both kinds sit on one scene the model repeatedly dropped one of them.
+        rest = self._patch_affected_scenes(other_problems, data)
         for start in range(0, len(rest), self._PATCH_BATCH_SCENES):
-            scope = rest[start:start + self._PATCH_BATCH_SCENES]
-            if scope:
-                batches.append((scope, False))
-                assigned.update(scope)
-        # A map finding without a parseable pair still gets a bounded, fail-closed scene scope.
-        unassigned = [n for n in self._patch_affected_scenes(map_problems, data) if n not in assigned]
-        for start in range(0, len(unassigned), self._PATCH_BATCH_SCENES):
-            scope = unassigned[start:start + self._PATCH_BATCH_SCENES]
-            if scope:
-                batches.append((scope, True))
-                assigned.update(scope)
+            batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
         return batches
 
     def _knock_on_batches(self, current: list[str], data: dict, done: set[int]) -> list[tuple[list[int], bool]]:
-        """Schedule newly exposed fixes without reopening scenes already patched in this revision."""
-        fresh_batches = []
-        for scope, is_map in self._patch_batches(current, data):
-            if not scope or set(scope) & set(done):
-                # A repeated repair in the same scene is deliberately not attempted:
-                # the final deterministic gate reports the unresolved defect instead.
-                continue
-            fresh_batches.append((scope, is_map))
-        return fresh_batches
+        fresh = [n for n in self._patch_affected_scenes([p for p in current if "SETUP_PAYOFF_MAP" not in str(p)], data) if n not in done]
+        return [(fresh[i:i + self._PATCH_BATCH_SCENES], False) for i in range(0, len(fresh), self._PATCH_BATCH_SCENES)]
 
     def _blueprint_findings(self, mode: str, user_input: str, data: dict, source_character_names) -> list[str]:
         """Deterministic validation of the current plan (no model call). Empty when the plan passes."""
@@ -3234,9 +3206,8 @@ class QwenDirector(
     ) -> str:
         """The single Architect revision, done as small sequential batches.
 
-        Each batch is one short call. Ordinary scene repairs cover at most three scenes; a connected
-        setup/payoff component stays together even when it spans more scenes, so a shared plant/payoff scene
-        is never patched by separate calls. A scene is corrected at most once. Between batches the plan is re-checked deterministically (no model
+        Each batch is one short call for at most two setup/payoff pairs or three scenes, so the model can follow the
+        notes. A scene is corrected at most once. Between batches the plan is re-checked deterministically (no model
         call): findings that an earlier batch already removed are skipped, and new knock-on findings reach later
         scenes in the next batch. The application never writes story text; the plan is validated once at the end and
         rejected if it still fails.
@@ -3267,7 +3238,7 @@ class QwenDirector(
                 if "SETUP_PAYOFF_MAP" in str(finding):
                     if is_map and (not numbers or numbers & scope_set):
                         relevant.append(finding)
-                elif numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers):
+                elif not is_map and (numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers)):
                     relevant.append(finding)
             if not relevant:
                 print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} skipped=already_resolved", flush=True)
@@ -3283,8 +3254,8 @@ class QwenDirector(
             except RuntimeError as unusable:
                 # A malformed reply for one small batch leaves those scenes as planned; the final validation decides.
                 print(f"[QWEN] story_architecture batch={index} unusable: {str(unusable)[:160]}", flush=True)
-            # Every scene is touched at most once, regardless of finding type.
-            done |= scope_set
+            if not is_map:
+                done |= scope_set
             current = self._blueprint_findings(mode, user_input, data, source_character_names)
             if not current:
                 break
