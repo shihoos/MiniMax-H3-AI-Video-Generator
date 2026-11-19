@@ -113,6 +113,7 @@ KNOWLEDGE_RE = re.compile(
 )
 OBJECT_CHANGE_RE = re.compile(
     r"\b(take\w*|hand\w*|give\w*|steal\w*|drop\w*|leave\w*|carry\w*|move\w*|hide\w*|"
+    r"grab\w*|insert\w*|plug\w*|connect\w*|attach\w*|detach\w*|unplug\w*|fit\w*|"
     r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|retriev\w*|remove\w*|place\w*|"
     r"find\w*|discover\w*|locate\w*|return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*|"
     r"inject\w*|activat\w*|dispers\w*|releas\w*|escap\w*|consum\w*|use\w*|stabiliz\w*|"
