@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-16.5.5"
+CONTRACTS_REVISION = "2026-11-18.5.8"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -420,7 +420,9 @@ def _scene_local_transition_is_explained(
                     event_text, flags=re.I,
                 )
     destination_tokens = _plural_variants(_location_tokens(exit_location))
-    target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I))
+    target_is_interior = bool(re.search(r"\b(?:interior|inside|room|corridor|vault)\b", new, re.I)) and not re.search(
+        r"\b(?:entrance|entry|doorway|door|gate|hatch|airlock|threshold)\b", new, re.I,
+    )  # an entrance/door is the access point itself; reaching it needs no separate door or hatch in the sentence
     source_is_outside = bool(re.search(r"\b(?:tundra|exterior|outside|entrance)\b", old, re.I))
     surfaces = sorted(
         {
@@ -839,6 +841,14 @@ def _scene10_enacts_climax_choice(choice: str, event: str, cast: list[dict[str, 
     return False
 
 
+_TITLE_ABBREVIATION_RE = re.compile(r"\b(Dr|Mr|Mrs|Ms|Prof|St|Col|Gen|Capt|Lt|Sgt|Cmdr)\.")
+
+
+def _event_sentences(event: object) -> list[str]:
+    """Split an EVENT into sentences without cutting at a title abbreviation such as 'Dr.' in 'notices Dr. Kovalenko's logbook'."""
+    return re.split(r"(?<=[.!?])\s+", _TITLE_ABBREVIATION_RE.sub(r"\1", str(event or "")))
+
+
 def _plot_event_anchor_is_grounded(
     field_value: str, event: str, cast: list[dict[str, Any]],
 ) -> bool:
@@ -846,7 +856,7 @@ def _plot_event_anchor_is_grounded(
     anchors = _distinctive_plot_tokens(field_value, cast)
     if not anchors:
         return False
-    for sentence in re.split(r"(?<=[.!?])\s+", str(event or "")):
+    for sentence in _event_sentences(event):
         sentence_anchors = _distinctive_plot_tokens(sentence, cast)
         if anchors & sentence_anchors and (
             OBJECT_CHANGE_RE.search(sentence)
@@ -908,7 +918,7 @@ def _object_action_is_anchored(item: str, event: str) -> bool:
         anchors = _stemmed_content_tokens(item) - _OBJECT_STATE_WORDS
     if not anchors:
         return False
-    for sentence in re.split(r"(?<=[.!?])\s+", str(event or "")):
+    for sentence in _event_sentences(event):
         sentence_tokens = _stemmed_content_tokens(sentence)
         if anchors & sentence_tokens and (OBJECT_CHANGE_RE.search(sentence) or _OBJECT_DISCOVERY_RE.search(sentence)):
             return True
