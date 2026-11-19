@@ -303,7 +303,7 @@ _CLAUSE_SPLIT_RE = re.compile(
     r"[.;!?]+|,|\b(?:while|as|but|and|then|before|after|when|although|though|whereas|yet|so)\b", re.I,
 )
 _SCENE_LOCAL_ACCESS_RE = re.compile(
-    r"\b(?:enter\w*|go(?:es|ing)?\s+inside|step(?:s|ped|ping)?\s+inside|cross\w*|pass(?:es|ed|ing)?\s+through|"
+    r"\b(?:enter\w*|into|through|past|indoors|door\w*|hatch\w*|airlock\w*|go(?:es|ing)?\s+inside|step(?:s|ped|ping)?\s+inside|cross\w*|pass(?:es|ed|ing)?\s+through|"
     r"open\w*|unlock\w*|bypass\w*|breach\w*|descend\w*|climb\w*|"
     r"tak(?:e|es|ing)\s+shelter|took\s+shelter|seek(?:s|ing)?\s+shelter|sought\s+shelter|"
     r"retreat\w*|duck(?:s|ed|ing)?\s+inside|shelter\w*\s+inside)\b", re.I,
