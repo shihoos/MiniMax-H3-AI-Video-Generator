@@ -113,7 +113,6 @@ KNOWLEDGE_RE = re.compile(
 )
 OBJECT_CHANGE_RE = re.compile(
     r"\b(take\w*|hand\w*|give\w*|steal\w*|drop\w*|leave\w*|carry\w*|move\w*|hide\w*|"
-    r"grab\w*|insert\w*|plug\w*|connect\w*|attach\w*|detach\w*|unplug\w*|fit\w*|"
     r"open\w*|close\w*|break\w*|destroy\w*|transfer\w*|recover\w*|retriev\w*|remove\w*|place\w*|"
     r"find\w*|discover\w*|locate\w*|return\w*|seize\w*|lock\w*|unlock\w*|burn\w*|mark\w*|sign\w*|"
     r"inject\w*|activat\w*|dispers\w*|releas\w*|escap\w*|consum\w*|use\w*|stabiliz\w*|"
@@ -154,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-18.5.8"
+CONTRACTS_REVISION = "2026-11-19.5.9"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -810,6 +809,15 @@ _PLOT_PERCEPTION_RE = re.compile(
 )
 # An object shown for the first time ("revealing a canister") is a discovery, like find/locate.
 _OBJECT_DISCOVERY_RE = re.compile(r"\b(?:reveal\w*|uncover\w*|spot\w*|notic\w*|glimps\w*|expos\w*)\b", re.I)
+# Ordinary physical custody/state verbs a writer uses for a prop ("grabs the drive", "pockets the keycard",
+# "smashes the scanner"). Architect-side object and plant anchors only; the prose audit keeps OBJECT_CHANGE_RE.
+_OBJECT_CUSTODY_RE = re.compile(
+    r"\b(?:grab\w*|snatch\w*|grasp\w*|clutch\w*|clench\w*|pocket\w*|collect\w*|gather\w*|pick\w*|pull\w*|"
+    r"extract\w*|secur\w*|obtain\w*|acqui\w*|receiv\w*|throw\w*|threw|thrown|toss\w*|hurl\w*|fling\w*|"
+    r"abandon\w*|discard\w*|lose|loses|losing|lost|shatter\w*|smash\w*|crush\w*|insert\w*|plug\w*|install\w*|"
+    r"attach\w*|swap\w*|download\w*|cop(?:y|ies|ied)|wrest\w*|rip\w*|tear\w*|tore|torn|sabotag\w*|disabl\w*|"
+    r"disarm\w*|detonat\w*|slip\w*|stash\w*|conceal\w*|trad(?:e|es|ed|ing)|swallow\w*)\b", re.I,
+)
 
 
 _CLIMAX_GENERIC_TOKENS = {
@@ -822,7 +830,11 @@ _CLIMAX_ACTION_RE = re.compile(
     r"releas\w*|seal\w*|leav\w*|preserv\w*|hid\w*|accept\w*|reject\w*|refus\w*|"
     r"sacrific\w*|publish\w*|send\w*|transmit\w*|break\w*|open\w*|shut\w*|disabl\w*|"
     r"surrender\w*|confess\w*|expos\w*|stay\w*|remain\w*|sign\w*|withhold\w*|"
-    r"abandon\w*|overload\w*|cut\w*|disconnect\w*|lock\w*|unlock\w*)\b", re.I,
+    r"abandon\w*|overload\w*|cut\w*|disconnect\w*|lock\w*|unlock\w*|"
+    r"overrid\w*|overrod\w*|extract\w*|retriev\w*|detonat\w*|execut\w*|eras\w*|delet\w*|wip\w*|purg\w*|"
+    r"upload\w*|download\w*|vent\w*|flood\w*|ignit\w*|sever\w*|reroute\w*|rewir\w*|hack\w*|shoot\w*|"
+    r"fire\w*|blow\w*|inject\w*|arm\w*|swap\w*|trad(?:e|es|ed|ing)|surrender\w*|evacuat\w*|"
+    r"shut\w*|collapse\w*|flip\w*|press\w*|pull\w*|grab\w*|take|takes|took|taken)\b", re.I,
 )
 
 
@@ -921,7 +933,9 @@ def _object_action_is_anchored(item: str, event: str) -> bool:
         return False
     for sentence in _event_sentences(event):
         sentence_tokens = _stemmed_content_tokens(sentence)
-        if anchors & sentence_tokens and (OBJECT_CHANGE_RE.search(sentence) or _OBJECT_DISCOVERY_RE.search(sentence)):
+        if anchors & sentence_tokens and (
+            OBJECT_CHANGE_RE.search(sentence) or _OBJECT_DISCOVERY_RE.search(sentence) or _OBJECT_CUSTODY_RE.search(sentence)
+        ):
             return True
     return False
 
