@@ -643,9 +643,12 @@ class QwenDirectorPromptMixin:
             FINAL SELF-CHECK BEFORE RETURNING:
             1. The premise-specific skill/setting actually causes plot events and the solution.
             2. Cast contains no remote-only voice or non-visible AI; each visible cast member acts in listed scenes.
-            3. Every one of the eleven causal handoffs is enacted by the next EVENT.
-            4. Every setup/payoff map scene is correct and its EVENT contains the actual plant/payoff.
-            5. Location, knowledge, object ownership/state and fate carry forward without unexplained changes.
+            3. next_cause is a concrete result for scenes 1-11 (only scene 12 may say 'none'); the next EVENT acts on it.
+            4. Each setup/payoff item is a physical thing a named character finds, reads or uses in that scene's EVENT,
+               using the map's own words; an abstract fact is not a plant.
+            5. If exit_location differs from where the scene starts, the EVENT has a sentence "<Name> walks into <exit_location>"
+               with that name. A person who enters, leaves or dies mid-scene is named doing so in the EVENT; a key object
+               that changes or disappears is named with the action that changes it.
             6. No adjacent events repeat the same completed action; Scenes 10, 11 and 12 are distinct.
             Return one valid JSON object and stop.
         """).strip()
