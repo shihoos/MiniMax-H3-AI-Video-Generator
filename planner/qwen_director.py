@@ -2705,7 +2705,7 @@ class QwenDirector(
         }
         return {"type": "json_schema", "json_schema": {"name": "story_scene_patch", "strict": True, "schema": schema}}
 
-    def _patch_story_blueprint(
+    def _patch_scenes_once(
         self,
         mode: str,
         user_input: str,
@@ -2713,8 +2713,12 @@ class QwenDirector(
         problems: list[str],
         *,
         source_character_names: list[str] | None = None,
-    ) -> str:
-        """The single Architect revision: rewrite only the scenes that failed, then splice them into the plan.
+        scope: list[int] | None = None,
+        validate: bool = True,
+    ):
+        """One small Architect call: rewrite only the scenes in ``scope`` (or every failing scene), then splice them in.
+
+        With ``validate=False`` the spliced plan data is returned and the caller validates once at the end.
 
         Asking the model to re-emit the whole 12-scene plan made it return an identical copy (the findings were
         ignored), so nothing was ever repaired. Here it receives only the failing scenes, must return new text for
@@ -2731,7 +2735,7 @@ class QwenDirector(
         scenes = resolve_scenes(data)
         if len(scenes) != total:
             raise RuntimeError("Cannot patch Architect plan: it does not contain every scene.")
-        affected = self._patch_affected_scenes(problems, data)
+        affected = sorted(set(scope)) if scope else self._patch_affected_scenes(problems, data)
         plot_fields = self._patch_affected_plot_fields(problems)
         map_needs_patch = any("SETUP_PAYOFF_MAP" in str(problem) for problem in problems)
         if not affected and not plot_fields and not map_needs_patch:
@@ -2845,6 +2849,21 @@ class QwenDirector(
                     continue
                 if number == plant_scene:
                     plant_words = anchor_words(pair.get('plant'))
+                    plant_tokens = _distinctive_plot_tokens(str(pair.get('plant') or ''), patch_cast)
+                    best_scene, best_hits = 0, len(plant_tokens & _distinctive_plot_tokens(as_text(scene.get('event')), patch_cast))
+                    for other_number, other in enumerate(scenes, 1):
+                        if other_number == number or other_number >= payoff_scene:
+                            continue
+                        hits = len(plant_tokens & _distinctive_plot_tokens(as_text(other.get('event')), patch_cast))
+                        if hits >= 2 and hits > best_hits:
+                            best_scene, best_hits = other_number, hits
+                    if best_scene:
+                        notes.append(
+                            f"  MAP HINT: scene {best_scene:02d}'s event already shows this planted item. The simplest correction is "
+                            f"to set this map item's plant_scene to {best_scene} (it must stay before payoff scene {payoff_scene}) and "
+                            "leave this scene's event as it is; otherwise rewrite this scene's event so a named character finds, "
+                            "notices or uses the item."
+                        )
                     notes.append(
                         "  PLANT REQUIREMENT: the event must show a named character finding, noticing, reading or using the planted "
                         f"item with at least one of these exact words: {', '.join(plant_words) or 'the planted item'}. "
@@ -3056,8 +3075,12 @@ class QwenDirector(
         new_map = [x for x in (patch or {}).get("setup_payoff_map", []) if isinstance(x, dict)]
         missing_scenes = sorted(set(affected) - set(patched))
         extra_returned = sorted(set(patched) - set(affected))
-        if missing_scenes:
+        if missing_scenes and not (set(affected) & set(patched)):
             raise RuntimeError(f"Scene patch covered scenes {sorted(patched)}; expected {affected}.")
+        if missing_scenes:
+            # The model skipped some requested scenes. They stay exactly as planned and the single final validation
+            # judges the plan; a partial repair is not thrown away.
+            print(f"[QWEN] story_architecture scene_patch warning=scenes_not_returned scenes={missing_scenes}", flush=True)
         map_scene_numbers: set[int] = set()
         for item in new_map:
             for key in ("plant_scene", "payoff_scene"):
@@ -3067,13 +3090,15 @@ class QwenDirector(
                     pass
         # An extra scene is legitimate only when the corrected map now names it (a relocated plant/payoff).
         if extra_returned and not (map_needs_patch and set(extra_returned) <= map_scene_numbers):
-            raise RuntimeError(
-                f"Scene patch returned scenes {extra_returned} that are neither failing nor named by a corrected map."
-            )
+            dropped = [n for n in extra_returned if not (map_needs_patch and n in map_scene_numbers)]
+            print(f"[QWEN] story_architecture scene_patch warning=unrequested_scenes_ignored scenes={dropped}", flush=True)
+            for n in dropped:
+                patched.pop(n, None)
+            extra_returned = [n for n in extra_returned if n not in dropped]
         returned_fields = (patch or {}).get("plot_fields") or {}
         if set(returned_fields) != set(plot_fields):
             raise RuntimeError(f"Global field patch covered {sorted(returned_fields)}; expected {sorted(plot_fields)}.")
-        unchanged = [n for n in affected if as_text(patched[n].get("event")).strip() == as_text(scenes[n - 1].get("event")).strip()]
+        unchanged = [n for n in affected if n in patched and as_text(patched[n].get("event")).strip() == as_text(scenes[n - 1].get("event")).strip()]
         if unchanged:
             print(f"[QWEN] story_architecture scene_patch warning=event_unchanged scenes={unchanged}", flush=True)
         if extra_returned:
@@ -3103,6 +3128,8 @@ class QwenDirector(
         for scene in data["scenes"]:
             for key in ("entry_location", "entry_present", "entry_knows", "entry_objects"):
                 scene.pop(key, None)
+        if not validate:
+            return data
         blueprint = ""
         try:
             blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
@@ -3111,6 +3138,130 @@ class QwenDirector(
             )
         except RuntimeError as rejection:
             # Nothing is invented or silently adjusted to satisfy a validator: a plan that still fails is rejected.
+            if not getattr(self, "_last_story_quality_errors", None) or not blueprint:
+                self._last_story_quality_errors = [str(rejection)]
+            self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=str(rejection))
+            raise self._BlueprintRejected(str(rejection), blueprint=blueprint) from rejection
+        return blueprint
+
+    _PATCH_SINGLE_CALL_SCENES = 5
+    _PATCH_BATCH_SCENES = 3
+
+    def _patch_batches(self, problems: list[str], data: dict) -> list[tuple[list[int], bool]]:
+        """Split a repair into small batches: failing setup/payoff pairs first (two pairs at most), then other scenes."""
+        total = int(DIRECTOR_STORY_SCENES)
+        map_problems = [p for p in problems if "SETUP_PAYOFF_MAP" in str(p)]
+        other_problems = [p for p in problems if "SETUP_PAYOFF_MAP" not in str(p)]
+        batches: list[tuple[list[int], bool]] = []
+        in_map: set[int] = set()
+        if map_problems:
+            named = {int(v) for p in map_problems for v in re.findall(r"\bscenes?\s+0*(\d+)", str(p), re.I)}
+            pairs = []
+            for pair in data.get("setup_payoff_map") or []:
+                try:
+                    scenes_of_pair = [int(pair.get("plant_scene")), int(pair.get("payoff_scene"))]
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if not named or named & set(scenes_of_pair):
+                    pairs.append(scenes_of_pair)
+            for start in range(0, len(pairs), 2):
+                group = sorted({n for pair in pairs[start:start + 2] for n in pair if 1 <= n <= total})
+                if group:
+                    batches.append((group, True))
+                    in_map.update(group)
+        rest = [n for n in self._patch_affected_scenes(other_problems, data) if n not in in_map]
+        for start in range(0, len(rest), self._PATCH_BATCH_SCENES):
+            batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
+        return batches
+
+    def _knock_on_batches(self, current: list[str], data: dict, done: set[int]) -> list[tuple[list[int], bool]]:
+        fresh = [n for n in self._patch_affected_scenes([p for p in current if "SETUP_PAYOFF_MAP" not in str(p)], data) if n not in done]
+        return [(fresh[i:i + self._PATCH_BATCH_SCENES], False) for i in range(0, len(fresh), self._PATCH_BATCH_SCENES)]
+
+    def _blueprint_findings(self, mode: str, user_input: str, data: dict, source_character_names) -> list[str]:
+        """Deterministic validation of the current plan (no model call). Empty when the plan passes."""
+        from planner.story_blueprint_schema import render_blueprint_text
+        total = int(DIRECTOR_STORY_SCENES)
+        try:
+            blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
+            self._validate_story_blueprint_contract(mode, blueprint, user_input, source_character_names=source_character_names)
+        except RuntimeError as problem:
+            return list(getattr(self, "_last_story_quality_errors", None) or [str(problem)])
+        return []
+
+    def _patch_story_blueprint(
+        self,
+        mode: str,
+        user_input: str,
+        base_data: dict,
+        problems: list[str],
+        *,
+        source_character_names: list[str] | None = None,
+    ) -> str:
+        """The single Architect revision, done as small sequential batches.
+
+        Each batch is one short call for at most two setup/payoff pairs or three scenes, so the model can follow the
+        notes. A scene is corrected at most once. Between batches the plan is re-checked deterministically (no model
+        call): findings that an earlier batch already removed are skipped, and new knock-on findings reach later
+        scenes in the next batch. The application never writes story text; the plan is validated once at the end and
+        rejected if it still fails.
+        """
+        import copy
+        from planner.story_blueprint_schema import render_blueprint_text
+        total = int(DIRECTOR_STORY_SCENES)
+        data = copy.deepcopy(base_data)
+        # Small repairs stay one fast call. Only a repair too large for the model to follow (past the point where
+        # earlier logs showed it skipping or misreading scenes) is split into batches.
+        if len(self._patch_affected_scenes(problems, data)) <= self._PATCH_SINGLE_CALL_SCENES:
+            return self._patch_scenes_once(
+                mode, user_input, data, problems, source_character_names=source_character_names, validate=True,
+            )
+        batches = self._patch_batches(problems, data)
+        print(f"[QWEN] story_architecture batched_repair batches={[b[0] for b in batches]}", flush=True)
+        done: set[int] = set()
+        current = list(problems)
+        queue = list(batches)
+        index = 0
+        while queue:
+            scope, is_map = queue.pop(0)
+            index += 1
+            scope_set = set(scope) - (set() if is_map else done)
+            relevant = []
+            for finding in current:
+                numbers = {int(v) for v in re.findall(r"\bscenes?\s+0*(\d+)", str(finding), re.I)}
+                if "SETUP_PAYOFF_MAP" in str(finding):
+                    if is_map and (not numbers or numbers & scope_set):
+                        relevant.append(finding)
+                elif numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers):
+                    relevant.append(finding)
+            if not relevant:
+                print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} skipped=already_resolved", flush=True)
+                if not queue and current:
+                    queue.extend(self._knock_on_batches(current, data, done))
+                continue
+            print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} findings={len(relevant)}", flush=True)
+            try:
+                data = self._patch_scenes_once(
+                    mode, user_input, data, relevant, source_character_names=source_character_names,
+                    scope=sorted(scope_set), validate=False,
+                )
+            except RuntimeError as unusable:
+                # A malformed reply for one small batch leaves those scenes as planned; the final validation decides.
+                print(f"[QWEN] story_architecture batch={index} unusable: {str(unusable)[:160]}", flush=True)
+            done |= scope_set
+            current = self._blueprint_findings(mode, user_input, data, source_character_names)
+            if not current:
+                break
+            if not queue:
+                # Knock-on findings on scenes no batch has touched yet (a scene corrected only once, never twice).
+                queue.extend(self._knock_on_batches(current, data, done))
+        blueprint = ""
+        try:
+            blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
+            self._validate_story_blueprint_contract(
+                mode, blueprint, user_input, source_character_names=source_character_names,
+            )
+        except RuntimeError as rejection:
             if not getattr(self, "_last_story_quality_errors", None) or not blueprint:
                 self._last_story_quality_errors = [str(rejection)]
             self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=str(rejection))
