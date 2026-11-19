@@ -354,7 +354,8 @@ class QwenDirectorPromptMixin:
             Every scene must contain three distinct dramatic movements, usually in 2-3 paragraphs with natural sentence
             lengths: (1) establish the immediate objective and pressure through action; (2) dramatize resistance and a
             discovery or complication; (3) show the decision, its cost, and the changed situation that hands off to the
-            next scene. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
+            next scene. Each movement is about 40-45 words, so a whole scene is about 130 words; longer scenes run out of
+            output budget before Scene {n:02d}. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
             not a fragment. Aim for roughly 120-140 words per scene on average, following the allocation above; the
             per-scene soft maximum is {scene_cap} words, reserved for scenes that need fuller action or aftermath.
             Do not treat that maximum as a quota for every scene. The output budget is designed for the {target}-word
@@ -369,12 +370,6 @@ class QwenDirectorPromptMixin:
             EXIT_PRESENT must EVENT explicitly show that named character physically leaving/withdrawing. If absent
             from both boundaries but visible mid-scene, show both actions in that scene. Remote voices, recordings,
             screens, and discussed people are not physical entrances or visible cast members.
-
-            ACT-LEVEL EXECUTION: preserve the validated beginning/middle/ending progression in the Architect's scene beats.
-            The opening movement establishes the goal and commits the protagonist; the middle changes knowledge, leverage,
-            relationships or available options through escalating consequences; the final movement enacts the prepared
-            choice, its consequence and the resolution. Do not compress the ending or invent a new act turn that contradicts
-            the blueprint. Every scene's decision/result must hand a concrete cause to the next scene.
 
             DRAMATIC EXECUTION: make the protagonist's immediate objective and pressure understandable early. The opposition
             must have an intelligible goal and a credible method, not merely be evil or obstructive. Give major characters
@@ -547,42 +542,37 @@ class QwenDirectorPromptMixin:
               seeds the mechanism early and the story earns it through observable evidence. Do not invent a deceased
               researcher/mentor and a journal as a shortcut for exposition unless the premise establishes that person
               or document and the story visibly earns its discovery.
-            - CAST DESIGN / PLOT-DRIVEN: choose the smallest cast that can credibly perform the causal story, with no
-              preferred number, minimum, maximum or ensemble target. A one-person story, a two-person conflict, or a
-              larger ensemble may be correct; decide from the premise rather than testing or aiming for a numeric band.
-              Add a person only when that person has an independent want, pressure and tactic and makes a consequential
-              decision that changes the protagonist's options, evidence, leverage, relationships or cost. Do not add
-              a colleague, partner, authority, witness, rescuer or opponent merely because that role is available.
-              Remove or redesign exposition-only, token, memory-only and disposable characters. CAST contains only
+            - CAST DESIGN / ENSEMBLE DECISION: the default is an ensemble, not a lone protagonist. An abandoned or
+              remote setting does not mean nobody else can act. Unless the premise explicitly says the protagonist is
+              alone for the whole story, cast the protagonist plus 2-4 other on-screen people (a design default, not a
+              quota): a colleague with conflicting evidence, a field partner with a different risk threshold, an authority
+              controlling access, a witness, a rescuer or an opponent with their own strategy. Each person needs an
+              independent want, pressure and tactic and a decision that changes options or cost. The 2-4 others must be
+              living people who appear on screen in at least two scenes: a corpse, memory, recording, remote voice or
+              animal does not count toward them. No filler. CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
               institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
               non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
               its visible nonhuman body, robot, avatar or hologram; a voice/interface is not an embodiment. Never turn
               a remote voice into a human or add a remote helper merely to enlarge the cast.
-            - Every cast member needs a distinct want and pressure plus a consequential on-screen action. Keep names,
-              aliases, roles, kinds, scene presence and fate consistent.
+            - Every cast member needs a distinct want and pressure plus a consequential on-screen action. Include only
+              aliases actually used. Keep names, roles, kinds, scene presence and fate consistent.
             - The opposition must have a coherent goal/constraint and a credible way to limit the protagonist. An agent
               may take actions; an environmental or mechanical force acts through physical consequences, not intention.
               Do not create an AI/antagonist solely to issue repeated warnings. Avoid repetitive locks, alarms, codes,
               countdowns and obstacles; each new pressure must force a different response or change the available plan.
             - The protagonist must make consequential decisions. Events should not be a chain of arrivals, accidents,
               warnings or convenient failures. Escalation may be physical, temporal, procedural, relational or moral.
-              The protagonist's role-specific skill must change available options and contribute to the prepared
-              solution or climax; using a tool merely to open a door is not enough.
-            - GOAL AND CHARACTER-ARC ALIGNMENT: keep one primary objective consistent across LOGLINE, PROTAGONIST_GOAL, the
-              protagonist's CAST wants, CLIMAX_CHOICE and RESOLUTION; state the priority of any secondary motive.
-              Resolve the fate/contact/rescue/outcome of every person or group whose safety motivates the mission.
-              Each core character's skill must change a decision or solution; otherwise remove or redesign them.
-            - SCENE VARIETY AND PAYOFF: do not repeat scans, locks, access attempts, countdowns, warnings or obstacles
-              unless they add evidence, change a rule/plan or impose a distinct cost. Scene 10 must physically enact
-              the irreversible choice; Scenes 11-12 show consequence then resolve the central question, not repeat
-              the climax or substitute a sequel hook for an ending.
+              The protagonist's role-specific skill must materially change the available options in more than a cosmetic
+              way and must contribute to the prepared solution or climax; using a tool merely to open a door is not enough.
+            - Keep one primary objective consistent across LOGLINE, PROTAGONIST_GOAL, the protagonist's CAST want,
+              CLIMAX_CHOICE and RESOLUTION, and resolve the fate of every person or group whose safety drives the mission.
 
             CAUSAL DESIGN AND DRAMATIC QUALITY:
-            - Build exactly {n} causal scenes around one dramatic question: the beginning establishes goal, stakes and
-              commitment; the middle compounds resistance and changes options; the ending resolves the prepared choice.
-              No forced midpoint. Each scene changes knowledge, options or cost through action; retries require visible
-              failure or reset.
+            - Build one clear dramatic question and a causal chain of exactly {n} scenes. Each scene must change the
+              protagonist's options, knowledge, leverage, relationship, resources, danger or cost through a specific
+              action or decision. Do not repeat a completed action as if it were pending; a retry is valid only if the
+              earlier attempt visibly failed or the system/object was reset.
             - Give every scene a different dramatic job and event. Each scene must raise stakes, narrow the protagonist's
               viable options, or reveal information that changes the cost of winning; a scene that only relocates or
               repeats a warning is not escalation. Avoid repeating the same discovery, reveal, decision or obstacle with
@@ -603,12 +593,12 @@ class QwenDirectorPromptMixin:
               through a different completed action/outcome. These are three different events, not repeated
               explosion/death/aftermath beats. Do not resolve the central question before Scene 12. Scene 12 next_cause
               is exactly 'none'. The scene 10 action must match the mechanism and selected option in CLIMAX_CHOICE.
-            - Do not force a Scene 06 midpoint, death, twist, countdown, rescue or sequel hook; let the premise set
-              the rhythm and close the central question on screen.
+            - Do not force a midpoint at Scene 06, a death, a twist, a countdown, a rescue or a sequel hook. Use the
+              premise's natural dramatic rhythm. The ending must close the central question on screen.
 
             STATE / CONTINUITY RULES:
-            - Scene 01 starts at JSON `opening`; later scenes inherit the preceding scene's exit_location,
-              exit_present, exit_knows and exit_objects. Entry state is inherited, not authored.
+            - The JSON `opening` is the state at the start of Scene 01. Each later scene starts from the preceding
+              scene's exit_location, exit_present, exit_knows and exit_objects; entry state is inherited, not authored.
             - `on_screen_present` is the complete list of physical beings visible at any point in that scene.
               `exit_present` lists only those still physically present at the end. A remote voice, recording, discussed
               person, screen image or off-screen communicator is not physically present. If an embodied agent is listed,
@@ -682,31 +672,42 @@ class QwenDirectorPromptMixin:
                 "a preselected template."
             )
             cast_design_rule = (
-                "CAST DESIGN / PLOT-DRIVEN: choose the smallest cast that can credibly perform the causal story. "
-                "There is no preferred number, minimum, maximum, or ensemble target; one, two, or many characters "
-                "may be right depending on the premise. Add a person only when that person has an independent want, "
-                "pressure, and tactic and makes a consequential decision that changes options, evidence, leverage, "
-                "relationships, or cost. Do not add a colleague, field partner, authority, witness, rescuer, or opponent "
-                "merely because the role is available. Do not add filler characters. Remove exposition-only, token, disposable, memory-only, or "
-                "recording-only people. Give every retained core character distinct agency and a meaningful consequence. "
-                "Do not replace a human decision-maker with a generic institutional voice when a person is established "
-                "by the premise; do not invent one when the premise does not support one. Qwen owns the final cast decision."
+                "CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story merely because the premise "
+                "introduces one protagonist or uses an isolated setting. For a 12-scene short film, actively test a "
+                "3-5 person active ensemble as the first strong design candidate, then compare it against 1, 2, 6, or "
+                "more. This 3-5 range is a design comparison, NOT a minimum, maximum, or quota: choose fewer when "
+                "isolation is the premise-specific engine, and choose more only when every added person changes the plot. "
+                "Look for premise-grounded people with independent goals: a colleague with conflicting evidence, a field "
+                "partner with a different risk threshold, an authority who controls access/resources, a witness whose "
+                "decision changes what can be proved, a rescuer/operator who changes the available plan, or an opposing "
+                "person with their own strategy. Do not use an off-screen voice or disembodied AI to substitute for a "
+                "human decision-maker when the premise supports a physically dramatized person. Choose each added person "
+                "only when they make a consequential decision that changes options, leverage, knowledge, relationships, "
+                "or cost. Give every core person a distinct want, pressure, tactic, and consequence; recurring core "
+                "characters should materially affect at least two separate scenes unless one decisive action has a major "
+                "irreversible payoff. Do not merge distinct human decision-makers into a generic institution/system "
+                "voice. An abandoned or remote setting does not mean nobody else can act: consider credible on-site "
+                "survivors, arrivals, field counterparts, operators, or opposing agents when the premise supports them. "
+                "Never add filler, token roles, or characters who exist only in memories, labels, recordings, or exposition. "
+                "Qwen makes the final plot-driven cast decision; no numeric quota is imposed."
             )
         elif mode == EXPAND_USER_STORY_MODE:
             source_rule = (
-                "Expand the user's story while preserving every active source character's identity and role, "
+                "Expand the user's story while preserving every established source character's identity and role, "
                 "the core setting, chronology, defining events, twists, and outcome. The source's original cast size "
                 "is not a limit. Add premise-grounded people when distinct causal roles are missing and their decisions "
                 "materially affect the established plot; do not change the source's defining outcome."
             )
             cast_design_rule = (
-                "CAST DESIGN / SOURCE-FAITHFUL AND PLOT-DRIVEN: preserve every active source character. There is no "
-                "preferred cast size, minimum, maximum, or ensemble target. Add a premise-grounded person only when "
-                "the established plot needs a distinct causal role and that person has an independent want, pressure, "
-                "tactic, and consequential decision. Do not create a role merely to reach a number, increase the cast, or fill a template, "
-                "supply disposable exposition, or add an unrelated subplot or surprise relative. Keep the source's "
-                "identities and defining outcome intact; every added character must change options, evidence, leverage, "
-                "relationships, or cost and must have a meaningful payoff."
+                "CAST DESIGN / EXPANSION ENSEMBLE: preserve every active source character. Actively test whether a "
+                "3-5 person active ensemble makes this 12-scene film stronger, while comparing 1, 2, 6, or more; "
+                "3-5 is a design comparison band, not a quota or cap. A sparse source premise may gain a field partner, "
+                "rival, local survivor, authority/operator, witness, or rescuer only when that person has an independent "
+                "want, pressure, tactic, and a consequential decision that changes the plot. Do not create a role merely "
+                "to reach a number. Keep 1-2 when isolation is the strongest engine; allow 6+ only for genuinely distinct "
+                "decision-makers. Preserve the source's identities and outcome; new characters must grow from the source "
+                "setting and events, not from unrelated subplots or surprise relatives. Give recurring added characters "
+                "meaningful actions in multiple scenes unless one decisive action has a major irreversible payoff."
             )
         else:
             source_rule = "Preserve all supplied story facts and do not invent a different outcome."
@@ -730,36 +731,6 @@ class QwenDirectorPromptMixin:
             - the evidence, action, or behavior that changes the audience's understanding;
             - the midpoint reversal, the protagonist's changed plan, and the costly climax choice;
             - the observable resolution and permanent consequence.
-
-            STORY QUALITY RULES — apply to every Architect output, including this text-mode fallback:
-            - ACT-LEVEL HIERARCHY: plan the overall dramatic question first, then the beginning/middle/ending movements,
-              then each scene's event. The beginning establishes the objective, mechanism, opposition and commitment; the
-              middle compounds resistance and changes knowledge, relationships or available options; the ending enacts the
-              irreversible choice in Scene 10, its distinct consequence in Scene 11, and the actual resolution in Scene 12.
-              Let turning points follow the premise; do not force a twist or fixed midpoint. Each scene's next_cause must
-              hand the completed event to the next scene's action. Do not add fields or scenes.
-            - GOAL AND CHARACTER-ARC ALIGNMENT: keep one primary protagonist objective consistent across LOGLINE,
-              PROTAGONIST_GOAL, the protagonist's CAST wants, CLIMAX_CHOICE and RESOLUTION. A secondary motive is
-              allowed only when its priority and relation to the primary objective are explicit. Do not make a named
-              person or group the reason for the mission and then abandon their fate: explicitly resolve the
-              fate/contact/rescue outcome (success, failure, survival or confirmed status) for each person/group
-              whose safety drives the stakes.
-            - CHARACTER AGENCY: every core supporting character must have an independent want, pressure and tactic,
-              and a consequential decision that changes an option, clue, relationship, leverage or cost. A role's
-              profession or skill must materially change the available solution; otherwise remove or redesign the role.
-              Do not retain someone only for exposition, a disposable warning, or an unearned death.
-            - SCENE VARIETY AND PAYOFF: do not repeat the same scan, lock, access attempt, countdown, warning or obstacle in
-              multiple scenes unless each recurrence reveals new evidence, changes a rule or plan, or imposes a distinct
-              cost. Every scene must change at least one meaningful story state.
-            - CLIMAX AND RESOLUTION: the designated climax scene must physically enact the irreversible choice.
-              Later scenes show immediate consequences and resolve the central dramatic question. Do not move the
-              climax to an earlier scene, explain the same choice twice, or substitute a sequel hook for an ending.
-            - MECHANISM CLARITY: state the causal rule behind the central threat and keep its detection, limits,
-              response and consequences consistent. Explain any apparent exception (for example, what is neutralized
-              versus what residue remains dangerous) through a visible cause rather than a late assertion.
-            - ENTITY AND PROP CONSISTENCY: every named project, institution, group and plot-critical object introduced
-              in the prose must be seeded in the plan or removed. The cast, named-entity inventory and key-object ledger
-              must agree with the story; generic groups must receive a resolved status when they carry the stakes.
 
             Do not assume the story needs a secret, a villain, a conspiracy, a laboratory, an experiment, a project
             codename, a countdown, a death, a family twist, or a technology reveal. Also avoid a simulation/dream/memory
@@ -1019,8 +990,9 @@ class QwenDirectorPromptMixin:
         text = swap(
             r"CAST FORMAT: output one CAST line first\..*?(?=Keep honorifics such as)",
             "CAST: fill the `cast` array with core people/creatures whose decisions matter and whose presence is "
-            "actually dramatized. Cast size is plot-driven with no preferred number, minimum, maximum, or ensemble "
-            "target; decide only from the premise and each person's causal necessity. Per entry give name, kind "
+            "actually dramatized. Cast size is plot-driven with no fixed minimum, maximum, or target; actively test a "
+            "3-5 person ensemble as a design comparison for this 12-scene short, not as a quota, and justify smaller or "
+            "larger casts by the premise. Per entry give name, kind "
             "(person, animal, or embodied agent), role, wants, pressure, voice, aliases, fate and death_scene. On-screen "
             "scenes are derived from each scene's on_screen_present list. A sentient AI/system belongs in physical cast "
             "only if it has an actual visible nonhuman body, robot, projected avatar, or holographic figure in a listed "
@@ -1832,13 +1804,13 @@ class QwenDirectorPromptMixin:
         system_prompt = textwrap.dedent("""
     You are Qwen's character and dialogue extractor for a film-production planner. Return JSON only.
 
-    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual VISUAL/PERFORMING CHARACTER ROSTER from the story evidence itself. `candidates` contains only named beings that physically appear or act in a present-time scene and can be represented as visible production characters. A human is eligible when the story shows them physically acting/appearing in a present-time scene; direct in-person speech in that scene is evidence of physical presence. A sentient nonhuman/system (including an AI) is eligible only when the story explicitly depicts an actual visible body, robot/android, embodied creature, humanoid avatar, or holographic figure that manifests/stands/moves/gestures in the scene. A voice through a radio, intercom, phone, terminal, loudspeaker, speaker, or screen is NOT a visual candidate, even when it makes decisions, threats, warnings, or other causal contributions. Remote-only agents remain valid dialogue `speaker` values with `classification=remote_or_offscreen_spoken` and `delivery=remote`; do not force them into `candidates`. A screen/interface/voice does not establish a visible body. Include a person first introduced in backstory only if they later physically appear and act in present events. Do not stop after the protagonist. `candidates` may contain one or more genuinely visual participants; never add a remote entity to avoid an empty roster.
+    Read all supplied `story_evidence` and inspect every item in the numbered `quotes` inventory. The evidence text may be compacted for a long source, but the quote inventory retains each quote-delimited source span; use its local context for speaker attribution and speech-vs-writing decisions. Determine the actual production cast from the story evidence itself. `candidates` is the set of materially active story people and sentient agents: people who act, speak in person, oppose/help another character, touch or rescue someone, enter or leave, or otherwise take part in a present-time event; also include a named or canonical in-world agent (such as a station AI) whose live remote voice makes decisions, warnings, threats, or other causal contributions to current events, even when that source is not physically visible in that scene. A live remote voice does not by itself mean the source is physically present. Include a person first introduced in backstory if that person later physically appears and acts in present events. Do not stop after the protagonist. The JSON lists `quote_classifications` first and `candidates` second: every speaker you attribute in an in_person_spoken quote who physically takes part in the story MUST also appear in `candidates`, together with every other named person who acts. `candidates` is never empty.
 
-    Review beginning, middle, and ending evidence for distinct physical participants, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota. Do not add people merely because a planning outline suggested them. Exclude people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. A name printed on a drawer, label, screen, journal, or directive is not an active visual character. A line spoken by one character that mentions another person is not evidence that the mentioned person is present. Do not treat places, objects, organizations, weather, labels, infrastructure, or generic role words as people. A voice-only station AI may be a sentient narrative agent, but it is not a production character unless a visible embodiment is explicitly shown. For a visible sentient agent, retain a grounded host-specific canonical label such as "Station AI" when the prose uses "the station's AI"; keep the original generic term as an alias. Do not invent a serial number or proper name that the story never uses.
+    Review the beginning, middle, and ending evidence for distinct people or sentient agents performing a present-time action or materially influencing it through a live channel, then merge aliases for the same identity. Do not bias toward a protagonist-only roster or stop after the first candidate. There is no cast-count quota during extraction. Do not add people merely because a planning outline suggested them. Do not include people who appear only in memories, documents, photographs, archival recordings, logs, signs, or reported history. A name printed on a drawer, label, screen, journal, or directive is not an active character. A line spoken by one character that mentions another person is still the first character's dialogue, not evidence that the mentioned person is present or speaking. Only include a human as an active present-time cast member when the story shows that person physically acting/appearing or directly speaking in a present-time scene. Do not treat places, objects, organizations, weather, labels, and generic role words as people; a station AI may be a sentient agent but must not be mislabeled as a human PERSON. When Qwen has identified a generic sentient agent such as "AI" as a character, retain it if the story gives it live causal agency; prefer a grounded host-specific canonical label such as "Station AI" when the prose itself uses a phrase like "the station's AI", and keep the original term as an alias. Do not invent a serial number or proper name that the story never uses.
 
-    Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. `name_surface_index` and `name_surface_evidence` are recall aids generated from source text; they can contain places, objects, sentence-initial words, or other false positives. They are NOT a cast list. The evidence entries contain short source contexts around name-like surfaces that may be absent from compacted story evidence. Use them to check the source, and include a surface only when the source supports a person physically participating in present-time events. Qwen alone decides which names are people, how aliases resolve, and who belongs in `candidates`. The `candidates` array is the final cast decision; no downstream step will add names from these indexes, a planned cast, or dialogue speakers. An in-person dialogue speaker must also be represented in `candidates`; an explicitly remote-only speaker must remain outside the visual roster.
+    Use grounded canonical names and aliases from the story. Never invent names, relationships, or characters. `name_surface_index` and `name_surface_evidence` are recall aids generated from source text; they can contain places, objects, sentence-initial words, or other false positives. They are NOT a cast list. The evidence entries contain short source contexts around name-like surfaces that may be absent from compacted story evidence. Use them to check the source, and include a surface only when the source supports a person physically participating in present-time events. Qwen alone decides which names are people, how aliases resolve, and who belongs in `candidates`. The `candidates` array is the final cast decision; no downstream step will add names from these indexes, a planned cast, or dialogue speakers. A dialogue speaker must also be represented in `candidates` when that person physically participates in the story.
 
-    The payload includes a numbered `quotes` inventory. Return exactly one `quote_classifications` item for EVERY supplied `quote_id`, with the same ID, one classification, and a speaker. Use `in_person_spoken` for direct speech from a speaker physically present in the current scene; use `remote_or_offscreen_spoken` for an explicitly attributed, live, diegetic voice over radio/intercom/phone/terminal/loudspeaker or another in-world channel when the source remains off-screen; use `written_or_displayed` for notes, journals, signs, screens, labels, messages or documents; use `remembered_or_recalled` for remembered or archival speech; use `inner_monologue` for thoughts; and `other` when no listed category applies. Do not promote narration, generic voice-over, written text, or a recording merely being read to spoken dialogue. For both spoken classifications, preserve an explicitly identified, source-grounded speaker even when that speaker is remote-only and therefore absent from `candidates`; remote speakers are audio identities, not visual cast members. Leave speaker empty only when the source does not identify one. Resolve consecutive dialogue turns from grammar: when a quote is followed by an attribution such as “she shouted” and the next quote follows without a new named-speaker attribution, carry the same speaker forward unless source text clearly signals a speaker change. Do not reassign a continuing multi-quote turn merely because another character is mentioned or reacts between lines. A remote speaker is audible but is NOT thereby a visible shot character. For `in_person_spoken`, the speaker must physically participate in that scene. Do not return quote text: the application restores it exactly from the source.
+    The payload includes a numbered `quotes` inventory. Return exactly one `quote_classifications` item for EVERY supplied `quote_id`, with the same ID, one classification, and a speaker. Use `in_person_spoken` for direct speech from a speaker physically present in the current scene; use `remote_or_offscreen_spoken` for an explicitly attributed, live, diegetic voice over radio/intercom/phone/terminal/loudspeaker or another in-world channel when the source remains off-screen; use `written_or_displayed` for notes, journals, signs, screens, labels, messages or documents; use `remembered_or_recalled` for remembered or archival speech; use `inner_monologue` for thoughts; and `other` when no listed category applies. Do not promote narration, generic voice-over, written text, or a recording merely being read to spoken dialogue. For both spoken classifications, provide the canonical speaker when the source explicitly identifies one and the speaker belongs in the current story cast; otherwise leave speaker empty. Resolve consecutive dialogue turns from grammar: when a quote is followed by an attribution such as “she shouted” and the next quote follows without a new named-speaker attribution, carry the same speaker forward unless source text clearly signals a speaker change. Do not reassign a continuing multi-quote turn merely because another character is mentioned or reacts between lines. A remote speaker is audible but is NOT thereby a visible shot character. For `in_person_spoken`, the speaker must physically participate in that scene. Do not return quote text: the application restores it exactly from the source.
 
     The quote inventory is an exhaustive coverage checklist. Do not omit, duplicate, or invent quote IDs. If unsure whether a quote is speech, classify it explicitly rather than omitting it. This lets the application detect missing classifications and apply only source-grounded deterministic fallback. Return compact JSON on one line: no indentation, pretty-printing, or optional whitespace between JSON fields. Return exactly `candidates` and `quote_classifications`, with no prose outside JSON.
     """).strip()
@@ -1881,38 +1853,6 @@ class QwenDirectorPromptMixin:
             and str(item.get("name", "") or "").strip()
             and re.sub(r"[^a-z]+", "", str(item.get("name", "")).lower())
             not in {"unknown", "none", "null", "na", "anonymous", "unnamed", "unidentified", "speaker", "narrator", "voice", "someone", "stranger", "person", "character", "same", "other", "unspecified"}
-        ]
-
-        def _remote_only_human_candidate(item: dict) -> bool:
-            """Reject a PERSON/CHARACTER whose only named source evidence is a transmitted voice."""
-            if str(item.get("entity_type", "")).strip().upper() not in {"PERSON", "CHARACTER"}:
-                return False
-            surfaces = [str(item.get("name", "") or "").strip()]
-            surfaces.extend(str(alias or "").strip() for alias in (item.get("aliases") or []))
-            surfaces = [surface for surface in surfaces if surface]
-            sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", story) if part.strip()]
-            remote_channel = re.compile(
-                r"\b(?:radio|intercom|phone|telephone|walkie[- ]talkie|terminal|loudspeaker|speakers?|"
-                r"transmission|monitor|screen|earpiece|comms?)\b", re.I,
-            )
-            remote_voice = re.compile(
-                r"\b(?:voice|said|says|speaks?|spoke|replied|replies|called|warned|whispered|"
-                r"shouted|crackled|echoed|carried|heard|broadcast)\b", re.I,
-            )
-            remote_only_evidence = False
-            for sentence in sentences:
-                if not any(re.search(rf"(?<![A-Za-z0-9]){re.escape(surface)}(?![A-Za-z0-9])", sentence, re.I)
-                           for surface in surfaces):
-                    continue
-                if remote_channel.search(sentence) and remote_voice.search(sentence):
-                    remote_only_evidence = True
-                else:
-                    return False
-            return remote_only_evidence
-
-        accepted_candidates = [
-            item for item in accepted_candidates
-            if not _remote_only_human_candidate(item)
         ]
         canonical_names = {
             EntityResolver.normalize(str(item.get("name", ""))): str(item.get("name", "")).strip()
@@ -2036,7 +1976,7 @@ class QwenDirectorPromptMixin:
                 normalized_dialogue.append(entry)
 
         result = {
-            "candidates": accepted_candidates,
+            "candidates": raw_candidates,
             "spoken_dialogue": normalized_dialogue,
             "quote_classifications": [item for item in (raw_classifications or []) if isinstance(item, dict)] if isinstance(raw_classifications, list) else [],
         }
