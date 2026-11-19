@@ -653,6 +653,7 @@ class QwenDirectorPromptMixin:
             5. If exit_location differs from where the scene starts, the EVENT has a sentence "<Name> walks into <exit_location>"
                with that name. A person who enters, leaves or dies mid-scene is named doing so in the EVENT; a key object
                that changes or disappears is named with the action that changes it.
+               A location is a place, not its condition: keep the same name when a room floods or is damaged; show that in the EVENT.
             6. No adjacent events repeat the same completed action; Scenes 10, 11 and 12 are distinct.
             Return one valid JSON object and stop.
         """).strip()
