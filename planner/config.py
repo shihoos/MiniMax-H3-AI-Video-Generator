@@ -232,7 +232,6 @@ if DIRECTOR_STORY_CAST_SIZE_POLICY != "plot_driven":
         "runtime_versions.yaml story_contract cast_size_policy must be 'plot_driven'; "
         "fixed numeric character-count quotas are not supported."
     )
-
 if not 0.0 <= DIRECTOR_STORY_THINKING_TEMPERATURE <= 2.0:
     raise RuntimeError("Story thinking temperature must be in [0, 2].")
 if not 0.0 < DIRECTOR_STORY_THINKING_TOP_P <= 1.0:
@@ -267,6 +266,10 @@ DIRECTOR_VLLM_GPU_MEMORY_UTILIZATION = float(
 )
 
 DIRECTOR_VLLM_MAX_MODEL_LEN = int(RUNTIME["director"]["context"])
+_prefix_cache_value = RUNTIME["director"].get("enable_prefix_caching", True)
+if not isinstance(_prefix_cache_value, bool):
+    raise RuntimeError("runtime_versions.yaml director.enable_prefix_caching must be true or false.")
+DIRECTOR_VLLM_ENABLE_PREFIX_CACHING = _prefix_cache_value
 
 # vLLM safetensors loader is an explicit runtime contract. The environment
 # override exists for controlled A/B testing (for example, prefetch vs eager).
