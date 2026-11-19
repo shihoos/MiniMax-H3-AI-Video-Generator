@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-19.5.9"
+CONTRACTS_REVISION = "2026-11-19.6.0"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -315,6 +315,12 @@ def _location_tokens(value: str) -> set[str]:
         token for token in content_tokens(value)
         if token not in _LOCATION_GENERIC_WORDS and token not in {"arctic", "storm-ravaged"}
     }
+
+
+def _location_key(value: str) -> str:
+    """Normalised place name; a trailing "(flooded)" / "(destroyed)" qualifier is a condition, not another place."""
+    text = re.sub(r"\s*\([^)]*\)\s*$", "", str(value or "")).strip()
+    return re.sub(r"\W+", " ", text.casefold()).strip()
 
 
 def _is_nested_station_location(old_location: str, new_location: str) -> bool:
@@ -1078,8 +1084,7 @@ def validate_blueprint_state_contract(blueprint: str, expected_scenes: int = 12)
         if (
             entry_location
             and exit_location
-            and re.sub(r"\W+", " ", entry_location.casefold()).strip()
-            != re.sub(r"\W+", " ", exit_location.casefold()).strip()
+            and _location_key(entry_location) != _location_key(exit_location)
             and not _scene_local_transition_is_explained(
                 entry_location, exit_location, state.get("EVENT", ""), cast,
             )
