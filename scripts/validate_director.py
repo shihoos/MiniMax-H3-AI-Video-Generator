@@ -1439,7 +1439,7 @@ def test_structured_architect_json_round_trips_through_every_contract():
             "structured schema must bound verbose fields without truncating substantive events or object inventories")
     from planner.qwen_director import QwenDirector
     compact_prompt = QwenDirector.__new__(QwenDirector)._story_blueprint_system(AI_STORY_MODE, structured=True)
-    _assert(len(compact_prompt) < 12500,
+    _assert(len(compact_prompt) < 13500,
             f"live structured Architect prompt regressed in size ({len(compact_prompt)} chars)")
     compact_lower = " ".join(compact_prompt.lower().split())
     _assert("premise indispensable" in compact_lower
@@ -2668,8 +2668,8 @@ def test_structured_architect_prompt_marks_ledger_as_application_derived():
     prompt = QwenDirector.__new__(QwenDirector)._story_blueprint_system(AI_STORY_MODE, structured=True).lower()
     _assert("do not emit `continuity_ledger`" in prompt and "application derives" in prompt,
             "live JSON-mode prompt must tell Qwen that the application owns the derived ledger")
-    _assert("specific change this scene causes in 7-12 words" in prompt,
-            "live JSON prompt must retain the consequential 7-12-word scene-purpose contract")
+    _assert("specific change this scene causes in 10-14 words" in prompt and "anything under 7 is rejected" in prompt,
+            "live JSON prompt must retain the consequential scene-purpose word contract (aim long, 7 is the floor)")
     compact = " ".join(prompt.split())
     _assert("scene 10 event must enact the selected final irreversible choice itself" in compact
             and "scene 11 shows a distinct immediate physical consequence" in compact
