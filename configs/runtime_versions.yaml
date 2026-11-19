@@ -70,6 +70,9 @@ director:
   host: 127.0.0.1
   port: 8000
   max_num_seqs: 1
+  # Reuse KV blocks for repeated Director system prompts across sequential calls.
+  # vLLM 0.33.0 supports this flag; it changes prefill cost, not generated content.
+  enable_prefix_caching: true
   speculative_method: eagle3
   speculative_model_path: /kaggle/input/eagle-3
   speculative_tokens: 2
@@ -107,10 +110,15 @@ director:
     writer_words_per_scene: 190
     accept_min_words: 1400
     cast_size_policy: plot_driven
+    # One non-thinking Author completion plus at most one conditional revision
+    # after a returned hard-gate rejection or a demonstrably starved ending.
+    # Transport failures and token truncation never trigger a content revision.
     author_revision_retries: 1
   prompt_limits:
     story_context_chars: 12000
-    critic_story_context_chars: 3500
+    # Critic evidence must preserve the complete generated story (usually ~12k chars).
+    # Shot metadata is compacted instead of deleting the middle of the story.
+    critic_story_context_chars: 12000
     shot_story_context_chars: 3000
     shot_scene_description_chars: 1500
     shot_scene_objective_chars: 220
