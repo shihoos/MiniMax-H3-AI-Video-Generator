@@ -3169,7 +3169,9 @@ class QwenDirector(
                 if group:
                     batches.append((group, True))
                     in_map.update(group)
-        rest = [n for n in self._patch_affected_scenes(other_problems, data) if n not in in_map]
+        # Mechanical findings (moves, handoffs, objects) get their own calls, separate from the setup/payoff calls:
+        # when both kinds sit on one scene the model repeatedly dropped one of them.
+        rest = self._patch_affected_scenes(other_problems, data)
         for start in range(0, len(rest), self._PATCH_BATCH_SCENES):
             batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
         return batches
@@ -3218,7 +3220,7 @@ class QwenDirector(
             )
         batches = self._patch_batches(problems, data)
         print(f"[QWEN] story_architecture batched_repair batches={[b[0] for b in batches]}", flush=True)
-        done: set[int] = set()
+        done: set[int] = set()   # scenes already given their mechanical repair
         current = list(problems)
         queue = list(batches)
         index = 0
@@ -3232,7 +3234,7 @@ class QwenDirector(
                 if "SETUP_PAYOFF_MAP" in str(finding):
                     if is_map and (not numbers or numbers & scope_set):
                         relevant.append(finding)
-                elif numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers):
+                elif not is_map and (numbers & scope_set or (re.search(r"NEXT_CAUSE|anchored", str(finding), re.I) and {n + 1 for n in scope_set} & numbers)):
                     relevant.append(finding)
             if not relevant:
                 print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} skipped=already_resolved", flush=True)
@@ -3248,7 +3250,8 @@ class QwenDirector(
             except RuntimeError as unusable:
                 # A malformed reply for one small batch leaves those scenes as planned; the final validation decides.
                 print(f"[QWEN] story_architecture batch={index} unusable: {str(unusable)[:160]}", flush=True)
-            done |= scope_set
+            if not is_map:
+                done |= scope_set
             current = self._blueprint_findings(mode, user_input, data, source_character_names)
             if not current:
                 break
