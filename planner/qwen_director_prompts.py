@@ -541,13 +541,13 @@ class QwenDirectorPromptMixin:
               seeds the mechanism early and the story earns it through observable evidence. Do not invent a deceased
               researcher/mentor and a journal as a shortcut for exposition unless the premise establishes that person
               or document and the story visibly earns its discovery.
-            - CAST DESIGN / ENSEMBLE DECISION: do not default to a one-person story just because the premise
-              names one protagonist or an isolated setting; an abandoned or remote setting does not mean nobody else can
-              act. Test a 3-5 person ensemble first (a comparison, not a quota): a colleague with conflicting evidence, a
-              field partner with a different risk threshold, an authority controlling access, a witness, a rescuer or an
-              opponent with their own strategy. Keep fewer only when isolation is the premise-specific engine. Each
-              person needs an independent want, pressure and tactic and a decision that changes options or cost; no
-              filler or memory-only roles. CAST contains only
+            - CAST DESIGN / ENSEMBLE DECISION: the default is an ensemble, not a lone protagonist. An abandoned or
+              remote setting does not mean nobody else can act. Unless the premise explicitly says the protagonist is
+              alone for the whole story, cast the protagonist plus 2-4 other on-screen people (a design default, not a
+              quota): a colleague with conflicting evidence, a field partner with a different risk threshold, an authority
+              controlling access, a witness, a rescuer or an opponent with their own strategy. Each person needs an
+              independent want, pressure and tactic and a decision that changes options or cost; no filler or
+              memory-only roles. CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
               institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
               non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
