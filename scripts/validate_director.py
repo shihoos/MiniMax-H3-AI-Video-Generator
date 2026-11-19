@@ -1018,8 +1018,8 @@ def test_story_prompt_is_open_cast_and_fully_filled():
             _assert("remote-only" in rendered_architect or "remote-only voices" in rendered_architect,
                     f"{mode}: structured={structured} remote speakers must not be promoted into physical cast")
             if mode == AI_STORY_MODE:
-                _assert(("3-5 person" in rendered_architect or "3-5 active" in rendered_architect)
-                        and "do not default to a one-person story" in rendered_architect,
+                _assert(("3-5 person" in rendered_architect or "2-4 other on-screen people" in rendered_architect)
+                        and ("do not default to a one-person story" in rendered_architect or "not a lone protagonist" in rendered_architect),
                         f"{mode}: structured={structured} Architect must actively test a multi-person ensemble")
                 if structured:
                     _assert("distinct want" in rendered_architect and "consequential on-screen action" in rendered_architect,
@@ -1444,7 +1444,7 @@ def test_structured_architect_json_round_trips_through_every_contract():
     compact_lower = " ".join(compact_prompt.lower().split())
     _assert("premise indispensable" in compact_lower
             and "profession, skill" in compact_lower
-            and "do not default to a one-person story" in compact_lower
+            and ("do not default to a one-person story" in compact_lower or "not a lone protagonist" in compact_lower)
             and "cumulative inventory" in compact_lower and "exit_objects" in compact_lower,
             "live structured prompt must prioritize premise-specific plot, necessary cast and cumulative objects")
     _assert("materially shape" in compact_lower and "if the same plot would work unchanged" in compact_lower,
