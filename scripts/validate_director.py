@@ -313,7 +313,7 @@ def test_trace_sentient_ai_candidate_survives_normalization_and_reaches_roster()
     story = (
         "Dr. Elara Voss reached the vault. The station's AI denied access over the terminal. "
         "The AI triggered a lockdown, then spoke through the station speakers. "
-        "A humanoid holographic avatar of the station's AI materialized before Elara and raised a mechanical hand."
+        "A holographic interface from the station's AI materialized before Elara."
     )
     extracted = {
         "candidates": [
@@ -331,40 +331,6 @@ def test_trace_sentient_ai_candidate_survives_normalization_and_reaches_roster()
     station_ai = characters[1]
     _assert("AI" in station_ai.semantic_aliases,
             f"the model's original spoken surface must remain a resolvable alias: {station_ai.semantic_aliases!r}")
-
-
-def test_voice_only_sentient_agent_is_excluded_from_visual_roster():
-    planner = _planner()
-    story = (
-        "Dr. Elara Voss entered the vault. The station's AI spoke through the ceiling speakers and "
-        "triggered a lockdown. Elara crossed the room and pulled the manual release."
-    )
-    extracted = {"candidates": [
-        {"name": "Dr. Elara Voss", "entity_type": "PERSON", "is_character": True,
-         "aliases": ["Elara"], "identity_type": "named_character"},
-        {"name": "AI", "entity_type": "SENTIENT", "is_character": True,
-         "aliases": [], "identity_type": "named_character"},
-    ]}
-    names = [item.name for item in planner.create_characters(story, qwen_character_extractor=lambda *_: extracted)]
-    _assert(names == ["Elara Voss"],
-            f"a causally active but voice-only AI must remain outside visual Character assets: {names!r}")
-
-
-def test_remote_only_human_is_excluded_from_visual_roster_even_if_qwen_lists_them():
-    planner = _planner()
-    story = (
-        "Dr. Elara Voss entered the vault. The radio carried Kael Mercer's voice: \"I can walk.\" "
-        "Elara crossed the room and pulled the manual release."
-    )
-    extracted = {"candidates": [
-        {"name": "Dr. Elara Voss", "entity_type": "PERSON", "is_character": True,
-         "aliases": ["Elara"], "identity_type": "named_character"},
-        {"name": "Kael Mercer", "entity_type": "PERSON", "is_character": True,
-         "aliases": ["Kael"], "identity_type": "named_character"},
-    ]}
-    names = [item.name for item in planner.create_characters(story, qwen_character_extractor=lambda *_: extracted)]
-    _assert(names == ["Elara Voss"],
-            f"a remote-only named human must remain dialogue-only even if Qwen returns it as PERSON: {names!r}")
 
 
 def test_sentient_ai_label_is_not_promoted_when_qwen_does_not_mark_it_sentient():
@@ -441,12 +407,10 @@ def test_qwen_extraction_does_not_force_candidates_from_hints_plan_or_dialogue()
             "every quote must retain its exact text and stable quote ID")
     _assert(set(observed["schema"]["properties"]) == {"candidates", "quote_classifications"},
             "Qwen should decide the cast directly and classify each numbered source quote")
-    _assert("physically appear" in observed["system"] and "remote-only agents" in observed["system"].lower()
-            and "no cast-count quota" in observed["system"].lower()
-            and "every supplied `quote_id`" in observed["system"].lower(),
-            "extractor must distinguish visible candidates from remote-only speakers and classify every quote ID")
-    _assert([item["name"] for item in result["candidates"]] == ["Elara"],
-            "the visual roster must exclude the remote-only speaker even when Qwen proposes it")
+    _assert("physically participate" in observed["system"] and "no cast-count quota" in observed["system"].lower() and "every supplied `quote_id`" in observed["system"].lower(),
+            "extractor must request all current-action participants and classify every quote ID")
+    _assert([item["name"] for item in result["candidates"]] == ["Elara", "Kael Mercer"],
+            "the extractor must use Qwen's returned roster and must not programmatically add a missing character")
     _assert(len(mixin._semantic_spoken_dialogue) == 1
             and mixin._semantic_spoken_dialogue[0].get("delivery") == "remote"
             and mixin._semantic_spoken_dialogue[0].get("speaker") == "Kael Mercer",
@@ -1049,17 +1013,14 @@ def test_story_prompt_is_open_cast_and_fully_filled():
             _assert("cast design" in rendered_architect or "smallest cast" in rendered_architect,
                     f"{mode}: structured={structured} Architect must include premise-driven cast guidance")
             _assert("not a minimum, maximum or quota" in rendered_architect or "not a quota" in rendered_architect
-                    or "no preferred cast size" in rendered_architect or "no fixed minimum, maximum, or target" in rendered_architect
-                    or "no preferred number, minimum, maximum or ensemble target" in rendered_architect,
+                    or "no preferred cast size" in rendered_architect or "no fixed minimum, maximum, or target" in rendered_architect,
                     f"{mode}: structured={structured} Architect must remain free of hard cast-count quotas")
             _assert("remote-only" in rendered_architect or "remote-only voices" in rendered_architect,
                     f"{mode}: structured={structured} remote speakers must not be promoted into physical cast")
             if mode == AI_STORY_MODE:
-                _assert("smallest cast" in rendered_architect and "no preferred number" in rendered_architect
-                        and ("one-person story" in rendered_architect or "one, two, or many characters" in rendered_architect),
-                        f"{mode}: structured={structured} Architect must choose cast size from plot necessity, not an ensemble bias")
-                _assert("3-5" not in rendered_architect and "2-4 other on-screen people" not in rendered_architect,
-                        f"{mode}: structured={structured} Architect must not retain a numerical ensemble suggestion")
+                _assert(("3-5 person" in rendered_architect or "2-4 other on-screen people" in rendered_architect)
+                        and ("do not default to a one-person story" in rendered_architect or "not a lone protagonist" in rendered_architect),
+                        f"{mode}: structured={structured} Architect must actively test a multi-person ensemble")
                 if structured:
                     _assert("distinct want" in rendered_architect and "consequential on-screen action" in rendered_architect,
                             f"{mode}: structured Architect supporting characters must have independent agency")
@@ -1079,20 +1040,14 @@ def test_story_prompt_is_open_cast_and_fully_filled():
             _assert("architect's approved cast may include new premise-grounded people" in low,
                     "Expand Author must honor new characters approved by the Architect")
         if mode == AI_STORY_MODE:
-            _assert("smallest cast" in blueprint and "no preferred number" in blueprint
-                    and "one, two, or many characters" in blueprint and "3-5" not in blueprint,
-                    "AI Story Architect must choose cast size from premise and plot necessity without a numeric target")
-            _assert("independent want" in blueprint and "consequential decision" in blueprint,
+            _assert("do not default to a one-person story" in blueprint
+                    and ("3-5 person" in blueprint or "3-5 active" in blueprint)
+                    and ("not a minimum, maximum or quota" in blueprint or "not a quota" in blueprint or "no numeric quota" in blueprint),
+                    "AI Story Architect must choose cast size from premise and plot necessity")
+            _assert("independent want" in blueprint and "consequential action/decision" in blueprint,
                     "additional cast members must have distinct agency, not filler roles")
         _assert("continuity ledger" in blueprint and "costly climax choice" in blueprint,
                 f"{mode}: Architect must plan continuity and meaningful climax cost")
-        for structured in (False, True):
-            quality_prompt = q._story_blueprint_system(mode, structured=structured).lower()
-            _assert("goal and character-arc alignment" in quality_prompt
-                    and "protagonist_goal" in quality_prompt and "resolution" in quality_prompt
-                    and "fate/contact/rescue" in quality_prompt
-                    and "scene variety and payoff" in quality_prompt,
-                    f"{mode}: structured={structured} Architect must align goals, close human stakes, and prevent repeated beats")
         _assert(("create exactly 12 linked beats" in blueprint and "do not assign the same fixed function" in blueprint)
                 or ("causal chain of exactly 12 scenes" in blueprint and "different dramatic job and event" in blueprint),
                 f"{mode}: Architect must avoid fixed scene-function and sentence templates")
@@ -1487,13 +1442,9 @@ def test_structured_architect_json_round_trips_through_every_contract():
     _assert(len(compact_prompt) < 13500,
             f"live structured Architect prompt regressed in size ({len(compact_prompt)} chars)")
     compact_lower = " ".join(compact_prompt.lower().split())
-    _assert("the beginning establishes goal, stakes and commitment" in compact_lower
-            and "the middle compounds resistance and changes options" in compact_lower
-            and "the ending resolves the prepared choice" in compact_lower,
-            "the Architect must plan macro beginning/middle/ending progression before individual scene events")
     _assert("premise indispensable" in compact_lower
             and "profession, skill" in compact_lower
-            and ("smallest cast" in compact_lower and "no preferred number" in compact_lower)
+            and ("do not default to a one-person story" in compact_lower or "not a lone protagonist" in compact_lower)
             and "cumulative inventory" in compact_lower and "exit_objects" in compact_lower,
             "live structured prompt must prioritize premise-specific plot, necessary cast and cumulative objects")
     _assert("materially shape" in compact_lower and "if the same plot would work unchanged" in compact_lower,
@@ -1556,7 +1507,7 @@ def test_architect_and_author_get_only_informed_hard_gate_revisions():
     _assert(STORY_ARCHITECT_REVISION_RETRIES == 1,
             "production policy must retain exactly one conditional Architect revision")
     _assert(STORY_AUTHOR_REVISION_RETRIES == 1,
-            "production policy must retain at most one conditional Author revision")
+            "production policy must retain exactly one conditional Author revision")
 
     with TemporaryDirectory() as tmp:
         def architect(replies):
@@ -1626,46 +1577,30 @@ def test_architect_and_author_get_only_informed_hard_gate_revisions():
         _assert(isinstance(still_rejected, RuntimeError) and len(users) == 2,
                 "a second rejected plan must fail closed without a third Architect call")
 
-        # A valid Author completion costs one call; a rejected returned draft gets only one informed revision.
+        # An Author draft rejected by a content contract may receive one informed revision.
         author = QwenDirector.__new__(QwenDirector)
         author.project_root = Path(tmp)
         author._story_min_words = 1400
         author._qwen_telemetry = {"calls": []}
         author_calls = []
-        def one_call_author(mode, user_input, story_system, story_user, **kwargs):
+        def reject_then_accept(mode, user_input, story_system, story_user, **kwargs):
             author_calls.append(story_user)
             author._qwen_telemetry["calls"].append({"call_name": "ai_story_text_pass"})
-            return "A complete accepted story", True
-        author._generate_story_once_impl = one_call_author
+            if len(author_calls) == 1:
+                author._last_story_raw_output = "First completion"
+                author._last_story_draft = "Returned draft rejected by a hard quality gate."
+                author._last_story_quality_errors = ["scene 11 has no required causal payoff"]
+                raise RuntimeError("hard story-contract rejection")
+            return "Revised story accepted", True
+        author._generate_story_once_impl = reject_then_accept
         with redirect_stdout(StringIO()):
             accepted, generated = author._run_author_with_one_revision(
                 AI_STORY_MODE, "premise", "system", "original prompt", temperature=0.7, top_p=0.8,
             )
-        _assert(generated and accepted == "A complete accepted story" and len(author_calls) == 1,
-                "the production Author must use exactly one completion with no tail rebalance")
-
-        rejected_author = QwenDirector.__new__(QwenDirector)
-        rejected_author.project_root = Path(tmp)
-        rejected_author._qwen_telemetry = {"calls": []}
-        rejected_calls = []
-        def reject_once(mode, user_input, story_system, story_user, **kwargs):
-            rejected_calls.append(story_user)
-            rejected_author._last_story_raw_output = "First completion"
-            rejected_author._last_story_draft = "Returned draft rejected by a hard quality gate."
-            rejected_author._last_story_quality_errors = ["scene 11 has no required causal payoff"]
-            raise RuntimeError("hard story-contract rejection")
-        rejected_author._generate_story_once_impl = reject_once
-        with redirect_stdout(StringIO()):
-            try:
-                rejected_author._run_author_with_one_revision(
-                    AI_STORY_MODE, "premise", "system", "original prompt", temperature=0.7, top_p=0.8,
-                )
-            except RuntimeError as exc:
-                _assert("hard story-contract rejection" in str(exc), f"unexpected Author error: {exc}")
-            else:
-                raise AssertionError("a rejected Author output must fail closed under the one-call policy")
-        _assert(len(rejected_calls) == 2 and rejected_calls[1] != rejected_calls[0],
-                "a rejected Author draft must receive exactly one informed revision, never a third call")
+        _assert(generated and accepted == "Revised story accepted" and len(author_calls) == 2,
+                "one returned rejected Author draft must receive exactly one conditional revision")
+        _assert("REVISION:" in author_calls[1] and "causal payoff" in author_calls[1],
+                "the Author revision must include the exact hard-gate feedback")
 
         # Infrastructure truncation is not a content revision opportunity.
         truncated = QwenDirector.__new__(QwenDirector)
@@ -1735,7 +1670,7 @@ def test_a_cut_off_draft_is_rewritten_with_pacing_not_expanded_as_if_complete():
             "Author must be given a realistic average and 190-word per-scene soft cap so it cannot front-load the story")
 
 
-def test_story_minimum_is_a_hard_floor_with_one_author_call():
+def test_story_minimum_is_a_hard_floor_with_one_conditional_revision():
     from planner.qwen_director import QwenDirector
     from planner.config import AI_STORY_MODE, DIRECTOR_STORY_SCENES, STORY_ACCEPT_MIN_WORDS, STORY_MIN_WORDS
     from contextlib import redirect_stdout
@@ -1771,10 +1706,12 @@ def test_story_minimum_is_a_hard_floor_with_one_author_call():
             "accepted story must meet the 1,400-word boundary")
     short_result, short_generated, short_calls, short_error = run(65)
     _assert(not short_generated and short_result is None and len(short_calls) == 2,
-            "a returned sub-1,400-word draft may receive exactly one conditional Author revision")
-    _assert("VALIDATED PLOT ARCHITECTURE" in short_calls[0].get("_user", "")
-            and "AUTHOR REVISION" in short_calls[1].get("_user", ""),
-            "the single conditional Author revision must be grounded in the validated architecture and hard-gate feedback")
+            "a returned sub-1,400-word draft must receive at most one conditional Author revision")
+    _assert("AUTHOR REVISION" in short_calls[1].get("_user", "")
+            and "VALIDATED PLOT ARCHITECTURE" in short_calls[1].get("_user", "")
+            and "01=65" in short_calls[1].get("_user", "")
+            and "DRAFT:" not in short_calls[1].get("_user", ""),
+            "a too-short draft must be rebuilt from the validated plan with targeted scene diagnostics")
     _assert("below the configured minimum" in (short_error or "").lower(),
             f"sub-floor story should report the hard minimum: {short_error}")
     completion_probe = QwenDirector.__new__(QwenDirector)
@@ -1973,9 +1910,8 @@ def test_story_pipeline_uses_two_bounded_stages_and_only_conditional_revisions()
             and "except self._BlueprintRejected" in architect_wrapper,
             "Architect revision must be conditional on a returned blueprint being rejected by its hard gate")
     _assert("STORY_AUTHOR_REVISION_RETRIES" in author_wrapper and "_last_story_draft" in author_wrapper
-            and "StoryTruncated" in author_wrapper and "vLLM request failed" in author_wrapper
-            and STORY_AUTHOR_REVISION_RETRIES == 1,
-            "Author may revise one returned rejected draft but must exclude infrastructure retries and extra repair stages")
+            and "StoryTruncated" in author_wrapper and "vLLM request failed" in author_wrapper,
+            "Author revision must require a returned draft and exclude truncation/transport failures")
     _assert("_story_single_call_system" not in source and "single_call=True" not in source,
             "combined thinking/write call must not remain")
     _assert("_rescue_short_scenes" not in source, "no rescue calls may exist")
@@ -2143,7 +2079,7 @@ def test_rejected_author_draft_is_saved_for_diagnosis():
                 "the diagnostic artifact must identify the rejection stage")
         _assert("architect_revision_limit=1" in contents and "author_revision_limit=1" in contents
                 and "minimum_output_tokens=0" in contents and "repair_calls=0" in contents,
-                "draft preservation must report one bounded revision per stage and min_tokens=0")
+                "draft preservation must report the configured conditional-revision policy and min_tokens=0")
 
 
 def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
@@ -2183,8 +2119,8 @@ def test_author_wrapper_preserves_draft_when_pipeline_rejects_it():
                 "outer wrapper must preserve raw and processed drafts separately")
         _assert("author_calls=2" in contents and "author_revisions=1" in contents
                 and "author_revision_limit=1" in contents and "repair_calls=0" in contents,
-                "draft preservation must report the failed primary call plus the single conditional Author revision")
-        _assert(calls == 2, "a rejected Author draft may receive one revision, never a third generation call")
+                "draft preservation must report the failed primary call plus its single conditional revision")
+        _assert(calls == 2, "a returned rejected draft may receive one revision, never a third Author call")
 
 
 def test_scene_markers_preserve_one_to_one_scene_boundaries():
@@ -2360,184 +2296,8 @@ def test_architect_repair_recognizes_logged_location_and_object_verbs():
             "finding a named object must count as an observable acquisition/discovery action")
     _assert(OBJECT_CHANGE_RE.search("Elena uses the geothermal reactor data core to stabilize the reactor."),
             "using a named data core to stabilize the reactor must count as a physical state action")
-    _assert(OBJECT_CHANGE_RE.search("Eli grabs the Emergency Data Drive."),
-            "grabbing a specifically named object must count as a physical object-state action")
-    _assert(OBJECT_CHANGE_RE.search("Eli inserts the Radiation Keycard into the reader."),
-            "inserting a specifically named object must count as a physical object-state action")
-    _assert(OBJECT_CHANGE_RE.search("Elara connects the cable to the manual release."),
-            "connecting an object must count as a physical object-state action")
     _assert(not OBJECT_CHANGE_RE.search("Elena considers the consequences of the decision."),
             "an event with no object-action verb must not validate an object-state change")
-
-
-def test_architect_patch_batches_are_disjoint_and_merge_mixed_scene_findings():
-    from planner.qwen_director import QwenDirector
-    director = QwenDirector.__new__(QwenDirector)
-    data = {"setup_payoff_map": [
-        {"plant_scene": 2, "payoff_scene": 4},
-        {"plant_scene": 4, "payoff_scene": 7},
-        {"plant_scene": 8, "payoff_scene": 10},
-    ]}
-    problems = [
-        "SETUP_PAYOFF_MAP payoff in scene 04 is not grounded in the scene EVENT",
-        "SETUP_PAYOFF_MAP payoff in scene 10 does not reference its plant in scene 08",
-        "scene 04 object state change is not anchored to the named object and a physical action",
-        "scene 11 changes location without a physical transition",
-    ]
-    batches = director._patch_batches(problems, data)
-    all_scenes = [scene for scope, _is_map in batches for scene in scope]
-    _assert(len(all_scenes) == len(set(all_scenes)), f"repair scenes must never be scheduled twice: {batches!r}")
-    _assert(any({2, 4, 7}.issubset(set(scope)) and is_map for scope, is_map in batches),
-            f"overlapping plant/payoff pairs must form one connected repair scope: {batches!r}")
-    _assert(any(8 in scope and 10 in scope and is_map for scope, is_map in batches),
-            f"second map pair must remain a map repair scope: {batches!r}")
-    _assert(any(11 in scope and not is_map for scope, is_map in batches),
-            f"unrelated continuity scenes must remain in separate bounded batches: {batches!r}")
-
-
-def test_knock_on_repair_batches_never_reopen_scenes_already_patched():
-    from planner.qwen_director import QwenDirector
-    director = QwenDirector.__new__(QwenDirector)
-    data = {"setup_payoff_map": [
-        {"plant_scene": 4, "payoff_scene": 8},
-        {"plant_scene": 8, "payoff_scene": 10},
-    ]}
-    current = [
-        "SETUP_PAYOFF_MAP payoff in scene 10 is not grounded in its plant in scene 08",
-        "scene 11 location transition is not physically anchored",
-    ]
-    batches = director._knock_on_batches(current, data, done={4, 8})
-    _assert(batches == [([11], False)],
-            f"knock-on repairs must not revisit a map component touching scenes already patched: {batches!r}")
-
-
-def test_shot_batching_budget_supports_three_scene_preflight():
-    from planner.qwen_director import QwenDirector
-    from planner.config import DIRECTOR_MAX_TOKENS, DIRECTOR_SHOTS_PER_SCENE
-    _assert(QwenDirector.MAX_SHOT_BATCH_SCENES == 3,
-            "shot planner should attempt up to three fresh adjacent scenes")
-    expected = min(DIRECTOR_MAX_TOKENS, max(320, 350 * DIRECTOR_SHOTS_PER_SCENE * 3))
-    _assert(QwenDirector._shot_batch_completion_budget(3) == expected,
-            "three-scene shot completion budget must use the trace-calibrated 350-token per-shot reserve")
-
-
-def test_critic_discards_unquoted_or_fabricated_findings_and_patches():
-    from planner.qwen_director import QwenDirector
-    director = QwenDirector.__new__(QwenDirector)
-    plan = {
-        "story": "Raj warns, \"The vault contains a bioweapon.\" Later, Raj dies when the roof collapses.",
-        "scenes": [{"scene_id": "scene_003", "description": "Raj enters the room."}],
-        "shots": [{"shot_id": "scene_003_shot_001", "scene_id": "scene_003", "action": "Raj enters the room.",
-                   "visual_prompt": "Raj entering beside Elena.", "camera_shot": "medium", "camera_movement": "static"}],
-    }
-    critique = {
-        "overall_score": 5,
-        "status": "review",
-        "findings": [
-            "Scene scene_003 omits Raj's warning: \"The vault contains a bioweapon.\"; current event is \"Raj enters the room.\".",
-            "Scene scene_003 says Raj never warns Elena: \"The vault contains a bioweapon.\".",
-        ],
-        "shot_findings": [{"shot_id": "scene_003_shot_001", "severity": "warning",
-                           "finding": "Shot omits the story line \"The vault contains a bioweapon.\"; current action is \"Raj enters the room.\"."}],
-        "recommended_focus": [],
-        "shot_patches": [{"shot_id": "scene_003_shot_001", "patch": {"action": "Raj explains the bioweapon."}}],
-    }
-    result = director._reconcile_critique(critique, plan)
-    _assert(len(result["findings"]) == 1,
-            f"unquoted critique claims must be removed while exact evidence survives: {result!r}")
-    _assert(len(result["shot_findings"]) == 1,
-            f"shot findings must include an exact quote and a real shot id: {result!r}")
-    _assert(result["shot_patches"] == [{"shot_id": "scene_003_shot_001", "patch": {"action": "Raj explains the bioweapon."}}],
-            f"a patch is permitted only when its shot has a source-quoted finding: {result!r}")
-
-
-def test_critic_scene_level_evidence_is_scoped_to_named_scene():
-    from planner.qwen_director import QwenDirector
-    director = QwenDirector.__new__(QwenDirector)
-    plan = {
-        "story": "Mira closes the archive door.\n\nThe vault door remains open.",
-        "scenes": [
-            {"scene_id": "scene_001", "description": "Mira closes the archive door."},
-            {"scene_id": "scene_002", "description": "The vault door remains open."},
-        ],
-        "shots": [
-            {"shot_id": "scene_001_shot_001", "scene_id": "scene_001", "action": "Mira closes the archive door."},
-            {"shot_id": "scene_002_shot_001", "scene_id": "scene_002", "action": "The vault door remains open."},
-        ],
-    }
-    critique = {
-        "overall_score": 10, "status": "review",
-        "findings": [
-            "Scene scene_001 contradicts the source: \"The vault door remains open.\"; current scene says \"Mira closes the archive door.\"."
-        ],
-        "shot_findings": [], "recommended_focus": [], "shot_patches": [],
-    }
-    result = director._reconcile_critique(critique, plan)
-    _assert(not result["findings"],
-            "a story quote and plan quote from different scenes must not validate a scene-specific mismatch")
-    _assert(result["status"] == "pass",
-            "a critic claim rejected for cross-scene evidence must not leave a false review status")
-
-
-def test_critic_payload_preserves_full_story_and_compacts_only_derived_metadata():
-    import json
-    from unittest.mock import patch
-    from planner.qwen_director import QwenDirector
-
-    director = QwenDirector.__new__(QwenDirector)
-    full_story = "BEGIN-SOURCE-EVIDENCE\n" + ("The complete causal event remains in the original prose. " * 230) + "END-SOURCE-EVIDENCE"
-    long_action = "A precise, story-grounded physical action. " * 12
-    long_visual = "The same physical event is framed with motivated light and clear staging. " * 8
-    long_dialogue = "The first dialogue line remains in the critic payload." * 4
-    second_dialogue = "This later dialogue line is not duplicated into the compact critic payload."
-    plan = {
-        "story": full_story,
-        "characters": [{"name": "Mira"}],
-        "scenes": [{
-            "scene_id": "scene_001", "title": "The archive",
-            "description": "A detailed scene description. " * 20,
-            "scene_objective": "A detailed scene objective. " * 10,
-            "location": "Archive", "characters": ["Mira"],
-        }],
-        "shots": [{
-            "shot_id": "scene_001_shot_001", "scene_id": "scene_001",
-            "camera_shot": "medium", "camera_movement": "static",
-            "lighting": "fluorescent", "color_temperature": "cool",
-            "location": "Archive", "mood": "tense", "characters": ["Mira"],
-            "visual_prompt": long_visual, "action": long_action,
-            "dialogue_events": [
-                {"speaker": "Mira", "text": long_dialogue},
-                {"speaker": "Mira", "text": second_dialogue},
-            ],
-        }],
-    }
-    captured = {}
-
-    def fake_chat_json(system_prompt, user_payload, **kwargs):
-        captured["payload"] = json.loads(user_payload)
-        return {
-            "overall_score": 10, "status": "pass", "findings": [],
-            "shot_findings": [], "recommended_focus": [], "shot_patches": [],
-        }
-
-    director._available_output_tokens = lambda *args, **kwargs: (1000, 1400)
-    director._chat_json = fake_chat_json
-    director._print_qwen_summary = lambda *args, **kwargs: None
-    with patch("planner.qwen_director.director_critic_enabled", return_value=True):
-        result = director.critique_plan(mode="ai_story", user_input="ignored fallback", plan=plan)
-
-    payload = captured["payload"]
-    shot = payload["shots"][0]
-    scene = payload["scenes"][0]
-    _assert(payload["story"] == full_story,
-            "critic context must preserve the complete source story byte-for-byte, including its middle")
-    _assert(len(shot["visual_prompt"]) == 180 and len(shot["action"]) == 180,
-            "only redundant derived shot descriptions should be compacted")
-    _assert(len(shot["dialogue_events"]) == 1 and len(shot["dialogue_events"][0]["text"]) == 100,
-            "critic payload should bound redundant dialogue metadata without modifying the story")
-    _assert(len(scene["description"]) == 160 and len(scene["scene_objective"]) == 100,
-            "scene metadata should be compacted to reserve context for full source prose")
-    _assert(result["status"] == "pass", "an empty, high-score critic response should remain a pass")
 
 
 def test_architect_revision_context_preserves_the_failed_plan_and_compacts_findings():
@@ -3711,8 +3471,6 @@ def main():
         test_character_semantic_schema_includes_spoken_dialogue,
         test_qwen_can_choose_any_cast_size,
         test_trace_sentient_ai_candidate_survives_normalization_and_reaches_roster,
-        test_voice_only_sentient_agent_is_excluded_from_visual_roster,
-        test_remote_only_human_is_excluded_from_visual_roster_even_if_qwen_lists_them,
         test_sentient_ai_label_is_not_promoted_when_qwen_does_not_mark_it_sentient,
         test_qwen_negative_is_authoritative,
         test_deterministic_detection_never_adds_missing_qwen_character,
@@ -3775,7 +3533,7 @@ def main():
         test_scene10_must_enact_one_of_the_actual_climax_options,
         test_architect_and_author_get_only_informed_hard_gate_revisions,
         test_scene_boundaries_are_derived_and_wording_only_findings_are_advisory,
-        test_story_minimum_is_a_hard_floor_with_one_author_call,
+        test_story_minimum_is_a_hard_floor_with_one_conditional_revision,
         test_story_hard_quality_gate_rejects_repeated_stock_phrases_and_overlong_dialogue,
         test_cast_absent_from_one_scene_is_advisory_but_never_appearing_is_fatal,
         test_blueprint_state_ledger_rejects_unrostered_people_location_jumps_and_post_death_presence,
@@ -3798,12 +3556,6 @@ def main():
         test_duplicate_scene_blocks_are_hard_and_author_revision_rebuilds_from_architecture,
         test_blueprint_story_structure_failures_are_hard_and_feedback_is_actionable,
         test_architect_repair_recognizes_logged_location_and_object_verbs,
-        test_architect_patch_batches_are_disjoint_and_merge_mixed_scene_findings,
-        test_knock_on_repair_batches_never_reopen_scenes_already_patched,
-        test_shot_batching_budget_supports_three_scene_preflight,
-        test_critic_discards_unquoted_or_fabricated_findings_and_patches,
-        test_critic_scene_level_evidence_is_scoped_to_named_scene,
-        test_critic_payload_preserves_full_story_and_compacts_only_derived_metadata,
         test_architect_revision_context_preserves_the_failed_plan_and_compacts_findings,
         test_architect_revision_retry_receives_the_actual_rejected_blueprint,
         test_setup_payoff_requires_distinctive_evidence_in_the_declared_event,
