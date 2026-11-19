@@ -3071,6 +3071,52 @@ class ProductionPlanner:
                 or tokens[0] in cls.NON_PERSON_PREFIX_WORDS
             )
 
+        def is_remote_only_human(name: str, aliases: list[str]) -> bool:
+            """A named human heard only through a device is a dialogue identity, not a visual asset."""
+            surfaces = [value for value in [name, *aliases] if str(value or "").strip()]
+            sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", str(story or "")) if part.strip()]
+            remote_channel = re.compile(
+                r"\b(?:radio|intercom|phone|telephone|walkie[- ]talkie|terminal|loudspeaker|speakers?|"
+                r"transmission|monitor|screen|earpiece|comms?)\b", re.I,
+            )
+            remote_voice = re.compile(
+                r"\b(?:voice|said|says|speaks?|spoke|replied|replies|called|warned|whispered|"
+                r"shouted|crackled|echoed|carried|heard|broadcast)\b", re.I,
+            )
+            remote_only_evidence = False
+            for sentence in sentences:
+                if not any(re.search(rf"(?<![A-Za-z0-9]){re.escape(surface)}(?![A-Za-z0-9])", sentence, re.I)
+                           for surface in surfaces):
+                    continue
+                if remote_channel.search(sentence) and remote_voice.search(sentence):
+                    remote_only_evidence = True
+                else:
+                    return False
+            return remote_only_evidence
+
+        def has_explicit_visible_embodiment(name: str, aliases: list[str]) -> bool:
+            """A SENTIENT system is a visual character only when the prose shows its body/avatar."""
+            surfaces = [value for value in [name, *aliases] if str(value or "").strip()]
+            sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", str(story or "")) if part.strip()]
+            embodiment_noun = re.compile(
+                r"\b(?:robot|android|automaton|robotic body|mechanical body|physical body|"
+                r"physical form|humanoid avatar|projected avatar|holographic avatar|holographic figure|"
+                r"hologram|avatar|robotic shell|mechanical shell|embodied creature|alien|creature)\b",
+                re.I,
+            )
+            visible_action = re.compile(
+                r"\b(?:materiali[sz]\w*|manifest\w*|appear\w*|emerg\w*|stand\w*|stood|"
+                r"walk\w*|step\w*|move\w*|gesture\w*|raise\w*|reach\w*|touch\w*|"
+                r"enter\w*|cross\w*|approach\w*|turn\w*|lift\w*)\b",
+                re.I,
+            )
+            for sentence in sentences:
+                if any(re.search(rf"(?<![A-Za-z0-9]){re.escape(surface)}(?![A-Za-z0-9])", sentence, re.I)
+                       for surface in surfaces):
+                    if embodiment_noun.search(sentence) and visible_action.search(sentence):
+                        return True
+            return False
+
         named_candidates: list[tuple[dict, str]] = []
         descriptive_candidates: list[tuple[dict, str]] = []
         relational_candidates: list[dict] = []
@@ -3107,6 +3153,12 @@ class ProductionPlanner:
                 continue
 
             if entity_type not in {"PERSON", "CHARACTER", "SENTIENT"} or not name:
+                continue
+            if entity_type == "SENTIENT" and not has_explicit_visible_embodiment(name, aliases):
+                # Remote speech remains available to the dialogue track; it is not a visual Character asset.
+                continue
+            if entity_type in {"PERSON", "CHARACTER"} and is_remote_only_human(name, aliases):
+                # A Qwen roster mistake cannot turn a radio-only person into a visible production asset.
                 continue
             surfaces = [name, *aliases]
             grounded_surface = next(
