@@ -41,6 +41,7 @@ from planner.config import (
     DIRECTOR_VLLM_TENSOR_PARALLEL_SIZE,
     DIRECTOR_VLLM_ENV_DIR,
     DIRECTOR_VLLM_MAX_NUM_SEQS,
+    DIRECTOR_VLLM_ENABLE_PREFIX_CACHING,
     DIRECTOR_VLLM_SPECULATIVE_METHOD,
     DIRECTOR_VLLM_SPECULATIVE_MODEL_PATH,
     DIRECTOR_VLLM_SPECULATIVE_TOKENS,
@@ -1486,6 +1487,8 @@ class QwenDirectorRuntimeMixin:
                 "--trust-remote-code",
                 "--disable-custom-all-reduce",
             ]
+            if DIRECTOR_VLLM_ENABLE_PREFIX_CACHING:
+                command.append("--enable-prefix-caching")
 
             enforce_eager_base_val = "1" if DIRECTOR_VLLM_ENFORCE_EAGER else "0"
             if enforce_eager_base_val in {"1", "true", "yes", "on"}:
@@ -1501,7 +1504,8 @@ class QwenDirectorRuntimeMixin:
             ])
             print(
                 f"[QWEN] safetensors_load_strategy={safetensors_strategy} "
-                f"vllm={DIRECTOR_VLLM_VERSION} enforce_eager={DIRECTOR_VLLM_ENFORCE_EAGER} jit_warmup={DIRECTOR_VLLM_JIT_WARMUP}",
+                f"vllm={DIRECTOR_VLLM_VERSION} enforce_eager={DIRECTOR_VLLM_ENFORCE_EAGER} "
+                f"jit_warmup={DIRECTOR_VLLM_JIT_WARMUP} prefix_caching={DIRECTOR_VLLM_ENABLE_PREFIX_CACHING}",
                 flush=True,
             )
 
