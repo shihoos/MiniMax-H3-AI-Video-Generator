@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-19.6.0"
+CONTRACTS_REVISION = "2026-11-20.6.1"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -822,7 +822,8 @@ _OBJECT_CUSTODY_RE = re.compile(
     r"extract\w*|secur\w*|obtain\w*|acqui\w*|receiv\w*|throw\w*|threw|thrown|toss\w*|hurl\w*|fling\w*|"
     r"abandon\w*|discard\w*|lose|loses|losing|lost|shatter\w*|smash\w*|crush\w*|insert\w*|plug\w*|install\w*|"
     r"attach\w*|swap\w*|download\w*|cop(?:y|ies|ied)|wrest\w*|rip\w*|tear\w*|tore|torn|sabotag\w*|disabl\w*|"
-    r"disarm\w*|detonat\w*|slip\w*|stash\w*|conceal\w*|trad(?:e|es|ed|ing)|swallow\w*)\b", re.I,
+    r"disarm\w*|detonat\w*|slip\w*|stash\w*|conceal\w*|trad(?:e|es|ed|ing)|swallow\w*|"
+    r"explod\w*|explo(?:sion|sions)|implod\w*|collaps\w*|burn\w*|melt\w*|overload\w*|incinerat\w*|vaporiz\w*|flood\w*|submerg\w*)\b", re.I,
 )
 
 
@@ -851,11 +852,19 @@ def _scene10_enacts_climax_choice(choice: str, event: str, cast: list[dict[str, 
     if len(alternatives) < 2 or not _CLIMAX_ACTION_RE.search(str(event or "")):
         return False
     event_anchors = _stemmed_content_tokens(_strip_cast_surfaces(str(event or ""), cast)) - _CLIMAX_GENERIC_TOKENS
+    event_tokens = _stemmed_content_tokens(_strip_cast_surfaces(str(event or ""), cast))
     for alternative in alternatives[:2]:
         # Parenthetical text normally states cost/risk; match the selected action, not its consequence label.
-        action_text = re.sub(r"\([^)]*\)", " ", alternative)
+        # A following sentence ("The storm forces a decision.") describes the situation, not the option.
+        action_text = re.split(r"(?<=[.!?])\s+", re.sub(r"\([^)]*\)", " ", alternative).strip())[0]
         anchors = _stemmed_content_tokens(action_text) - _CLIMAX_GENERIC_TOKENS
         if anchors and anchors & event_anchors:
+            return True
+        # A self-destruct / detonation option is enacted by the explosion or collapse it causes.
+        if any(k in a for a in anchors for k in ("destruct", "detonat", "explod", "collaps", "demolish", "blow")) and any(
+            t.startswith(("explod", "explo", "detonat", "destruct", "collaps", "blast", "demolish", "implod", "meltdown"))
+            for t in event_tokens
+        ):
             return True
     return False
 
