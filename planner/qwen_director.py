@@ -3194,8 +3194,11 @@ class QwenDirector(
             batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
         return batches
 
-    def _knock_on_batches(self, current: list[str], data: dict, done: set[int]) -> list[tuple[list[int], bool]]:
-        fresh = [n for n in self._patch_affected_scenes([p for p in current if "SETUP_PAYOFF_MAP" not in str(p)], data) if n not in done]
+    _PATCH_MAX_TOUCHES = 2   # a scene is repaired at most twice inside the single revision
+    _PATCH_MAX_CALLS = 6     # and the whole revision never exceeds six short calls
+
+    def _knock_on_batches(self, current: list[str], data: dict, blocked: set[int]) -> list[tuple[list[int], bool]]:
+        fresh = [n for n in self._patch_affected_scenes([p for p in current if "SETUP_PAYOFF_MAP" not in str(p)], data) if n not in blocked]
         return [(fresh[i:i + self._PATCH_BATCH_SCENES], False) for i in range(0, len(fresh), self._PATCH_BATCH_SCENES)]
 
     def _blueprint_findings(self, mode: str, user_input: str, data: dict, source_character_names) -> list[str]:
@@ -3239,6 +3242,20 @@ class QwenDirector(
         batches = self._patch_batches(problems, data)
         print(f"[QWEN] story_architecture batched_repair batches={[b[0] for b in batches]}", flush=True)
         done: set[int] = set()   # scenes already given their mechanical repair
+        touches: dict[int, int] = {}
+
+        def knock_on() -> list[tuple[list[int], bool]]:
+            # Findings that only appeared because an earlier batch changed a neighbouring scene (for example an
+            # object list restored in scene 10 that scene 11 must now acknowledge). Bounded: two repairs per scene
+            # and six calls in total, so the single revision stays short.
+            if index >= self._PATCH_MAX_CALLS:
+                return []
+            blocked = {n for n, c in touches.items() if c >= self._PATCH_MAX_TOUCHES}
+            fresh = self._knock_on_batches(current, data, blocked)
+            for scope_, _m in fresh:
+                done.difference_update(scope_)
+            return fresh
+
         current = list(problems)
         queue = list(batches)
         index = 0
@@ -3257,7 +3274,7 @@ class QwenDirector(
             if not relevant:
                 print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} skipped=already_resolved", flush=True)
                 if not queue and current:
-                    queue.extend(self._knock_on_batches(current, data, done))
+                    queue.extend(knock_on())
                 continue
             print(f"[QWEN] story_architecture batch={index} scenes={sorted(scope_set)} findings={len(relevant)}", flush=True)
             try:
@@ -3270,12 +3287,13 @@ class QwenDirector(
                 print(f"[QWEN] story_architecture batch={index} unusable: {str(unusable)[:160]}", flush=True)
             if not is_map:
                 done |= scope_set
+            for n in scope_set:
+                touches[n] = touches.get(n, 0) + 1
             current = self._blueprint_findings(mode, user_input, data, source_character_names)
             if not current:
                 break
             if not queue:
-                # Knock-on findings on scenes no batch has touched yet (a scene corrected only once, never twice).
-                queue.extend(self._knock_on_batches(current, data, done))
+                queue.extend(knock_on())
         blueprint = ""
         try:
             blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
