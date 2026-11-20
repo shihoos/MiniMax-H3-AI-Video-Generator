@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-20.6.1"
+CONTRACTS_REVISION = "2026-11-20.6.2"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -289,6 +289,8 @@ _SCENE_LOCAL_MOVE_RE = re.compile(
     r"(?:proceed\w*|venture\w*|crawl\w*|slip\w*|sneak\w*|stumbl\w*|rush\w*|dash\w*)\s+"
     r"(?:to|into|inside|through|down|up|toward|towards|past|across)|"
     r"head(?:s|ed|ing)?\s+(?:to|for|toward|towards|down|up|into|out)|"
+    r"(?:lead|leads|led|leading|guid(?:e|es|ed|ing)|follow(?:s|ed|ing)?|usher(?:s|ed|ing)?|drag(?:s|ged|ging)?|haul(?:s|ed|ing)?)"
+    r"\s+(?:\w+\s+){1,2}?(?:to|into|inside|through|down|up|toward|towards)|"
     r"go(?:es|ing)?\s+(?:to|into|down|up|through)|went\s+(?:to|into|inside|down|up|through)|"
     r"(?:make|makes|made|making)\s+(?:her|his|their)\s+way|"
     r"step(?:s|ped|ping)?\s+(?:into|out|through|onto)|"
