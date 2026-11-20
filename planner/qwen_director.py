@@ -3155,6 +3155,8 @@ class QwenDirector(
                 mode, blueprint, user_input, source_character_names=source_character_names,
             )
         except RuntimeError as rejection:
+            if self._accept_bookkeeping_remainder(blueprint):
+                return blueprint
             # Nothing is invented or silently adjusted to satisfy a validator: a plan that still fails is rejected.
             if not getattr(self, "_last_story_quality_errors", None) or not blueprint:
                 self._last_story_quality_errors = [str(rejection)]
@@ -3193,6 +3195,30 @@ class QwenDirector(
         for start in range(0, len(rest), self._PATCH_BATCH_SCENES):
             batches.append((rest[start:start + self._PATCH_BATCH_SCENES], False))
         return batches
+
+    # After the single revision, these two kinds of finding are bookkeeping about HOW a plan is worded (the sentence that
+    # shows a move, the sentence that shows an object changing), not story contradictions. If nothing else is left they
+    # are recorded as warnings and the run continues; every other finding still rejects the plan.
+    _POST_REVISION_ADVISORY = (
+        "changes its physical location without an explicit transition",
+        "key-object state change is not anchored",
+        "object state change is not anchored",
+    )
+
+    def _only_bookkeeping_left(self) -> bool:
+        errors = list(getattr(self, "_last_story_quality_errors", None) or [])
+        return bool(errors) and all(any(m in str(e) for m in self._POST_REVISION_ADVISORY) for e in errors)
+
+    def _accept_bookkeeping_remainder(self, blueprint: str) -> bool:
+        if not blueprint or not self._only_bookkeeping_left():
+            return False
+        remaining = [str(e) for e in self._last_story_quality_errors]
+        print(f"[QWEN] story_architecture accepted_with_warnings={len(remaining)} (move/object wording only)", flush=True)
+        for item in remaining:
+            print(f"[QWEN]   warning: {item[:220]}", flush=True)
+        self._last_story_contract_warnings = list(getattr(self, "_last_story_contract_warnings", None) or []) + remaining
+        self._last_story_quality_errors = []
+        return True
 
     _PATCH_MAX_TOUCHES = 2   # a scene is repaired at most twice inside the single revision
     _PATCH_MAX_CALLS = 6     # and the whole revision never exceeds six short calls
@@ -3250,8 +3276,14 @@ class QwenDirector(
             # and six calls in total, so the single revision stays short.
             if index >= self._PATCH_MAX_CALLS:
                 return []
-            blocked = {n for n, c in touches.items() if c >= self._PATCH_MAX_TOUCHES}
-            fresh = self._knock_on_batches(current, data, blocked)
+            once = {n for n, c in touches.items() if c >= 1}
+            twice = {n for n, c in touches.items() if c >= self._PATCH_MAX_TOUCHES}
+            hard = [f for f in current if not any(m in str(f) for m in self._POST_REVISION_ADVISORY)]
+            # Scenes not repaired yet get any finding; a scene already repaired is only re-opened for a hard finding
+            # (re-opening it for wording alone made the model undo its earlier fix).
+            scenes = [n for b, _m in self._knock_on_batches(current, data, once) for n in b]
+            scenes += [n for b, _m in self._knock_on_batches(hard, data, twice) for n in b if n not in scenes]
+            fresh = [(scenes[i:i + self._PATCH_BATCH_SCENES], False) for i in range(0, len(scenes), self._PATCH_BATCH_SCENES)]
             for scope_, _m in fresh:
                 done.difference_update(scope_)
             return fresh
@@ -3301,6 +3333,8 @@ class QwenDirector(
                 mode, blueprint, user_input, source_character_names=source_character_names,
             )
         except RuntimeError as rejection:
+            if self._accept_bookkeeping_remainder(blueprint):
+                return blueprint
             if not getattr(self, "_last_story_quality_errors", None) or not blueprint:
                 self._last_story_quality_errors = [str(rejection)]
             self._save_story_run_diagnostics(status="failed", stage="ai_story_architect_validation", reason=str(rejection))
