@@ -2650,7 +2650,9 @@ class QwenDirector(
         scene_properties = {
             "scene": {"type": "integer", "minimum": 1, "maximum": int(DIRECTOR_STORY_SCENES)},
             "purpose": {"type": "string", "minLength": 56}, "event": text, "exit_location": text, "exit_present": names,
-            "exit_knows": text, "exit_objects": text, "next_cause": text,
+            "exit_knows": text, "exit_objects": text,
+            # Only the final scene may say "none"; every earlier scene needs a real handoff sentence.
+            "next_cause": text if int(DIRECTOR_STORY_SCENES) in scene_numbers else {"type": "string", "minLength": 12},
         }
         scene_required = [
             "scene", "purpose", "event", "exit_location", "exit_present", "exit_knows", "exit_objects", "next_cause",
@@ -2831,6 +2833,18 @@ class QwenDirector(
                             f"  FIX HOW: the state of '{obj}' changes between start and end. The event must name the object and "
                             "show the physical action that changes it; otherwise restore its starting state in exit_objects."
                         )
+            if any("has no NEXT_CAUSE handoff" in c for c in mentions):
+                following = ""
+                try:
+                    nxt = (data.get("scenes") or [])[number]
+                    following = as_text(nxt.get("purpose")) or as_text(nxt.get("event"))
+                except (IndexError, TypeError, AttributeError):
+                    pass
+                notes.append(
+                    "  FIX HOW: next_cause must be a full sentence (never 'none', 'resolved' or 'n/a' for this scene) stating "
+                    "the concrete result of this scene that the next scene starts from"
+                    + (f"; the next scene is about: {following}" if following else "") + "."
+                )
             if any("PURPOSE is too vague" in c for c in mentions):
                 words_now = len(word_tokens(as_text(scene.get("purpose"))))
                 notes.append(
