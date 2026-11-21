@@ -153,7 +153,7 @@ def _event_explicitly_assigns_death(event: str, item: dict[str, Any]) -> bool:
     return False
 
 # Printed in the diagnostic artifacts so the code version that ran is unambiguous.
-CONTRACTS_REVISION = "2026-11-20.6.2"
+CONTRACTS_REVISION = "2026-11-21.6.3"
 
 # Hard findings cover structural facts and continuity contradictions: missing/invalid structure,
 # impossible cast state, ungrounded setup/payoff evidence, physical location jumps, and declared key-object
@@ -863,9 +863,9 @@ def _scene10_enacts_climax_choice(choice: str, event: str, cast: list[dict[str, 
         if anchors and anchors & event_anchors:
             return True
         # A self-destruct / detonation option is enacted by the explosion or collapse it causes.
-        if any(k in a for a in anchors for k in ("destruct", "detonat", "explod", "collaps", "demolish", "blow")) and any(
-            t.startswith(("explod", "explo", "detonat", "destruct", "collaps", "blast", "demolish", "implod", "meltdown"))
-            for t in event_tokens
+        if any(k in a for a in anchors for k in ("destruct", "destroy", "detonat", "explod", "collaps", "demolish", "blow")) and any(
+            k in t for t in event_tokens
+            for k in ("explo", "detonat", "destruct", "destroy", "collaps", "blast", "demolish", "implod", "meltdown")
         ):
             return True
     return False
