@@ -355,7 +355,7 @@ class QwenDirectorPromptMixin:
             lengths: (1) establish the immediate objective and pressure through action; (2) dramatize resistance and a
             discovery or complication; (3) show the decision, its cost, and the changed situation that hands off to the
             next scene. Each movement is about 40-45 words, so a whole scene is about 130 words; longer scenes run out of
-            output budget before Scene {n:02d}. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
+            output budget before Scene {n:02d}. Drafts overrun in the opening scenes: hold Scenes 01-03 to their quota so Scenes 10-12 get their full share. Do not force exactly three paragraphs or three sentences per paragraph. A scene must be complete,
             not a fragment. Aim for roughly 120-140 words per scene on average, following the allocation above; the
             per-scene soft maximum is {scene_cap} words, reserved for scenes that need fuller action or aftermath.
             Do not treat that maximum as a quota for every scene. The output budget is designed for the {target}-word
@@ -545,11 +545,13 @@ class QwenDirectorPromptMixin:
             - CAST DESIGN / ENSEMBLE DECISION: the default is an ensemble, not a lone protagonist. An abandoned or
               remote setting does not mean nobody else can act. Unless the premise explicitly says the protagonist is
               alone for the whole story, cast the protagonist plus 2-4 other on-screen people (a design default, not a
-              quota): a colleague with conflicting evidence, a field partner with a different risk threshold, an authority
-              controlling access, a witness, a rescuer or an opponent with their own strategy. Each person needs an
+              quota): a colleague with conflicting evidence, a field partner, an authority controlling
+              access, a witness, a rescuer or an opponent. Each person needs an
               independent want, pressure and tactic and a decision that changes options or cost. The 2-4 others must be
               living people who appear on screen in at least two scenes: a corpse, memory, recording, remote voice or
-              animal does not count toward them. No filler. CAST contains only
+              animal does not count toward them. No filler. A person counts as on screen only if a scene lists them in on_screen_present
+              or exit_present: list every cast member in each scene where they act. Every cast member, the protagonist too,
+              has a personal name (never 'Protagonist' or a job title). CAST contains only
               named beings physically visible in at least one present-time scene. A remote operator, radio voice, recording,
               institution, disembodied AI, screen or control panel is not a physical cast member. Put remote voices and
               non-embodied systems in OPPOSITION. An AI is kind 'embodied agent' only if a scene EVENT explicitly shows
