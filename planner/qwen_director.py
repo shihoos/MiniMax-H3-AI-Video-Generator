@@ -2833,6 +2833,14 @@ class QwenDirector(
                             f"  FIX HOW: the state of '{obj}' changes between start and end. The event must name the object and "
                             "show the physical action that changes it; otherwise restore its starting state in exit_objects."
                         )
+            ens = [m for c in mentions for m in re.findall(r"ENSEMBLE: CAST character '([^']+)'", c)]
+            if ens:
+                notes.append(
+                    f"  FIX HOW: {ens[0]} must be physically on screen here: add {ens[0]} to exit_present and write the EVENT so "
+                    f"{ens[0]} does something specific that changes what the protagonist can do (a named action, not a mention). "
+                    "Where a person enters or leaves during the scene, the EVENT names that action; keep exit_present consistent "
+                    "from one of these scenes to the next. Keep every other fact of the scene."
+                )
             if any("has no NEXT_CAUSE handoff" in c for c in mentions):
                 following = ""
                 try:
@@ -3150,6 +3158,7 @@ class QwenDirector(
             return data
         blueprint = ""
         try:
+            self._last_blueprint_data = data
             blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
             self._validate_story_blueprint_contract(
                 mode, blueprint, user_input, source_character_names=source_character_names,
@@ -3203,7 +3212,56 @@ class QwenDirector(
         "changes its physical location without an explicit transition",
         "key-object state change is not anchored",
         "object state change is not anchored",
+        "ENSEMBLE:",
     )
+
+    _ENSEMBLE_MIN_PEOPLE = 3
+
+    def _ensemble_findings(self) -> list[str]:
+        """The Architect often names colleagues in CAST but lists only the protagonist in every scene, so the render step
+        drops them and the film has one character. Name each living person who is cast but never shown, with the scenes
+        in which the repair should show them. The model decides what they do; nothing is written by the application."""
+        from planner.story_blueprint_schema import derive_on_screen_scenes, resolve_scenes
+        data = getattr(self, "_last_blueprint_data", None)
+        if not isinstance(data, dict):
+            return []
+        try:
+            scenes = resolve_scenes(data)
+        except Exception:
+            return []
+        seen = 0
+        unseen: list[tuple[str, int]] = []
+        for member in (m for m in (data.get("cast") or []) if isinstance(m, dict)):
+            if str(member.get("kind", "")).casefold() != "person":
+                continue
+            name = re.sub(r"[()]", "", str(member.get("name") or "")).strip()
+            aliases = [str(a).strip() for a in (member.get("aliases") or []) if str(a).strip()]
+            if not name:
+                continue
+            if derive_on_screen_scenes(name, aliases, scenes, set()):
+                seen += 1
+                continue
+            death = 0
+            if str(member.get("fate", "")).casefold() == "dies":
+                try:
+                    death = int(member.get("death_scene") or 0)
+                except (TypeError, ValueError):
+                    death = 0
+                if death < 4:
+                    continue          # already dead before the story reaches them: a body, not a person who can act
+            unseen.append((name, death))
+        findings: list[str] = []
+        for order, (name, death) in enumerate(unseen[: max(0, self._ENSEMBLE_MIN_PEOPLE - seen)]):
+            run = [3, 4, 5] if order == 0 else [6, 7, 8]
+            if death and death < run[-1]:
+                run = sorted({max(2, death - 2), max(2, death - 1), death})
+            where = ", ".join(f"scene {n:02d}" for n in run)
+            findings.append(
+                f"ENSEMBLE: CAST character {name!r} has no planned on-screen scenes; the film needs at least "
+                f"{self._ENSEMBLE_MIN_PEOPLE} living people on screen. Show {name} physically present and acting in {where} "
+                f"(listed in exit_present, entering with a named action in the first of them)."
+            )
+        return findings
 
     def _only_bookkeeping_left(self) -> bool:
         errors = list(getattr(self, "_last_story_quality_errors", None) or [])
@@ -3232,6 +3290,7 @@ class QwenDirector(
         from planner.story_blueprint_schema import render_blueprint_text
         total = int(DIRECTOR_STORY_SCENES)
         try:
+            self._last_blueprint_data = data
             blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
             self._validate_story_blueprint_contract(mode, blueprint, user_input, source_character_names=source_character_names)
         except RuntimeError as problem:
@@ -3328,6 +3387,7 @@ class QwenDirector(
                 queue.extend(knock_on())
         blueprint = ""
         try:
+            self._last_blueprint_data = data
             blueprint = self._normalize_story_blueprint(render_blueprint_text(data, total, []), total)
             self._validate_story_blueprint_contract(
                 mode, blueprint, user_input, source_character_names=source_character_names,
@@ -3672,6 +3732,8 @@ class QwenDirector(
             ]
             if missing_sources:
                 errors.append("Architect dropped source character(s): " + ", ".join(missing_sources))
+        if mode == AI_STORY_MODE:
+            errors.extend(self._ensemble_findings())
         errors.extend(validate_blueprint_state_contract(blueprint, DIRECTOR_STORY_SCENES))
         errors, soft_findings = split_contract_findings(errors)
         if soft_findings:
